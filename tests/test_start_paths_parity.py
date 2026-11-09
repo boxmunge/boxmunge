@@ -39,7 +39,7 @@ GUARDED = "renders nothing: refused while the overlay or containers are stale"
 # runs inside that deploy, which wrote the overlay with the record.
 LIFTS = "renders nothing itself: every caller renders first or is a deploy"
 CALLERS = {
-    ("commands/deploy.py", "_start_and_verify"): DEPLOYS,
+    ("commands/deploy.py", "_start"): DEPLOYS,
     ("legacy_stage_ops.py", "finish_apply"): DEPLOYS,
     ("staging_bringup.py", "_prepare_storage"): DEPLOYS,
     ("staging_bringup.py", "bring_up_staging"): DEPLOYS,
@@ -121,6 +121,15 @@ def test_a_record_newer_than_the_overlay_is_found(stale) -> None:
     assert "app (the record says 10002:10002, the overlay 10001:10001)" in problem
     assert "db" not in problem
     assert f"prod-deploy {NAME}" in problem
+
+
+def test_a_pause_handed_to_a_deploy_is_told_to_deploy(stale) -> None:
+    from boxmunge.pause import mark_awaiting_deploy, write_paused_state
+    paths, _up, _start = stale
+    write_paused_state(NAME, paths)
+    mark_awaiting_deploy(NAME, paths)
+    problem = stale_overlay_problem(paths, NAME)
+    assert f"prod-deploy {NAME}" in problem and f"resume {NAME}" not in problem
 
 
 def test_a_record_the_overlay_replays_is_not(stale) -> None:

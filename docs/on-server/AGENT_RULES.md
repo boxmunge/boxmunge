@@ -37,16 +37,14 @@ These operations are safe to run without human confirmation:
 | Set a host-level secret | `secrets set --host KEY=value` |
 | List secrets | `secrets list <project>` |
 | Check server/project health | `status` or `check <project>` |
-| Tail container logs | `logs <project>` |
+| Tail container logs | `logs <project>` (staging: `logs <project> --staging`) |
 | Query ops audit log | `log --tail 50` |
 | Validate a project config | `validate <project>` |
 | Run a backup | `backup <project>` |
 | Run diagnostics | `doctor` |
-| Remove uploaded bundles from the inbox | `inbox clean [project]` |
 | Read documentation | `agent-help <topic>` |
-| Pause a project (planned maintenance) | `pause <project>` |
-| Resume a paused project (pulls latest images) | `resume <project>` |
-| Restart a project the health monitor stopped (same build) | `recover <project>` |
+| Resume a paused project (pulls latest images) | `resume <project> --yes` (it asks first; without a terminal it needs `--yes`) |
+| Restart a project the health monitor stopped (same build) | `recover <project> --yes` (it asks first; without a terminal it needs `--yes`) |
 | Show effective container security posture | `security <project> [--json]` |
 | Audit overall platform health | `health` |
 | Show server boxmunge version | `version` |
@@ -94,12 +92,15 @@ These commands prompt for confirmation before executing. Use `--yes` only when y
 - `rollback <project>` -- puts back the previous release's code and its pre-deploy data snapshot (refuses, with the reason, if either is unavailable)
 - `restore <project>` -- restores from a backup
 - `project-delete <project>` -- destructively deletes a project (containers, files including local backups, registry entry); off-site backup copies are kept
-- `pause <project>` -- takes the site offline with a maintenance page
+- `pause <project>` -- takes the site offline with a maintenance page, after a data snapshot (the deploy that ends the pause rolls back to it); `pause <project> --no-snapshot` for an emergency pause, giving up that data rollback
 - `resume <project>` -- brings it back online; with `--skip-security-checks` (DANGEROUS) it starts potentially vulnerable images without pulling fresh ones
+- `resume <project> --no-start` -- starts nothing: hands the pause to the next `prod-deploy`/`promote` (or `rollback`), which ends it once its containers start. Use it when `resume` refuses and names it (only a deploy can repair what it found)
 - `recover <project>` -- restarts a project the health monitor stopped
 - `inbox clean [project]` -- removes every uploaded bundle (of that project)
 
 Do not pass `--yes` reflexively. Confirm the target project and the effect before proceeding.
+
+The prompt needs a terminal. Over `ssh deploy@<host> <command>` without `-t` there is none, so these commands refuse before changing anything and ask for `--yes`; they print what they would do first, so read that, then run the same command again with `--yes` added.
 
 ### Flags are strict
 

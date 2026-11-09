@@ -21,6 +21,7 @@ from boxmunge.commands.deploy_checks import service_mounts
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.docker_containers import running_by_service
 from boxmunge.lifecycle import BlockReason, is_blocked
+from boxmunge.pause import awaiting_deploy
 from boxmunge.paths import BoxPaths
 from boxmunge.pending_snapshot import age, pending_for_live
 from boxmunge.release_txn import open_install_reason
@@ -65,6 +66,11 @@ def _why_stopped(paths: BoxPaths, project: str, backup_service: str) -> tuple[st
                 f"run `boxmunge security resume {project}` once its images are clean (that "
                 f"starts it, and the backup dumps from the running service), then run "
                 f"data chown again")
+    if block is not None and block.reason is BlockReason.PAUSED and \
+            awaiting_deploy(project, paths):
+        return ("the project is paused, awaiting a deploy (resume --no-start)",
+                f"deploy it (`prod-deploy {project}`; the pause ends once it starts), then "
+                f"run data chown again")
     if block is not None and block.reason is BlockReason.PAUSED:
         return ("the project is paused",
                 f"run `boxmunge resume {project}`, then run data chown again")
@@ -116,9 +122,9 @@ def snapshot_first(paths: BoxPaths, project: str, service: str, services: dict,
     data meanwhile. The caller records it once the stop succeeded."""
     taken = pending_for_live(paths, project)
     if taken is not None:
-        print(f"  The snapshot {taken['name']}, taken {age(taken)} ago before an earlier "
-              f"ownership change, stays the next deploy's pre-deploy snapshot: "
-              f"{taken['service']} has not run since. No new one is taken.")
+        print(f"  The snapshot {taken['name']}, taken by {taken['taken_by']} {age(taken)} "
+              f"ago, stays the next deploy's pre-deploy snapshot: {taken['service']} has "
+              f"not run since. No new one is taken.")
         return None
     if no_snapshot:
         print(f"  No snapshot (--no-snapshot): {NO_SNAPSHOT_COST}.")

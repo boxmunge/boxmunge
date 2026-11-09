@@ -111,6 +111,7 @@ def test_a_stopped_backup_service_is_dumped_offline_and_paired(
     ("monitor", "health monitor stopped", "boxmunge recover shop"),
     ("stopped", "app is stopped", "prod-deploy shop"),
     ("installing", "an install is open", "that install's ways out"),
+    ("awaiting", "awaiting a deploy", "prod-deploy shop"),
 ])
 def test_a_dump_that_cannot_run_offline_names_the_states_way_out_first(
         paths, monkeypatch, system_container, capsys, state, why, way_out) -> None:
@@ -123,6 +124,11 @@ def test_a_dump_that_cannot_run_offline_names_the_states_way_out_first(
     elif state == "paused":
         from boxmunge.pause import write_paused_state
         write_paused_state("shop", paths, reason="maintenance")
+    elif state == "awaiting":
+        # resume refuses a pause handed to the next deploy (#141).
+        from boxmunge.pause import mark_awaiting_deploy, write_paused_state
+        write_paused_state("shop", paths, reason="maintenance")
+        mark_awaiting_deploy("shop", paths)
     elif state == "monitor":
         monkeypatch.setattr(chown_snapshot, "is_monitor_stopped", lambda p, paths_: True)
     elif state == "installing":
@@ -138,6 +144,7 @@ def test_a_dump_that_cannot_run_offline_names_the_states_way_out_first(
     assert err.index(way_out) < err.index("--no-snapshot")
     assert "Only if you cannot" in err
     assert state != "installing" or "security resume" not in err
+    assert state != "awaiting" or "resume shop" not in err
     assert calls == ["dump-offline"] and pending(paths, "shop") is None
 
 
@@ -281,9 +288,13 @@ def test_stop_recover_stop_does_not_pass_off_a_stale_pairing(paths, monkeypatch)
     assert pending_for_live(paths, "shop") is None
 
 
-def test_a_boxmunge_start_of_the_service_drops_the_pairing(paths, monkeypatch) -> None:
-    from boxmunge.pending_snapshot import pending
+@pytest.mark.parametrize("taken_by", ["data chown", "pause"])
+def test_a_boxmunge_start_of_the_service_drops_the_pairing(
+        paths, monkeypatch, taken_by) -> None:
+    """data chown's pairing and pause's (#141) alike."""
+    from boxmunge.pending_snapshot import pending, record_pending
     _paired(paths, monkeypatch)
+    record_pending(paths, "shop", "snap.tar.gz.age", taken_by, "app", ["shop-app-1"])
     chown_hold.after_start(paths, "shop", ["db"], "restore")
     assert pending(paths, "shop") is not None
     chown_hold.after_start(paths, "shop", ["app", "db"], "restore")

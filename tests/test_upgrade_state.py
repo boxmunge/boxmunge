@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
+import stat
+
 import pytest
 from boxmunge.paths import BoxPaths
+import os
+
+from boxmunge import upgrade_state
 from boxmunge.upgrade_state import (
-    UpgradeStateError, is_blocklisted, add_to_blocklist, remove_from_blocklist,
+    UpgradeStateError, UpgradeStateUnreadable, is_blocklisted, add_to_blocklist, remove_from_blocklist,
     read_probation, write_probation, clear_probation,
 )
 
@@ -77,3 +82,25 @@ class TestProbation:
     def test_clear_when_no_probation_is_noop(self, paths):
         clear_probation(paths)
         assert read_probation(paths) is None
+
+    def test_probation_is_group_readable_for_deploy(self, paths):
+        """deploy reads (and ends) the marker root writes (#107)."""
+        write_probation(paths, "0.2.1", "a", hours=6)
+        assert stat.S_IMODE(paths.probation.stat().st_mode) == 0o660
+
+    def test_probation_written_by_root_is_root_deploy(self, paths, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(upgrade_state, "running_as_root", lambda: True)
+        monkeypatch.setattr(upgrade_state, "deploy_ids", lambda: (1001, 1002))
+        monkeypatch.setattr(upgrade_state, "atomic_write_bytes",
+                            lambda path, text, **kw: seen.update(kw))
+        write_probation(paths, "0.2.1", "a", hours=6)
+        assert seen == {"mode": 0o660, "owner": (0, 1002)}
+
+    @pytest.mark.skipif(os.geteuid() == 0, reason="root reads any file")
+    def test_unreadable_probation_is_its_own_error(self, paths):
+        write_probation(paths, "0.2.1", "a", hours=6)
+        paths.probation.chmod(0)
+        with pytest.raises(UpgradeStateUnreadable) as e:
+            read_probation(paths)
+        assert str(paths.probation) in str(e.value)

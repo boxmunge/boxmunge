@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from boxmunge.commands.confirm import confirm
+
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
@@ -109,7 +111,7 @@ def _run_inbox_list_json(paths: BoxPaths, project_filter: str | None) -> int:
 def run_inbox_clean(
     paths: BoxPaths, project_filter: str | None, yes: bool = False
 ) -> int:
-    """Remove bundles from the inbox. Returns 0."""
+    """Remove bundles from the inbox. Returns 0, or 1 when not confirmed."""
     targets: list[Path] = []
 
     if paths.inbox.exists():
@@ -131,10 +133,8 @@ def run_inbox_clean(
         print(f"Will remove {len(targets)} bundle(s):")
         for t in targets:
             print(f"  {t.name}")
-        response = input("Proceed? [y/N] ")
-        if response.lower() != "y":
-            print("Aborted.")
-            return 0
+        if not confirm("inbox clean"):
+            return 1
 
     removed_names = [t.name for t in targets]
     for t in targets:

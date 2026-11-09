@@ -51,9 +51,9 @@ remove_slot() {
     local slot="$1"
     require_slot "$slot" "slot removal"
     [[ "$slot" != "$ACTIVE_SLOT" && "$(readlink "$BOXMUNGE_ROOT/env-active" 2>/dev/null)" != "$BOXMUNGE_ROOT/env-$slot" ]] \
-        || die "Refusing to remove env-$slot: it is the live slot"
+        || die_logged "Refusing to remove env-$slot: it is the live slot"
     slot_works "$ACTIVE_SLOT" \
-        || die "Refusing to remove env-$slot: the live slot env-$ACTIVE_SLOT is not a working venv; inspect both as supervisor"
+        || die_logged "Refusing to remove env-$slot: the live slot env-$ACTIVE_SLOT is not a working venv; inspect both as supervisor"
     rm -rf "${BOXMUNGE_ROOT:?}/env-$slot"
 }
 
@@ -140,7 +140,7 @@ Output (truncated): ${output:0:500}"
 do_rollback() {
     local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" count=0
     rollback_target_ok "$prev_slot" \
-        || die "Cannot roll back $new_version: env-$prev_slot is not a working venv, or is itself a half-finished upgrade; inspect it as supervisor"
+        || die_logged "Cannot roll back $new_version: env-$prev_slot is not a working venv, or is itself a half-finished upgrade; inspect it as supervisor"
     [[ "$stage" != interrupted ]] || count=$(( $(interruptions "$new_version") + 1 ))
     printf '%s\n%s\n%s\n' "$new_version" "$stage" "$count" > "$(rollback_marker "$prev_slot")"
     sync

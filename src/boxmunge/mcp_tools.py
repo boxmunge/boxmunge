@@ -303,8 +303,12 @@ def _tool_project_add(name: str) -> dict:
 
 def _tool_project_delete(name: str, yes: bool = False) -> dict:
     from boxmunge.commands.project_delete_cmd import run_project_delete
+    if yes is not True:
+        return {"success": False, "exit_code": 2, "data": {}, "messages": [
+            f"ERROR: project_delete permanently deletes '{name}'. "
+            f"Call again with yes=true to proceed."]}
     paths = _get_paths()
-    return capture_tool_call(lambda: run_project_delete(name, paths, yes=yes))
+    return capture_tool_call(lambda: run_project_delete(name, paths, yes=True))
 
 
 def _tool_project_list_mcp() -> dict:

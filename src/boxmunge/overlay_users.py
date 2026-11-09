@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.pause import awaiting_deploy
 from boxmunge.run_as import RunAsError, read_users
 
 if TYPE_CHECKING:
@@ -91,9 +92,12 @@ def stale_overlay_problem(paths: BoxPaths, project: str) -> str | None:
              if name in in_overlay and in_overlay[name] != user]
     if not wrong:
         return None
-    return (f"{overlay.name} does not run {', '.join(wrong)}: the users record changed "
+    head = (f"{overlay.name} does not run {', '.join(wrong)}: the users record changed "
             f"after it was generated (data chown writes the record), so a start would "
             f"run the old user over data the new one owns. Run `prod-deploy {project}`, "
-            f"which generates it again (`resume {project}`, `recover {project}` or "
-            f"`security resume {project}` when it is paused, stopped by the health "
-            f"monitor or CVE-quarantined)")
+            f"which generates it again")
+    if awaiting_deploy(project, paths):
+        return f"{head} (and ends the pause handed to it)"
+    return (f"{head} (`resume {project}`, `recover {project}` or `security resume "
+            f"{project}` when it is paused, stopped by the health monitor or "
+            f"CVE-quarantined)")

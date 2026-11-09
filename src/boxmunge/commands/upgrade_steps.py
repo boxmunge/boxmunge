@@ -22,6 +22,7 @@ from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.user_entries import USER_ENTRIES, split_user_entries
 from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.release_txn import InstallTxn, load_txn, stale_reason, start_refusal
 from boxmunge.docker import DockerError
@@ -34,7 +35,7 @@ from boxmunge.manifest import (
 )
 from boxmunge.git_layout import relink_advice, repo_ownership_advice, unlinked_files
 from boxmunge.migration import migrate_manifest, MigrationError
-from boxmunge.pause import render_maintenance_caddy_config
+from boxmunge.pause import is_paused, render_maintenance_caddy_config
 from boxmunge.fleet import report_project_failure
 from boxmunge.paths import BoxPaths, InvalidProjectName, validate_project_name
 from boxmunge.security_overlay import services_with_off_profile
@@ -283,13 +284,23 @@ def _regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any], re
                                f"previous ones could not be put back: {e}") from e
     if refusal is not None:
         regen.refused[name] = refusal
-        log_error("upgrade", f"{name} ({reason}): {refusal}. Fix the cause, then bring it "
-                  f"back or redeploy it.", paths, project=name)
+        log_error("upgrade", f"{name} ({reason}): {refusal}. Fix the cause, then "
+                  f"{_offline_exit(paths, name)}.", paths, project=name)
         return
     log_operation("upgrade", f"{name} is {reason}: it keeps its maintenance page and is not "
                   f"restarted; its overlay was regenerated and recorded for when it comes "
                   f"back", paths, project=name)
     regen.processed.append(name)
+
+
+def _offline_exit(paths: BoxPaths, name: str) -> str:
+    """The command that brings a paused or quarantined project back: a
+    deploy is refused while it is paused."""
+    if not is_quarantined(name, paths):
+        return f"run `boxmunge resume {name}`"
+    if is_paused(name, paths):
+        return f"run `boxmunge security resume {name}`, then `boxmunge resume {name}`"
+    return f"run `boxmunge security resume {name}`, or deploy a fixed release"
 
 
 def _in_memory_line(name: str, written: object) -> str:

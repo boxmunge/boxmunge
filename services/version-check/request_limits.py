@@ -13,13 +13,14 @@ worker's last flush are lost if it is killed without a clean exit.
 
 import atexit
 import ipaddress
-import sqlite3
 import threading
 import time
 from collections import Counter
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable
+
+import db
 
 
 def utc_today() -> date:
@@ -130,7 +131,7 @@ class CheckCounter:
             self._last_flush = self._clock()
         if not pending:
             return
-        conn = sqlite3.connect(self.db_path, isolation_level=None)
+        conn = db.connect(self.db_path, isolation_level=None)
         try:
             # One write transaction across the select and the insert, so
             # another worker's flush cannot add versions between them.

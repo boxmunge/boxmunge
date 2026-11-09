@@ -176,5 +176,39 @@ def test_lift_respects_pause(tmp_path, real_lift, capsys):
     assert real_lift.policies == {"demo-web-1": "no"}
     from boxmunge.pause import read_paused_state
     assert read_paused_state("demo", paths)["restart_policies"] == {"demo-web-1": "always"}
-    assert "still paused" in out and "boxmunge resume demo" in out
+    assert "it is paused" in out and "boxmunge resume demo" in out
 
+
+
+def _monitor_stop(paths) -> None:
+    from datetime import datetime, timedelta, timezone
+    from boxmunge.state import write_state
+    now = datetime.now(timezone.utc)
+    write_state(paths.project_health_state("demo"), {
+        "status": "critical_stopped", "stopped_at": now.isoformat(),
+        "failure_reason": "smoke exit 2", "alerted": True})
+    write_state(paths.project_deploy_state("demo"), {
+        "current_ref": "demo-v1", "last_started_at": (now - timedelta(hours=1)).isoformat()})
+
+
+def test_lift_leaves_a_monitor_stopped_project_down(tmp_path, real_lift, capsys):
+    """Logic review 04: the same rule as the scan's lift (quarantine_lift.
+    start_hold). Started, it would stay monitor-stopped: unwatched by the
+    monitor and skipped by container-update until `recover`."""
+    from boxmunge.commands.health_state import is_monitor_stopped
+    paths = make_paths(tmp_path)
+    seed_quarantine(paths, restart_policies={"demo-web-1": "always"})
+    real_lift.policies = {"demo-web-1": "no"}
+    _monitor_stop(paths)
+    maintenance = paths.project_caddy_site("demo")
+    maintenance.write_text("maintenance page\n")
+    assert cmd_security_resume(["demo"], paths) == 0
+    assert not is_quarantined("demo", paths)
+    assert real_lift.calls == [] and real_lift.rendered == []   # nothing started
+    assert maintenance.read_text() == "maintenance page\n"
+    # No pause to hand them to: a container the monitor's stop left gets its
+    # own policy back, as after any monitor stop.
+    assert real_lift.policies == {"demo-web-1": "always"}
+    assert is_monitor_stopped("demo", paths)
+    out = capsys.readouterr().out
+    assert "health monitor stopped it" in out and "boxmunge recover demo" in out

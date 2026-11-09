@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 import admin_auth
-import webauthn_store
+import passkey_routes
 from conftest import ADMIN_RP_ID, ADMIN_SECRET
 from softauthn import SoftAuthenticator, b64url, login, register, session_header
 
@@ -180,20 +180,42 @@ class TestChallenges:
         assert response.status_code == 400
         assert "expired or already used" in response.get_json()["error"]
 
+    @pytest.mark.parametrize("flooder_addr", [
+        "203.0.113.7",
+        "198.51.100.7",          # a neighbour on the admin's /24
+        "2001:db8:1:2::7",       # a neighbour on the admin's /48
+    ])
     def test_one_client_flooding_sign_in_cannot_block_another(
-            self, admin_client, authenticator):
+            self, admin_client, authenticator, flooder_addr):
         register(admin_client, authenticator, ADMIN_SECRET)
-        flooder = {"X-Forwarded-For": "203.0.113.7"}
-        for _ in range(webauthn_store.MAX_PENDING_PER_CLIENT):
+        flooder = {"X-Forwarded-For": flooder_addr}
+        for _ in range(passkey_routes.CHALLENGES_PER_CLIENT):
             assert admin_client.post("/v1/admin/login/options",
                                      headers=flooder).status_code == 200
         refused = admin_client.post("/v1/admin/login/options", headers=flooder)
         assert refused.status_code == 429 and "this client" in refused.get_json()["error"]
-        admin = {"X-Forwarded-For": "198.51.100.20"}
+        admin_addr = "2001:db8:1:3::20" if ":" in flooder_addr else "198.51.100.20"
+        admin = {"X-Forwarded-For": admin_addr}
+        assert login_from(admin_client, authenticator, admin).status_code == 200
+
+    def test_one_network_cannot_fill_the_global_cap_from_many_slash_64s(
+            self, admin_client, authenticator, migrated_db):
+        """2,000 /64s of one /48 used to fill the 10,000 global cap and lock
+        the admin out; a network may start only CHALLENGES_PER_NETWORK."""
+        register(admin_client, authenticator, ADMIN_SECRET)
+        for n in range(passkey_routes.CHALLENGES_PER_NETWORK):
+            assert admin_client.post("/v1/admin/login/options",
+                                     headers={"X-Forwarded-For": f"2001:db8:7:{n:x}::1"}
+                                     ).status_code == 200
+        refused = admin_client.post("/v1/admin/login/options",
+                                    headers={"X-Forwarded-For": "2001:db8:7:ffff::1"})
+        assert refused.status_code == 429 and "this network" in refused.get_json()["error"]
+        assert len(_challenges(migrated_db)) == passkey_routes.CHALLENGES_PER_NETWORK
+        admin = {"X-Forwarded-For": "2001:db8:8::20"}
         assert login_from(admin_client, authenticator, admin).status_code == 200
 
     def test_registration_challenges_count_towards_the_client_cap(self, admin_client):
-        for _ in range(webauthn_store.MAX_PENDING_PER_CLIENT):
+        for _ in range(passkey_routes.CHALLENGES_PER_CLIENT):
             assert admin_client.post("/v1/admin/register/options",
                                      json={"code": ADMIN_SECRET}).status_code == 200
         assert admin_client.post("/v1/admin/register/options",
@@ -204,7 +226,7 @@ class TestChallenges:
         with patch("webauthn_store.MAX_PENDING_CHALLENGES", 2):
             for n, status in ((1, 200), (2, 200), (3, 429)):
                 response = admin_client.post("/v1/admin/login/options",
-                                             headers={"X-Forwarded-For": f"192.0.2.{n}"})
+                                             headers={"X-Forwarded-For": f"192.0.{n}.1"})
                 assert response.status_code == status
 
 

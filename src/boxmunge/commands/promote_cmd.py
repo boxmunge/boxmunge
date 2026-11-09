@@ -31,7 +31,9 @@ from boxmunge.git_slot import GitRefError, is_full_sha, require_regular_control_
 from boxmunge.intake import IntakeError, check_installable, report_refusal, validate_release_tree
 from boxmunge.log import log_error, log_operation
 from boxmunge.probation import clear_probation_if_active
-from boxmunge.release_txn import InstallTxn, close_txn, load_txn, options_text
+from boxmunge.release_txn import (
+    InstallTxn, close_txn, load_txn, options_text, rollback_refused,
+)
 from boxmunge.release import live_ref
 from boxmunge.staged_release import (
     SlotError, StagedRelease, has_slot, load_slot, promoted_debris, release_dir, slot_dir,
@@ -274,7 +276,7 @@ def _options_now(project: str, paths: BoxPaths, ref: str, slot_readable: bool) -
     if not slot_readable:
         return _unreadable_advice(project, txn)
     return (f"The install of {txn.ref} stays open at {txn.phase}: "
-            f"{options_text(project, txn, quarantined=is_quarantined(project, paths))}")
+            f"{options_text(project, txn, rollback_refused=rollback_refused(paths, project))}")
 
 
 def _report_failed(project: str, paths: BoxPaths, meta: StagedRelease, rc: int) -> int:

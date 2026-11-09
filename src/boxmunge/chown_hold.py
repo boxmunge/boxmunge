@@ -6,13 +6,15 @@ user. `docker stop` is not enough to keep it down: when the Docker daemon
 starts (a reboot, a docker-ce upgrade) it restarts every stopped
 `restart: always` container. So the service's containers are held at
 restart policy "no", as pause and quarantine hold a whole project
-(restart_hold), and the originals are kept in the deploy state file. The
-next production start of the service by boxmunge (the deploy, or any start
-before it, which now runs the new user: the overlay is regenerated with the
-record) gives them back (compose_guard).
+(restart_hold), and the held containers are kept in the deploy state file.
+The next production start of the service by boxmunge (the deploy, or any
+start before it, which now runs the new user: the overlay is regenerated
+with the record) gives each its release's own policy (release_policies):
+a deploy may have recreated it under the same name from a release with
+another policy, so no policy saved before is given back.
 
 A paused or quarantined project's containers are held by that record
-already, whose own exit gives the originals back; they are not held twice.
+already, until its own exit; they are not held twice.
 """
 from __future__ import annotations
 
@@ -20,10 +22,13 @@ import sys
 from typing import TYPE_CHECKING
 
 from boxmunge import pending_snapshot, restart_hold
+from boxmunge.compose_resolve import ComposeResolveError
 from boxmunge.docker import set_restart_policy
 from boxmunge.docker_containers import project_containers
 from boxmunge.docker_run import DockerError
 from boxmunge.log import log_error
+from boxmunge.release_policies import ReleasePolicyError, service_policy
+from boxmunge.release_target import production_target, resolved_services
 from boxmunge.state import StateError, read_state, write_state
 
 if TYPE_CHECKING:
@@ -34,17 +39,16 @@ if TYPE_CHECKING:
 KEY = "chown_restart_hold"
 
 
-def _held(paths: BoxPaths, project: str) -> dict[str, dict[str, str]]:
+def _held(paths: BoxPaths, project: str) -> dict[str, str]:
+    """{container: its service} of the containers held."""
     entry = read_state(paths.project_deploy_state(project)).get(KEY) or {}
-    if not (isinstance(entry, dict) and all(
-            isinstance(v, dict) and isinstance(v.get("service"), str)
-            and isinstance(v.get("policy"), str) for v in entry.values())):
+    if not (isinstance(entry, dict) and all(isinstance(v, str) for v in entry.values())):
         raise StateError(f"{paths.project_deploy_state(project)}: {KEY} is not a restart "
                          f"hold: {entry!r}")
     return entry
 
 
-def _write(paths: BoxPaths, project: str, held: dict[str, dict[str, str]]) -> None:
+def _write(paths: BoxPaths, project: str, held: dict[str, str]) -> None:
     path = paths.project_deploy_state(project)
     state = read_state(path)
     if held:
@@ -56,33 +60,31 @@ def _write(paths: BoxPaths, project: str, held: dict[str, dict[str, str]]) -> No
 
 def hold(paths: BoxPaths, project: str, service: str) -> list[str]:
     """Set the restart policy of every container of `service` to "no",
-    keeping the originals (a policy saved by an earlier hold is kept: it is
-    the real one). Returns the containers held. Raises DockerError or
-    StateError."""
+    recording them first. Returns the containers held. Raises DockerError
+    or StateError."""
     current = {c.name: c.restart_policy for c in project_containers(project)
                if c.service == service and not c.oneoff}
-    names = sorted(current)
-    if not names:
+    if not current:
         return []
-    held = _held(paths, project)
-    for name in names:
-        held.setdefault(name, {"service": service, "policy": current[name]})
-    # Saved before any policy changes: a hold that fails part-way, then a
-    # re-run that sees "no", never saves "no" as an original.
-    _write(paths, project, held)
-    set_restart_policy([n for n in names if current[n] != "no"], "no")
-    return names
+    _write(paths, project, {**_held(paths, project), **{n: service for n in current}})
+    set_restart_policy(sorted(n for n, p in current.items() if p != "no"), "no")
+    return sorted(current)
 
 
 def release(paths: BoxPaths, project: str, services: Collection[str] | None) -> None:
-    """Give back the policies held for `services` (None: every service),
-    which a start has just started. Raises DockerError or StateError."""
+    """Give the containers held for `services` (None: every service), which
+    a start has just started, their release's own policy. One of a service
+    the release no longer has is an orphan, and keeps "no". Raises
+    DockerError, StateError, ComposeResolveError, ReleasePolicyError or
+    OSError."""
     held = _held(paths, project)
-    mine = {n: v for n, v in held.items() if services is None or v["service"] in services}
+    mine = {n: svc for n, svc in held.items() if services is None or svc in services}
     if not mine:
         return
-    restart_hold.release(project, {n: v["policy"] for n, v in mine.items()})
-    _write(paths, project, {n: v for n, v in held.items() if n not in mine})
+    _model, model = resolved_services(production_target(paths, project))
+    restart_hold.release(project, {n: service_policy(model[svc])
+                                   for n, svc in mine.items() if svc in model})
+    _write(paths, project, {n: svc for n, svc in held.items() if n not in mine})
 
 
 def after_start(paths: BoxPaths, project: str, services: Collection[str] | None,
@@ -97,7 +99,7 @@ def after_start(paths: BoxPaths, project: str, services: Collection[str] | None,
         pending_snapshot.drop_if_started(paths, project,
                                          None if services is None else set(services))
         release(paths, project, services)
-    except (DockerError, StateError) as e:
+    except (DockerError, StateError, ComposeResolveError, ReleasePolicyError, OSError) as e:
         message = (f"{project}: started, but what data chown left for it could not be "
                    f"undone: {e}. The next start tries again; until then a reboot may not "
                    f"restart the containers it held at restart policy \"no\".")

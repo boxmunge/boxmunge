@@ -59,6 +59,7 @@ from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation
 from boxmunge.manifest import ManifestError, load_manifest
+from boxmunge.pause import awaiting_deploy
 from boxmunge.paths import BoxPaths
 from boxmunge.pending_snapshot import record_pending
 from boxmunge.release import ReleaseStateError
@@ -228,7 +229,8 @@ def _chown_mount(paths: BoxPaths, project: str, model: dict, m, ids: tuple[int, 
 def _regenerates(paths: BoxPaths, project: str) -> str:
     """The command that regenerates the overlay from the state the project is in."""
     block = is_blocked(project, paths)
-    if block is not None and block.reason is BlockReason.PAUSED:
+    if block is not None and block.reason is BlockReason.PAUSED and \
+            not awaiting_deploy(project, paths):
         return f"`boxmunge resume {project}`"
     if block is not None and block.reason is BlockReason.QUARANTINED:
         return (f"a deploy of a fixed release, or `boxmunge security resume {project}` once "

@@ -94,6 +94,15 @@ fn(os.environ["BM_COMPONENT"], os.environ["BM_MSG"], BoxPaths(), detail=detail)
 PYBM
 }
 
+# die_logged <message>: die, and put the reason in the operational log first.
+# For what the health timer runs: it discards check-probation's exit status
+# and stderr, so a plain die there would leave nothing for `boxmunge log`,
+# health or the operator to see.
+die_logged() {
+    bm_log error upgrade "$1"
+    die "$1"
+}
+
 # >>> boxmunge-upgrade.d: the source loader; scripts/build-shim.py replaces
 # this block with the libraries themselves.
 SHIM_LIB_DIR="$(dirname "$SHIM_PATH")/boxmunge-upgrade.d"

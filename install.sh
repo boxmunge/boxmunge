@@ -338,12 +338,12 @@ if [[ ! -L "${BOXMUNGE_ROOT}/env-active" ]]; then
     ln -sfn "${BOXMUNGE_ROOT}/env-a" "${BOXMUNGE_ROOT}/env-active"
 fi
 
-# Ensure upgrade-state perms allow deploy access (idempotent — fixes existing v0.3.0/v0.3.1 installs)
+# Ensure upgrade-state perms allow deploy access (idempotent). Not chown -R:
+# that left probation.json unreadable to deploy (see the script).
 if [[ -d "${BOXMUNGE_ROOT}/upgrade-state" ]]; then
-    chown -R root:deploy "${BOXMUNGE_ROOT}/upgrade-state"
+    chown root:deploy "${BOXMUNGE_ROOT}/upgrade-state"
     chmod 770 "${BOXMUNGE_ROOT}/upgrade-state"
-    [[ -f "${BOXMUNGE_ROOT}/upgrade-state/active-slot" ]] && chmod 660 "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
-    [[ -f "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json" ]] && chmod 660 "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
+    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/upgrade-state-perms.sh"
 fi
 
 # Ensure caddy/sites perms: 775 root:deploy so deploy can write generated
