@@ -83,6 +83,97 @@ def test_a_later_start_of_an_unchanged_project_goes_ahead(box) -> None:
     assert sent == []
 
 
+def test_no_start_builds_an_image(box) -> None:
+    """A start runs the images its deploy built and decided users from; a
+    rebuild would start an image no deploy vetted, and on the containerd
+    image store take a running container's image away."""
+    paths, _, up, _, _ = box
+    _deploy(paths)
+    _restart(paths)
+    assert [(c.kwargs["build"], c.kwargs["pinned"]) for c in up.call_args_list] == [
+        (False, True), (False, True)]
+
+
+def test_a_start_whose_image_is_missing_is_refused_before_anything_runs(
+        box, monkeypatch) -> None:
+    """Compose creates in dependency order and fails only at the missing
+    image, so the check comes first: nothing ahead of it is touched."""
+    paths, _, up, _, sent = box
+    _deploy(paths)
+    up.reset_mock()
+    asked: list = []
+    monkeypatch.setattr("boxmunge.docker_containers.absent_images",
+                        lambda images: asked.append(images) or [("web", images["web"])])
+    with pytest.raises(ComposeRefused, match=r"the image for web \(nginx:1.27\) is missing.*"
+                       r"run prod-deploy shop. Nothing was started"):
+        _restart(paths)
+    up.assert_not_called()
+    assert asked == [{"web": "nginx:1.27"}] and "the image for web" in sent[0]
+
+
+def test_a_one_service_start_checks_that_service_and_what_it_needs(box, monkeypatch) -> None:
+    paths, project_dir, up, _, _ = box
+    (project_dir / "compose.yml").write_text(yaml.safe_dump({"services": {
+        "web": {"image": "nginx:1.27", "depends_on": ["db"]},
+        "db": {"image": "postgres:16"}, "worker": {"image": "app:1"},
+        "backup": {"image": "backup:1", "profiles": ["backup"], "depends_on": ["web"]}}}))
+    _deploy(paths)
+    asked: list = []
+    monkeypatch.setattr("boxmunge.docker_containers.absent_images",
+                        lambda images: asked.append(sorted(images)) or [])
+    compose_up_checked(paths, NAME, component="restore", compose_files=["compose.yml"],
+                       services=["backup"])
+    assert asked == [["backup", "db", "web"]]
+
+
+def test_an_image_gone_during_the_start_says_what_may_have_run(box, monkeypatch) -> None:
+    paths, _, up, _, _ = box
+    _deploy(paths)
+    answers = iter([[], [("web", "nginx:1.27")]])
+    monkeypatch.setattr("boxmunge.docker_containers.absent_images",
+                        lambda images: next(answers))
+    up.side_effect = DockerError("No such image: nginx:1.27")
+    with pytest.raises(DockerError, match="went from the local image store during the start"
+                       ".*may already have created or recreated") as failed:
+        _restart(paths)
+    assert not isinstance(failed.value, ComposeRefused)
+
+
+def test_a_failed_start_with_every_image_present_keeps_its_own_error(box) -> None:
+    paths, _, up, _, _ = box
+    _deploy(paths)
+    up.side_effect = DockerError("port is already allocated")
+    with pytest.raises(DockerError, match="port is already allocated") as failed:
+        _restart(paths)
+    assert not isinstance(failed.value, ComposeRefused)
+
+
+def test_a_running_container_whose_image_is_gone_is_recreated(box, monkeypatch) -> None:
+    paths, _, up, _, _ = box
+    _deploy(paths)
+    up.reset_mock()
+    monkeypatch.setattr("boxmunge.docker_containers.running_without_image",
+                        lambda project_name: {"web": ["shop-web-1"]})
+    _restart(paths)
+    first, second = up.call_args_list
+    assert (first.kwargs["force_recreate"], first.kwargs["services"]) == (False, None)
+    assert (second.kwargs["force_recreate"], second.kwargs["services"]) == (True, ["web"])
+    assert second.kwargs["build"] is False
+    log = paths.log_file.read_text()
+    assert "shop-web-1" in log and "no longer has" in log
+
+
+def test_a_one_service_start_recreates_only_that_service(box, monkeypatch) -> None:
+    paths, _, up, _, _ = box
+    _deploy(paths)
+    up.reset_mock()
+    monkeypatch.setattr("boxmunge.docker_containers.running_without_image",
+                        lambda project_name: {"web": ["shop-web-1"], "db": ["shop-db-1"]})
+    compose_up_checked(paths, NAME, component="restore", compose_files=["compose.yml"],
+                       services=["db"])
+    assert [c.kwargs["services"] for c in up.call_args_list] == [["db"], ["db"]]
+
+
 def _refused(box, match: str) -> None:
     paths, _, up, start, sent = box
     up.reset_mock()

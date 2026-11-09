@@ -33,10 +33,12 @@ failed start.
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
 import sys
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -249,30 +251,122 @@ def check_start(
 def compose_up_checked(
     paths: BoxPaths, project_name: str, *, component: str,
     compose_files: list[str] | None = None, staging: bool = False, record: bool = False,
-    deploying: bool = False, build: bool = True,
+    deploying: bool = False,
     force_recreate: bool = False, services: list[str] | None = None, start: bool = True,
-    txn: str | None = None, pinned: bool = False,
+    txn: str | None = None,
 ) -> None:
     """check_start, then `docker compose up` (`start=False`: create without
     starting, which still mounts nothing yet but fixes every bind source in
     the containers it creates). Staging runs from the slot, with its own
     files. A production up of every service clears the slot's
     production_stopped marker and sweeps 0.10.1's live-scripts copy.
-    Raises ComposeRefused or DockerError."""
+
+    No start pulls or builds (`--pull never --no-build`, whatever a
+    service's `pull_policy` says): it runs only the local images a deploy
+    (or stage) built, pulled and decided users for, or that container-update
+    pulled and checked. A start whose image is missing is refused, naming
+    it. A running container whose image the local image store no longer
+    has is recreated (_recreate_without_image). Raises ComposeRefused or
+    DockerError."""
     check_start(paths, project_name, component=component, compose_files=compose_files,
                 staging=staging, record=record, deploying=deploying, txn=txn)
     if staging:
         target = staging_target(paths, project_name)
-        compose_up(target.cwd, build=build, force_recreate=force_recreate,
-                   services=services, start=start, pinned=pinned, **target.kwargs())
-        return
-    compose_up(paths.project_dir(project_name), compose_files=compose_files, build=build,
-               project_name=project_name, force_recreate=force_recreate,
-               services=services, start=start, pinned=pinned)
+        where = {"project_dir": target.cwd, "project_directory": target.project_directory,
+                 "env_file": target.env_file}
+        files, compose_project = list(target.files), target.project_name
+    else:
+        where = {"project_dir": paths.project_dir(project_name)}
+        files, compose_project = list(compose_files or []), project_name
+    run_dir = where.pop("project_dir")
+    up = functools.partial(compose_up, run_dir, compose_files=files, build=False,
+                           project_name=compose_project, start=start, pinned=True, **where)
+    redo = f"stage {project_name}" if staging else f"prod-deploy {project_name}"
+    try:
+        images = _start_images(run_dir, files, compose_project, services, where)
+    except compose_resolve.ComposeResolveError as e:
+        raise _refused(paths, project_name, component, str(e)) from e
+    # Before the up: Compose creates in dependency order and fails only at
+    # the service whose image is missing, after those ahead of it.
+    missing = docker_containers.absent_images(images)
+    if missing:
+        raise _refused(paths, project_name, component, _missing_text(missing)
+                       + f": a start runs only images a deploy built or pulled; run {redo}",
+                       tampering=False)
+    try:
+        up(force_recreate=force_recreate, services=services)
+    except DockerError as e:
+        gone = docker_containers.absent_images(images)
+        if not gone:
+            raise
+        raise DockerError(
+            f"{e}. {_missing_text(gone)}: it went from the local image store during the "
+            f"start, which may already have created or recreated the services ahead of "
+            f"it. Run {redo}.") from e
+    _recreate_without_image(paths, project_name, compose_project, component, services, up)
     # A partial up (restore's one service) may leave the rest stopped.
-    if start and not services:
+    if not staging and start and not services:
         _clear_production_stopped(paths, project_name, component)
         _sweep_live_scripts(paths, project_name, component)
+
+
+def _missing_text(missing: list[tuple[str, str]]) -> str:
+    return "; ".join(f"the image for {svc} ({image}) is missing" for svc, image in missing)
+
+
+def _start_images(run_dir: Path, files: list[str], compose_project: str,
+                  services: list[str] | None, where: dict) -> dict[str, str]:
+    """{service: image} for every service the up would create or start:
+    `services`, or every service without a profile (boxmunge runs Compose
+    with no profile enabled), and those they depend on. Compose names a
+    build service without an `image:` (an overlay from before boxmunge
+    named built images) `<project>-<service>`."""
+    model = compose_resolve.resolve_deployed_config(
+        run_dir, files, compose_project, all_profiles=True, **where)
+    specs = model.get("services") or {}
+    wanted: set[str] = set()
+    todo = list(services if services is not None else
+                (svc for svc, spec in specs.items()
+                 if isinstance(spec, dict) and not spec.get("profiles")))
+    while todo:
+        svc = todo.pop()
+        spec = specs.get(svc)
+        if svc in wanted or not isinstance(spec, dict):
+            continue
+        wanted.add(svc)
+        todo.extend(spec.get("depends_on") or ())
+    images = {}
+    for svc in sorted(wanted):
+        spec = specs[svc]
+        image = spec.get("image") or (f"{compose_project}-{svc}" if "build" in spec else None)
+        if isinstance(image, str):
+            images[svc] = image
+    return images
+
+
+def _recreate_without_image(paths: BoxPaths, project_name: str, compose_project: str,
+                            component: str, services: list[str] | None,
+                            up: Callable[..., None]) -> None:
+    """Recreate the running containers whose image the local image store no
+    longer has, from the image their name points at now.
+
+    A build that moved a name to a new image index left them there:
+    Compose compares the platform manifest, which a cached build keeps, so
+    it does not recreate them, and on the containerd store the index they
+    were created from goes with its last name (boxmunge.docker_containers).
+    Compose left them because their platform manifest is still the one
+    the name points at, so the recreated containers run the same image."""
+    gone = docker_containers.running_without_image(compose_project)
+    recreate = sorted(svc for svc in gone if services is None or svc in services)
+    if not recreate:
+        return
+    names = ", ".join(n for svc in recreate for n in gone[svc])
+    message = (f"{compose_project}: recreating {', '.join(recreate)}: the local image store "
+               f"no longer has the image {names} was created from (a build replaced it "
+               f"under its name)")
+    print(f"  WARNING: {message}", file=sys.stderr)
+    log_warning(component, message, paths, project=project_name)
+    up(force_recreate=True, services=recreate)
 
 
 def _clear_production_stopped(paths: BoxPaths, project_name: str, component: str) -> None:
@@ -369,14 +463,17 @@ def compose_up_platform(stack_dir: Path, compose_files: list[str], stack: str, *
 
 
 def compose_up_canary(paths: BoxPaths, project_name: str, *, compose_files: list[str],
-                      build: bool = True, force_recreate: bool = False,
+                      force_recreate: bool = False,
                       services: list[str] | None = None) -> None:
     """`docker compose up` for the self-test canary, without the project checks.
 
     The canary is boxmunge's own fixture, copied fresh from the installed
     release by `self-test` and torn down after it. It publishes a host
     port, which no project may, so it cannot pass them. Only `restore`
-    called by `self-test` uses this.
+    called by `self-test` uses this. Like every start, it neither pulls nor
+    builds: `self-test` built and pulled the canary's images when it
+    brought it up.
     """
-    compose_up(paths.project_dir(project_name), compose_files=compose_files, build=build,
-               project_name=project_name, force_recreate=force_recreate, services=services)
+    compose_up(paths.project_dir(project_name), compose_files=compose_files, build=False,
+               project_name=project_name, force_recreate=force_recreate, services=services,
+               pinned=True)

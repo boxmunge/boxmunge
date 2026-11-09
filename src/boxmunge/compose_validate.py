@@ -23,7 +23,7 @@ from boxmunge.compose_images import image_warnings
 from boxmunge.compose_isolation import isolation_problems
 from boxmunge.compose_mounts import has_named_volume
 from boxmunge.compose_own_files import own_file_problems
-from boxmunge.compose_service_rules import namespace_refusals, service_findings
+from boxmunge.compose_service_rules import namespace_refusals, pull_policy_problem, service_findings
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.published_ports import declared_ports
@@ -273,6 +273,18 @@ def _profile_note(services: dict[str, Any], message: str) -> str:
 # Public entry point
 # ---------------------------------------------------------------------------
 
+def _check_pull_policies(services: dict[str, Any], paths: BoxPaths, project_name: str,
+                         lenient: bool) -> None:
+    problems = [p for name, svc in services.items() if isinstance(svc, dict)
+                if (p := pull_policy_problem(name, svc))]
+    if problems and not lenient:
+        raise ComposeSecurityError(problems[0])
+    for problem in problems:
+        warning = f"{problem}. Until then its starts do not apply it: they run local images only"
+        print(f"  WARN: {warning}")
+        log_warning("compose-validate", warning, paths, project=project_name)
+
+
 def validate_user_compose(
     compose_path,
     paths: BoxPaths,
@@ -283,6 +295,7 @@ def validate_user_compose(
     manifest_services: dict | None = None,
     user_entries: dict | None = None,
     project_directory: Path | None = None,
+    lenient_values: bool = False,
 ) -> None:
     """Parse compose.yml and reject hostile keys.
 
@@ -315,6 +328,9 @@ def validate_user_compose(
     paths when that is not the file's own directory (staging's base sits
     in the slot beside the release it runs from). The model then runs in
     place, so the own-file rules locate its mounts where they lie.
+
+    `lenient_values` (validate_manifest's): for an installed project, a
+    `pull_policy` once accepted unchecked is a logged warning, not an error.
 
     Raises ComposeSecurityError on the first hostile key in a non-off
     service, or if the file cannot be read, parsed, or resolved.
@@ -399,6 +415,7 @@ def validate_user_compose(
         raise ComposeSecurityError(user_problems[0] + _profile_note(services, user_problems[0]))
     for warning in image_warnings(services, project_name):
         log_warning("compose-validate", warning, paths, project=project_name)
+    _check_pull_policies(services, paths, project_name, lenient_values)
     for entry in declared_ports(cve_policy):
         if entry["service"] not in services:
             raise ComposeSecurityError(

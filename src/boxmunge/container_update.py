@@ -205,7 +205,7 @@ def _recreate(paths: "BoxPaths", target: UpdateTarget) -> None:
         compose_up_platform(target.project_dir, target.compose_files, target.name, build=False)
     else:
         compose_up_checked(paths, target.name, component="container-update",
-                           compose_files=target.compose_files, build=False)
+                           compose_files=target.compose_files)
 
 
 def _maybe_rollback(

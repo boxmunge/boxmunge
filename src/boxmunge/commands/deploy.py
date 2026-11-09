@@ -324,11 +324,12 @@ def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict,
     try:
         promote_candidates(paths, project_name)
         deploy_storage.prepare_storage(paths, production_target(paths, project_name))
-        # generate_release_config built every image the users were decided from.
-        # A quarantine's fix starts only the scanned images (no pull, no build).
+        # generate_release_config built and pulled every image the users were
+        # decided from (and a quarantine's fix scanned); the start pulls and
+        # builds nothing.
         compose_up_checked(paths, project_name, component=component,
                            compose_files=compose_files, record=True, deploying=True,
-                           build=False, txn=txn, pinned=clearance is not None)
+                           txn=txn)
     except (DockerError, BindSourceError, RunAsError, ComposeResolveError, RemapError,
             ComposeError, OSError) as e:
         print(f"  ERROR: {e}", file=sys.stderr)
