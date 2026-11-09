@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 
 from boxmunge.commands import pause_snapshot
+from boxmunge.commands.confirm import confirm
 from boxmunge.docker import compose_stop, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, atomic_write_text, project_lock
 from boxmunge.legacy_stage import refuse_if_legacy_stage
@@ -52,9 +53,7 @@ def run_pause(
         print(f"  - Visitors to {', '.join(hosts)} see a maintenance page")
         print(f"  - Containers stopped (state preserved)")
         print(f"  - Health checks, backups, container-updates skip this project")
-        response = input("\nProceed? [y/N] ")
-        if response.lower() != "y":
-            print("Aborted.")
+        if not confirm("pause"):
             return 1
 
     try:

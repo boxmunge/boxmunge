@@ -210,12 +210,12 @@ from every project, unless --project, --tail N or --all (every match) says
 otherwise. DUR is e.g. 30m, 2h, 7d. --containers adds the project's
 container logs and needs --project.""",
     "logs": """\
-Usage: boxmunge logs <project> [service] [--tail N] [--follow]
+Usage: boxmunge logs <project> [service] [--staging] [--tail N] [--follow]
        boxmunge logs --host
        boxmunge logs --boxmunge
 
-Show container logs, host journal for boxmunge units, or the boxmunge
-service log.""",
+Show container logs (production's, or with --staging the staged
+release's), host journal for boxmunge units, or the boxmunge service log.""",
     "backup": """\
 Usage: boxmunge backup <project>
 

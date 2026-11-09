@@ -37,16 +37,14 @@ These operations are safe to run without human confirmation:
 | Set a host-level secret | `secrets set --host KEY=value` |
 | List secrets | `secrets list <project>` |
 | Check server/project health | `status` or `check <project>` |
-| Tail container logs | `logs <project>` |
+| Tail container logs | `logs <project>` (staging: `logs <project> --staging`) |
 | Query ops audit log | `log --tail 50` |
 | Validate a project config | `validate <project>` |
 | Run a backup | `backup <project>` |
 | Run diagnostics | `doctor` |
-| Remove uploaded bundles from the inbox | `inbox clean [project]` |
 | Read documentation | `agent-help <topic>` |
-| Pause a project (planned maintenance) | `pause <project>` |
-| Resume a paused project (pulls latest images) | `resume <project>` |
-| Restart a project the health monitor stopped (same build) | `recover <project>` |
+| Resume a paused project (pulls latest images) | `resume <project> --yes` (it asks first; without a terminal it needs `--yes`) |
+| Restart a project the health monitor stopped (same build) | `recover <project> --yes` (it asks first; without a terminal it needs `--yes`) |
 | Show effective container security posture | `security <project> [--json]` |
 | Audit overall platform health | `health` |
 | Show server boxmunge version | `version` |
@@ -101,6 +99,8 @@ These commands prompt for confirmation before executing. Use `--yes` only when y
 - `inbox clean [project]` -- removes every uploaded bundle (of that project)
 
 Do not pass `--yes` reflexively. Confirm the target project and the effect before proceeding.
+
+The prompt needs a terminal. Over `ssh deploy@<host> <command>` without `-t` there is none, so these commands refuse before changing anything and ask for `--yes`; they print what they would do first, so read that, then run the same command again with `--yes` added.
 
 ### Flags are strict
 

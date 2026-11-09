@@ -31,6 +31,7 @@ from boxmunge.backup import (
     resolve_backup_service,
 )
 from boxmunge.commands.backup_cmd import list_snapshots, sweep_stale_dumps
+from boxmunge.commands.confirm import confirm
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.compose_guard import (
     ComposeRefused, check_start, compose_up_canary, compose_up_checked,
@@ -135,9 +136,7 @@ def run_restore(
     if not yes:
         print(f"\nWill restore {project_name} from {plan.snapshot_path.name}")
         print("This will STOP the project and overwrite current data.")
-        response = input("Proceed? [y/N] ")
-        if response.lower() != "y":
-            print("Aborted.")
+        if not confirm("restore"):
             return 1
 
     try:

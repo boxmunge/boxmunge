@@ -263,23 +263,22 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
             continue
         name = proj_dir.name
         # Mirrors lifecycle.is_blocked precedence: quarantine wins if
-        # both markers exist.
-        if is_quarantined(name, paths):
-            try:
+        # both markers exist. A directory whose name is no longer a valid
+        # project name (a legacy `-staging` one) fails the first lookup.
+        try:
+            if is_quarantined(name, paths):
                 qstate = read_quarantine_state(name, paths) or {}
-            except PROJECT_INPUT_ERRORS as e:
-                unreadable.append(f"{name} ({e})")
-                continue
-            cve = qstate.get("cve_id", "?")
-            quarantined.append((name, cve))
-        elif pause_incomplete(name, paths):
-            incomplete.append(name)
-        elif awaiting_deploy(name, paths):
-            awaiting.append(name)
-        elif is_paused(name, paths):
-            paused.append(name)
-        elif is_monitor_stopped(name, paths):
-            stopped.append(name)
+                quarantined.append((name, qstate.get("cve_id", "?")))
+            elif pause_incomplete(name, paths):
+                incomplete.append(name)
+            elif awaiting_deploy(name, paths):
+                awaiting.append(name)
+            elif is_paused(name, paths):
+                paused.append(name)
+            elif is_monitor_stopped(name, paths):
+                stopped.append(name)
+        except PROJECT_INPUT_ERRORS as e:
+            unreadable.append(f"{name} ({e})")
     parts = [label + text for label, text, names in (
         ("unreadable state: ", "; ".join(unreadable), unreadable),
         ("quarantined: ", ", ".join(f"{n} ({c})" for n, c in quarantined), quarantined),
@@ -403,6 +402,9 @@ def collect_health(paths: BoxPaths) -> HealthReport:
 
     from boxmunge.health_checks.platform_updates import check_platform_updates
     report.checks.append(check_platform_updates(paths))
+
+    from boxmunge.health_checks.upgrade_probation import check_upgrade_probation
+    report.checks.append(check_upgrade_probation(paths))
 
     from boxmunge.health_checks.userns import check_docker_userns
     report.checks.append(check_docker_userns(paths))
