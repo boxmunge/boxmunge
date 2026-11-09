@@ -87,14 +87,23 @@ def test_clean_release_is_cleared_with_the_names_it_starts_under(box) -> None:
                                           "sha256:" + "c" * 64])
 
 
+STRICT = {**MANIFEST, "security": {"posture": "strict"}}
+
+
 def test_quarantine_level_finding_refuses_naming_cve_package_and_image(box) -> None:
     box.findings["postgres@sha256:" + "b" * 64] = (finding("CVE-2026-1234"),)
     with pytest.raises(gate.QuarantineRefused) as e:
-        box.clear()
+        box.clear(STRICT)
     text = str(e.value)
     assert "CVE-2026-1234 (Critical) in openssl 1, service db (image postgres@sha256:" in text
     assert "no fixed version is published yet" in text
     assert "quarantine stays in place" in text and "nothing was started" in text
+
+
+def test_balanced_release_clears_a_non_kev_finding_with_no_fix(box) -> None:
+    """Balanced quarantines only on KEV: an unfixable Critical does not refuse."""
+    box.findings["postgres@sha256:" + "b" * 64] = (finding("CVE-2026-1234"),)
+    assert box.clear().cve_id == "CVE-2026-0001"
 
 
 def test_fixable_kev_finding_names_the_fix(box) -> None:
@@ -119,7 +128,10 @@ def test_kev_finding_refuses_whatever_the_release_posture(box) -> None:
 def test_the_release_manifest_sets_the_policy(box) -> None:
     """The deployed manifest has no opt-out; the release's does."""
     box.findings["postgres@sha256:" + "b" * 64] = (finding("CVE-2026-1234"),)
-    opted_out = {**MANIFEST, "security": {"dangerously_disable_quarantine": True}}
+    with pytest.raises(gate.QuarantineRefused):
+        box.clear(STRICT)
+    opted_out = {**MANIFEST, "security": {
+        "posture": "strict", "dangerously_disable_quarantine": True}}
     assert box.clear(opted_out).cve_id == "CVE-2026-0001"
 
 
@@ -313,7 +325,8 @@ def test_a_malformed_recorded_policy_refuses(box) -> None:
 
 def test_findings_left_running_at_risk_are_kept_for_the_report(box) -> None:
     box.findings["postgres@sha256:" + "b" * 64] = (finding("CVE-2026-1234"),)
-    clearance = box.clear({**MANIFEST, "security": {"dangerously_disable_quarantine": True}})
+    clearance = box.clear({**MANIFEST, "security": {
+        "posture": "strict", "dangerously_disable_quarantine": True}})
     assert clearance.at_risk and "CVE-2026-1234" in clearance.at_risk[0]
     assert "service db" in clearance.at_risk[0]
     assert clearance.relaxed() == [] and clearance.quarantined_under is None

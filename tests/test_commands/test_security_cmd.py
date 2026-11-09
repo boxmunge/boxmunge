@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 import pytest
 import yaml
 
+from tests.test_commands.cve_helpers import render_site
 from boxmunge.commands.security_cmd import cmd_security
 from boxmunge.commands.security_suppress_targets import utc_today
 from boxmunge.manifest import CURRENT_SCHEMA_VERSION
@@ -1292,6 +1293,9 @@ def _scan_paths(tmp_path, *, in_grace: bool = False):
     long-standing quarantine/alert behaviour matches the pre-grace tests).
     Pass ``in_grace=True`` to write an active grace marker for the
     grace-specific tests.
+
+    The posture is strict: these tests quarantine on plain (non-KEV)
+    findings, which balanced only alerts on.
     """
     paths = _make_paths(tmp_path)
     proj = paths.projects / "demo"
@@ -1305,6 +1309,7 @@ def _scan_paths(tmp_path, *, in_grace: bool = False):
         "services": {
             "web": {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh", "image": "myapp:1.0"},
         },
+        "security": {"posture": "strict"},
     }
     (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
     (proj / "compose.yml").write_text(yaml.safe_dump({
@@ -2539,15 +2544,15 @@ def test_resume_lift_section_holds_project_lock(monkeypatch, tmp_path) -> None:
     paths.project_caddy_site("demo").parent.mkdir(parents=True, exist_ok=True)
     paths.project_caddy_site("demo").write_text("dummy")
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.prepare_caddy_config",
-        lambda p, m: None,
+        "boxmunge.commands.quarantine_lift.prepare_caddy_config",
+        render_site,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.prepare_compose_override",
+        "boxmunge.commands.quarantine_lift.prepare_compose_override",
         lambda p, m, component=None: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.run_smoke",
+        "boxmunge.commands.quarantine_lift.run_smoke",
         lambda p, paths_: (True, "ok"),
     )
     lock_holds: list = []
@@ -2564,7 +2569,7 @@ def test_resume_lift_section_holds_project_lock(monkeypatch, tmp_path) -> None:
         finally:
             _os.close(fd)
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.lift_quarantine",
+        "boxmunge.commands.quarantine_lift.lift_quarantine",
         assert_lock_held,
     )
     rc = cmd_security_resume(["demo"], paths)
@@ -2679,19 +2684,19 @@ def _wire_resume_lift_stubs(monkeypatch) -> None:
     """Stub out the lift_quarantine + caddy/compose/smoke primitives so the
     resume flow can run end-to-end without touching docker."""
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.lift_quarantine",
+        "boxmunge.commands.quarantine_lift.lift_quarantine",
         lambda *a, **k: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.prepare_caddy_config",
-        lambda p, m: None,
+        "boxmunge.commands.quarantine_lift.prepare_caddy_config",
+        render_site,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.prepare_compose_override",
+        "boxmunge.commands.quarantine_lift.prepare_compose_override",
         lambda p, m, component=None: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.run_smoke",
+        "boxmunge.commands.quarantine_lift.run_smoke",
         lambda p, paths_: (True, "ok"),
     )
 

@@ -108,7 +108,7 @@ def test_service_without_the_key_is_not_declared(paths) -> None:
 # --- the CVE hardening calculator, fed through the real loader ---
 
 def _meta() -> ProjectMeta:
-    return ProjectMeta(manifest=MANIFEST, posture_str="balanced",
+    return ProjectMeta(manifest=MANIFEST,
                        posture=parse_posture("balanced"), dangerously=False,
                        declared_runtimes=None, hosts=[], compose_files=["compose.yml"])
 

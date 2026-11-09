@@ -68,3 +68,14 @@ env_files:
 #     cap_add: [NET_RAW]         # re-add a capability we drop by default
 #
 # Run `agent-help security` on the server for full details.
+#
+# CVE posture — what this project accepts downtime for (project level only):
+#   security:
+#     posture: balanced    # the default: quarantine only for an actively
+#                          # exploited CVE (on CISA KEV); everything else
+#                          # is alerted, and the site stays up
+#     # relaxed:  only an actively exploited CVE with no fix you could deploy
+#     # strict:   also an unexploited, network-reachable Medium-or-worse flaw
+#     #           the distro confirms, with no fix (needs read_only: true)
+#     # paranoid: also anything >= Medium any source reports
+# Run `agent-help cve` on the server for the full policy.

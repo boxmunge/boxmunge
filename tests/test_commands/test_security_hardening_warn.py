@@ -8,6 +8,10 @@ the posture threshold is flagged and alerted once, never quarantined and
 never a reason to refuse a deploy. A finding the 0.10.1 penalty already lifts
 behaves as ever. The real scan, policy, alerting and gate code run; only
 Docker and Trivy are stubbed.
+
+Only strict and paranoid quarantine on severity, so only they are warned:
+under balanced (KEV-only quarantine) and relaxed the penalty decides no
+quarantine. The cases here run strict with a Low finding (+1 → Medium).
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ from boxmunge.release_target import production_target
 from tests.test_commands.cve_helpers import Docker, Pushover, finding, make_box, scan_result
 from tests.test_commands.test_quarantine_gate import MANIFEST, Box
 
+LOW = finding("CVE-2026-5555", sev=Severity.LOW)
 MEDIUM = finding("CVE-2026-5555", sev=Severity.MEDIUM)
 UPCOMING_TITLE = "will quarantine from 0.12"
 
@@ -39,13 +44,13 @@ def _kev() -> KevCatalog:
     return KevCatalog(frozenset(), datetime.now(timezone.utc))
 
 
-def _scan_box(tmp_path, monkeypatch, db: dict, posture: str = "balanced"):
+def _scan_box(tmp_path, monkeypatch, db: dict, posture: str = "strict", found=LOW):
     """The manifest declares web; the compose-only db is ``db``."""
     paths = make_box(tmp_path, security={"posture": posture})
     (paths.projects / "demo" / "compose.yml").write_text(yaml.safe_dump({"services": {
         "web": {"image": "demo-web:1"}, "db": {"image": "postgres:16", **db}}}))
     monkeypatch.setattr(security_scan_core, "scan_image",
-                        lambda ref, timeout: scan_result(ref, [MEDIUM]))
+                        lambda ref, timeout: scan_result(ref, [found]))
     Docker(monkeypatch)
     return paths, Pushover(monkeypatch, paths)
 
@@ -85,6 +90,8 @@ def test_the_warning_shows_in_status_health_and_survives_the_scan_state(
     check = check_cve_hardening_upcoming(paths)
     assert check.status == "warn" and "demo: 1 finding(s)" in check.detail
     assert "read_only: true" in check.detail
+    assert "under posture strict or paranoid" in check.detail
+    assert "`security.posture: balanced`" in check.detail
 
 
 def test_a_finding_the_legacy_penalty_already_lifts_quarantines_as_before(
@@ -114,6 +121,37 @@ def test_a_hardened_compose_only_db_has_nothing_to_warn_about(tmp_path, monkeypa
     assert not any(UPCOMING_TITLE in t for t in pushover.titles())
 
 
+@pytest.mark.parametrize("posture", ["balanced", "relaxed"])
+def test_a_posture_that_quarantines_only_on_kev_is_never_warned(
+        tmp_path, monkeypatch, posture) -> None:
+    """The 0.12 penalty lifts a Medium to High: under balanced that is an alert
+    (AWAITING_FIX) at most, never a quarantine, so nothing claims one."""
+    paths, pushover = _scan_box(tmp_path, monkeypatch, {}, posture=posture, found=MEDIUM)
+    fd = _scan(paths).decisions[0].findings[0]
+    assert not fd.hardening_would_quarantine and "0.12" not in fd.explanation
+    assert fd.disposition is Disposition.INFORMATIONAL
+    assert check_cve_hardening_upcoming(paths).status == "ok"
+    assert not any(UPCOMING_TITLE in t for t in pushover.titles())
+    assert not is_quarantined("demo", paths)
+
+
+def test_the_health_check_ignores_a_flag_on_a_kev_only_posture(tmp_path, monkeypatch) -> None:
+    """A flag recorded under strict (or by 0.11.1 under balanced) is not a
+    claim the health check repeats once the posture quarantines only on KEV."""
+    paths, _ = _scan_box(tmp_path, monkeypatch, {})
+    _scan(paths)
+    assert check_cve_hardening_upcoming(paths).status == "warn"
+    manifest = paths.project_manifest("demo")
+    data = yaml.safe_load(manifest.read_text())
+    data["security"] = {"posture": "balanced"}
+    manifest.write_text(yaml.safe_dump(data))
+    assert check_cve_hardening_upcoming(paths).status == "ok"
+    data["security"] = {"posture": "lax"}
+    manifest.write_text(yaml.safe_dump(data))
+    check = check_cve_hardening_upcoming(paths)
+    assert check.status == "warn" and "demo: posture unreadable" in check.detail
+
+
 def test_the_digest_does_not_repeat_a_warned_finding(tmp_path, monkeypatch) -> None:
     paths, pushover = _scan_box(tmp_path, monkeypatch, {})
     _scan(paths)
@@ -126,8 +164,11 @@ def test_the_digest_does_not_repeat_a_warned_finding(tmp_path, monkeypatch) -> N
 @pytest.fixture
 def box(tmp_path, monkeypatch) -> Box:
     b = Box(tmp_path, monkeypatch)
-    b.findings["postgres@sha256:" + "b" * 64] = (MEDIUM,)
+    b.findings["postgres@sha256:" + "b" * 64] = (LOW,)
     return b
+
+
+STRICT_MANIFEST = {**MANIFEST, "security": {"posture": "strict"}}
 
 
 def _compose(box, monkeypatch, **db) -> None:
@@ -138,7 +179,7 @@ def _compose(box, monkeypatch, **db) -> None:
 def test_the_gate_warns_and_clears_a_release_only_the_new_penalty_lifts(
         box, monkeypatch, capsys) -> None:
     _compose(box, monkeypatch)
-    assert box.clear(MANIFEST).cve_id == "CVE-2026-0001"
+    assert box.clear(STRICT_MANIFEST).cve_id == "CVE-2026-0001"
     out = capsys.readouterr().out
     assert "WARNING: from 0.12 this release would still be quarantined" in out
     assert "CVE-2026-5555" in out and "service db" in out and "read_only: true" in out
@@ -147,7 +188,7 @@ def test_the_gate_warns_and_clears_a_release_only_the_new_penalty_lifts(
 def test_the_gate_refuses_what_the_legacy_penalty_already_lifts(box, monkeypatch) -> None:
     _compose(box, monkeypatch, read_only=False)
     with pytest.raises(gate.QuarantineRefused) as e:
-        box.clear(MANIFEST)
+        box.clear(STRICT_MANIFEST)
     assert "CVE-2026-5555" in str(e.value)
 
 
@@ -155,14 +196,14 @@ def test_the_gate_refuses_once_the_strict_penalty_is_enforced(box, monkeypatch) 
     monkeypatch.setattr(hardening, "STRICT_HARDENING_PENALTY_ENFORCED", True)
     _compose(box, monkeypatch)
     with pytest.raises(gate.QuarantineRefused) as e:
-        box.clear(MANIFEST)
+        box.clear(STRICT_MANIFEST)
     assert "CVE-2026-5555" in str(e.value)
 
 
 def test_require_unchanged_ignores_a_change_only_the_new_penalty_sees(
         box, monkeypatch) -> None:
     _compose(box, monkeypatch, read_only=True)
-    clearance = box.clear(MANIFEST)
+    clearance = box.clear(STRICT_MANIFEST)
     _compose(box, monkeypatch)  # a hook dropped the db's read_only
     monkeypatch.setattr(gate, "production_target", lambda *a: production_target(box.paths, "demo"))
     gate.require_unchanged(box.paths, clearance)
@@ -173,3 +214,4 @@ def test_the_undeclared_service_warning_names_the_penalty_and_0_12() -> None:
     text = undeclared_service_warning("demo", "db")
     assert "+1 to the CVE severity of every finding in the whole project" in text
     assert "only warns" in text and "from 0.12 it quarantines" in text
+    assert "strict or paranoid" in text and "balanced and relaxed" in text

@@ -13,12 +13,16 @@ workflow, and recovery.
   newly deployed image is first scanned by the next daily run. The exception
   is a deploy to a quarantined project, which scans the release first (see
   "Recovering a quarantined project").
-- **Posture per project (default `balanced`).** Four tiers form a trust ladder
-  — `relaxed` quarantines only on CISA KEV, `balanced` (default) quarantines
-  on KEV or a distro-acknowledged High + AV:N finding, `strict` extends that
-  net to Medium, `paranoid` uses the highest severity any source (NVD,
-  the distro, GHSA) reports, with no distro trust.
-  Set in the manifest under `security.posture`.
+- **Posture per project (default `balanced`): what are you prepared to
+  accept downtime for?** Four tiers form a trust ladder. `balanced`
+  (default) takes a site down only for an actively exploited CVE (on CISA
+  KEV), fixable or not; every other finding is alerted, never downtime.
+  `relaxed` does not even do that when a fix exists (it alerts every scan
+  instead). `strict` also takes a site down for unexploited risk: a
+  distro-acknowledged, network-reachable Medium-or-worse finding with no
+  fix. `paranoid` does so on the highest severity any source (NVD, the
+  distro, GHSA) reports, with no distro trust. Set in the manifest under
+  `security.posture`.
 - **Trust the distro.** Below `paranoid`, the engine treats the distro's own
   triage as authoritative. A CVE the distro marked `will_not_fix`,
   `fix_deferred`, `not_affected`, or `under_investigation` is informational
@@ -37,7 +41,13 @@ workflow, and recovery.
   scan; `paranoid` does not consult it, and KEV still overrides it.
 - **Auto-quarantine** when a finding crosses the project's quarantine gate:
   maintenance page + `compose stop` (restart policies held at `no`) +
-  priority-1 Pushover alert.
+  priority-1 Pushover alert. **Auto-lift** (`balanced` only) when a later
+  scan of every image the project starts, against a fresh KEV catalog,
+  finds nothing quarantine-level and nothing on KEV (see "Automatic lift").
+- **No fix yet, not exploited (`balanced`): alerted once, stays up.** A
+  distro-acknowledged High + AV:N finding with no fix is `AWAITING_FIX`:
+  one alert says nothing needs doing now; the next comes when a fix lands
+  (rebuild and redeploy) or if CISA lists it as exploited (it quarantines).
 - **Suppress with operator review:**
   `boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason <text>`.
 - **Inspect state:** `boxmunge security` (fleet) or `boxmunge security <project>`
@@ -53,10 +63,18 @@ workflow, and recovery.
 
 ## The promise
 
-Sleep easy: if a published CVE on a deployed image is bad enough by your
-declared posture, boxmunge stops the project and serves a maintenance page
-before you've had your morning coffee. If it's not bad enough to quarantine,
-you still get an informational alert. Either way, you find out.
+Sleep easy. boxmunge takes a site down only for what its posture says you
+accept downtime for, and tells you about everything else.
+
+Under the default `balanced` that is one thing: a CVE that is being actively
+exploited (on CISA's Known Exploited Vulnerabilities catalog). Then boxmunge
+stops the project and serves a maintenance page before you've had your
+morning coffee. A serious CVE that nobody is known to be exploiting, with no
+fix yet, does not take you offline: there is nothing to rebuild and nothing
+to do tonight. You get one alert saying so, another when a fix lands, and
+the quarantine if it is ever listed as exploited. If you would rather take
+downtime for unexploited risk too, that is `strict` or `paranoid`. Either
+way, you find out.
 
 The constraint that shaped this design: there is no AI agent on the
 deployed box doing bespoke "is this exploitable in our context"
@@ -66,33 +84,47 @@ review notes); the engine reapplies those rules on every scan.
 
 ## The trust ladder
 
-The four postures form a trust ladder, not just severity thresholds. The
+Each posture answers one question: **what am I prepared to accept downtime
+for?** The four form a trust ladder, not just severity thresholds. The
 governing insight: for every posture below `paranoid`, the distro's own
 triage is a first-class, authoritative input. Debian triages CVEs against
 its actual packaged versions and marks findings it judges low-risk as
 `will_not_fix` or `no-dsa` — taking a site offline for those would override
 the distro's own verdict without additional evidence.
 
-`relaxed` is the strongest expression of that trust: the site only goes dark
-for active exploitation. `paranoid` is the opposite: no distro trust and no
-AV filter, and the severity is the highest any source reports, so neither
-the distro's triage nor a lower NVD rating can lower it.
+`relaxed` and `balanced` are the strongest expression of that trust: the
+site only goes dark for active exploitation. `paranoid` is the opposite: no
+distro trust and no AV filter, and the severity is the highest any source
+reports, so neither the distro's triage nor a lower NVD rating can lower it.
 
-| Posture | Quarantines when (no fix, not suppressed) | Severity source |
-|---|---|---|
-| **relaxed** | CVE is on **CISA KEV** — nothing else. Pure last resort. | — |
-| **balanced** *(default)* | On **KEV** OR distro `Status` `affected`, `end_of_life` or missing + **distro** severity ≥ High + `AV:N` | Debian/vendor |
-| **strict** | On **KEV** OR distro `Status` `affected`, `end_of_life` or missing + **distro** severity ≥ Medium + `AV:N` | Debian/vendor |
-| **paranoid** | Anything ≥ Medium over threshold — no AV filter, no distro trust. KEV can still escalate. | Highest of NVD and every vendor rating |
+| Posture | Accepts downtime for | Alerted, stays up | Severity source |
+|---|---|---|---|
+| **relaxed** | A CVE on **CISA KEV** with no fix. A fixable KEV finding stays up, alerted every scan. | Everything else (informational) | — |
+| **balanced** *(default)* | A CVE on **CISA KEV**, fixable or not — nothing else. | Distro `Status` `affected`, `end_of_life` or missing + **distro** severity ≥ High + `AV:N`, no fix: `AWAITING_FIX`, alerted once. Everything else informational. | Debian/vendor |
+| **strict** | **KEV**, OR distro `Status` `affected`, `end_of_life` or missing + **distro** severity ≥ Medium + `AV:N`, no fix | Everything else (informational) | Debian/vendor |
+| **paranoid** | **KEV**, OR anything ≥ Medium with no fix — no AV filter, no distro trust | Everything else (informational) | Highest of NVD and every vendor rating |
 
-`balanced` stays the out-of-the-box default. The residual net it keeps
-(distro-acknowledged High, AV:N, no fix) is genuine: Debian issues a DSA
-quickly for those, so catching them is meaningful — and rare enough not to
-create the false-quarantine problem that motivated this design.
+A suppression applies to every non-KEV finding and never to a KEV one. A
+fix that exists but is not running never quarantines a non-KEV finding:
+boxmunge alerts with the rebuild advice instead (decision order, step 2).
 
-`relaxed` and `balanced` differ meaningfully. A distro-acknowledged, High,
-unpatched, network-reachable CVE takes a `balanced` site down but not a
-`relaxed` one. If that distinction matters for a project, choose consciously.
+`balanced` is the out-of-the-box default, and it accepts downtime only for
+active exploitation. Until 0.11.2 it also quarantined a distro-acknowledged
+High, network-reachable finding with no fix. That took sites offline when
+nobody was exploiting the bug and there was nothing to rebuild: a High in
+`zlib1g` with no fix, in every `python:3.12-slim` image, did exactly that,
+and only a manual suppression brought the sites back. From 0.11.2 that
+finding is `AWAITING_FIX`. Its alert says no fix exists yet, it is not known
+to be exploited, and nothing needs doing now; you are alerted again when a
+fix lands (rebuild and redeploy) or if CISA lists it as exploited (it then
+quarantines). A project the old rule quarantined is lifted by the first
+scan after the upgrade (see "Automatic lift").
+
+`relaxed` and `balanced` now differ only on a KEV finding that has a fix:
+`balanced` keeps the site down until the fix is deployed, `relaxed` keeps it
+up and alerts on every scan. `strict` is where unexploited risk takes a site
+down: choose it for a project where an unpatched, network-reachable flaw is
+worse than an outage.
 
 ### When to use `paranoid`
 
@@ -107,7 +139,17 @@ regardless of attack vector or distro verdict. Suitable for:
 
 The expected default for typical web/api containers is `balanced` with
 the distro trust active. AV:L findings and distro-deprioritized findings
-on hardened web surfaces are not worth taking services down for.
+on hardened web surfaces are not worth taking services down for, and
+under `balanced` neither is anything not being exploited.
+
+### Choosing a posture
+
+| If you can accept downtime for... | Choose |
+|---|---|
+| Only an actively exploited CVE with no fix you could deploy | `relaxed` |
+| Only an actively exploited CVE (the default) | `balanced` |
+| Also an unexploited, network-reachable Medium-or-worse flaw the distro confirms, with no fix | `strict` |
+| Also anything ≥ Medium any source reports, whatever the distro or attack vector says | `paranoid` |
 
 ## Per-finding decision order
 
@@ -135,10 +177,12 @@ For every finding, `evaluate_finding` runs these gates in order:
    and the alert names the unapplied fix too.
 2. **Fix available** (not KEV) → `IGNORED_FIXED`. boxmunge does not rebuild
    images, so "fixed upstream" is not "fixed here". When the finding would
-   otherwise meet the posture's quarantine gate, it is flagged and a
+   otherwise meet the posture's gate (a quarantine under `strict` and
+   `paranoid`, `AWAITING_FIX` under `balanced`), it is flagged and a
    `fix_available` alert lists it once (rebuild and redeploy to apply the
-   fix); otherwise it is reported in the new-findings digest. Either way it
-   is never silent.
+   fix) — including when a fix lands for a finding that was `AWAITING_FIX`;
+   otherwise it is reported in the new-findings digest. Either way it is
+   never silent.
 3. **Active suppression** → `SUPPRESSED`. Skipped until suppression expiry.
 4. **Unknown severity** → `INFORMATIONAL`. The engine cannot reason about a
    severity it does not recognize; reporting only.
@@ -154,8 +198,8 @@ For every finding, `evaluate_finding` runs these gates in order:
 6. **Relaxed short-circuit** — under `relaxed`, quarantine is KEV-only (already
    handled at step 1). Every non-KEV finding is `INFORMATIONAL` regardless of
    distro severity — the most hands-off tier, for operators who accept
-   severity-based risk. Raise the posture to `balanced`/`strict` for
-   distro-severity-based quarantine.
+   severity-based risk. Raise the posture to `strict` for
+   distro-severity-based quarantine (`balanced` alerts on it, step 11).
 7. **Irrelevant runtime** (balanced/strict) — the package belongs to a
    language runtime the project never invokes → `INFORMATIONAL`. Placed
    ahead of the distro-status gates below: all of them produce
@@ -177,14 +221,20 @@ For every finding, `evaluate_finding` runs these gates in order:
    Retained from v0.7.1. By this step the distro verdict and severity are
    already authoritative noise gates; the AV filter is a secondary reducer for
    findings that passed distro triage but are not network-reachable.
-11. **Threshold comparison** against the distro severity (elevated by the
-   hardening penalty, using the posture threshold from the trust ladder table)
-   → `QUARANTINE` / `STILL_RUNNING_AT_RISK` / `INFORMATIONAL`. Reached only by
-   `balanced`/`strict` with a distro severity and a `Status` that is not one
-   of the deprioritized statuses in step 8: `affected`, `end_of_life`, or a
-   missing/unrecognised status. A missing status is not a distro verdict that
-   the finding is low-risk, so it fails closed and is threshold-compared like
-   `affected`.
+11. **Severity gate** against the distro severity (elevated by the
+   hardening penalty, using the posture threshold from the trust ladder
+   table). Reached only by `balanced`/`strict` with a distro severity and a
+   `Status` that is not one of the deprioritized statuses in step 8:
+   `affected`, `end_of_life`, or a missing/unrecognised status. A missing
+   status is not a distro verdict that the finding is low-risk, so it fails
+   closed and is compared like `affected`.
+   - `strict` (≥ Medium): `QUARANTINE`, or `STILL_RUNNING_AT_RISK` with
+     `dangerously_disable_quarantine: true`; `INFORMATIONAL` below it.
+   - `balanced` (≥ High): `AWAITING_FIX` — no fix yet, not known to be
+     exploited, the site stays up; alerted once, when it first reaches this
+     disposition. There is no quarantine here to opt out of, so
+     `dangerously_disable_quarantine` changes nothing. `INFORMATIONAL`
+     below it.
 
 ### Decision matrix summary
 
@@ -201,7 +251,8 @@ For every finding, `evaluate_finding` runs these gates in order:
 | Distro marked `will_not_fix` / `fix_deferred` / `not_affected` / `under_investigation` | `INFORMATIONAL` — distro deprioritized |
 | No distro rating (NVD/GHSA only) | `INFORMATIONAL` — no distro verdict |
 | CVSS Attack Vector is not Network | `INFORMATIONAL` — not network-reachable |
-| Distro severity (+ hardening penalty) ≥ threshold | `QUARANTINE` (or `STILL_RUNNING_AT_RISK` if quarantine disabled) |
+| Distro severity (+ hardening penalty) ≥ Medium, posture `strict` | `QUARANTINE` (or `STILL_RUNNING_AT_RISK` if quarantine disabled) |
+| Distro severity (+ hardening penalty) ≥ High, posture `balanced` | `AWAITING_FIX` — alerted once, stays up |
 | Distro severity (+ hardening penalty) < threshold | `INFORMATIONAL` |
 | `dangerously_disable_quarantine: true` | `STILL_RUNNING_AT_RISK` instead of `QUARANTINE`, KEV included (alerted every scan for KEV) |
 
@@ -262,8 +313,10 @@ it:
    `CISA KEV feed stale — exploitation defense degraded`.
 
 This alert fires once per scan run, not once per finding, to avoid alert
-storms. The degradation must not go unnoticed — the `relaxed` tier's only
-quarantine protection depends on the KEV feed.
+storms. The degradation must not go unnoticed: under `relaxed` and
+`balanced` (the default) KEV is the only quarantine trigger, so while the
+catalog is stale nothing can quarantine those projects. A stale catalog
+also never lifts a quarantine (see "Automatic lift").
 
 ## Runtime relevance gate
 
@@ -422,6 +475,11 @@ For non-paranoid postures, the penalty applies to the **distro** severity
 at step 11. For `paranoid`, the penalty applies to the highest severity any
 source reports (step 5).
 
+The penalty decides a quarantine only under `strict` and `paranoid`, whose
+severity gate quarantines. Under `balanced` it can lift a finding to
+`AWAITING_FIX` (an alert, the site stays up); under `relaxed` it changes no
+disposition. Only KEV takes a `balanced` or `relaxed` site down.
+
 Rationale: running with read-only rootfs disabled means a Medium CVE
 behaves more like a High one in practice — the policy treats it that way.
 
@@ -477,7 +535,7 @@ The penalty is project-wide: a compose-only service without
 finding in every image of the project, so a medium finding in the web image
 judges as high.
 
-**0.11 warns; 0.12 quarantines.** Releases before 0.11.0 counted every
+**0.11 warns; 0.12 quarantines (`strict` and `paranoid`).** Releases before 0.11.0 counted every
 service not on `profile: off` as hardened by the overlay, compose-only ones
 included, and did not count the manifest's `security.cap_add` or
 `security.no_new_privileges: false`. The calculator now applies the rule
@@ -489,12 +547,17 @@ in `--json`), shows as a `cve-hardening` warning in `boxmunge health`, and is
 alerted once per finding (`will quarantine from 0.12 (warning only)`, naming
 the services that cause the extra penalty). A deploy to a quarantined project
 prints such findings as a `WARNING` and is not refused for them. A finding the
-old penalty already lifts quarantines as before. Fix it by adding
+old penalty already lifts quarantines as before. Only `strict` and
+`paranoid` are judged under the stricter penalty: under `balanced` and
+`relaxed`, which quarantine only on KEV, no finding is flagged, and the
+`cve-hardening` health check ignores a flag a scan recorded before the
+project moved there (or before 0.11.2, when `balanced` still quarantined on
+severity). Fix it by adding
 `read_only: true` to the service in `compose.yml`, declaring the service in
 the manifest so boxmunge hardens it, or dropping the manifest relaxation. To
-accept the risk instead, suppress the CVE after review or choose a lower
-`security.posture`: a finding that would not quarantine under the stricter
-penalty either is not flagged.
+accept the risk instead, suppress the CVE after review or choose
+`security.posture: balanced`: a finding that would not quarantine under the
+stricter penalty either is not flagged.
 
 ### v0.9 writable: surface and the penalty
 
@@ -525,7 +588,7 @@ omit it unless you have a specific reason to override inference.
 
 ```yaml
 security:
-  posture: balanced                       # default if absent
+  posture: balanced                       # default: downtime only for actively exploited (KEV) CVEs
   dangerously_disable_quarantine: false   # default if absent
   # runtimes: [python]                    # optional; overrides inference
 ```
@@ -567,7 +630,8 @@ The trade is explicit and signed off in the manifest:
 
 - You accept that a quarantine-level CVE on this project will not stop the
   service — **including a CVE on CISA KEV** (actively exploited), with or
-  without a fix available. The opt-out is honoured for KEV, but never
+  without a fix available. Under `balanced` and `relaxed` KEV findings are
+  the only quarantine-level ones, so the opt-out only ever applies to them. The opt-out is honoured for KEV, but never
   quietly: every scan with a live KEV finding sends a priority-1
   `[STILL RUNNING — quarantine disabled by config] ACTIVELY EXPLOITED <CVE>
   (CISA KEV)` alert naming the CVE and the opt-out (and the fix, if one
@@ -905,7 +969,9 @@ several findings are involved the title names the worst and adds
 | `[boxmunge:<project>] [STILL RUNNING — quarantine disabled by config] <CVE> (<severity>)` | priority-1 |
 | `[boxmunge:<project>] [STILL RUNNING — quarantine disabled by config] ACTIVELY EXPLOITED <CVE> (CISA KEV)` (every scan) | priority-1 |
 | `[boxmunge:<project>] ACTIVELY EXPLOITED — <CVE> fix available but not running (CISA KEV)` (`relaxed`, every scan) | priority-1 |
-| `[boxmunge:<project>] <N> fixable CVE findings over the quarantine gate — rebuild to apply the fix` | normal |
+| `[boxmunge:<project>] <N> fixable CVE findings over the posture's gate — rebuild to apply the fix` (once; also when a fix lands for an `AWAITING_FIX` finding) | normal |
+| `[boxmunge:<project>] <N> CVE findings with no fix yet — site stays up, nothing to do now` (`balanced`, `AWAITING_FIX`, once per finding) | normal |
+| `[boxmunge:<project>] Quarantine lifted — back online (<CVE>)` (a scan cleared it; `still paused`, or `smoke test FAILED` at priority-1) | normal |
 | `[boxmunge:<project>] <N> CVE findings will quarantine from 0.12 (warning only)` (once per finding) | normal |
 | `[boxmunge:<project>] <N> new CVE findings (informational)` (digest, top 5 listed) | normal |
 | `[boxmunge:<project>] Suppression expired — <CVE>` | priority-1 |
@@ -952,14 +1018,16 @@ project's active suppressions.
 ## Quarantine enforcement across the lifecycle (v0.7.0)
 
 Once a project is quarantined, every operational entry point honours
-that state until a deploy of a fixed release or `boxmunge security resume
-<project>` lifts it. Both scan what they would start first and fail closed.
+that state until a deploy of a fixed release, `boxmunge security resume
+<project>`, or (for a `balanced` project) a scan that finds nothing
+quarantine-level and nothing on KEV lifts it (see "Automatic lift"). All three scan what they would start first and fail
+closed.
 
 The quarantine record (`state/deploy/<project>.quarantined.json`) says
 `action_complete: false` until the maintenance page is routed **and** the
-containers are stopped. Every scan of a quarantined project re-asserts the
-action — maintenance page, Caddy reload, stop, restart policies — whatever
-the scan finds,
+containers are stopped. Every scan of a quarantined project that does not
+lift it re-asserts the action — maintenance page, Caddy reload, stop,
+restart policies — whatever else the scan finds,
 so a step that failed (a Caddy reload timeout, a hung `compose stop`) is
 retried on the next scan until it completes, and a container started
 behind the maintenance page is stopped again. A failed re-assert is a scan
@@ -992,9 +1060,58 @@ quarantined project"; a project that is also paused is refused.
   failure counts.
 
 In both camps the skip is recorded via `log_operation` and visible in
-`boxmunge log --component <component>`. Only a deploy of a fixed release
-or `boxmunge security resume <project>` lifts the quarantine; both scan
-first and fail closed (see "Recovering a quarantined project" below).
+`boxmunge log --component <component>`. Only a deploy of a fixed release,
+`boxmunge security resume <project>` or, under `balanced`, a clearing scan
+lifts the quarantine; each scans first and fails closed (see "Automatic lift" and
+"Recovering a quarantined project" below).
+
+## Automatic lift
+
+`balanced` takes a site down only for an actively exploited CVE. A
+quarantine of a `balanced` project whose cause is no longer exploited, or
+no longer there, is lifted by the scan on its own, with no deploy and no
+operator: the nightly scan, or `boxmunge security scan`. That happens when
+the project's posture is `balanced` and the scan
+
+- covered every image the project would start (the scan of a quarantined
+  project is of the images `compose up` would start; a failed or skipped
+  image scan, or an image that cannot be identified, never lifts), and
+- ran against a fresh CISA KEV catalog (a stale or missing catalog reads as
+  "nothing is exploited", which is exactly what must not be trusted), and
+- found no quarantine-level finding and no KEV-listed finding at all.
+
+The case it exists for: a finding the old `balanced` rule quarantined (a
+distro-acknowledged High, network-reachable, no fix, not on KEV) is lifted
+at the first scan after upgrading to 0.11.2, and the alert says the posture
+rules changed in boxmunge 0.11.2. The finding itself is `AWAITING_FIX` from
+then on.
+
+Every other posture keeps a deploy of a fixed release or `security resume`
+as the way out. Under `relaxed`, a KEV finding stops quarantining once a fix
+is published, while the running image is still the vulnerable one; under
+`strict` and `paranoid`, a distro re-triage or a newly published fix is not
+evidence that what runs is safe. Those decisions stay with the operator.
+
+The lift is `security resume`'s: the normal Caddy site is restored, the
+saved restart policies are given back, the scanned local images are
+started with no pull or build, and the smoke test runs. A project that is
+also paused has only its quarantine lifted and stays down until `boxmunge
+resume`. These keep their quarantine, re-asserted on every scan:
+
+- a project mid-migration, until the migration ends;
+- a project the health monitor stopped: its stop stands until `recover`,
+  and the monitor and container-update skip the project while it does, so
+  a lift would leave it running unwatched. Lift it with `security resume`,
+  then bring it back with `recover`.
+
+A lift that cannot complete (its start is refused, for example by an
+install left open, or `compose up` fails) fails that project's scan loudly
+(the scan-incomplete alert) and is retried by the next scan. A failure after
+the Caddy routing was switched re-asserts the quarantine first, so visitors
+get the maintenance page back, not a 502; `security resume` does the same.
+
+One alert says so, `Quarantine lifted — back online (<CVE>)`, naming why,
+and `security scan` prints `<project>: quarantine lifted (<CVE>)`.
 
 ## Recovering a quarantined project
 
@@ -1009,7 +1126,8 @@ first and fail closed (see "Recovering a quarantined project" below).
    is published for a finding that is not on KEV, it stops quarantining
    (`IGNORED_FIXED`, alerted once), so `security resume` succeeds while
    the old, unpatched image still runs: rebuild and redeploy straight
-   after it.
+   after it. Only a `balanced` project is lifted by a scan on its own (see
+   "Automatic lift").
 
 3. **If suppressing:**
 
@@ -1030,7 +1148,7 @@ first and fail closed (see "Recovering a quarantined project" below).
    when the re-scan covered every image and found no quarantine-level
    finding. It refuses, keeps the quarantine, and exits 1 when:
 
-   - any finding still meets the project's posture threshold:
+   - any finding is still quarantine-level under the project's posture:
 
      ```
      ERROR: Cannot resume — CVE-2026-5678 (Critical) would still quarantine.

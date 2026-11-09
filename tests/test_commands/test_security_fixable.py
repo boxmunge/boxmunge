@@ -61,7 +61,7 @@ def test_fixable_over_threshold_alerts_once(box):
     scan_one_project(paths, "demo", in_grace=False, kev=_kev())
     [(title, body, priority)] = pushover.sent
     assert priority == 0
-    assert "1 fixable CVE finding over the quarantine gate" in title
+    assert "1 fixable CVE finding over the posture's gate" in title
     assert "CVE-2026-0001" in body
     assert not is_quarantined("demo", paths)
     pushover.clear()

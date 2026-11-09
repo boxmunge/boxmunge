@@ -162,6 +162,7 @@ def _summarise_decisions(decisions: list[ProjectDecision]) -> str:
         Disposition.QUARANTINE.value,
         Disposition.SUPPRESSED.value,
         Disposition.STILL_RUNNING_AT_RISK.value,
+        Disposition.AWAITING_FIX.value,
         Disposition.INFORMATIONAL.value,
         Disposition.IGNORED_FIXED.value,
     ):
@@ -293,9 +294,10 @@ def _scan_each(
             print(f"{name}: SKIPPED — held by another operation; will be "
                   f"picked up on next scan")
             continue
-        except (RuntimeError, ManifestError, OSError) as e:
-            # Audit B-12: a malformed per-project file is reported for that
-            # project and the fleet scan carries on with the rest.
+        except (RuntimeError, ManifestError, OSError, StateError) as e:
+            # Audit B-12: a malformed per-project file (a manifest, a corrupt
+            # health or deploy state) is reported for that project and the
+            # fleet scan carries on with the rest.
             print(f"{name}: ERROR — {e}")
             log_warning(
                 "cve-scan", f"scan failed for {name}: {e}",
@@ -314,6 +316,10 @@ def _scan_each(
         for w in scan.warnings:
             print(f"{name}: WARN — {w}")
         print(f"{name}: {_summarise_decisions(list(scan.decisions))}")
+        if scan.lifted:
+            print(f"{name}: quarantine lifted ({scan.lifted})")
+        if scan.kept:
+            print(f"{name}: {scan.kept}")
         if not scan.complete:
             run.problems[name] = scan.incomplete_reasons()
             print(f"{name}: INCOMPLETE — {len(run.problems[name])} image(s) "

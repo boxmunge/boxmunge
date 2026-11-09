@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import subprocess
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
 import yaml
 
 from boxmunge.commands import quarantine_gate
+from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.quarantine import is_quarantined, quarantine_project
 from boxmunge.cve.scanner import ScannerError, Severity
@@ -100,6 +102,9 @@ def _stub_scanner(monkeypatch) -> Trivy:
     trivy = Trivy()
     monkeypatch.setattr("boxmunge.commands.security_scan_core.scan_image", trivy)
     monkeypatch.setattr(quarantine_gate, "refresh_db", lambda: None)
+    # Actively exploited: the release's balanced posture quarantines only on KEV.
+    kev = KevCatalog(frozenset({CVE}), datetime.now(timezone.utc))
+    monkeypatch.setattr(quarantine_gate, "load_kev", lambda paths: kev)
     # The suite keeps restart-policy holds off the daemon; these tests are about them.
     monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies",
                         project_restart_policies)
@@ -136,7 +141,8 @@ def test_deploying_a_fix_to_a_quarantined_project(int_paths, capsys, monkeypatch
 
             out = _refused_unchanged(int_paths, p, capsys,
                                      _bundle(p, "yes", "always"), before)
-            assert f"{CVE} (Critical) in openssl 1, service app" in out
+            assert f"{CVE} (Critical, CISA KEV: actively exploited) in openssl 1, service app" \
+                in out
             assert "quarantine stays in place" in out
 
             trivy.fail = True
@@ -185,7 +191,8 @@ def test_a_release_that_relaxes_the_policy_lifts_and_says_so(int_paths, capsys,
         assert not is_quarantined(p, int_paths)
         assert "by relaxing the security policy (dangerously_disable_quarantine turned on)" in out
         assert "images were not shown to be fixed" in out
-        assert f"Still running at risk: {CVE} (Critical) in openssl 1, service app" in out
+        assert (f"Still running at risk: {CVE} (Critical, CISA KEV: actively exploited) in "
+                f"openssl 1, service app") in out
         ((title, body, kw),) = sent
         assert "relaxing the security policy" in title and kw["priority"] == 1
         assert "not shown to be fixed" in body

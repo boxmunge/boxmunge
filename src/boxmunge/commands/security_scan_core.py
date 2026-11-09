@@ -30,6 +30,7 @@ from boxmunge.commands.security_scan_inputs import (
 from boxmunge.commands.security_enforce import (
     Enforcement,
     announce_quarantine,
+    clears_quarantine,
     enforce,
     headline_of,
     raise_enforcement_error,
@@ -110,6 +111,10 @@ class ProjectScan:
     # Set when the scan ran and was acted on but its result could not be
     # written (ScanStateWriteError); the fleet run fails and alerts on it.
     record_error: str | None = None
+    # The CVE whose quarantine this scan lifted, or why a quarantine it
+    # cleared was kept (security_enforce).
+    lifted: str | None = None
+    kept: str | None = None
 
     @property
     def unidentified_services(self) -> tuple[str, ...]:
@@ -323,7 +328,7 @@ def audit_targets(
     results, failed, skipped, warnings = _scan_targets(paths, project, targets)
     decisions = _evaluate(paths, project, meta, profile, supps, results, kev)
     return ProjectScan(
-        project=project, posture=meta.posture_str, dangerously=meta.dangerously,
+        project=project, posture=meta.posture.value, dangerously=meta.dangerously,
         decisions=tuple(decisions),
         warnings=tuple(_unscanned(unidentified=unidentified) + warnings),
         failed_images=tuple(failed), skipped_images=tuple(skipped),
@@ -372,7 +377,7 @@ def scan_one_project_locked(
             )
             raise_enforcement_error(outcome.error, record_error)
         return ProjectScan(
-            project=project, posture=meta.posture_str, dangerously=dangerously,
+            project=project, posture=meta.posture.value, dangerously=dangerously,
             decisions=(), warnings=tuple(warnings),
             unidentified=tuple(unidentified.items()), record_error=record_error,
             **basis,
@@ -385,11 +390,16 @@ def scan_one_project_locked(
     headline = headline_of(decisions)
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow
     # itself and never act. Everyone else enforces: an existing quarantine
-    # is re-asserted on every scan (B-03), a new one fires outside grace.
+    # is re-asserted on every scan (B-03) unless this scan cleared it, a new
+    # one fires outside grace.
     outcome = Enforcement()
     if not audit_only:
+        cleared = clears_quarantine(
+            meta.posture, decisions, complete=not (failed or skipped or unidentified),
+            kev_fresh=not kev.is_stale(_today()))
         outcome = _enforce(
             paths, project, meta, headline, in_grace=in_grace or defer_new,
+            cleared=tuple(decisions) if cleared else None,
         )
 
     if failed and not decisions:
@@ -421,7 +431,7 @@ def scan_one_project_locked(
 
     return ProjectScan(
         project=project,
-        posture=meta.posture_str,
+        posture=meta.posture.value,
         dangerously=dangerously,
         record_error=record_error,
         decisions=tuple(decisions),
@@ -432,6 +442,8 @@ def scan_one_project_locked(
         **basis,
         headline=headline,
         host_expired=host_expired,
+        lifted=outcome.lifted,
+        kept=outcome.kept,
     )
 
 
@@ -448,11 +460,11 @@ def _record(path, **kwargs) -> str | None:
 def _enforce(
     paths: BoxPaths, project: str, meta: ProjectMeta,
     headline: tuple[ProjectDecision, FindingDisposition] | None,
-    *, in_grace: bool,
+    *, in_grace: bool, cleared: tuple[ProjectDecision, ...] | None = None,
 ) -> Enforcement:
     return enforce(
         paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
-        policy=meta.policy(), headline=headline, in_grace=in_grace,
+        policy=meta.policy(), headline=headline, in_grace=in_grace, cleared=cleared,
     )
 
 

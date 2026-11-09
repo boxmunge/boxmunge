@@ -11,6 +11,7 @@ import pytest
 from boxmunge.commands import security_scan_core
 from boxmunge.commands.security_scan_core import scan_one_project
 from boxmunge.cve import quarantine as q
+from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.scanner import ScannerError
 from tests.test_commands.cve_helpers import (
     CRIT,
@@ -59,15 +60,16 @@ def test_failed_quarantine_step_is_retried_until_complete(
 def test_quarantine_is_reasserted_even_when_findings_are_gone(
     tmp_path, monkeypatch, docker,
 ):
-    """An incomplete quarantine converges whatever the new scan finds.
+    """An incomplete quarantine converges when the scan cannot clear it.
 
-    Only `security resume` lifts a quarantine, so a clean scan must still
-    finish stopping the project rather than leave it half-quarantined.
+    A clean scan lifts a quarantine only against a fresh KEV catalog (a stale
+    one reads as "nothing exploited"); otherwise the scan must still finish
+    stopping the project rather than leave it half-quarantined.
     """
     paths = make_box(tmp_path)
     seed_quarantine(paths, action_complete=False)
     _scan_returns(monkeypatch, [])
-    scan_one_project(paths, "demo", in_grace=False)
+    scan_one_project(paths, "demo", in_grace=False, kev=KevCatalog(frozenset(), None))
     assert docker.calls == ["caddy_reload", "compose_stop"]
     assert q.quarantine_action_complete("demo", paths)
 

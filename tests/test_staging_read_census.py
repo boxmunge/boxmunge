@@ -135,15 +135,19 @@ def _container_update(box, seen):
 
 
 def _scan_and_quarantine(box, seen, monkeypatch):
+    from datetime import datetime, timezone
+
     from boxmunge.commands import security_scan_core
-    from boxmunge.cve.kev import load_kev
+    from boxmunge.cve.kev import KevCatalog
     from boxmunge.lifecycle import is_quarantined
     from tests.test_commands.cve_helpers import CRIT, scan_result
     monkeypatch.setattr(security_scan_core, "scan_image",
                         lambda ref, timeout: scan_result(ref, [CRIT]))
+    # KEV-listed: the default (balanced) posture quarantines only on KEV.
+    kev = KevCatalog(frozenset({CRIT.cve_id}), datetime.now(timezone.utc))
     with staging_docker_off(), patch("boxmunge.cve.quarantine.caddy_reload"):
         security_scan_core.scan_one_project_locked(
-            box.paths, "myapp", in_grace=False, kev=load_kev(box.paths))
+            box.paths, "myapp", in_grace=False, kev=kev)
     assert is_quarantined("myapp", box.paths)
     assert "stop" in seen.docker
 

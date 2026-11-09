@@ -27,6 +27,8 @@ AlertKind = Literal[
     "fix_available",
     "kev_at_risk",
     "hardening_upcoming",
+    "awaiting_fix",
+    "quarantine_lifted",
 ]
 
 
