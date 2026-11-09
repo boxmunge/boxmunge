@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 import admin_auth
-import passkey_routes
+import webauthn_store
 from conftest import ADMIN_RP_ID, ADMIN_SECRET
 from softauthn import SoftAuthenticator, b64url, login, register, session_header
 
@@ -127,7 +127,7 @@ class TestRegistrationIsGuarded:
         assert response.status_code == 401
 
     def test_code_guesses_are_rate_limited(self, admin_client, migrated_db):
-        for _ in range(passkey_routes.CODE_ATTEMPTS):
+        for _ in range(admin_auth.GUESS_FAILURES):
             assert admin_client.post("/v1/admin/register/options",
                                      json={"code": "guess"}).status_code == 401
         response = admin_client.post("/v1/admin/register/options", json={"code": ADMIN_SECRET})
@@ -173,19 +173,46 @@ class TestChallenges:
     def test_a_login_challenge_cannot_complete_a_registration(self, admin_client, authenticator):
         register(admin_client, authenticator, ADMIN_SECRET)
         options = admin_client.post("/v1/admin/login/options", json={}).get_json()
-        admin_client.application.config["STATS_SECRET"] = "rotated-code"
+        admin_client.application.config["STATS_SECRET"] = "rotated-registration-code-0123456789abcdef"
         response = admin_client.post("/v1/admin/register/verify", json={
-            "code": "rotated-code",
+            "code": "rotated-registration-code-0123456789abcdef",
             "credential": SoftAuthenticator(ADMIN_RP_ID, ORIGIN).create(options)})
         assert response.status_code == 400
         assert "expired or already used" in response.get_json()["error"]
 
-    def test_outstanding_challenges_are_bounded(self, admin_client, authenticator):
+    def test_one_client_flooding_sign_in_cannot_block_another(
+            self, admin_client, authenticator):
+        register(admin_client, authenticator, ADMIN_SECRET)
+        flooder = {"X-Forwarded-For": "203.0.113.7"}
+        for _ in range(webauthn_store.MAX_PENDING_PER_CLIENT):
+            assert admin_client.post("/v1/admin/login/options",
+                                     headers=flooder).status_code == 200
+        refused = admin_client.post("/v1/admin/login/options", headers=flooder)
+        assert refused.status_code == 429 and "this client" in refused.get_json()["error"]
+        admin = {"X-Forwarded-For": "198.51.100.20"}
+        assert login_from(admin_client, authenticator, admin).status_code == 200
+
+    def test_registration_challenges_count_towards_the_client_cap(self, admin_client):
+        for _ in range(webauthn_store.MAX_PENDING_PER_CLIENT):
+            assert admin_client.post("/v1/admin/register/options",
+                                     json={"code": ADMIN_SECRET}).status_code == 200
+        assert admin_client.post("/v1/admin/register/options",
+                                 json={"code": ADMIN_SECRET}).status_code == 429
+
+    def test_a_global_backstop_bounds_the_table(self, admin_client, authenticator):
         register(admin_client, authenticator, ADMIN_SECRET)
         with patch("webauthn_store.MAX_PENDING_CHALLENGES", 2):
-            assert admin_client.post("/v1/admin/login/options").status_code == 200
-            assert admin_client.post("/v1/admin/login/options").status_code == 200
-            assert admin_client.post("/v1/admin/login/options").status_code == 429
+            for n, status in ((1, 200), (2, 200), (3, 429)):
+                response = admin_client.post("/v1/admin/login/options",
+                                             headers={"X-Forwarded-For": f"192.0.2.{n}"})
+                assert response.status_code == status
+
+
+def login_from(client, authenticator, headers):
+    options = client.post("/v1/admin/login/options", json={}, headers=headers)
+    assert options.status_code == 200, options.get_json()
+    return client.post("/v1/admin/login/verify", headers=headers,
+                       json={"credential": authenticator.get(options.get_json())})
 
 
 class TestAssertionChecks:

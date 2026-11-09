@@ -44,7 +44,7 @@ def local_date_not_utc():
         time.tzset()
 
 
-ADMIN_SECRET = "registration-code-for-tests"
+ADMIN_SECRET = "registration-code-for-tests-0123456789"
 ADMIN_RP_ID = "admin.example.com"
 
 

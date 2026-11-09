@@ -1,5 +1,6 @@
 """Who reaches the admin pages and endpoints: passkey sessions, Bearer, and neither."""
 
+import os
 import re
 import sqlite3
 from unittest.mock import patch
@@ -7,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 import admin_auth
+import webauthn_store
 from conftest import ADMIN_RP_ID, ADMIN_SECRET
 from softauthn import SoftAuthenticator, login, register, session_header
 
@@ -55,20 +57,36 @@ class TestStatsPageNeedsASession:
     def test_a_forged_cookie_is_sent_to_sign_in(self, admin_client, value):
         assert admin_client.get("/v1/admin/stats", headers=_cookie(value)).status_code == 303
 
-    def test_the_session_expires_after_eight_hours(self, admin_client):
+    def test_the_session_expires_after_eight_hours(self, admin_client, migrated_db):
         issued = 1_800_000_000
         with patch.object(admin_auth, "now_unix", return_value=issued):
-            value = admin_auth.session_cookie_value(ADMIN_SECRET)
+            value = admin_auth.session_cookie_value(ADMIN_SECRET,
+                                                    webauthn_store.session_key(migrated_db))
         assert value.startswith(f"{issued + 8 * 3600}.")
         for now, status in ((issued + 8 * 3600 - 1, 200), (issued + 8 * 3600, 303)):
             with patch.object(admin_auth, "now_unix", return_value=now):
                 assert admin_client.get("/v1/admin/stats",
                                         headers=_cookie(value)).status_code == status
 
-    def test_the_signature_covers_the_expiry(self, admin_client):
-        expires, _, mac = admin_auth.session_cookie_value(ADMIN_SECRET).partition(".")
+    def test_the_signature_covers_the_expiry(self, admin_client, migrated_db):
+        expires, _, mac = admin_auth.session_cookie_value(
+            ADMIN_SECRET, webauthn_store.session_key(migrated_db)).partition(".")
         extended = f"{int(expires) + 3600}.{mac}"
         assert admin_client.get("/v1/admin/stats", headers=_cookie(extended)).status_code == 303
+
+    def test_a_cookie_forged_with_stats_secret_alone_is_refused(self, admin_client, migrated_db):
+        genuine = admin_auth.session_cookie_value(ADMIN_SECRET,
+                                                  webauthn_store.session_key(migrated_db))
+        assert admin_client.get("/v1/admin/stats", headers=_cookie(genuine)).status_code == 200
+        for guessed_key in (b"", bytes(32), os.urandom(32)):
+            forged = admin_auth.session_cookie_value(ADMIN_SECRET, guessed_key)
+            assert admin_client.get("/v1/admin/stats", headers=_cookie(forged)).status_code == 303
+
+    def test_each_database_has_its_own_random_session_key(self, tmp_path, migrated_db):
+        import db_schema
+        other = tmp_path / "other.db"
+        db_schema.migrate(other)
+        assert webauthn_store.session_key(other) != webauthn_store.session_key(migrated_db)
 
 
 class TestTheTwoMethodsStaySeparate:
@@ -80,11 +98,36 @@ class TestTheTwoMethodsStaySeparate:
         assert admin_client.get("/v1/admin/version-checks", headers=BEARER).status_code == 200
 
 
+class TestSecretGuessing:
+    def test_wrong_bearer_secrets_are_limited_per_client(self, admin_client):
+        guesser = {"X-Forwarded-For": "203.0.113.9"}
+        for _ in range(admin_auth.GUESS_FAILURES):
+            response = admin_client.get("/v1/admin/version-checks",
+                                        headers={**guesser, "Authorization": "Bearer guess"})
+            assert response.status_code == 401
+        blocked = admin_client.get("/v1/admin/version-checks", headers={**guesser, **BEARER})
+        assert blocked.status_code == 429
+        other = admin_client.get("/v1/admin/version-checks",
+                                 headers={"X-Forwarded-For": "198.51.100.3", **BEARER})
+        assert other.status_code == 200
+
+    def test_correct_bearer_requests_do_not_use_up_the_limit(self, admin_client):
+        for _ in range(admin_auth.GUESS_FAILURES + 2):
+            assert admin_client.get("/v1/admin/version-checks",
+                                    headers=BEARER).status_code == 200
+
+    def test_bearer_and_registration_code_guesses_share_one_budget(self, admin_client):
+        for _ in range(admin_auth.GUESS_FAILURES):
+            admin_client.get("/v1/admin/version-checks", headers={"Authorization": "Bearer x"})
+        response = admin_client.post("/v1/admin/register/options", json={"code": ADMIN_SECRET})
+        assert response.status_code == 429
+
+
 class TestRotatingTheSecret:
     def test_rotation_reopens_registration_and_ends_sessions(
             self, admin_app, admin_client, authenticator, signed_in, migrated_db):
         assert admin_client.get("/v1/admin/register").status_code == 403
-        admin_app.config["STATS_SECRET"] = "rotated-registration-code"
+        admin_app.config["STATS_SECRET"] = "rotated-registration-code-0123456789abcdef"
 
         assert admin_client.get("/v1/admin/stats", headers=signed_in).status_code == 303
         assert admin_client.post("/v1/admin/login/options", json={}).status_code == 409
@@ -94,7 +137,7 @@ class TestRotatingTheSecret:
 
         replacement = SoftAuthenticator(ADMIN_RP_ID, f"https://{ADMIN_RP_ID}")
         assert register(admin_client, replacement,
-                        "rotated-registration-code").status_code == 201
+                        "rotated-registration-code-0123456789abcdef").status_code == 201
         assert login(admin_client, authenticator).status_code == 401
         new_session = session_header(login(admin_client, replacement))
         assert admin_client.get("/v1/admin/stats", headers=new_session).status_code == 200
@@ -103,8 +146,8 @@ class TestRotatingTheSecret:
             (stored,) = conn.execute("SELECT code_mac FROM admin_credential").fetchone()
         finally:
             conn.close()
-        assert "rotated-registration-code" not in stored
-        assert stored == admin_auth.code_mac("rotated-registration-code")
+        assert "rotated-registration-code-0123456789abcdef" not in stored
+        assert stored == admin_auth.code_mac("rotated-registration-code-0123456789abcdef")
 
 
 class TestUnconfigured:
@@ -119,6 +162,28 @@ class TestUnconfigured:
         response = getattr(admin_client, method)(path, json={"code": ""}, headers=BEARER)
         assert response.status_code == 503
         assert "STATS_SECRET is unset" in response.get_json()["error"]
+
+    @pytest.mark.parametrize("method,path", [
+        ("get", "/v1/admin/stats"), ("get", "/v1/admin/register"),
+        ("post", "/v1/admin/register/options"), ("post", "/v1/admin/login/options"),
+        ("get", "/v1/admin/version-checks"),
+    ])
+    def test_a_short_stats_secret_is_refused_like_a_missing_one(
+            self, admin_app, admin_client, method, path):
+        short = "x" * 31
+        admin_app.config["STATS_SECRET"] = short
+        response = getattr(admin_client, method)(path, json={"code": short},
+                                                 headers={"Authorization": f"Bearer {short}"})
+        assert response.status_code == 503
+        error = response.get_json()["error"]
+        assert "STATS_SECRET is shorter than 32 characters" in error
+        assert "openssl rand -hex 32" in error
+
+    def test_a_32_character_secret_is_enough(self, admin_app, admin_client):
+        admin_app.config["STATS_SECRET"] = "x" * 32
+        response = admin_client.get("/v1/admin/version-checks",
+                                    headers={"Authorization": "Bearer " + "x" * 32})
+        assert response.status_code == 200
 
     def test_an_invalid_rp_id_stops_the_service(self, tmp_path, migrated_db, monkeypatch):
         monkeypatch.setenv("ADMIN_RP_ID", "https://example.com/")
@@ -179,6 +244,7 @@ class TestMigration:
         conn = sqlite3.connect(path)
         conn.execute("DROP TABLE admin_credential")
         conn.execute("DROP TABLE admin_challenges")
+        conn.execute("DROP TABLE admin_session_key")
         conn.execute("PRAGMA user_version = 3")
         conn.commit()
         conn.close()
@@ -186,7 +252,7 @@ class TestMigration:
         conn = sqlite3.connect(path)
         try:
             tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
-            assert {"admin_credential", "admin_challenges"} <= tables
+            assert {"admin_credential", "admin_challenges", "admin_session_key"} <= tables
             assert conn.execute("PRAGMA user_version").fetchone()[0] == db_schema.SCHEMA_VERSION
         finally:
             conn.close()

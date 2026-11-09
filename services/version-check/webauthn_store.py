@@ -1,4 +1,4 @@
-"""SQLite storage for the admin passkey and its ceremony challenges.
+"""SQLite storage for the admin passkey, its ceremony challenges and the session key.
 
 Tables come from the db_schema migration `_admin_passkey`. Every function
 opens its own connection: gunicorn workers share nothing but the database,
@@ -12,15 +12,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 CHALLENGE_TTL_SECONDS = 5 * 60
-# Outstanding challenges per purpose. Issuing one needs no credentials, so
-# the table must not grow with the request rate; past the cap new
-# ceremonies are refused until the old challenges expire.
-MAX_PENDING_CHALLENGES = 100
+# Issuing a sign-in challenge needs no credentials, so pending challenges
+# are capped per client (client_key: IPv4 address or IPv6 /64): one client
+# can hold up the next ceremony only for itself. The global cap is a
+# backstop on table size that no single client can reach.
+MAX_PENDING_PER_CLIENT = 5
+MAX_PENDING_CHALLENGES = 10_000
 PURPOSES = ("register", "login")
 
 
 class TooManyChallenges(RuntimeError):
-    """MAX_PENDING_CHALLENGES unexpired challenges already exist for a purpose."""
+    """The client, or every client together, already holds its cap of unexpired challenges."""
 
 
 @dataclass(frozen=True)
@@ -39,7 +41,8 @@ def _check_purpose(purpose: str) -> None:
         raise ValueError(f"challenge purpose must be one of {PURPOSES}, got {purpose!r}")
 
 
-def issue_challenge(db_path: Path, challenge: bytes, purpose: str, now: int) -> None:
+def issue_challenge(db_path: Path, challenge: bytes, purpose: str, client: str,
+                    now: int) -> None:
     """Record a challenge that redeem_challenge accepts once, until it expires."""
     _check_purpose(purpose)
     conn = _connect(db_path)
@@ -47,14 +50,20 @@ def issue_challenge(db_path: Path, challenge: bytes, purpose: str, now: int) -> 
         conn.execute("BEGIN IMMEDIATE")
         try:
             conn.execute("DELETE FROM admin_challenges WHERE expires_unix <= ?", (now,))
-            pending = conn.execute("SELECT COUNT(*) FROM admin_challenges WHERE purpose = ?",
-                                   (purpose,)).fetchone()[0]
+            mine = conn.execute("SELECT COUNT(*) FROM admin_challenges WHERE client = ?",
+                                (client,)).fetchone()[0]
+            if mine >= MAX_PENDING_PER_CLIENT:
+                raise TooManyChallenges(
+                    f"this client already has {mine} unfinished passkey ceremonies; "
+                    f"try again in {CHALLENGE_TTL_SECONDS // 60} minutes")
+            pending = conn.execute("SELECT COUNT(*) FROM admin_challenges").fetchone()[0]
             if pending >= MAX_PENDING_CHALLENGES:
                 raise TooManyChallenges(
-                    f"{pending} {purpose} ceremonies are already pending; "
+                    f"{pending} passkey ceremonies are pending; "
                     f"try again in {CHALLENGE_TTL_SECONDS // 60} minutes")
-            conn.execute("INSERT INTO admin_challenges (challenge, purpose, expires_unix) "
-                         "VALUES (?, ?, ?)", (challenge, purpose, now + CHALLENGE_TTL_SECONDS))
+            conn.execute("INSERT INTO admin_challenges (challenge, purpose, client, expires_unix) "
+                         "VALUES (?, ?, ?, ?)",
+                         (challenge, purpose, client, now + CHALLENGE_TTL_SECONDS))
             conn.execute("COMMIT")
         except BaseException:
             conn.execute("ROLLBACK")
@@ -133,3 +142,16 @@ def advance_sign_count(db_path: Path, credential: Credential, new_count: int) ->
     finally:
         conn.close()
     return cursor.rowcount == 1
+
+
+def session_key(db_path: Path) -> bytes:
+    """The random key, created by the schema migration, that every session MAC needs."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute("SELECT key FROM admin_session_key WHERE slot = 1").fetchone()
+    finally:
+        conn.close()
+    if row is None or len(row[0]) != 32:
+        raise RuntimeError(f"{db_path} has no 32-byte admin session key; the schema migration "
+                           "creates it, so this database was altered by hand")
+    return row[0]

@@ -31,7 +31,7 @@ from webauthn.helpers.structs import (
 import admin_auth
 import admin_pages
 import webauthn_store
-from request_limits import RateLimiter, client_key
+from request_limits import client_key
 
 ALGORITHMS = [COSEAlgorithmIdentifier.ECDSA_SHA_256, COSEAlgorithmIdentifier.EDDSA]
 RP_NAME = "boxmunge version-check"
@@ -39,11 +39,6 @@ RP_NAME = "boxmunge version-check"
 # passkey for this site instead of adding a second one.
 USER_ID = b"boxmunge-version-check-admin"
 USER_NAME = "admin"
-# Registration-code guesses per client (IPv4 address or IPv6 /64) per
-# worker; a registration spends two (challenge, then completion).
-CODE_ATTEMPTS = 10
-CODE_WINDOW_SECONDS = 15 * 60
-CODE_LIMITER_CLIENTS = 10_000
 DEFAULT_NEXT = "/v1/admin/stats"
 NEXT_RE = re.compile(r"/v1/admin/[a-z0-9][a-z0-9_-]*(?:/[a-z0-9][a-z0-9_-]*)*\Z")
 RP_ID_RE = re.compile(r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?\Z")
@@ -91,8 +86,6 @@ def _options(options) -> Response:
 
 def create_blueprint(db_path: Path) -> Blueprint:
     bp = Blueprint("passkey", __name__)
-    code_limiter = RateLimiter(CODE_ATTEMPTS, CODE_WINDOW_SECONDS, CODE_LIMITER_CLIENTS)
-
     @bp.errorhandler(Refusal)
     def refused(exc: Refusal):
         return jsonify({"error": str(exc)}), exc.status
@@ -101,18 +94,19 @@ def create_blueprint(db_path: Path) -> Blueprint:
     def too_many(exc: webauthn_store.TooManyChallenges):
         return jsonify({"error": str(exc)}), 429
 
+    def issue(challenge: bytes, purpose: str) -> None:
+        webauthn_store.issue_challenge(db_path, challenge, purpose,
+                                       client_key(request.remote_addr), admin_auth.now_unix())
+
     def registered(secret: str) -> webauthn_store.Credential | None:
         return webauthn_store.active_credential(db_path, admin_auth.code_mac(secret))
 
     def check_registration_code(secret: str, body: dict) -> None:
-        """Registration is open and the body carries the code; bounded against guessing."""
+        """Registration is open and the body carries the code (admin_auth bounds guessing)."""
         if registered(secret) is not None:
             raise Refusal(403, CLOSED)
-        if not code_limiter.allow(client_key(request.remote_addr)):
-            raise Refusal(429, "too many registration attempts; try again in "
-                               f"{CODE_WINDOW_SECONDS // 60} minutes")
         code = body.get("code")
-        if not isinstance(code, str) or not admin_auth.eq(code, secret):
+        if not admin_auth.check_secret(code if isinstance(code, str) else ""):
             raise Refusal(401, "wrong registration code")
 
     def redeem(challenge: bytes, purpose: str) -> None:
@@ -138,8 +132,7 @@ def create_blueprint(db_path: Path) -> Blueprint:
                 resident_key=ResidentKeyRequirement.PREFERRED,
                 user_verification=UserVerificationRequirement.REQUIRED),
             supported_pub_key_algs=ALGORITHMS)
-        webauthn_store.issue_challenge(db_path, options.challenge, "register",
-                                       admin_auth.now_unix())
+        issue(options.challenge, "register")
         return _options(options)
 
     @bp.post("/v1/admin/register/verify")
@@ -189,8 +182,7 @@ def create_blueprint(db_path: Path) -> Blueprint:
             rp_id=current_app.config["ADMIN_RP_ID"],
             allow_credentials=[PublicKeyCredentialDescriptor(id=stored.credential_id)],
             user_verification=UserVerificationRequirement.REQUIRED)
-        webauthn_store.issue_challenge(db_path, options.challenge, "login",
-                                       admin_auth.now_unix())
+        issue(options.challenge, "login")
         return _options(options)
 
     @bp.post("/v1/admin/login/verify")

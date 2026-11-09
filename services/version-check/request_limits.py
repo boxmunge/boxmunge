@@ -77,6 +77,13 @@ class RateLimiter:
             self._windows[key] = (started, count + 1)
             return True
 
+    def exhausted(self, key: str) -> bool:
+        """True if `key` has used its whole limit in the current window; counts nothing."""
+        now = self._clock()
+        with self._lock:
+            started, count = self._windows.get(key, (now, 0))
+            return now - started < self.window and count >= self.limit
+
 
 OVERFLOW_VERSION = "unlisted"
 

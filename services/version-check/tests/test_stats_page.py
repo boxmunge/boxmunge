@@ -11,14 +11,17 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-SECRET = "page-secret"
+SECRET = "page-secret-0123456789abcdef0123456789"
 BEARER = {"Authorization": f"Bearer {SECRET}"}
 
 
-def _session() -> dict[str, str]:
+@pytest.fixture
+def session(db_path) -> dict[str, str]:
     """A signed-in browser's cookie (the sign-in itself is tested in test_admin_passkey)."""
     import admin_auth
-    return {"Cookie": f"{admin_auth.SESSION_COOKIE}={admin_auth.session_cookie_value(SECRET)}"}
+    import webauthn_store
+    value = admin_auth.session_cookie_value(SECRET, webauthn_store.session_key(db_path))
+    return {"Cookie": f"{admin_auth.SESSION_COOKIE}={value}"}
 
 
 @pytest.fixture
@@ -98,10 +101,10 @@ class TestInstalledFromValidation:
 
 
 class TestStatsPageContent:
-    def test_shows_daily_checks_per_version_including_unlisted_ones(self, client):
+    def test_shows_daily_checks_per_version_including_unlisted_ones(self, client, session):
         for v in ("0.4.2", "0.4.2", "9.9.9-not", "0.0.9", "0.0.9", "0.0.9"):
             client.get("/v1/check", query_string={"v": v})
-        html = client.get("/v1/admin/stats", headers=_session()).get_data(as_text=True)
+        html = client.get("/v1/admin/stats", headers=session).get_data(as_text=True)
         today = datetime.now(timezone.utc).date().isoformat()
         assert today in html
         assert "<th>0.4.2</th>" in html
@@ -110,26 +113,26 @@ class TestStatsPageContent:
         assert "not unique boxes" in html
         assert "unverified client text" in html
 
-    def test_lists_failure_reports_with_their_reason(self, client):
+    def test_lists_failure_reports_with_their_reason(self, client, session):
         _report(client, installed_from="boxmunge 0.10.1",
                 detail="system_upgrade_failed: install_sh_exit_100")
-        html = client.get("/v1/admin/stats", headers=_session()).get_data(as_text=True)
+        html = client.get("/v1/admin/stats", headers=session).get_data(as_text=True)
         assert "system_upgrade_failed: install_sh_exit_100" in html
         assert "<td class=\"l\">0.10.1</td>" in html
         assert "boxmunge 0.10.1" not in html
 
-    def test_stored_text_is_escaped(self, client, db_path):
+    def test_stored_text_is_escaped(self, client, db_path, session):
         conn = sqlite3.connect(db_path)
         conn.execute("INSERT INTO failures (version, installed_from, stage, detail, reported_at)"
                      " VALUES ('0.4.2', '<script>x</script>', 's', '<b>d</b>', '2026-01-01')")
         conn.commit()
         conn.close()
-        html = client.get("/v1/admin/stats", headers=_session()).get_data(as_text=True)
+        html = client.get("/v1/admin/stats", headers=session).get_data(as_text=True)
         assert "<script>" not in html and "<b>d</b>" not in html
         assert "&lt;script&gt;" in html
 
-    def test_empty_state_and_last_parameter(self, client):
-        html = client.get("/v1/admin/stats?last=3", headers=_session()).get_data(as_text=True)
+    def test_empty_state_and_last_parameter(self, client, session):
+        html = client.get("/v1/admin/stats?last=3", headers=session).get_data(as_text=True)
         assert "No checks recorded" in html and "No failure reports" in html
 
     def test_json_endpoint_marks_unlisted_versions(self, client):
@@ -148,6 +151,7 @@ class TestMigration:
         conn.execute("ALTER TABLE failures DROP COLUMN detail")
         conn.execute("DROP TABLE admin_credential")
         conn.execute("DROP TABLE admin_challenges")
+        conn.execute("DROP TABLE admin_session_key")
         conn.execute("PRAGMA user_version = 2")
         conn.commit()
         conn.close()

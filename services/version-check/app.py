@@ -44,6 +44,7 @@ from release_catalog import (
     VERSION_RE, apply_holds, check_response, find_blocked, load_releases, select_offers,
 )
 import stats_page
+import webauthn_store
 from request_limits import CheckCounter, RateLimiter, client_key, utc_today
 
 SERVICE_DIR = Path(__file__).parent
@@ -252,11 +253,17 @@ def create_app() -> Flask:
     sweeper.start()
     app.extensions["failure_sweeper"] = sweeper
 
+    app.extensions[admin_auth.SESSION_KEY] = webauthn_store.session_key(DB_PATH)
+    app.extensions[admin_auth.GUESSES] = admin_auth.guess_limiter()
     app.register_blueprint(passkey_routes.create_blueprint(DB_PATH))
 
     @app.errorhandler(admin_auth.AdminNotConfigured)
     def admin_not_configured(exc):
         return jsonify({"error": str(exc)}), 503
+
+    @app.errorhandler(admin_auth.TooManyGuesses)
+    def too_many_guesses(exc):
+        return jsonify({"error": str(exc)}), 429
 
     @app.before_request
     def rate_limit():
