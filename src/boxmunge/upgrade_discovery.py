@@ -30,6 +30,7 @@ installed fleet-wide.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -59,20 +60,47 @@ class EndpointContractError(ValueError):
 _SOURCE_ERRORS = (OSError, json.JSONDecodeError, UnicodeDecodeError, EndpointContractError)
 
 
+class _RedirectTracker(urllib.request.HTTPRedirectHandler):
+    """Remembers where the service redirected to: a redirect is an answer,
+    so a redirect target that cannot be reached is not an outage."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.redirected_to: str | None = None
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        self.redirected_to = newurl
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _check_endpoint(current: str) -> Any:
     """The decoded /v1/check answer.
 
-    Raises OSError when no answer arrived (the only case discovery falls back
-    to GitHub for) and EndpointContractError for an answer it cannot use.
+    Raises OSError only when no answer arrived at all (the one case discovery
+    falls back to GitHub for), and EndpointContractError for an answer it
+    cannot use: an HTTP error status, a malformed HTTP response, a redirect
+    to somewhere unreachable, a body that breaks off mid-read or is not JSON.
     """
     req = urllib.request.Request(
         f"{version_check_base()}/v1/check?v={current}",
         headers={"User-Agent": f"boxmunge/{current}"},
     )
+    tracker = _RedirectTracker()
     try:
-        raw = urllib.request.urlopen(req, timeout=10).read()
+        resp = urllib.request.build_opener(tracker).open(req, timeout=10)
     except urllib.error.HTTPError as e:  # an answer, not an outage
         raise EndpointContractError(f"it answered HTTP {e.code} ({e.reason})") from e
+    except http.client.HTTPException as e:
+        raise EndpointContractError(f"its HTTP response is malformed ({e!r})") from e
+    except OSError as e:
+        if tracker.redirected_to is None:
+            raise
+        raise EndpointContractError(
+            f"it redirected to {tracker.redirected_to}, which could not be reached ({e})") from e
+    try:
+        raw = resp.read()
+    except (OSError, http.client.HTTPException) as e:
+        raise EndpointContractError(f"its answer broke off while being read ({e!r})") from e
     try:
         return json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
@@ -146,8 +174,24 @@ def _read_endpoint(
         if field not in result:
             raise EndpointContractError(
                 f"response has no '{field}' field (version-check service out of date?)")
-    return (_endpoint_candidate(result, mode), _endpoint_blocked(result["blocked"]),
-            _endpoint_held(result.get("held", [])))
+    held = _endpoint_held(result.get("held", []))
+    return _endpoint_offer(result, mode, held), _endpoint_blocked(result["blocked"]), held
+
+
+def _endpoint_offer(result: dict[str, Any], mode: str, held: list[str]) -> dict[str, Any] | None:
+    """The candidate for ``mode``. A manual (``latest``) upgrade whose newest
+    release is held takes the newest unheld offer in the response instead
+    (the break-fix or security offer, which the service never holds); a held
+    candidate with no such alternative is returned, and refused by the caller."""
+    candidate = _endpoint_candidate(result, mode)
+    if mode != "latest" or candidate is None or candidate["version"] not in held:
+        return candidate
+    best = None
+    for other in (_endpoint_candidate(result, m) for m in ("breakfix", "security")):
+        if other is not None and other["version"] not in held and (
+                best is None or newer(other["version"], best["version"])):
+            best = other
+    return best or candidate
 
 
 def _check_github(current: str, mode: str) -> tuple[dict[str, Any] | None, dict | None]:
@@ -178,9 +222,10 @@ def discover_update(paths: BoxPaths, mode: str) -> dict[str, Any]:
       - "blocklisted": {action, version, class, ...}
       - "error": {action, message}
     Every action but "error" also carries ``current_version``, ``blocked``
-    (see the module docstring) and ``source`` ("endpoint" or "github"); a
-    github result also carries ``endpoint_error`` (why the endpoint was not
-    used).
+    (see the module docstring) and ``source`` ("endpoint" or "github"), and
+    ``held`` (the versions the service holds) when it is not empty. A github
+    result, and an error the service caused, also carry ``endpoint_error``
+    (why the endpoint was not used).
     """
     if mode not in MODES:
         raise ValueError(f"unknown discovery mode {mode!r}; expected one of {MODES}")
@@ -191,23 +236,26 @@ def discover_update(paths: BoxPaths, mode: str) -> dict[str, Any]:
     try:
         candidate, blocked, held = _read_endpoint(_check_endpoint(current), mode)
     except EndpointContractError as e:
-        return {"action": "error", "message": _unusable_answer(e)}
+        return {"action": "error", "message": _unusable_answer(e), "endpoint_error": str(e)}
     except OSError as e:  # no answer at all: the service is unreachable
         meta = {"source": "github", "endpoint_error": str(e)}
         try:
             candidate, blocked = _check_github(current, mode)
         except _SOURCE_ERRORS as gh:
-            return {"action": "error",
+            return {"action": "error", "endpoint_error": str(e),
                     "message": f"Cannot use boxmunge.dev ({e}) or GitHub ({gh})"}
     meta = {"current_version": current, "blocked": blocked, **meta}
     if held:
         meta["held"] = held
 
     if candidate is not None and candidate["version"] in held:
+        version = candidate["version"]
         return {"action": "error", "message": (
-            f"Release {candidate['version']} is held by the version-check circuit "
-            "breaker (withdrawn as broken); not installing it. It is offered again "
-            "once the hold is reset.")}
+            f"Release {version} is held by the version-check circuit breaker (withdrawn "
+            f"as broken); not installing it. It is offered again once the hold is reset. "
+            f"To install it deliberately anyway: `upgrade --target {version}` (as root, "
+            f"`boxmunge-upgrade target {version}`, or `force-target {version}` past the "
+            f"blocklist).")}
     if candidate is None or not newer(candidate["version"], current):
         return {"action": "up_to_date", **meta}
 

@@ -1539,7 +1539,7 @@ the exit code. The MCP `health` tool runs the same checks.
 | `recent-errors` | more than 10 errors in the log in the last 24 hours, or torn lines in the log that may have been errors | `log --level error --since 24h --all` (`log --since 24h` lists torn lines) |
 | `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
-| `platform-updates` | a security or break-fix release cannot be installed automatically | see [Upgrading the Platform](#upgrading-the-platform) |
+| `platform-updates` | a security or break-fix release cannot be installed automatically, or the version-check service has given no usable answer for 48 hours | see [Upgrading the Platform](#upgrading-the-platform) |
 | `upgrade-probation` | a platform upgrade's probation expired more than 30 minutes ago and the health timer has not promoted it, or `probation.json` cannot be read | the supervisor user runs `sudo /opt/boxmunge/bin/boxmunge-upgrade check-probation` to see why; `sudo rm /opt/boxmunge/upgrade-state/probation.json` accepts the release, as does `backup <project>` from the deploy shell when it can read the file |
 | `docker-userns` | Docker does not remap user namespaces yet, remaps them with another identity, or a source cannot be read on a box boxmunge has not remapped (warning; deploys go on); or the record or `daemon.json` claims boxmunge's remap and a source disagrees, or a remapped box's `caddy/Caddyfile` is not a world-readable regular file (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
 | `security-profiles` | a service runs with `profile: off` | review the reason in its manifest |
@@ -1826,20 +1826,29 @@ entry names the class that was applied (`log --component auto-update`).
 
 Releases are discovered through the version-check service at boxmunge.dev.
 Its answer also names any release its circuit breaker holds (withdrawn as
-broken); a held release is never installed, and auto-update logs the hold.
-If the service cannot be reached at all (DNS, connection or timeout failure),
-auto-update falls back to the GitHub releases list, applying the same rules to
-the markers in each release's title or notes (`[security]`, `[breakfix]`,
-`[breaking]`), and logs a warning. If the service answers but the answer
-cannot be used (an HTTP error such as its rate limit's 429, or an unexpected
-shape), nothing is installed and the check fails with the reason: GitHub
-cannot know about holds, so its answer could install a held release. The
-next run (every 6 hours) tries again. A security release can therefore wait
-while the service answers with errors; that is the price of never installing
-a release the maintainer has held. A failed upgrade is also reported there (see "What boxmunge
-sends home" below). Reporting is best-effort: if it cannot be sent the upgrade
-log says so and the upgrade outcome is unchanged. `BOXMUNGE_VERSION_CHECK_URL`
-points both calls at another service (the test suites use it to stay offline).
+broken). A held release is never installed automatically, and auto-update
+logs the hold; `upgrade --target <version>` still installs it deliberately.
+
+If the service cannot be reached at all (DNS, connection or timeout
+failure), auto-update falls back to the GitHub releases list, applying the
+same rules to the markers in each release's title or notes (`[security]`,
+`[breakfix]`, `[breaking]`), and logs a warning. If the service answers but
+the answer cannot be used (an HTTP error such as its rate limit's 429, a
+redirect to somewhere unreachable, or an unexpected shape), nothing is
+installed and the check fails with the reason: GitHub cannot know about
+holds, so its answer could install a held release. The next run (every 6
+hours) tries again. A security release can therefore wait while the service
+answers with errors; that is the price of never installing a release the
+maintainer has held. So it is never silent: once the service has gone 48
+hours without a usable answer, `health` reports `platform-updates` as
+`WARN`, naming the last error (state in
+`/opt/boxmunge/state/update-discovery.json`).
+
+A failed upgrade is also reported to the version-check service (see "What
+boxmunge sends home" below). Reporting is best-effort: if it cannot be sent
+the upgrade log says so and the upgrade outcome is unchanged.
+`BOXMUNGE_VERSION_CHECK_URL` points both calls at another service (the test
+suites use it to stay offline).
 (The version-check service's stats page is for its maintainer only: browsers sign in
 with a passkey, and scripts read the JSON counts with an `Authorization: Bearer` header.
 No secret ever travels in a URL, so none reaches the proxy's access log.)

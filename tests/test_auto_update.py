@@ -106,6 +106,17 @@ class TestDispatch:
         assert "warn" in levels
 
     @patch("boxmunge.upgrade_discovery.discover_update")
+    def test_each_discovery_is_recorded_for_health(self, mock_discover, box) -> None:
+        mock_discover.return_value = {"action": "error", "message": "x",
+                                      "endpoint_error": "it answered HTTP 503 (down)"}
+        assert run_auto_update(box) == 1
+        state = json.loads(box.update_discovery_state.read_text())
+        assert state["last_error"] == "it answered HTTP 503 (down)"
+        mock_discover.return_value = _up_to_date()
+        assert run_auto_update(box) == 0
+        assert json.loads(box.update_discovery_state.read_text())["last_error"] is None
+
+    @patch("boxmunge.upgrade_discovery.discover_update")
     def test_held_releases_are_reported(self, mock_discover, box, capsys) -> None:
         mock_discover.return_value = {**_up_to_date(), "held": ["0.3.6"]}
         assert run_auto_update(box) == 0

@@ -1,5 +1,8 @@
 """Tests for upgrade discovery — release-class selection via endpoint and GitHub."""
+import http.client
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from unittest.mock import patch, MagicMock
 from urllib.error import HTTPError, URLError
 
@@ -57,7 +60,7 @@ FULL = dict(security=_offer("0.3.2", "security"), breakfix=_offer("0.3.3", "brea
 
 
 class TestEndpointSelection:
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_up_to_date(self, mock_open, tmp_path):
         mock_open.return_value = _endpoint()
         result = discover_update(_setup(tmp_path), mode="latest")
@@ -69,7 +72,7 @@ class TestEndpointSelection:
         ("breakfix", "0.3.3", "breakfix"),
         ("latest", "0.4.0", "feature"),
     ])
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_mode_picks_its_field(self, mock_open, tmp_path, mode, version, cls):
         mock_open.return_value = _endpoint(**FULL)
         result = discover_update(_setup(tmp_path), mode=mode)
@@ -77,14 +80,14 @@ class TestEndpointSelection:
                           "url": f"{GH}v{version}", "class": cls, "source": "endpoint",
                           "current_version": "0.3.0", "blocked": None}
 
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_security_mode_ignores_breakfix(self, mock_open, tmp_path):
         mock_open.return_value = _endpoint(breakfix=_offer("0.3.3", "breakfix"),
                                            status="breakfix_update_available")
         result = discover_update(_setup(tmp_path), mode="security")
         assert result["action"] == "up_to_date"
 
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_breakfix_mode_applies_security_class_offer(self, mock_open, tmp_path):
         offer = _offer("0.3.2", "security")
         mock_open.return_value = _endpoint(security=offer, breakfix=offer)
@@ -92,7 +95,7 @@ class TestEndpointSelection:
         assert result["version"] == "0.3.2"
         assert result["class"] == "security"
 
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_blocklisted_version(self, mock_open, tmp_path):
         mock_open.return_value = _endpoint(**FULL)
         paths = _setup(tmp_path)
@@ -103,7 +106,7 @@ class TestEndpointSelection:
                           "current_version": "0.3.0", "blocked": None}
 
     @pytest.mark.parametrize("content", ["{not json", "[]"])
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_unreadable_blocklist_is_an_error_naming_the_file(self, mock_open, tmp_path, content):
         mock_open.return_value = _endpoint(**FULL)
         paths = _setup(tmp_path)
@@ -114,7 +117,7 @@ class TestEndpointSelection:
         assert "refuses to install" in result["message"]
 
     @pytest.mark.parametrize("reason", [{"breaking_release": "0.4.0"}, {"major": 1}])
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_blocked_is_passed_through(self, mock_open, tmp_path, reason):
         mock_open.return_value = _endpoint(blocked=_blocked(reason=reason))
         result = discover_update(_setup(tmp_path), mode="breakfix")
@@ -122,14 +125,14 @@ class TestEndpointSelection:
         assert result["blocked"] == _blocked(reason=reason)
         assert result["source"] == "endpoint"
 
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_blocked_rides_along_with_an_upgrade(self, mock_open, tmp_path):
         mock_open.return_value = _endpoint(**FULL, blocked=_blocked())
         result = discover_update(_setup(tmp_path), mode="breakfix")
         assert result["action"] == "upgrade"
         assert result["blocked"]["version"] == "0.4.2"
 
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_offer_not_newer_than_installed_is_up_to_date(self, mock_open, tmp_path):
         mock_open.return_value = _endpoint(latest=_offer("0.3.0", "feature"))
         assert discover_update(_setup(tmp_path), mode="latest")["action"] == "up_to_date"
@@ -154,13 +157,13 @@ class TestEndpointContract:
         assert "held" in result["message"]
         return result
 
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_missing_breakfix_field_is_an_error(self, mock_open, tmp_path):
         stale = _response({"status": "up_to_date", "security": None, "latest": None})
         mock_open.side_effect = [stale, _github([_gh_release("0.3.1", body="[breakfix] fix")])]
         self._refused(mock_open, tmp_path, "breakfix", "breakfix")
 
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_missing_blocked_field_is_an_error(self, mock_open, tmp_path):
         stale = _response({"status": "up_to_date", "security": None, "breakfix": None,
                            "latest": None})
@@ -180,23 +183,23 @@ class TestEndpointContract:
         {**_offer("0.4.2", "security"),
          "reason": {"major": 1, "breaking_release": "0.4.0"}},
     ])
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_malformed_blocked_is_rejected(self, mock_open, tmp_path, blocked):
         mock_open.side_effect = [_endpoint(blocked=blocked), _github([])]
         self._refused(mock_open, tmp_path, "security", "blocked")
 
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_offer_of_wrong_class_is_rejected(self, mock_open, tmp_path):
         bad = _endpoint(breakfix=_offer("0.3.3", "feature"))
         mock_open.side_effect = [bad, _github([])]
         self._refused(mock_open, tmp_path, "breakfix", "feature")
 
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_non_object_response_is_rejected(self, mock_open, tmp_path):
         mock_open.side_effect = [_response([1, 2]), _github([])]
         self._refused(mock_open, tmp_path, "security", "JSON object")
 
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_non_json_answer_is_rejected(self, mock_open, tmp_path):
         page = MagicMock()
         page.read.return_value = b"<html>not json</html>"
@@ -210,7 +213,7 @@ class TestServiceErrorAnswers:
     the circuit breaker holds, because GitHub cannot know about holds."""
 
     @pytest.mark.parametrize("status", [429, 500, 502, 503])
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_http_error_does_not_fall_back_to_github(self, mock_open, tmp_path, status):
         held_on_github = [_gh_release("0.3.2", title="v0.3.2 [security] fix")]
         mock_open.side_effect = [HTTPError("https://x/v1/check", status, "nope", {}, None),
@@ -222,10 +225,54 @@ class TestServiceErrorAnswers:
         assert "next check" in result["message"]
 
 
+class TestBrokenAnswers:
+    """An answer that breaks mid-way is still an answer: no GitHub fallback."""
+
+    @patch("urllib.request.OpenerDirector.open")
+    def test_a_read_that_breaks_off_is_an_error(self, mock_open, tmp_path):
+        resp = MagicMock()
+        resp.read.side_effect = ConnectionResetError("reset by peer")
+        mock_open.side_effect = [resp, _github([])]
+        result = discover_update(_setup(tmp_path), mode="security")
+        assert result["action"] == "error"
+        assert mock_open.call_count == 1
+        assert "broke off" in result["message"]
+        assert "reset by peer" in result["endpoint_error"]
+
+    @patch("urllib.request.OpenerDirector.open")
+    def test_a_malformed_http_response_is_an_error(self, mock_open, tmp_path):
+        mock_open.side_effect = [http.client.BadStatusLine("garbage"), _github([])]
+        result = discover_update(_setup(tmp_path), mode="security")
+        assert result["action"] == "error"
+        assert mock_open.call_count == 1
+        assert "malformed" in result["message"]
+
+    def test_a_redirect_to_an_unreachable_host_is_an_error(self, tmp_path, monkeypatch):
+        class Redirect(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:9/v1/check")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), Redirect)
+        threading.Thread(target=server.handle_request, daemon=True).start()
+        monkeypatch.setenv("BOXMUNGE_VERSION_CHECK_URL",
+                           f"http://127.0.0.1:{server.server_address[1]}")
+        with patch("urllib.request.urlopen") as github:
+            result = discover_update(_setup(tmp_path), mode="security")
+        server.server_close()
+        assert result["action"] == "error"
+        assert "redirected to http://127.0.0.1:9/v1/check" in result["message"]
+        github.assert_not_called()
+
+
 class TestHeld:
     """``held`` lists the releases the service's circuit breaker withholds."""
 
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_held_versions_ride_along(self, mock_open, tmp_path):
         body = {"status": "up_to_date", "security": None, "breakfix": None,
                 "latest": _offer("0.3.2", "security"), "blocked": None,
@@ -236,7 +283,7 @@ class TestHeld:
         assert result["held"] == ["0.3.2"]
 
     @pytest.mark.parametrize("mode", ["security", "breakfix", "latest"])
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_a_held_candidate_is_never_installed(self, mock_open, tmp_path, mode):
         offer = _offer("0.3.2", "security")
         body = {"status": "security_update_available", "security": offer,
@@ -247,11 +294,34 @@ class TestHeld:
         assert result["action"] == "error"
         assert "0.3.2" in result["message"] and "circuit breaker" in result["message"]
 
+    @patch("urllib.request.OpenerDirector.open")
+    def test_a_held_refusal_names_the_deliberate_route(self, mock_open, tmp_path):
+        offer = _offer("0.3.2", "security")
+        mock_open.return_value = _response({
+            "status": "security_update_available", "security": offer, "breakfix": offer,
+            "latest": offer, "blocked": None,
+            "held": [{"version": "0.3.2", "reason": "circuit_breaker"}]})
+        message = discover_update(_setup(tmp_path), mode="latest")["message"]
+        assert "upgrade --target 0.3.2" in message
+        assert "boxmunge-upgrade target 0.3.2" in message
+
+    @patch("urllib.request.OpenerDirector.open")
+    def test_latest_skips_a_held_newest_release_for_the_newest_unheld(self, mock_open,
+                                                                      tmp_path):
+        mock_open.return_value = _response({
+            "status": "update_available", "security": _offer("0.3.2", "security"),
+            "breakfix": _offer("0.3.3", "breakfix"), "latest": _offer("0.4.0", "feature"),
+            "blocked": None, "held": [{"version": "0.4.0", "reason": "circuit_breaker"}]})
+        result = discover_update(_setup(tmp_path), mode="latest")
+        assert result["action"] == "upgrade"
+        assert result["version"] == "0.3.3"
+        assert result["held"] == ["0.4.0"]
+
     @pytest.mark.parametrize("held", [
         "0.3.2", [{"version": "0.3"}], [{"version": "0.3.2"}], ["0.3.2"],
         [{"version": "0.3.2", "reason": 1}],
     ])
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_malformed_held_is_rejected(self, mock_open, tmp_path, held):
         body = {"status": "up_to_date", "security": None, "breakfix": None,
                 "latest": None, "blocked": None, "held": held}
@@ -264,7 +334,7 @@ class TestHeld:
 
 class TestGitHubFallback:
     def _run(self, tmp_path, releases, mode, version="0.3.0"):
-        with patch("urllib.request.urlopen") as mock_open:
+        with patch("urllib.request.OpenerDirector.open") as mock_open:
             mock_open.side_effect = [URLError("down"), _github(releases)]
             return discover_update(_setup(tmp_path, version), mode=mode)
 
@@ -363,21 +433,21 @@ class TestGitHubFallback:
 
 
 class TestBothSourcesFail:
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_both_unreachable_returns_error(self, mock_open, tmp_path):
         mock_open.side_effect = URLError("down")
         result = discover_update(_setup(tmp_path), mode="security")
         assert result["action"] == "error"
         assert "down" in result["message"]
 
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_malformed_json_from_both_returns_error(self, mock_open, tmp_path):
         m = MagicMock()
         m.read.return_value = b"not json"
         mock_open.return_value = m
         assert discover_update(_setup(tmp_path), mode="latest")["action"] == "error"
 
-    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
     def test_read_timeout_is_a_source_failure(self, mock_open, tmp_path):
         mock_open.side_effect = TimeoutError("timed out")
         result = discover_update(_setup(tmp_path), mode="breakfix")
