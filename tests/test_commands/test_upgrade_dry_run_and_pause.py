@@ -12,13 +12,14 @@ import pytest
 import yaml
 
 from boxmunge.commands.upgrade_cmd import run_upgrade
-from boxmunge.commands.upgrade_steps import check_upgrade
+from boxmunge.commands.upgrade_steps import UpgradeGateError, check_upgrade
 from boxmunge.compose import ComposeError
 from boxmunge.docker_run import DockerError
 from boxmunge.upgrade_exclusions import apply_projects
 from boxmunge.manifest import CURRENT_SCHEMA_VERSION
 from boxmunge.pause import render_maintenance_caddy_config, write_paused_state
 from boxmunge.paths import BoxPaths
+from boxmunge.state import StateError
 from boxmunge.version import write_installed_version
 from tests.deploy_helpers import mark_deployed
 
@@ -84,7 +85,7 @@ class TestPausedProjectsKeepMaintenancePage:
         _pause(paths, "alpha")
         with patch("boxmunge.commands.upgrade_steps.prepare_caddy_config") as caddy, \
              patch("boxmunge.commands.upgrade_offline.prepare_compose_override") as overlay, \
-             patch("boxmunge.commands.upgrade_steps.check_start") as check:
+             patch("boxmunge.commands.upgrade_offline.check_start") as check:
             processed = apply_projects(paths)[1].processed
         caddy.assert_not_called()
         overlay.assert_called_once()
@@ -231,6 +232,81 @@ class TestOfflineOverlayRefused:
         assert paths.project_compose_override("alpha").read_text() == "# previous overlay\n"
         assert paths.project_bind_record("alpha").read_bytes() == record
         assert not paths.project_compose_override("beta").exists()
+
+
+    @pytest.mark.parametrize("linked", ["overlay", "record"])
+    def test_a_linked_overlay_or_record_is_refused_and_never_copied(
+            self, tmp_path: Path, linked: str) -> None:
+        """Putting the previous files back must not copy whatever a planted
+        link names (a root-only file) into the project directory, deploy-owned:
+        a link is refused before anything is regenerated."""
+        paths = _setup(tmp_path)
+        _project(paths, "alpha")
+        _quarantine(paths, "alpha")
+        secret = tmp_path / "root-only"
+        secret.write_text("SECRET\n")
+        target = (paths.project_compose_override("alpha") if linked == "overlay"
+                  else paths.project_bind_record("alpha"))
+        target.unlink(missing_ok=True)
+        target.symlink_to(secret)
+        paths.project_users_record("alpha").write_text('{"web": "not an entry"}\n')
+        [line] = check_upgrade(paths)
+        assert "would be refused" in line and "is a symlink" in line
+        regen = apply_projects(paths)[1]
+        assert "is a symlink" in regen.refused["alpha"]
+        assert "nothing was changed" in regen.refused["alpha"]
+        assert target.is_symlink() and secret.read_text() == "SECRET\n"
+        assert not any("SECRET" in f.read_text() for f in paths.project_dir("alpha").rglob("*")
+                       if f.is_file() and not f.is_symlink())
+
+    def test_a_failure_to_record_is_refused_and_puts_the_previous_files_back(
+            self, tmp_path: Path) -> None:
+        """Any failure of the record step, not only a start-check refusal
+        (here an unreadable state file), refuses the project, not the upgrade."""
+        paths = _setup(tmp_path)
+        _project(paths, "alpha")
+        _pause(paths, "alpha")
+        paths.project_compose_override("alpha").write_text("# previous overlay\n")
+        record = paths.project_bind_record("alpha").read_bytes()
+        with patch("boxmunge.commands.upgrade_offline.check_start",
+                   side_effect=StateError("Cannot read state file other.users.json")):
+            regen = apply_projects(paths)[1]
+        assert regen.refused["alpha"].startswith("its bind sources could not be recorded")
+        assert "Cannot read state file" in regen.refused["alpha"]
+        assert paths.project_compose_override("alpha").read_text() == "# previous overlay\n"
+        assert paths.project_bind_record("alpha").read_bytes() == record
+
+    def test_previous_files_that_cannot_be_put_back_fail_the_upgrade(
+            self, tmp_path: Path) -> None:
+        """Then the overlay and record may disagree: that is not left behind
+        as a refusal."""
+        paths = _setup(tmp_path)
+        _project(paths, "alpha")
+        _pause(paths, "alpha")
+        paths.project_compose_override("alpha").write_text("# previous overlay\n")
+
+        def written_then_failed(paths, manifest, component):
+            paths.project_compose_override("alpha").write_text("# half written\n")
+            raise DockerError("docker image rm timed out")
+
+        with patch("boxmunge.commands.upgrade_offline.prepare_compose_override",
+                   written_then_failed), \
+             patch("boxmunge.commands.upgrade_offline.atomic_write_bytes",
+                   side_effect=OSError(28, "No space left on device")), \
+             pytest.raises(UpgradeGateError, match="could not be put back.*No space left"):
+            apply_projects(paths)
+
+    def test_nothing_changed_means_nothing_to_put_back(self, tmp_path: Path) -> None:
+        """A regeneration that fails before writing leaves nothing to restore,
+        so a failing write could not matter: the project is just refused."""
+        paths = _setup(tmp_path)
+        _project(paths, "alpha")
+        _pause(paths, "alpha")
+        paths.project_users_record("alpha").write_text('{"web": "not an entry"}\n')
+        with patch("boxmunge.commands.upgrade_offline.atomic_write_bytes",
+                   side_effect=OSError(28, "No space left on device")):
+            regen = apply_projects(paths)[1]
+        assert "could not be regenerated" in regen.refused["alpha"]
 
 
 class TestRegenTakesProjectLock:

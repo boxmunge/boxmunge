@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import pytest
 import yaml
 
+from boxmunge.bind_sources import BindSourceError
 from boxmunge.commands import quarantine_lift, security_actions, security_scan_core
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.security_actions import cmd_security_scan
@@ -23,6 +24,7 @@ from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.policy import Disposition
 from boxmunge.cve.quarantine import is_quarantined, quarantine_action_complete
 from boxmunge.cve.scanner import ScannerError, Severity
+from boxmunge.docker_run import DockerError
 from boxmunge.pause import is_paused, write_paused_state
 from boxmunge.release import mark_live
 from boxmunge.release_txn import open_txn
@@ -195,6 +197,27 @@ def test_strict_keeps_the_quarantine(box) -> None:
     seed_quarantine(paths)
     _scan(paths)
     assert is_quarantined("demo", paths)
+    assert not _titles(pushover, LIFTED_TITLE)
+
+
+@pytest.mark.parametrize("error", [
+    BindSourceError("cannot read state/deploy/demo.binds.json"),
+    DockerError("docker image rm timed out"),
+])
+def test_an_overlay_that_cannot_be_regenerated_fails_the_lift_before_caddy(
+        box, monkeypatch, error) -> None:
+    paths, pushover = box()
+    seed_quarantine(paths)
+
+    def fail(paths, manifest, component=None):
+        raise error
+
+    monkeypatch.setattr(quarantine_lift, "prepare_compose_override", fail)
+    with pytest.raises(RuntimeError, match="automatic quarantine lift failed.*Failed to "
+                                           "regenerate the compose overlay"):
+        _scan(paths)
+    assert is_quarantined("demo", paths) and quarantine_action_complete("demo", paths)
+    assert "caddy_reload" not in paths.docker.calls and "compose_up" not in paths.docker.calls
     assert not _titles(pushover, LIFTED_TITLE)
 
 

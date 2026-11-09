@@ -16,7 +16,7 @@ from typing import Any, Iterator
 from boxmunge.caddy import generate_caddy_config, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.upgrade_offline import (
-    offline_dry_run_line, regenerate_offline_overlay, render_overlay,
+    PutBackError, offline_dry_run_line, regenerate_offline, render_overlay,
 )
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
@@ -240,9 +240,6 @@ def _regenerate_project(
     block = is_blocked(name, paths)
     if block:
         write_maintenance_page(paths, name, manifest)
-        log_operation("upgrade", f"{name} is {block.reason.value}: it keeps its maintenance "
-                      f"page and is not restarted; its overlay is regenerated for when it "
-                      f"comes back", paths, project=name)
     # A compose.yml that predates a validator fix must not get a fresh
     # overlay, nor be rebuilt and re-run as root by restart_projects. Its
     # old configs and running containers are left untouched; the upgrade
@@ -257,28 +254,40 @@ def _regenerate_project(
                   paths, project=name)
         return
     if block:
-        try:
-            refusal = regenerate_offline_overlay(paths, name, manifest)
-        except OSError as e:
-            raise UpgradeGateError(f"Failed to keep the previous overlay and bind record "
-                                   f"of {name}: {e}") from e
-        if refusal is not None:
-            regen.refused[name] = refusal
-            log_error("upgrade", f"{name} ({block.reason.value}): {refusal}; fix the cause "
-                      f"and redeploy it.", paths, project=name)
-            return
-    else:
-        try:
-            prepare_caddy_config(paths, manifest)
-            prepare_compose_override(paths, manifest, component="upgrade")
-        except Exception as e:
-            # The project would restart on its old overlay; fail so the shim
-            # rolls back instead of reporting a half-applied upgrade (D-07).
-            raise UpgradeGateError(f"Failed to regenerate configs for {name}: {e}") from e
+        _regenerate_offline(paths, name, manifest, block.reason.value, regen)
+        return
+    try:
+        prepare_caddy_config(paths, manifest)
+        prepare_compose_override(paths, manifest, component="upgrade")
+    except Exception as e:
+        # The project would restart on its old overlay; fail so the shim
+        # rolls back instead of reporting a half-applied upgrade (D-07).
+        raise UpgradeGateError(f"Failed to regenerate configs for {name}: {e}") from e
     refusal = _record_bind_sources(paths, name)
     if refusal is not None:
         regen.refused[name] = refusal
         return
+    regen.processed.append(name)
+
+
+def _regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any], reason: str,
+                        regen: Regeneration) -> None:
+    """A paused or quarantined project's overlay and record
+    (boxmunge.commands.upgrade_offline): refused, not fatal, unless its
+    previous files cannot be put back, which would leave the two disagreeing."""
+    try:
+        refusal = regenerate_offline(paths, name, manifest)
+    except PutBackError as e:
+        raise UpgradeGateError(f"{name}: its overlay or bind record changed and the "
+                               f"previous ones could not be put back: {e}") from e
+    if refusal is not None:
+        regen.refused[name] = refusal
+        log_error("upgrade", f"{name} ({reason}): {refusal}. Fix the cause, then bring it "
+                  f"back or redeploy it.", paths, project=name)
+        return
+    log_operation("upgrade", f"{name} is {reason}: it keeps its maintenance page and is not "
+                  f"restarted; its overlay was regenerated and recorded for when it comes "
+                  f"back", paths, project=name)
     regen.processed.append(name)
 
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 import sys
 
 
+from boxmunge.bind_sources import BindSourceError
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
 from boxmunge.run_as import RunAsError
@@ -147,7 +148,7 @@ def resume_locked(
     # one the project was paused on).
     try:
         prepare_compose_override(paths, manifest, component="resume")
-    except (OSError, ValueError, DockerError) as e:
+    except (OSError, ValueError, DockerError, BindSourceError) as e:
         print(f"ERROR: cannot regenerate the compose overlay: {e}", file=sys.stderr)
         log_error("resume", f"Overlay regeneration failed: {e}", paths, project=project_name)
         return 1, None

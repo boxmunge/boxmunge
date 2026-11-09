@@ -21,6 +21,7 @@ import sys
 from datetime import datetime, timezone
 from enum import Enum
 
+from boxmunge.bind_sources import BindSourceError
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_guard import compose_up_checked
@@ -188,7 +189,7 @@ def recover_locked(project_name: str, paths: BoxPaths) -> int:
     # the start checks see what will run.
     try:
         prepare_compose_override(paths, manifest, component="recover")
-    except (OSError, ValueError, DockerError) as e:
+    except (OSError, ValueError, DockerError, BindSourceError) as e:
         print(f"ERROR: cannot regenerate the compose overlay: {e}", file=sys.stderr)
         log_error("recover", f"Overlay regeneration failed: {e}", paths, project=project_name)
         return 1

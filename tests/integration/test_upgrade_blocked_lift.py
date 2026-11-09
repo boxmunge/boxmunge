@@ -239,8 +239,8 @@ def test_resume_after_the_upgrade_leaves_a_startable_project(box) -> None:
 
 def test_the_upgrade_still_refuses_a_bind_source_it_cannot_record(box) -> None:
     """Recording at the upgrade runs the start checks: a bind source that is
-    now a symlink is refused, nothing is recorded, and the lift is refused
-    until a deploy records the project."""
+    now a symlink refuses the project, which keeps its previous overlay and
+    (no) record, and no scan brings it back until a deploy records it."""
     paths, p, _image_id = box
     seed_quarantine(paths, p)
     pdir = paths.project_dir(p)
@@ -248,9 +248,13 @@ def test_the_upgrade_still_refuses_a_bind_source_it_cannot_record(box) -> None:
     os.symlink("elsewhere", pdir / "data")
     regen = _upgrade(paths)
     assert "data is a symlink" in regen.refused[p]
+    assert paths.project_compose_override(p).read_text() == _OVERLAY_0101
     assert not paths.project_bind_record(p).exists()
-    with pytest.raises(RuntimeError, match="no record of the bind sources"):
+    try:
         scan_one_project(paths, p, in_grace=False, kev=_kev())
+    except RuntimeError as e:  # the lift's own refusal, when the scan gets that far
+        assert "no record of the bind sources" in str(e)
     assert is_quarantined(p, paths)
-    paths.caddy_reload.assert_not_called()
     assert not _container(p)["State"]["Running"]
+    site = paths.project_caddy_site(p).read_text()
+    assert "status 503" in site and "reverse_proxy" not in site

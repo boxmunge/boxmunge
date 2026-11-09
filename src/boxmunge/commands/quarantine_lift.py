@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from boxmunge.bind_sources import BindSourceError
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_guard import ComposeRefused, check_start
@@ -64,7 +65,7 @@ def restore_from_quarantine(paths: BoxPaths, project: str, *, component: str) ->
         raise QuarantineError(str(e)) from e
     try:
         prepare_compose_override(paths, manifest, component=component)
-    except (OSError, ValueError, DockerError) as e:
+    except (OSError, ValueError, DockerError, BindSourceError) as e:
         raise QuarantineError(f"Failed to regenerate the compose overlay: {e}") from e
     try:
         check_start(paths, project, component=component,

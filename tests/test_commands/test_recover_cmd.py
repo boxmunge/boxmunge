@@ -1,7 +1,12 @@
 """Tests for boxmunge recover — un-stop a health-monitor-stopped prod."""
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 import yaml
+
+from boxmunge.bind_sources import BindSourceError
+from boxmunge.compose import ComposeError
 
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state, write_state
@@ -63,13 +68,16 @@ class TestRunRecover:
         assert run_recover(name, paths, yes=True) == 0
         assert order == ["overlay", "up"]
 
+    @pytest.mark.parametrize("error", [
+        ComposeError("cannot read the users record"),
+        BindSourceError("cannot read state/deploy/myapp.binds.json"),
+    ])
     @_patched
     def test_an_overlay_that_cannot_be_regenerated_starts_nothing(
-        self, _smoke, _reload, mock_up, _caddy, mock_override, tmp_path, capsys,
+        self, _smoke, _reload, mock_up, _caddy, mock_override, error, tmp_path, capsys,
     ):
         from boxmunge.commands.recover_cmd import run_recover
-        from boxmunge.compose import ComposeError
-        mock_override.side_effect = ComposeError("cannot read the users record")
+        mock_override.side_effect = error
         paths, name = _setup(tmp_path)
         assert run_recover(name, paths, yes=True) == 1
         assert "cannot regenerate the compose overlay" in capsys.readouterr().err
