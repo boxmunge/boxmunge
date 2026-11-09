@@ -1524,18 +1524,27 @@ health
 health --json
 ```
 
-Exit codes: 0 = healthy, 1 = warnings, 2 = issues requiring attention. `health` is not run on a
-schedule; run it after any change to the box and whenever an alert arrives. A check that cannot run
-(for example one that needs root, run from the deploy shell) reports `SKIP`, which does not affect
-the exit code. The MCP `health` tool runs the same checks.
+Exit codes: 0 = healthy, 1 = warnings, 2 = issues requiring attention. Run it after any change to
+the box and whenever an alert arrives. A check that cannot run (for example one that needs root,
+run from the deploy shell) reports `SKIP`, which does not affect the exit code. The MCP `health`
+tool runs the same checks.
+
+Outside an upgrade nothing runs `health` on a schedule: the 5-minute health timer runs `check-all`
+(the per-project checks and alerts). A platform upgrade runs `health` as root twice over: once
+right after it switches to the new release (60-second budget), then on every health-timer fire for
+the 6-hour probation that follows (`boxmunge-upgrade check-probation`, 180-second budget). An exit
+of 2 from either rolls the platform back to the previous release and blocklists the new one, so
+auto-update does not retry it (`sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist <version>`
+forgets it). Exit 0 or 1 keeps the release; a `health` that runs past its budget is retried on the
+next fire, not rolled back.
 
 | Check | Warns (or errors) when | What to do |
 |---|---|---|
 | `docker`, `caddy`, `system-container` | Docker, the Caddy container or the boxmunge-system container is not running (error) | `doctor`, then the supervisor user restarts the component |
 | `system-container` | boxmunge-system runs an image built from an older definition than `/opt/boxmunge/system` (an upgrade's rebuild failed, so it still has the previous Alpine, age and rclone; warning, backups still work) | fix what stopped the build (the upgrade's output says), then the supervisor user runs `sudo docker compose -f /opt/boxmunge/system/compose.yml up -d --build`; the next upgrade also retries it |
 | `permissions`, `age-key` | the backup key or host secrets have the wrong mode, or the backup key is missing or invalid | fix as the supervisor user |
-| `project-containers`, `lifecycle` | a deployed project has no running containers, or is quarantined or stopped by the health monitor | `check <project>`, `logs <project>`, `recover <project>` |
-| `config-drift` | a project's Caddy site config differs from what its manifest generates | redeploy the project |
+| `project-containers`, `lifecycle` | a deployed project has no running containers, or is quarantined or stopped by the health monitor, or its state cannot be read (warning; the detail names the file and the fix) | `check <project>`, `logs <project>`, `recover <project>` |
+| `config-drift` | a project's Caddy site config differs from what its manifest generates, or its manifest cannot be read | redeploy the project; `validate <project>` names a manifest problem |
 | `recent-errors` | more than 10 errors in the log in the last 24 hours, or torn lines in the log that may have been errors | `log --level error --since 24h --all` (`log --since 24h` lists torn lines) |
 | `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
@@ -1553,9 +1562,20 @@ the exit code. The MCP `health` tool runs the same checks.
 | `auto-updates` | OS security updates are not being fetched or installed | see [OS security updates](#os-security-updates) |
 | `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, container-update, cve-scan) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
 
-`health` exiting 2 during the probation after a platform upgrade rolls the upgrade back, so only a
-broken platform reports an error: Docker, Caddy, the system container, the backup key, sshd, the
-firewall, the userns remap, or state boxmunge cannot read. Every other check warns.
+Because exit 2 during probation rolls the upgrade back, only a platform component a probe saw
+broken reports an error: Docker not running (`docker info` fails), Caddy or the system container missing or wrong,
+the backup key missing or unreadable, sshd's drop-in changed or widened, the firewall off or not
+installed, or the userns remap inconsistent. Everything else warns:
+
+- a project whose files cannot be read (its manifest, a torn quarantine or pause marker, a
+  directory named `<x>-staging` from before 0.10.1) is named under `lifecycle`,
+  `project-containers` or `config-drift` with the cause and the fix, and the rest of the report
+  still runs;
+- a probe that does not answer in time (`docker info`, `docker inspect`, `ufw status`, `sshd -T`,
+  `docker compose ps`) warns, naming the command: a busy host is not a broken platform. So does
+  `ufw status` failing (often a held xtables lock), since it says nothing about the firewall;
+- a check that fails unexpectedly warns with the exception and logs it (`log --component health`)
+  instead of crashing the report.
 
 ### User-namespace remapping
 

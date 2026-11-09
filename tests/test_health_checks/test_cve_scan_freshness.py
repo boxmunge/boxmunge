@@ -60,7 +60,7 @@ def test_health_report_includes_the_check():
     import inspect
 
     from boxmunge.commands import health_cmd
-    assert "check_cve_scan_freshness(paths)" in inspect.getsource(health_cmd.collect_health)
+    assert "check_cve_scan_freshness(paths)" in inspect.getsource(health_cmd._checks)
 
 
 def test_registered_but_never_deployed_project_is_not_never_scanned(tmp_path):
