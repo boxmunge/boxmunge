@@ -66,7 +66,8 @@ def _days_ago(n: int) -> str:
 
 
 class TestStatsEndpointAuth:
-    def test_no_auth_returns_401(self, client):
+    def test_no_auth_returns_401(self, client, app):
+        app.config["STATS_SECRET"] = "test-stats-secret"
         resp = client.get("/v1/admin/version-checks")
         assert resp.status_code == 401
 
@@ -106,16 +107,17 @@ class TestStatsEndpointAuth:
             "/v1/admin/version-checks",
             headers={"Authorization": "Bearer cb-secret"},
         )
-        assert resp.status_code == 401
+        assert resp.status_code == 503
 
-    def test_no_stats_secret_configured_returns_401(self, client):
+    def test_no_stats_secret_configured_refuses_with_a_clear_error(self, client):
         """If the operator hasn't set STATS_SECRET at all, the endpoint
-        is effectively disabled — fail closed."""
+        refuses and says why: fail closed, and loudly."""
         resp = client.get(
             "/v1/admin/version-checks",
             headers={"Authorization": "Bearer anything"},
         )
-        assert resp.status_code == 401
+        assert resp.status_code == 503
+        assert "STATS_SECRET is unset" in resp.get_json()["error"]
 
 
 class TestStatsEndpointShape:

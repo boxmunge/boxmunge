@@ -42,3 +42,39 @@ def local_date_not_utc():
         else:
             os.environ["TZ"] = saved
         time.tzset()
+
+
+ADMIN_SECRET = "registration-code-for-tests"
+ADMIN_RP_ID = "admin.example.com"
+
+
+@pytest.fixture
+def admin_app(tmp_path, migrated_db, monkeypatch):
+    """The service with STATS_SECRET set and the relying party at ADMIN_RP_ID."""
+    import json
+    from unittest.mock import patch
+
+    releases_file = tmp_path / "releases.json"
+    releases_file.write_text(json.dumps({"releases": [
+        {"version": "0.4.2", "class": "feature", "breaking": False,
+         "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.4.2"},
+    ]}))
+    monkeypatch.setenv("ADMIN_RP_ID", ADMIN_RP_ID)
+    with patch("app.RELEASES_PATH", releases_file), patch("app.DB_PATH", migrated_db):
+        from app import create_app
+        application = create_app()
+        application.config["TESTING"] = True
+        application.config["STATS_SECRET"] = ADMIN_SECRET
+        yield application
+
+
+@pytest.fixture
+def admin_client(admin_app):
+    # Cookies are passed by hand, so each test shows exactly what a browser sends.
+    return admin_app.test_client(use_cookies=False)
+
+
+@pytest.fixture
+def authenticator():
+    from softauthn import SoftAuthenticator
+    return SoftAuthenticator(ADMIN_RP_ID, f"https://{ADMIN_RP_ID}")

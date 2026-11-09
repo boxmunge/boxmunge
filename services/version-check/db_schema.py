@@ -81,7 +81,34 @@ def _failure_detail(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE failures ADD COLUMN detail TEXT")
 
 
-MIGRATIONS = (_baseline, _reporter_identity, _failure_detail)
+def _admin_passkey(conn: sqlite3.Connection) -> None:
+    """The admin pages' passkey, and the single-use challenges of its ceremonies.
+
+    One credential at most (slot is always 1). code_mac is an HMAC of the
+    registration code it was registered under, never the code itself.
+    Challenges live here, not in memory, because each gunicorn worker serves
+    a different step of the same ceremony.
+    """
+    conn.execute("""
+        CREATE TABLE admin_credential (
+            slot          INTEGER PRIMARY KEY CHECK (slot = 1),
+            credential_id BLOB NOT NULL,
+            public_key    BLOB NOT NULL,
+            sign_count    INTEGER NOT NULL,
+            code_mac      TEXT NOT NULL,
+            created_at    TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE admin_challenges (
+            challenge    BLOB PRIMARY KEY,
+            purpose      TEXT NOT NULL CHECK (purpose IN ('register', 'login')),
+            expires_unix INTEGER NOT NULL
+        )
+    """)
+
+
+MIGRATIONS = (_baseline, _reporter_identity, _failure_detail, _admin_passkey)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

@@ -7,11 +7,13 @@ Serves:
 3. GET  /v1/failures?version=X           — query failure summary for a version
 4. POST /v1/circuit-breaker/trip?version=X   — suppress a broken release (auth required)
 5. POST /v1/circuit-breaker/reset?version=X  — re-enable a release (auth required)
-6. GET  /v1/admin/version-checks?last=N  — daily check counts by version (auth required)
+6. GET  /v1/admin/version-checks?last=N  — daily check counts by version (Bearer
+                                            STATS_SECRET)
 7. GET  /v1/admin/stats?last=N           — the same as an HTML page, plus recent failure
-                                            reports (auth required)
-8. GET  /healthz                         — liveness; counts nothing (smoke and health checks)
-9. GET  /                                — static landing page
+                                            reports (passkey session)
+8. /v1/admin/register, /v1/admin/login   — passkey registration and sign-in (passkey_routes)
+9. GET  /healthz                         — liveness; counts nothing (smoke and health checks)
+10. GET /                                — static landing page
 
 Abuse limits (F-12): the client address is taken from the X-Forwarded-For
 header set by the boxmunge Caddy proxy (one trusted hop), every request is
@@ -25,18 +27,18 @@ run once before gunicorn starts.
 Source: https://github.com/boxmunge/boxmunge/tree/main/services/version-check
 """
 
-import hashlib
-import hmac
 import os
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from flask import Flask, make_response, redirect, request, jsonify
+from flask import Flask, request, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+import admin_auth
 import failure_store
+import passkey_routes
 from db_schema import require_current
 from release_catalog import (
     VERSION_RE, apply_holds, check_response, find_blocked, load_releases, select_offers,
@@ -82,8 +84,6 @@ DETAIL_MAX = 200
 PRINTABLE_ASCII = re.compile(r"[ -~]*\Z")
 # The 0.10.x shim sends `boxmunge-server --version` output as installed_from.
 LEGACY_FROM_PREFIX = re.compile(r"^boxmunge\s+")
-STATS_COOKIE = "bm_stats"
-STATS_COOKIE_MAX_AGE = 8 * 3600
 STATS_FAILURES_SHOWN = 100
 
 
@@ -156,61 +156,7 @@ def _check_cb_auth(app_config):
     if not secret:
         return False
     auth = request.headers.get("Authorization", "")
-    return _eq(auth, f"Bearer {secret}")
-
-
-def _eq(a: str, b: str) -> bool:
-    """Constant-time equality; bytes, because compare_digest raises on non-ASCII str."""
-    return hmac.compare_digest(a.encode(), b.encode())
-
-
-def _check_stats_auth(app_config):
-    """Authorize the admin/version-checks endpoint: `Authorization: Bearer <secret>`.
-
-    Uses STATS_SECRET, NOT CB_SECRET — different blast radius. A leaked
-    stats token is read-only over check counts; a leaked CB token can
-    suppress security releases fleetwide.
-    """
-    secret = _stats_secret(app_config)
-    if not secret:
-        return False
-    return _eq(request.headers.get("Authorization", ""), f"Bearer {secret}")
-
-
-def _stats_secret(app_config) -> str:
-    return app_config.get("STATS_SECRET") or os.environ.get("STATS_SECRET", "")
-
-
-def _now_unix() -> int:
-    return int(datetime.now(timezone.utc).timestamp())
-
-
-def _stats_cookie_mac(secret: str, issued: str) -> str:
-    return hmac.new(secret.encode(), f"stats-cookie|{issued}".encode(), hashlib.sha256).hexdigest()
-
-
-def _stats_cookie_value(secret: str) -> str:
-    """"<issued_unix>.<mac>": derived from the secret, never the secret itself,
-    and checked against its issue time so a stolen cookie dies after STATS_COOKIE_MAX_AGE."""
-    issued = str(_now_unix())
-    return f"{issued}.{_stats_cookie_mac(secret, issued)}"
-
-
-def _stats_cookie_valid(secret: str, value: str) -> bool:
-    issued, _, mac = value.partition(".")
-    if not issued.isascii() or not issued.isdigit() or not _eq(mac, _stats_cookie_mac(secret, issued)):
-        return False
-    return 0 <= _now_unix() - int(issued) <= STATS_COOKIE_MAX_AGE
-
-
-def _check_stats_page_auth(app_config) -> bool:
-    """Authorize the stats page: Bearer header, or the cookie set by ?token=."""
-    secret = _stats_secret(app_config)
-    if not secret:
-        return False
-    if _eq(request.headers.get("Authorization", ""), f"Bearer {secret}"):
-        return True
-    return _stats_cookie_valid(secret, request.cookies.get(STATS_COOKIE, ""))
+    return admin_auth.eq(auth, f"Bearer {secret}")
 
 
 def _query_version_checks(db_path: Path, days: int, listed: set[str]) -> dict:
@@ -288,6 +234,7 @@ def create_app() -> Flask:
     app = Flask(__name__, static_folder="static")
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=TRUSTED_PROXY_HOPS)
     app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
+    app.config.update(passkey_routes.relying_party(os.environ.get("ADMIN_RP_ID", "boxmunge.dev")))
 
     # The pre-start step (db_schema.py, run by the image's CMD) migrates.
     require_current(DB_PATH)
@@ -304,6 +251,12 @@ def create_app() -> Flask:
     sweeper = failure_store.Sweeper(DB_PATH, failure_store.SWEEP_INTERVAL)
     sweeper.start()
     app.extensions["failure_sweeper"] = sweeper
+
+    app.register_blueprint(passkey_routes.create_blueprint(DB_PATH))
+
+    @app.errorhandler(admin_auth.AdminNotConfigured)
+    def admin_not_configured(exc):
+        return jsonify({"error": str(exc)}), 503
 
     @app.before_request
     def rate_limit():
@@ -420,44 +373,24 @@ def create_app() -> Flask:
         Counts buffered in other gunicorn workers appear after their next
         flush (at most CHECK_FLUSH_SECONDS later).
         """
-        if not _check_stats_auth(app.config):
+        # Bearer STATS_SECRET only: the passkey session cookie does not open
+        # this. A leaked STATS_SECRET is read-only over check counts; CB_SECRET
+        # (which can suppress releases fleetwide) is separate.
+        if not admin_auth.bearer_authorized():
             return jsonify({"error": "unauthorized"}), 401
         counter.flush()
         days = _parse_last_param(request.args.get("last"))
         return jsonify(_query_version_checks(DB_PATH, days, listed_versions))
 
     @app.route("/v1/admin/stats")
+    @admin_auth.require_session
     def admin_stats():
-        """HTML: daily checks per version and recent failure reports. Auth required.
-
-        Browsers cannot send a Bearer header, so `?token=<secret>` once sets a
-        short-lived HttpOnly cookie and redirects to the page without the token
-        in the URL. The page itself accepts only the header or that cookie.
-        """
-        token = request.args.get("token")
-        if token is not None:
-            secret = _stats_secret(app.config)
-            if not secret or not _eq(token, secret):
-                return jsonify({"error": "unauthorized"}), 401
-            response = redirect(f"/v1/admin/stats?last={_parse_last_param(request.args.get('last'))}",
-                                code=303)
-            response.set_cookie(STATS_COOKIE, _stats_cookie_value(secret),
-                                max_age=STATS_COOKIE_MAX_AGE, path="/v1/admin",
-                                secure=True, httponly=True, samesite="Strict")
-            return response
-        if not _check_stats_page_auth(app.config):
-            return jsonify({"error": "unauthorized"}), 401
+        """HTML: daily checks per version and recent failure reports, for a signed-in browser."""
         counter.flush()
         stats = _query_version_checks(DB_PATH, _parse_last_param(request.args.get("last")),
                                       listed_versions)
-        page = stats_page.render(stats, failure_store.recent_failures(
-            DB_PATH, STATS_FAILURES_SHOWN))
-        response = make_response(page)
-        response.headers["Content-Type"] = "text/html; charset=utf-8"
-        response.headers["Cache-Control"] = "no-store"
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'")
-        return response
+        return admin_auth.html_response(stats_page.render(
+            stats, failure_store.recent_failures(DB_PATH, STATS_FAILURES_SHOWN)))
 
     @app.route("/")
     def index():

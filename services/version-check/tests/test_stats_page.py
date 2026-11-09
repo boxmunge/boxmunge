@@ -15,6 +15,12 @@ SECRET = "page-secret"
 BEARER = {"Authorization": f"Bearer {SECRET}"}
 
 
+def _session() -> dict[str, str]:
+    """A signed-in browser's cookie (the sign-in itself is tested in test_admin_passkey)."""
+    import admin_auth
+    return {"Cookie": f"{admin_auth.SESSION_COOKIE}={admin_auth.session_cookie_value(SECRET)}"}
+
+
 @pytest.fixture
 def db_path(tmp_path, migrated_db):
     return tmp_path / "checks.db"
@@ -37,7 +43,8 @@ def app(tmp_path, db_path):
 
 @pytest.fixture
 def client(app):
-    return app.test_client()
+    # A cookie jar would replace the session Cookie header these tests send.
+    return app.test_client(use_cookies=False)
 
 
 def _report(client, **overrides):
@@ -90,91 +97,11 @@ class TestInstalledFromValidation:
         assert _rows(db_path) == []
 
 
-class TestStatsPageAuth:
-    def test_no_credentials_is_401(self, client):
-        assert client.get("/v1/admin/stats").status_code == 401
-
-    def test_unconfigured_secret_is_401_for_everyone(self, app, client):
-        app.config["STATS_SECRET"] = ""
-        assert client.get("/v1/admin/stats", headers=BEARER).status_code == 401
-        assert client.get("/v1/admin/stats?token=").status_code == 401
-
-    def test_bearer_works_and_returns_html(self, client):
-        resp = client.get("/v1/admin/stats", headers=BEARER)
-        assert resp.status_code == 200
-        assert resp.content_type.startswith("text/html")
-        assert resp.headers["Cache-Control"] == "no-store"
-        csp = resp.headers["Content-Security-Policy"]
-        assert "script-src" not in csp
-        assert "frame-ancestors 'none'" in csp and "base-uri 'none'" in csp
-
-    def test_wrong_bearer_is_401(self, client):
-        assert client.get("/v1/admin/stats",
-                          headers={"Authorization": "Bearer nope"}).status_code == 401
-
-    def test_token_in_query_never_authorizes_the_page(self, client):
-        # ?token= only trades the secret for a cookie and redirects; no page body.
-        resp = client.get("/v1/admin/stats?token=" + SECRET)
-        assert resp.status_code == 303
-        assert resp.headers["Location"] == "/v1/admin/stats?last=7"
-        assert SECRET not in resp.headers["Location"]
-        assert b"<table" not in resp.data
-
-    def test_wrong_token_is_401_and_sets_no_cookie(self, client):
-        resp = client.get("/v1/admin/stats?token=nope")
-        assert resp.status_code == 401 and "Set-Cookie" not in resp.headers
-
-    def test_cookie_from_token_login_authorizes_the_page(self, client):
-        resp = client.get("/v1/admin/stats?token=" + SECRET)
-        cookie = resp.headers["Set-Cookie"]
-        assert "HttpOnly" in cookie and "Secure" in cookie and "SameSite=Strict" in cookie
-        assert "Path=/v1/admin" in cookie
-        assert SECRET not in cookie  # derived value, never the secret itself
-        value = cookie.split(";")[0]
-        page = client.get("/v1/admin/stats", headers={"Cookie": value})
-        assert page.status_code == 200
-
-    def test_forged_cookie_is_401(self, client):
-        assert client.get("/v1/admin/stats",
-                          headers={"Cookie": "bm_stats=" + SECRET}).status_code == 401
-
-    def test_non_ascii_token_and_bearer_are_401_not_500(self, client):
-        assert client.get("/v1/admin/stats?token=%C3%A9").status_code == 401
-        sent = {"Authorization": "Bearer \u00e9".encode().decode("latin-1")}
-        assert client.get("/v1/admin/stats", headers=sent).status_code == 401
-        assert client.get("/v1/admin/stats",
-                          headers={"Cookie": "bm_stats=1.\u00e9"}).status_code == 401
-
-    def test_cookie_expires_server_side(self, client):
-        import app as app_module
-        issued = 1_800_000_000
-        with patch.object(app_module, "_now_unix", return_value=issued):
-            value = client.get("/v1/admin/stats?token=" + SECRET).headers["Set-Cookie"].split(";")[0]
-        assert value.startswith(f"bm_stats={issued}.")
-        for now, status in ((issued + 8 * 3600, 200), (issued + 8 * 3600 + 1, 401),
-                            (issued - 1, 401)):
-            with patch.object(app_module, "_now_unix", return_value=now):
-                assert client.get("/v1/admin/stats", headers={"Cookie": value}).status_code == status
-
-    def test_cookie_with_altered_issue_time_is_401(self, app):
-        client = app.test_client(use_cookies=False)
-        import app as app_module
-        with patch.object(app_module, "_now_unix", return_value=1_800_000_000):
-            value = client.get("/v1/admin/stats?token=" + SECRET).headers["Set-Cookie"].split(";")[0]
-            forged = value.replace("bm_stats=1800000000.", "bm_stats=1800000001.")
-            assert client.get("/v1/admin/stats", headers={"Cookie": forged}).status_code == 401
-
-    def test_cookie_does_not_open_the_json_endpoint(self, client):
-        value = client.get("/v1/admin/stats?token=" + SECRET).headers["Set-Cookie"].split(";")[0]
-        assert client.get("/v1/admin/version-checks",
-                          headers={"Cookie": value}).status_code == 401
-
-
 class TestStatsPageContent:
     def test_shows_daily_checks_per_version_including_unlisted_ones(self, client):
         for v in ("0.4.2", "0.4.2", "9.9.9-not", "0.0.9", "0.0.9", "0.0.9"):
             client.get("/v1/check", query_string={"v": v})
-        html = client.get("/v1/admin/stats", headers=BEARER).get_data(as_text=True)
+        html = client.get("/v1/admin/stats", headers=_session()).get_data(as_text=True)
         today = datetime.now(timezone.utc).date().isoformat()
         assert today in html
         assert "<th>0.4.2</th>" in html
@@ -186,7 +113,7 @@ class TestStatsPageContent:
     def test_lists_failure_reports_with_their_reason(self, client):
         _report(client, installed_from="boxmunge 0.10.1",
                 detail="system_upgrade_failed: install_sh_exit_100")
-        html = client.get("/v1/admin/stats", headers=BEARER).get_data(as_text=True)
+        html = client.get("/v1/admin/stats", headers=_session()).get_data(as_text=True)
         assert "system_upgrade_failed: install_sh_exit_100" in html
         assert "<td class=\"l\">0.10.1</td>" in html
         assert "boxmunge 0.10.1" not in html
@@ -197,12 +124,12 @@ class TestStatsPageContent:
                      " VALUES ('0.4.2', '<script>x</script>', 's', '<b>d</b>', '2026-01-01')")
         conn.commit()
         conn.close()
-        html = client.get("/v1/admin/stats", headers=BEARER).get_data(as_text=True)
+        html = client.get("/v1/admin/stats", headers=_session()).get_data(as_text=True)
         assert "<script>" not in html and "<b>d</b>" not in html
         assert "&lt;script&gt;" in html
 
     def test_empty_state_and_last_parameter(self, client):
-        html = client.get("/v1/admin/stats?last=3", headers=BEARER).get_data(as_text=True)
+        html = client.get("/v1/admin/stats?last=3", headers=_session()).get_data(as_text=True)
         assert "No checks recorded" in html and "No failure reports" in html
 
     def test_json_endpoint_marks_unlisted_versions(self, client):
@@ -219,6 +146,8 @@ class TestMigration:
         db_schema.migrate(path)
         conn = sqlite3.connect(path)
         conn.execute("ALTER TABLE failures DROP COLUMN detail")
+        conn.execute("DROP TABLE admin_credential")
+        conn.execute("DROP TABLE admin_challenges")
         conn.execute("PRAGMA user_version = 2")
         conn.commit()
         conn.close()
