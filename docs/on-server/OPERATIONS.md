@@ -1286,6 +1286,12 @@ next upgrade's restart. The start logs a warning naming the container. A stopped
 recreated; the **supervisor** removes it (`docker rm <container>`) and the next start
 creates it again.
 
+An image that is still there but has no name left (an upgrade from 0.10 to 0.11.0–0.11.2
+took the old name off an image a container still ran) is named again,
+`boxmunge.invalid/<project>/<service>`, by the next overlay regeneration or start, before
+anything is started: by its container's own image ID, so only the image that container's
+deploy built is ever named.
+
 ---
 
 ### Smoke script fails after upgrade with "permission denied" on `ping` or `traceroute`
@@ -1809,8 +1815,10 @@ How an upgrade is applied and undone:
    and compose overlay, project by project under that project's lock, reloads Caddy and
    restarts projects. A restart starts the images the project's last deploy built: it
    never rebuilds a `build:` service, so an upgrade cannot put a build on the box that no
-   deploy scanned or decided users for. (An image that is missing is built, as when an
-   upgrade from 0.10 renames a project's built images.)
+   deploy scanned or decided users for. When an upgrade from 0.10 renames a project's built
+   images to `boxmunge.invalid/<project>/<service>`, the image each container runs takes the
+   new name (logged as `named the images ...`) before the old one is removed, so the
+   restart starts that image. Only an image that is missing is built.
    Three kinds of project are left exactly as they are (not migrated, regenerated or
    restarted), reported as `LEFT AS IS` or `Skipped (busy)`, alerted, and do not fail the
    upgrade: one with a release staged by boxmunge 0.10.1 (one high-priority alert per project;

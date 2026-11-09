@@ -79,3 +79,21 @@ def test_prepare_refuses_a_malformed_record(paths) -> None:
     paths.project_users_record("app").write_text("[]")
     with pytest.raises(ComposeError, match="users record"):
         prepare_compose_override(paths, MANIFEST)
+
+
+def test_prepare_names_running_builds_before_it_untags(paths, monkeypatch) -> None:
+    """Taking a build's old names off must not leave the image a container
+    runs without one: it gets its platform name first."""
+    _project(paths)
+    calls: list = []
+    monkeypatch.setattr("boxmunge.built_images.name_running_builds",
+                        lambda cp, built: calls.append(("name", cp, sorted(built)))
+                        or ([f"boxmunge.invalid/{cp}/web"] if cp == "app" else []))
+    monkeypatch.setattr("boxmunge.built_images.untag_old_built_names",
+                        lambda cp, built, others: calls.append(("untag", cp)) or [])
+    prepare_compose_override(paths, MANIFEST, component="upgrade")
+    assert calls == [("name", "app", ["web"]), ("untag", "app"),
+                     ("name", "app-staging", ["web"]), ("untag", "app-staging")]
+    log = paths.log_file.read_text()
+    assert "named the images app's containers run: boxmunge.invalid/app/web" in log
+    assert '"component": "upgrade"' in log

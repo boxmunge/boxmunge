@@ -119,6 +119,36 @@ def test_a_one_service_start_recreates_only_that_service(box, monkeypatch) -> No
     assert [c.kwargs["services"] for c in up.call_args_list] == [["db"], ["db"]]
 
 
+def _named_at_start(box, monkeypatch, overlay: dict | None) -> list:
+    paths, project_dir, up, _, _ = box
+    files = ["compose.yml"]
+    if overlay is not None:
+        (project_dir / "compose.boxmunge.yml").write_text(yaml.safe_dump(overlay))
+        files.append("compose.boxmunge.yml")
+    asked: list = []
+    monkeypatch.setattr("boxmunge.built_images.name_running_builds",
+                        lambda cp, built: asked.append((cp, list(built), up.call_count))
+                        or [f"boxmunge.invalid/{cp}/{b}" for b in built])
+    compose_up_checked(paths, NAME, component="deploy", compose_files=files, record=True)
+    return asked
+
+
+def test_a_start_names_the_images_its_build_services_run_first(box, monkeypatch) -> None:
+    """The overlay names each build service's image; a container running one
+    whose name is gone gets it back before the up, which then runs it."""
+    overlay = {"services": {"web": {"image": "boxmunge.invalid/shop/web"}}}
+    assert _named_at_start(box, monkeypatch, overlay) == [(NAME, ["web"], 0)]
+    paths = box[0]
+    assert "named the images shop's containers run: boxmunge.invalid/shop/web" in \
+        paths.log_file.read_text()
+
+
+@pytest.mark.parametrize("overlay", [None, {"services": {"web": {"read_only": True}}}],
+                         ids=["no overlay", "no platform name"])
+def test_a_start_with_no_built_service_names_nothing(box, monkeypatch, overlay) -> None:
+    assert _named_at_start(box, monkeypatch, overlay) == []
+
+
 def _refused(box, match: str) -> None:
     paths, _, up, start, sent = box
     up.reset_mock()

@@ -27,7 +27,9 @@ def box():
 
 
 @pytest.mark.parametrize("case", [ic.case_restart_starts_the_deployed_image,
-                                  ic.case_a_start_recreates_a_container_whose_image_is_gone],
+                                  ic.case_a_start_recreates_a_container_whose_image_is_gone,
+                                  ic.case_regenerating_names_a_stopped_containers_build,
+                                  ic.case_a_start_names_a_nameless_build_and_runs_it],
                          ids=lambda c: c.__name__)
 def test_case(box, tmp_path, capsys, case) -> None:
     paths, project = ic.box_paths(tmp_path / "boxmunge"), ic.project_name()

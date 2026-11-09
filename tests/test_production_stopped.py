@@ -12,7 +12,9 @@ from boxmunge.pause import write_paused_state
 from boxmunge.production_stopped import (
     PROD_FILES, ProductionDownError, mark_stopped, start_again,
 )
-from boxmunge.staged_release import load_slot, new_meta, slot_dir, write_meta
+from boxmunge.staged_release import (
+    STAGING_OVERLAY, load_slot, new_meta, slot_dir, write_meta,
+)
 from tests.deploy_helpers import mark_deployed
 
 P = "shop"
@@ -30,6 +32,7 @@ def stopped(paths, fake_containers):
     mark_deployed(paths, P)
     slot = slot_dir(paths, P)
     (slot / "release").mkdir(parents=True)
+    (slot / STAGING_OVERLAY).write_text("services: {}\n")  # as stage writes it
     meta = new_meta("bundle", "shop-v2", None)
     write_meta(slot, meta)
     fake_containers.run(P, "web", "sha256:1", running=False)
