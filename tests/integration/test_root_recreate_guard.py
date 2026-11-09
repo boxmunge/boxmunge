@@ -201,7 +201,7 @@ def test_provider_project_is_refused_before_any_host_exec(tmp_path, alerts) -> N
     }}))
     with pytest.raises(ComposeRefused, match="provider"):
         compose_up_checked(paths, PROJECT, component="upgrade",
-                           compose_files=["compose.yml"], build=False)
+                           compose_files=["compose.yml"])
     assert not marker.exists()
     assert alerts and "provider" in alerts[0]
 

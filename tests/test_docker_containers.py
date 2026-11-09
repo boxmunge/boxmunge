@@ -16,6 +16,7 @@ project_containers = docker_containers.project_containers
 local_image = docker_containers.local_image
 created_times = docker_containers.created_times
 start_states = docker_containers.start_states
+running_without_image = docker_containers.running_without_image
 
 _IMG = "sha256:" + "a" * 64
 
@@ -37,16 +38,23 @@ def daemon(monkeypatch):
     """Answers docker ps / container inspect / image inspect from a dict."""
     state = {"containers": [], "images": {_IMG: ["busybox@sha256:" + "b" * 64]}, "calls": []}
 
-    def run(cmd, capture=False, **kwargs):
+    def run(cmd, capture=False, check=True, **kwargs):
         state["calls"].append(cmd)
-        out = MagicMock()
+        out = MagicMock(returncode=0, stderr="")
         if cmd[:2] == ["docker", "ps"]:
             out.stdout = "\n".join(c["Name"].lstrip("/") for c in state["containers"])
         elif cmd[:3] == ["docker", "container", "inspect"]:
             out.stdout = json.dumps(state["containers"])
         else:
+            # As the CLI does: what it found on stdout, an error per missing ID.
             out.stdout = json.dumps([{"Id": i, "RepoDigests": d}
                                      for i, d in state["images"].items() if i in cmd])
+            missing = [i for i in cmd[3:] if i not in state["images"]]
+            out.stderr = "".join(f"Error response from daemon: No such image: {i}\n"
+                                 for i in missing)
+            out.returncode = 1 if missing else 0
+            if missing and check:
+                raise DockerError(out.stderr)
         return out
 
     monkeypatch.setattr(docker_containers, "_run", run)
@@ -102,6 +110,55 @@ def test_a_container_without_a_service_label_fails_loudly(daemon):
     daemon["containers"] = [stray]
     with pytest.raises(DockerError, match="stray"):
         project_containers("demo")
+
+
+_GONE = "sha256:" + "c" * 64
+
+
+def _gone(name, service, **kwargs):
+    container = _container(name, service, image=_GONE, **kwargs)
+    container["Config"]["Image"] = f"boxmunge.invalid/demo/{service}"
+    return container
+
+
+def test_a_container_whose_image_is_gone_fails_saying_what_to_do(daemon):
+    """On the containerd image store a build that replaces the image a name
+    points at can take a running container's image away with it."""
+    daemon["containers"] = [_container("demo-db-1", "db"), _gone("demo-web-1", "web")]
+    with pytest.raises(DockerError) as raised:
+        project_containers("demo")
+    text = str(raised.value)
+    assert "demo-web-1" in text and _GONE in text and "boxmunge.invalid/demo/web" in text
+    assert "no longer has" in text and "prod-deploy demo" in text
+    assert "demo-db-1" not in text
+
+
+def test_running_without_image_names_the_containers_to_recreate(daemon):
+    daemon["containers"] = [_container("demo-db-1", "db"), _gone("demo-web-1", "web"),
+                            _gone("demo-web-2", "web"),
+                            _gone("demo-migrate-1", "migrate", running=False, restart="no"),
+                            _gone("demo-web-run-1", "web", oneoff=True)]
+    assert running_without_image("demo") == {
+        "web": ["demo-web-1", "demo-web-2"]}
+
+
+def test_running_without_image_of_a_project_without_containers_is_empty(daemon):
+    assert running_without_image("demo") == {}
+
+
+def test_an_image_inspect_failure_other_than_a_missing_image_raises(daemon, monkeypatch):
+    daemon["containers"] = [_container("demo-web-1", "web")]
+    real = docker_containers._run
+
+    def run(cmd, capture=False, check=True, **kwargs):
+        if cmd[:3] == ["docker", "image", "inspect"]:
+            return MagicMock(returncode=1, stdout="", stderr="Cannot connect to the daemon\n")
+        return real(cmd, capture=capture, check=check, **kwargs)
+    monkeypatch.setattr(docker_containers, "_run", run)
+    with pytest.raises(DockerError, match="Cannot connect"):
+        project_containers("demo")
+    with pytest.raises(DockerError, match="Cannot connect"):
+        running_without_image("demo")
 
 
 def test_docker_failure_is_not_an_empty_answer(monkeypatch):

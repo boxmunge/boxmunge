@@ -83,6 +83,42 @@ def test_a_later_start_of_an_unchanged_project_goes_ahead(box) -> None:
     assert sent == []
 
 
+def test_no_start_builds_an_image(box) -> None:
+    """A start runs the images its deploy built and decided users from; a
+    rebuild would start an image no deploy vetted, and on the containerd
+    image store take a running container's image away."""
+    paths, _, up, _, _ = box
+    _deploy(paths)
+    _restart(paths)
+    assert [c.kwargs["build"] for c in up.call_args_list] == [False, False]
+
+
+def test_a_running_container_whose_image_is_gone_is_recreated(box, monkeypatch) -> None:
+    paths, _, up, _, _ = box
+    _deploy(paths)
+    up.reset_mock()
+    monkeypatch.setattr("boxmunge.docker_containers.running_without_image",
+                        lambda project_name: {"web": ["shop-web-1"]})
+    _restart(paths)
+    first, second = up.call_args_list
+    assert (first.kwargs["force_recreate"], first.kwargs["services"]) == (False, None)
+    assert (second.kwargs["force_recreate"], second.kwargs["services"]) == (True, ["web"])
+    assert second.kwargs["build"] is False
+    log = paths.log_file.read_text()
+    assert "shop-web-1" in log and "no longer has" in log
+
+
+def test_a_one_service_start_recreates_only_that_service(box, monkeypatch) -> None:
+    paths, _, up, _, _ = box
+    _deploy(paths)
+    up.reset_mock()
+    monkeypatch.setattr("boxmunge.docker_containers.running_without_image",
+                        lambda project_name: {"web": ["shop-web-1"], "db": ["shop-db-1"]})
+    compose_up_checked(paths, NAME, component="restore", compose_files=["compose.yml"],
+                       services=["db"])
+    assert [c.kwargs["services"] for c in up.call_args_list] == [["db"], ["db"]]
+
+
 def _refused(box, match: str) -> None:
     paths, _, up, start, sent = box
     up.reset_mock()

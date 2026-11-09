@@ -1269,6 +1269,25 @@ Pick one: declare in manifest, restructure the conflict away, or switch the serv
 
 ---
 
+### "the local image store no longer has the image" a container was created from
+
+`check`, `security scan`, `container-update` or `resume` fails with this for a project on a
+box that uses Docker's containerd image store. A build replaced the image the container's
+name points at while the container kept running: Docker names a build by its image index,
+which a new provenance attestation changes even when every layer came from cache, and
+Compose, which compares the image's platform manifest, left the container as it was. Then
+nothing named the old index, so Docker dropped it. Before 0.11.3 every upgrade restart did
+this, because it rebuilt each project's `build:` services; a `docker compose build` by hand
+does it too.
+
+The project's next start recreates a running container like this from the image its name
+points at (the same image, which is why Compose left it): `prod-deploy <project>`, or the
+next upgrade's restart. The start logs a warning naming the container. A stopped one is not
+recreated; the **supervisor** removes it (`docker rm <container>`) and the next start
+creates it again.
+
+---
+
 ### Smoke script fails after upgrade with "permission denied" on `ping` or `traceroute`
 
 v0.5 hardening drops `NET_RAW` from every container by default — so `ping`, `traceroute`, and a handful of HTTP probe libraries that fall back to ICMP will fail with `Operation not permitted`. Most apps do not need `NET_RAW`; if your smoke script genuinely does, opt back in by adding to the project manifest:
@@ -1788,7 +1807,10 @@ How an upgrade is applied and undone:
    before v0.9.3); one it cannot re-own is printed as `FAIL` with the `chown` to run, and does
    not stop the upgrade. It then migrates manifests and regenerates every project's Caddy site
    and compose overlay, project by project under that project's lock, reloads Caddy and
-   restarts projects.
+   restarts projects. A restart starts the images the project's last deploy built: it
+   never rebuilds a `build:` service, so an upgrade cannot put a build on the box that no
+   deploy scanned or decided users for. (An image that is missing is built, as when an
+   upgrade from 0.10 renames a project's built images.)
    Three kinds of project are left exactly as they are (not migrated, regenerated or
    restarted), reported as `LEFT AS IS` or `Skipped (busy)`, alerted, and do not fail the
    upgrade: one with a release staged by boxmunge 0.10.1 (one high-priority alert per project;

@@ -328,7 +328,7 @@ def _start_and_verify(project_name: str, paths: BoxPaths, manifest: dict,
         # A quarantine's fix starts only the scanned images (no pull, no build).
         compose_up_checked(paths, project_name, component=component,
                            compose_files=compose_files, record=True, deploying=True,
-                           build=False, txn=txn, pinned=clearance is not None)
+                           txn=txn, pinned=clearance is not None)
     except (DockerError, BindSourceError, RunAsError, ComposeResolveError, RemapError,
             ComposeError, OSError) as e:
         print(f"  ERROR: {e}", file=sys.stderr)
