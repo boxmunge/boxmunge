@@ -1,26 +1,19 @@
 """The /v1/admin/stats HTML page: daily checks per version, recent failure reports.
 
-Plain server-rendered HTML with inline CSS, no scripts. Every stored string
-(failure reports carry client-supplied text) is escaped.
+Plain server-rendered HTML in the admin page shell (same-origin stylesheet,
+no scripts). Every stored string (failure reports carry client-supplied
+text) is escaped.
 """
 
 from html import escape
+
+from admin_pages import document
 
 NOTE = ("Counts are /v1/check requests, not unique boxes: one box checks about 4 times "
         "a day. A version marked unlisted is not in releases.json (a dev build or a "
         "dropped release); the version \"unlisted\" collects the overflow beyond the "
         "per-day cap on distinct versions. Versions and failure details are "
         "unverified client text: anyone can send them.")
-
-STYLE = """
-body{font:14px/1.4 system-ui,sans-serif;margin:1.5rem;color:#222;background:#fff}
-table{border-collapse:collapse;margin:.5rem 0 1.5rem}
-th,td{border:1px solid #ccc;padding:.25rem .6rem;text-align:right}
-th{background:#f3f3f3}td.l,th.l{text-align:left}
-.note{max-width:60rem;color:#555}
-@media (prefers-color-scheme:dark){body{background:#181818;color:#ddd}
-th{background:#262626}th,td{border-color:#444}.note{color:#aaa}}
-"""
 
 
 def _cell(value: object, cls: str = "") -> str:
@@ -61,12 +54,7 @@ def _failures_table(failures: list[dict]) -> str:
 
 
 def render(stats: dict, failures: list[dict]) -> str:
-    return (
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-        "<meta name=\"robots\" content=\"noindex\"><title>boxmunge version-check stats</title>"
-        f"<style>{STYLE}</style></head><body>"
+    return document("boxmunge version-check stats", (
         f"<h1>Checks per version, {escape(stats['since'])} to {escape(stats['until'])}</h1>"
         f"<p class=\"note\">{escape(NOTE)}</p>{_checks_table(stats)}"
-        f"<h1>Recent failure reports ({len(failures)})</h1>{_failures_table(failures)}"
-        "</body></html>")
+        f"<h1>Recent failure reports ({len(failures)})</h1>{_failures_table(failures)}"))

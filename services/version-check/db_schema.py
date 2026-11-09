@@ -13,6 +13,7 @@ version (require_current), so a slow migration of a large table can never
 be cut short by a worker's busy or boot timeout.
 """
 
+import secrets
 import sqlite3
 import sys
 import time
@@ -81,7 +82,46 @@ def _failure_detail(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE failures ADD COLUMN detail TEXT")
 
 
-MIGRATIONS = (_baseline, _reporter_identity, _failure_detail)
+def _admin_passkey(conn: sqlite3.Connection) -> None:
+    """The admin pages' passkey, its ceremonies' challenges, and the session key.
+
+    One credential at most (slot is always 1). code_mac is an HMAC of the
+    registration code it was registered under, never the code itself.
+    Challenges live here, not in memory, because each gunicorn worker serves
+    a different step of the same ceremony; `client` (the requester's
+    client_key) bounds how many one client can hold. The random session key
+    never leaves the database, so STATS_SECRET alone cannot sign a session.
+    """
+    conn.execute("""
+        CREATE TABLE admin_credential (
+            slot          INTEGER PRIMARY KEY CHECK (slot = 1),
+            credential_id BLOB NOT NULL,
+            public_key    BLOB NOT NULL,
+            sign_count    INTEGER NOT NULL,
+            code_mac      TEXT NOT NULL,
+            created_at    TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE admin_challenges (
+            challenge    BLOB PRIMARY KEY,
+            purpose      TEXT NOT NULL CHECK (purpose IN ('register', 'login')),
+            client       TEXT NOT NULL,
+            expires_unix INTEGER NOT NULL
+        )
+    """)
+    conn.execute("CREATE INDEX admin_challenges_by_client ON admin_challenges (client)")
+    conn.execute("""
+        CREATE TABLE admin_session_key (
+            slot INTEGER PRIMARY KEY CHECK (slot = 1),
+            key  BLOB NOT NULL
+        )
+    """)
+    conn.execute("INSERT INTO admin_session_key (slot, key) VALUES (1, ?)",
+                 (secrets.token_bytes(32),))
+
+
+MIGRATIONS = (_baseline, _reporter_identity, _failure_detail, _admin_passkey)
 SCHEMA_VERSION = len(MIGRATIONS)
 
 

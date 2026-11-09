@@ -126,3 +126,16 @@ class TestCheckCounter:
         counter = CheckCounter(tmp_path / "absent" / "checks.db", flush_interval=60,
                                max_pending=10, clock=FakeClock())
         counter.flush()  # would raise if it tried to open the missing directory
+
+
+class TestExhausted:
+    def test_reports_a_used_up_window_without_counting(self):
+        now = [0.0]
+        limiter = RateLimiter(2, 10, 100, clock=lambda: now[0])
+        assert not limiter.exhausted("a")
+        limiter.allow("a")
+        assert not limiter.exhausted("a")
+        limiter.allow("a")
+        assert limiter.exhausted("a") and not limiter.exhausted("b")
+        now[0] = 10.0
+        assert not limiter.exhausted("a")

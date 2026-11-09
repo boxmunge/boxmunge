@@ -5,7 +5,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --require-hashes -r requirements.txt
 
-COPY app.py db_schema.py failure_store.py release_catalog.py request_limits.py stats_page.py ./
+COPY admin_auth.py admin_pages.py app.py db_schema.py failure_store.py passkey_routes.py \
+     release_catalog.py request_limits.py stats_page.py webauthn_store.py ./
 COPY releases.json .
 COPY static/ static/
 
