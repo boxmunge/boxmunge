@@ -17,7 +17,8 @@ from boxmunge.commands.security_resume import security_resume_locked
 from boxmunge.commands.security_scan_core import scan_one_project
 from boxmunge.cve import kev_refresh
 from boxmunge.cve.kev import KevCatalog
-from boxmunge.cve.kev_refresh import refresh_from
+# Imported before conftest's autouse stub replaces the module attribute.
+from boxmunge.cve.kev_refresh import refresh_from, refresh_kev
 from boxmunge.cve.kev_withdrawals import load_withdrawals
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.cve.scanner import ScannerError
@@ -179,3 +180,62 @@ def test_the_deploy_gate_holds_a_release_that_still_has_the_cve(tmp_path, monkey
     assert "boxmunge security resume demo" in text
     gate_box.findings.clear()  # a release without the CVE is a fix
     assert gate.clear_release(paths, production_target(paths, "demo"), MANIFEST)
+
+
+# ---- through the fleet scan: the withdrawing run never reaches 'demo' ----
+
+
+def _fleet(paths, monkeypatch, ids: list[str], args: list[str]) -> int:
+    """One nightly run: refresh KEV from MIRROR serving ``ids``, then scan."""
+    from boxmunge.commands import security_actions, security_kev
+    from boxmunge.cve.kev import load_kev
+
+    paths.config_file.write_text(paths.config_file.read_text() + f"kev:\n  sources: [{MIRROR}]\n")
+    body = json.dumps({"dateReleased": datetime.now(timezone.utc).isoformat(),
+                       "vulnerabilities": [{"cveID": c} for c in ids]}).encode()
+    monkeypatch.setattr(kev_refresh, "_open", lambda req: _Resp(body))
+    monkeypatch.setattr(security_kev, "refresh_kev", refresh_kev)
+    monkeypatch.setattr(security_kev, "load_kev", load_kev)
+    monkeypatch.setattr(security_scan_core, "load_kev", load_kev)
+    monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
+    rc = security_actions.cmd_security_scan(args, paths)
+    paths.config_file.write_text(paths.config_file.read_text().split("kev:\n")[0])
+    return rc
+
+
+@pytest.fixture
+def fleet_box(tmp_path, monkeypatch):
+    """'demo' quarantined for _CVE (balanced) and 'other', both registered;
+    the cache still lists _CVE: the next refresh withdraws it."""
+    paths = make_box(tmp_path, projects=("demo", "other"), security={"posture": "balanced"})
+    monkeypatch.setattr(security_scan_core, "scan_image",
+                        lambda ref, timeout: scan_result(ref, [CRIT]))
+    monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)
+    monkeypatch.setattr(quarantine_lift, "prepare_compose_override",
+                        lambda p, m, component=None: None)
+    paths.docker = Docker(monkeypatch)
+    seed_quarantine(paths)
+    _catalog(paths, _ids(1400) + [_CVE])
+    return paths, Pushover(monkeypatch, paths)
+
+
+def test_a_project_locked_during_the_withdrawing_run_is_held_next_night(
+        fleet_box, monkeypatch) -> None:
+    from boxmunge.fileutil import project_lock
+    paths, pushover = fleet_box
+    with project_lock("demo", paths):
+        _fleet(paths, monkeypatch, _ids(1400), [])  # withdraws _CVE; 'demo' skipped
+    assert _CVE in load_withdrawals(paths) and is_quarantined("demo", paths)
+    _fleet(paths, monkeypatch, _ids(1400), [])  # next night: nothing withdrawn now
+    assert is_quarantined("demo", paths)
+    assert "compose_up" not in paths.docker.calls
+    assert _sent(pushover, HELD) and not _sent(pushover, LIFTED)
+
+
+def test_a_run_scanning_only_another_project_then_a_nightly_scan_holds(
+        fleet_box, monkeypatch) -> None:
+    paths, pushover = fleet_box
+    _fleet(paths, monkeypatch, _ids(1400), ["other"])  # refreshes KEV for the whole box
+    _fleet(paths, monkeypatch, _ids(1400), [])
+    assert is_quarantined("demo", paths)
+    assert _sent(pushover, HELD) and not _sent(pushover, LIFTED)
