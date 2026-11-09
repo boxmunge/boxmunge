@@ -20,6 +20,7 @@ import yaml
 
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.git_layout import links_into_repo
 from boxmunge.release_target import ReleaseTarget
 
 _BUILD_TIMEOUT = 1800
@@ -34,9 +35,14 @@ _BASE_UNREADABLE = "failed to resolve source metadata"
 def local_base_builds(target: ReleaseTarget) -> frozenset[str]:
     """The services whose compose.yml, as written, sets `build.pull: false`.
     Compose's resolved model drops a false `pull`, so the file itself is
-    read (validated already; a service from an include: is not covered)."""
+    read (validated already; a service from an include: is not covered).
+    A git project's compose.yml is a link into its checkout (git_layout);
+    any other link is refused."""
     release = target.compose.project_directory or target.compose.cwd
-    doc = yaml.safe_load(read_text_nofollow(release / "compose.yml")) or {}
+    path = release / "compose.yml"
+    if links_into_repo(release, "compose.yml"):
+        path = path.resolve()
+    doc = yaml.safe_load(read_text_nofollow(path)) or {}
     services = doc.get("services") or {}
     return frozenset(n for n, s in services.items() if isinstance(s, dict)
                      and isinstance(s.get("build"), dict) and s["build"].get("pull") is False)

@@ -126,3 +126,17 @@ def test_every_service_needing_a_declaration_is_listed() -> None:
         di.decide_users(services, facts, {"project": "shop", "services": {"web": {}}})
     assert len(e.value.problems) == 3 and "merge" in e.value.problems[2]
     assert "redis:7" in e.value.problems[0] and "postgres:16" in e.value.problems[1]
+
+
+def test_a_git_projects_compose_link_into_its_checkout_is_read(paths, tmp_path) -> None:
+    pdir = paths.project_dir("app")
+    (pdir / "repo").mkdir(parents=True)
+    (pdir / "repo" / "compose.yml").write_text(
+        "services:\n  tool:\n    build:\n      context: .\n      pull: false\n")
+    (pdir / "compose.yml").symlink_to("repo/compose.yml")
+    assert deploy_build.local_base_builds(production_target(paths, "app")) == {"tool"}
+    (pdir / "compose.yml").unlink()
+    (tmp_path / "elsewhere.yml").write_text("services: {}\n")
+    (pdir / "compose.yml").symlink_to(tmp_path / "elsewhere.yml")
+    with pytest.raises(OSError):
+        deploy_build.local_base_builds(production_target(paths, "app"))
