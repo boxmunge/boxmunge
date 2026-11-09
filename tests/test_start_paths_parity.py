@@ -139,8 +139,7 @@ def test_a_record_the_overlay_replays_is_not(stale) -> None:
     assert stale_overlay_problem(paths, NAME) is None
 
 
-def test_only_a_user_boxmunge_sets_is_compared_with_a_container() -> None:
-    paths = SimpleNamespace()
+def test_only_a_user_boxmunge_sets_is_compared_with_a_container(paths) -> None:
     with patch("boxmunge.overlay_users._record",
                lambda p, n: {"app": "10002:10002", "db": None}):
         assert stale_containers_problem(paths, NAME, {"app": "10002:10002",
