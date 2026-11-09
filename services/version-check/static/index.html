@@ -89,16 +89,19 @@ boxmunge server-setup you@your-server.example.com --email you@example.com</code>
     <p>Encrypted backups of the service's database can keep copies of these
        for longer than 90 days, until the backups themselves expire.</p>
 
-    <p>Your full IP address is never stored by this service: it is held
-       only in the service's memory, to rate-limit requests, and never
-       written to its database or its own logs.</p>
+    <p>Your full IP address is never stored in the service's database. It
+       is held in the service's memory to rate-limit requests, and it is
+       written to two request logs.</p>
 
-    <p>Separately, the web server in front of this service keeps an access
-       log of every request, with the full IP address, the time, the URL
-       requested (which includes the version) and the User-Agent. It is there
-       for abuse protection: the server's intrusion prevention (CrowdSec)
-       reads it to block attackers. The log is rotated by size, so old
-       entries are discarded as new ones arrive.</p>
+    <p>Request logs: the web server in front of this service (Caddy) and the
+       service itself each log every request, with the full IP address, the
+       time, the URL requested (which includes the version) and the
+       User-Agent. They are there for operations
+       and abuse protection: the server's intrusion prevention (CrowdSec)
+       reads the web server's log to block attackers. Both logs are rotated by
+       size under Docker's log settings, up to five files of 50&nbsp;MB each
+       per log, the oldest discarded as new entries arrive; how long an entry
+       lasts depends on traffic, not on a fixed number of days.</p>
 
     <p>Why prefixes: boxmunge is in early beta, and its maintainer uses them
        to see which networks still run an old version and nudge those users

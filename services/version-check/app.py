@@ -26,7 +26,8 @@ failure_store. The database schema changes only through db_schema migrations,
 run once before gunicorn starts.
 
 Privacy: the database holds a client's network prefix (prefix_store), never
-its address; the address itself lives only in memory, for rate limiting.
+its address. The address is held in memory for rate limiting and written
+to the request logs (gunicorn's access log here, Caddy's in front).
 Stored rows expire on a schedule (retention).
 
 Source: https://github.com/boxmunge/boxmunge/tree/main/services/version-check

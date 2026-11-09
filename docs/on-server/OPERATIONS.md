@@ -1936,9 +1936,11 @@ prefix it came from (IPv4 /24, IPv6 /48), never the full address: for a check, w
 version reported and the date; for a failure report, with the report. Both are deleted
 after 90 days, though encrypted backups of the service's database can hold copies until
 the backups expire. It also keeps a daily count of checks per version. During the beta
-the maintainer uses the prefixes to see which networks still run an old release. The web
-server in front of the service keeps a full-IP access log for abuse protection (CrowdSec
-reads it), rotated by size. The public statement is at <https://boxmunge.dev/#privacy>.
+the maintainer uses the prefixes to see which networks still run an old release. Two
+request logs keep the full IP address of every request, for operations and abuse
+protection: the access log of the web server in front of the service (CrowdSec reads it)
+and the service's own container log (gunicorn's access log). Both are rotated by size
+under Docker's log settings, at most five 50 MB files each. The public statement is at <https://boxmunge.dev/#privacy>.
 
 The box's other outbound requests go to public sources (GitHub releases, CISA's list of
 exploited vulnerabilities, OS and image registries) and to alert channels the operator set

@@ -347,19 +347,22 @@ class TestPrivacyStatement:
         assert prefix_store.RETENTION_DAYS == 90
         assert "/24" in text and "/48" in text
         assert "90 days" in text
-        assert "never stored" in text
+        assert "never stored in the service's database" in text
 
     def test_states_that_the_web_server_logs_full_addresses(self):
-        assert "access log" in self._text()
+        assert "Request logs:" in self._text()
         assert "full IP address" in self._text()
 
     def test_no_longer_claims_no_addresses_are_stored(self):
         assert "No IP addresses" not in self._text()
 
-    def test_the_service_keeps_no_request_log_of_its_own(self):
-        """The full address is in Caddy's access log only; gunicorn's would
-        be a second, unannounced copy."""
+    def test_states_that_both_request_logs_keep_full_addresses(self):
+        """gunicorn's access log, like Caddy's, records full addresses; the
+        statement must name both and their rotation."""
         cmd = next(line for line in (SERVICE_DIR / "Dockerfile").read_text().splitlines()
                    if line.startswith("CMD "))
-        assert "access-logfile" not in cmd
-
+        assert "--access-logfile -" in cmd
+        text = self._text()
+        assert "never stored in the service's database" in text
+        assert "the service itself each log every request, with the full IP address" in text
+        assert "five files of 50&nbsp;MB" in text

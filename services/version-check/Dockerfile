@@ -20,7 +20,7 @@ EXPOSE 8147
 # Migrate the database (and run the first sweep) once, before any worker
 # starts: workers only check the schema version. Not --preload: per-worker
 # state (check counter, sweeper thread) must be created after the fork.
-# No gunicorn access log: it would be a second copy of every client's full
-# address. The Caddy proxy's access log (read by CrowdSec) is the only one,
-# as the privacy statement in static/index.html says.
-CMD ["sh", "-c", "python db_schema.py /data/checks.db && exec gunicorn --bind 0.0.0.0:8147 --workers 2 'app:create_app()'"]
+# gunicorn's access log (stdout, so the container log) records each
+# request's full client address, like the Caddy proxy's access log; the
+# privacy statement in static/index.html says so.
+CMD ["sh", "-c", "python db_schema.py /data/checks.db && exec gunicorn --bind 0.0.0.0:8147 --workers 2 --access-logfile - 'app:create_app()'"]
