@@ -14,6 +14,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from boxmunge.commands.confirm import confirm
 from boxmunge.built_images import remove_built_images
 from boxmunge import docker_containers
 from boxmunge.data_helper import container_owned_dirs, empty_under
@@ -78,9 +79,7 @@ def run_project_delete(
         print("  - Remove Caddy site config")
         print("  - Remove health, deploy, pause, quarantine, scan, and update state")
         print("  - Deregister from project allowlist")
-        response = input("\nProceed? [y/N] ")
-        if response.lower() != "y":
-            print("Aborted.")
+        if not confirm("project-delete"):
             return 1
 
     try:

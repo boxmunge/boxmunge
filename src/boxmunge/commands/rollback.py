@@ -14,6 +14,7 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from boxmunge.commands.confirm import confirm
 from boxmunge.commands.deploy import (
     replace_release, run_pre_deploy_hook,
 )
@@ -154,9 +155,7 @@ def run_rollback(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
         print("  Data: nothing to restore (backup.type: none)")
 
     if not yes:
-        response = input("\nProceed? [y/N] ")
-        if response.lower() != "y":
-            print("Aborted.")
+        if not confirm("rollback"):
             return 1
 
     return _locked(project_name, paths, target)

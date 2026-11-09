@@ -101,6 +101,8 @@ These commands prompt for confirmation before executing. Use `--yes` only when y
 
 Do not pass `--yes` reflexively. Confirm the target project and the effect before proceeding.
 
+The prompt needs a terminal. Over `ssh deploy@<host> <command>` without `-t` there is none, so these commands refuse before changing anything and ask for `--yes`; they print what they would do first, so read that, then run the same command again with `--yes` added.
+
 ### Flags are strict
 
 - `help <command>` or `<command> --help` shows a command's usage. Neither runs the command.

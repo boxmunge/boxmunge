@@ -172,7 +172,8 @@ class TestResumeLock:
         ps = _resume_patches(paths)
         mocks = [p.start() for p in ps]
         try:
-            with patch("builtins.input", quarantine_then_confirm):
+            with patch("builtins.input", quarantine_then_confirm), \
+                    patch("sys.stdin", **{"isatty.return_value": True}):
                 rc = resume_cmd.run_resume(NAME, paths, yes=False)
         finally:
             for p in ps:

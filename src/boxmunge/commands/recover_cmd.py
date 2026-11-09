@@ -21,6 +21,7 @@ import sys
 from datetime import datetime, timezone
 from enum import Enum
 
+from boxmunge.commands.confirm import confirm
 from boxmunge.bind_sources import BindSourceError
 from boxmunge.caddy import prepare_caddy_config
 from boxmunge.compose import prepare_compose_override
@@ -148,9 +149,7 @@ def run_recover(project_name: str, paths: BoxPaths, yes: bool = False) -> int:
             print(f"  - Stopped for: {reason}")
         print("  - Restart the SAME build (no image pull, no rebuild)")
         print("  - Restore Caddy routing + run smoke test")
-        response = input("\nProceed? [y/N] ")
-        if response.lower() != "y":
-            print("Aborted.")
+        if not confirm("recover"):
             return 1
 
     try:
