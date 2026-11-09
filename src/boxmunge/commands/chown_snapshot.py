@@ -23,6 +23,7 @@ from boxmunge.docker_containers import running_by_service
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.pause import awaiting_deploy
 from boxmunge.paths import BoxPaths
+from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.pending_snapshot import age, pending_for_live
 from boxmunge.release_txn import open_install_reason
 
@@ -69,8 +70,8 @@ def _why_stopped(paths: BoxPaths, project: str, backup_service: str) -> tuple[st
     if block is not None and block.reason is BlockReason.PAUSED and \
             awaiting_deploy(project, paths):
         return ("the project is paused, awaiting a deploy (resume --no-start)",
-                f"deploy it (`prod-deploy {project}`; the pause ends once it starts), then "
-                f"run data chown again")
+                f"deploy it (`{redeploy_command(paths, project)}`; the pause ends once it "
+                f"starts), then run data chown again")
     if block is not None and block.reason is BlockReason.PAUSED:
         return ("the project is paused",
                 f"run `boxmunge resume {project}`, then run data chown again")
@@ -79,8 +80,8 @@ def _why_stopped(paths: BoxPaths, project: str, backup_service: str) -> tuple[st
                 f"fix the cause and run `boxmunge recover {project}`, then run data chown "
                 f"again")
     return (f"{backup_service} is stopped",
-            f"start {backup_service} (`prod-deploy {project}` does), then run data chown "
-            f"again")
+            f"start {backup_service} (`{redeploy_command(paths, project)}` does), then run "
+            f"data chown again")
 
 
 def _take(paths: BoxPaths, project: str, manifest: dict, compose_file: Path | None,

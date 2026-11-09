@@ -19,6 +19,7 @@ import yaml
 
 from boxmunge.fs_nofollow import read_text_nofollow
 from boxmunge.pause import awaiting_deploy
+from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.run_as import RunAsError, read_users
 
 if TYPE_CHECKING:
@@ -67,8 +68,8 @@ def stale_containers_problem(paths: BoxPaths, project: str,
         return None
     return (f"its stopped containers of {', '.join(wrong)} were created before the users "
             f"record changed (data chown writes it), so starting them would run the old "
-            f"user over data the new one owns. Run `prod-deploy {project}`, which "
-            f"recreates them")
+            f"user over data the new one owns. Run `{redeploy_command(paths, project)}`, "
+            f"which recreates them")
 
 
 def stale_overlay_problem(paths: BoxPaths, project: str) -> str | None:
@@ -94,7 +95,8 @@ def stale_overlay_problem(paths: BoxPaths, project: str) -> str | None:
         return None
     head = (f"{overlay.name} does not run {', '.join(wrong)}: the users record changed "
             f"after it was generated (data chown writes the record), so a start would "
-            f"run the old user over data the new one owns. Run `prod-deploy {project}`, "
+            f"run the old user over data the new one owns. Run "
+            f"`{redeploy_command(paths, project)}`, "
             f"which generates it again")
     if awaiting_deploy(project, paths):
         return f"{head} (and ends the pause handed to it)"
