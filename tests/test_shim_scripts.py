@@ -20,6 +20,9 @@ import pytest
 
 TESTS = Path(__file__).resolve().parent
 REPO = TESTS.parent
+# Each script is tens of seconds of bash: start them first in a parallel run.
+pytestmark = pytest.mark.runs_long
+
 SCRIPTS = sorted([TESTS / "test_boxmunge_upgrade_shim.sh", *(TESTS / "shim").glob("test_*.sh")])
 
 

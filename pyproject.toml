@@ -33,6 +33,7 @@ markers = [
     "integration: integration tests requiring Docker",
     "userns_dind: needs a daemon the test can remap and restart (the privileged dind CI job)",
     "decides_users: runs deploy's image build, user decision and storage steps (unit tier stubs them otherwise)",
+    "runs_long: takes tens of seconds; collected first, so a parallel (-n) run starts it early instead of finishing on it",
 ]
 testpaths = ["tests"]
 pythonpath = ["src"]
