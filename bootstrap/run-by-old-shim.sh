@@ -11,10 +11,12 @@
 # legacy upgrade lock, upgrade-state/upgrade.lock, on descriptor 9
 # (`exec 9>"$LOCK_FILE"; flock -n 9`), which install.sh, its child, inherits.
 # So the test is: descriptor 9 here is that file (a regular file, not reached
-# through a link), and a fresh open of it cannot take the lock, because the
-# shim's open holds it. A run by hand cannot pass it: sudo closes inherited
-# descriptors, and an upgrade or health check running alongside holds the lock
-# on a descriptor of its own, not on this process's 9.
+# through a link); a fresh open of it cannot take the lock, so someone holds
+# it; and flock on descriptor 9 itself succeeds, so the holder is this
+# process's own open of it, which it shares with the shim that made it. A run
+# by hand cannot pass: sudo closes inherited descriptors, and a descriptor 9
+# opened on the lock by anything else is a different open, which an upgrade or
+# health check holding the lock alongside blocks.
 set -euo pipefail
 
 BOXMUNGE_ROOT="${BOXMUNGE_ROOT:-/opt/boxmunge}"
@@ -37,8 +39,16 @@ except OSError as e:
 try:
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except BlockingIOError:
-    print(1)
+    pass
 else:
-    # Open on the lock but not holding it: not a shim mid-upgrade.
-    print(0)
+    print(0)  # nobody holds it: not a shim mid-upgrade
+    sys.exit(0)
+try:
+    # Succeeds only on the open that holds the lock; it is not released here
+    # (the shim's descriptor keeps it after this process exits).
+    fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print(0)  # someone else holds it, on an open that is not this one
+else:
+    print(1)
 PY

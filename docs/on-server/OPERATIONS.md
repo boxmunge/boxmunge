@@ -2044,9 +2044,9 @@ it knows; shims up to 0.10.1 do not know `requirements-mcp.txt`. From 0.11.3 on,
 own `install.sh`, which shims from 0.7.0 run before the venv swap, installs it into the new
 environment. A shim up to 0.10.0 runs `install.sh` without `--upgrade-shim`; `install.sh`
 recognises it by the upgrade lock it holds and still leaves the previous release, the rollback
-target, alone. If pip fails there (a network blip, a full disk), `install.sh` exits 75 and the old
-shim blocklists the release as `system_upgrade_failed: install_sh_exit_75`, with the previous
-release still live. Fix the cause, then run
+target, alone. If pip fails there (a network blip, a full disk), on the hop from 0.10.1 or from an
+older shim alike, `install.sh` exits 75 and the old shim blocklists the release as
+`system_upgrade_failed: install_sh_exit_75`, with the previous release still live. Fix the cause, then run
 `sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.3` (for the release concerned) and
 `upgrade` again. A box upgraded to 0.11.0, 0.11.1 or 0.11.2 by an older shim, or to any release by
 a 0.6.x shim (which never runs `install.sh`), comes up without MCP.

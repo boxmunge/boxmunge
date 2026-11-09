@@ -72,6 +72,7 @@ def test_a_shim_holding_the_legacy_lock_on_descriptor_9_is_recognised(root: Path
     ("none", "held-elsewhere"),  # by hand, while an upgrade or health check holds the lock
     ("other", "held-elsewhere"),  # descriptor 9 open on something else
     ("lock", "free"),            # open on the lock, which nobody holds
+    ("lock", "held-elsewhere"),  # open on the lock, which another open holds
 ])
 def test_anything_else_is_a_run_by_hand(root: Path, fd9: str, hold: str) -> None:
     result = _detect(root, fd9, hold)
