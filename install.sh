@@ -541,9 +541,15 @@ fi
 
 # The boxmunge-system build failed (refresh_system_container): everything
 # else is in place, so a fresh install or an operator's re-run stops here
-# with the rebuild to run. Under the upgrade shim it only warned.
+# with the rebuild to run. Under the upgrade shim it only warned. Either way
+# the installer fingerprint goes first, so the next upgrade re-runs install.sh
+# to retry the build.
 fail_if_system_image_stale() {
-    [[ "${SYSTEM_IMAGE_STALE}" -eq 1 && "${FROM_UPGRADE_SHIM}" -eq 0 ]] || return 0
+    [[ "${SYSTEM_IMAGE_STALE}" -eq 1 ]] || return 0
+    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/installer-fingerprint.sh" forget
+    echo "  Installer fingerprint not recorded: the next upgrade re-runs install.sh" \
+         "to retry the boxmunge-system build"
+    [[ "${FROM_UPGRADE_SHIM}" -eq 0 ]] || return 0
     echo "" >&2
     echo "ERROR: boxmunge is installed, but the boxmunge-system image did not build" \
          "(see the WARNING above), so backups, restores and data operations cannot" \
@@ -553,38 +559,11 @@ fail_if_system_image_stale() {
 }
 fail_if_system_image_stale
 
-# ---------------------------------------------------------------------------
-# Record the installer fingerprint (install.sh and the files it installs
-# from, as applied) so the upgrade shim can detect when a future release
-# ships an installer that differs from the one this host already ran, and
-# re-invoke install.sh automatically before flipping to the new venv. Without this, system-level
-# changes (new apt packages, new systemd units, install.sh-only migrations)
-# silently require a manual `bash boxmunge-install.sh` after every upgrade.
-# Written last so a partial install (which exits earlier under `set -e`)
-# leaves the prior fingerprint in place — the shim will then re-run on the
-# next upgrade attempt.
-# ---------------------------------------------------------------------------
-# Root-only: deploy can write state/, where releases up to 0.11.3 kept it
-# (and a link planted at the temp file there would have been written through).
-INSTALLER_HASH_FILE="${BOXMUNGE_ROOT}/upgrade-root/installer.sha256"
-rm -f "${BOXMUNGE_ROOT}/state/installer.sha256"
-if [[ -L "${BOXMUNGE_ROOT}/upgrade-root" ]]; then
-    echo "ERROR: ${BOXMUNGE_ROOT}/upgrade-root is a symlink; remove it and run install.sh again" >&2
-    exit 1
-fi
-install -d -m 700 -o root -g root "${BOXMUNGE_ROOT}/upgrade-root"
-if [[ "${SYSTEM_IMAGE_STALE}" -eq 1 ]]; then
-    rm -f "${INSTALLER_HASH_FILE}"
-    echo "  Installer fingerprint not recorded: the next upgrade re-runs install.sh" \
-         "to retry the boxmunge-system build"
-else
-    # Covers install.sh and the files it installs from: a release that changes
-    # only bootstrap/sshd-hardening.sh, or only system/Dockerfile, must re-run it
-    # too. The shim computes the same fingerprint over a new bundle
-    # (tests/test_installer_fingerprint.py).
-    (cd "${SCRIPT_DIR}" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' -o -path './system/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}' > "${INSTALLER_HASH_FILE}.tmp"
-    chmod 0600 "${INSTALLER_HASH_FILE}.tmp"
-    mv -f "${INSTALLER_HASH_FILE}.tmp" "${INSTALLER_HASH_FILE}"
+# Record the installer fingerprint last, so a partial install (which exits
+# earlier under `set -e`) leaves the prior one in place and the shim re-runs
+# install.sh on the next upgrade (see bootstrap/installer-fingerprint.sh).
+if [[ "${SYSTEM_IMAGE_STALE}" -eq 0 ]]; then
+    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/installer-fingerprint.sh" record "${SCRIPT_DIR}"
 fi
 
 echo ""

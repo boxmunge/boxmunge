@@ -132,12 +132,50 @@ run_shim_within 120 "$BOXMUNGE_ROOT/upgrade-root/installer.sha256" target 1.5.0
 expect 1 "non-regular file" "a FIFO at upgrade-root/installer.sha256 is refused, not blocked on"
 drop_root
 
-# --- install.sh records it there, root-only -----------------------------------
+# --- install.sh records it there (bootstrap/installer-fingerprint.sh) --------
 
-grep -q 'INSTALLER_HASH_FILE="${BOXMUNGE_ROOT}/upgrade-root/installer.sha256"' "$REPO_DIR/install.sh" \
-    && pass "install.sh records the fingerprint in upgrade-root/" || fail "install.sh does not record it in upgrade-root/"
-grep -q 'rm -f "${BOXMUNGE_ROOT}/state/installer.sha256"' "$REPO_DIR/install.sh" \
-    && pass "install.sh removes the old deploy-writable copy" || fail "install.sh leaves state/installer.sha256"
+FINGERPRINT="$REPO_DIR/bootstrap/installer-fingerprint.sh"
+mode_of() { python3 -c 'import os, stat, sys; print(oct(stat.S_IMODE(os.stat(sys.argv[1]).st_mode))[2:])' "$1"; }
+
+# Deploy can put anything at the old name, a directory included; install.sh
+# must not trip over it (a failed install.sh blocklists the release).
+box
+mkdir "$BOXMUNGE_ROOT/state/installer.sha256"
+RC=0
+OUT="$(bash "$FINGERPRINT" record "$RELEASE/boxmunge" 2>&1)" || RC=$?
+expect 0 "" "recording succeeds with a directory planted at state/installer.sha256"
+[[ "$(cat "$BOXMUNGE_ROOT/upgrade-root/installer.sha256")" == "$BUNDLE_HASH" ]] \
+    && pass "the fingerprint recorded is the one the shim computes" || fail "recorded: $(cat "$BOXMUNGE_ROOT/upgrade-root/installer.sha256" 2>&1)"
+[[ "$(mode_of "$BOXMUNGE_ROOT/upgrade-root")" == 700 && "$(mode_of "$BOXMUNGE_ROOT/upgrade-root/installer.sha256")" == 600 ]] \
+    && pass "upgrade-root/ is 0700 and the fingerprint 0600" \
+    || fail "modes: $(mode_of "$BOXMUNGE_ROOT/upgrade-root") $(mode_of "$BOXMUNGE_ROOT/upgrade-root/installer.sha256")"
+[[ -d "$BOXMUNGE_ROOT/state/installer.sha256" ]] && pass "the old name is left alone" || fail "the old name was touched"
+run_shim target 1.5.0
+expect 0 "install.sh unchanged" "the next upgrade of the same installer skips install.sh"
+RC=0
+OUT="$(bash "$FINGERPRINT" forget 2>&1)" || RC=$?
+expect 0 "" "forget succeeds"
+[[ ! -e "$BOXMUNGE_ROOT/upgrade-root/installer.sha256" ]] && pass "forget removes the fingerprint" || fail "fingerprint left"
+drop_root
+
+box
+ln -s "$(mktemp -d)" "$BOXMUNGE_ROOT/upgrade-root"
+RC=0
+OUT="$(bash "$FINGERPRINT" record "$RELEASE/boxmunge" 2>&1)" || RC=$?
+expect 1 "upgrade-root is a symlink" "a linked upgrade-root/ is refused"
+drop_root
+
+# install.sh forgets it (in fail_if_system_image_stale) before an incomplete
+# run can exit, and records it last.
+INSTALL_SH="$(cat "$REPO_DIR/install.sh")"
+forget_at="${INSTALL_SH%%installer-fingerprint.sh\" forget*}"
+stale_exit_at="${INSTALL_SH%%$'\n'fail_if_system_image_stale$'\n'*}"
+record_at="${INSTALL_SH%%installer-fingerprint.sh\" record*}"
+[[ "${#forget_at}" -lt "${#stale_exit_at}" && "${#stale_exit_at}" -lt "${#record_at}" && "${#record_at}" -lt "${#INSTALL_SH}" ]] \
+    && pass "install.sh forgets the fingerprint before the stale-image exit and records it at the end" \
+    || fail "install.sh does not call bootstrap/installer-fingerprint.sh in that order"
+[[ "$INSTALL_SH" != *"state/installer.sha256"* ]] && pass "install.sh no longer touches state/installer.sha256" \
+    || fail "install.sh still touches state/installer.sha256"
 
 rm -rf "$FIXTURE" "$RELEASE"
 finish
