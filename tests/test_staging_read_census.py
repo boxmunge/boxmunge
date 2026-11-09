@@ -94,7 +94,7 @@ def _rollback(box, seen):
     place_bundle(box.paths, timestamp=V3, files=PROD)
     snapshot = box.paths.project_backups("myapp") / "myapp-p1.tar.gz.age"
 
-    def backup(project, paths, kind=None, manifest=None):
+    def backup(project, paths, kind=None, manifest=None, compose_file=None):
         assert "POISON" not in str(manifest)
         snapshot.parent.mkdir(parents=True, exist_ok=True)
         snapshot.write_text("snapshot")

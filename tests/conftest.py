@@ -190,6 +190,9 @@ def fake_containers(request, monkeypatch) -> FakeContainers:
         # The legacy-stage evidence asks when production's containers were made.
         monkeypatch.setattr("boxmunge.docker_containers.created_times",
                             lambda project_name: {})
+        # Whether a data chown snapshot's service has run since (pending_snapshot).
+        monkeypatch.setattr("boxmunge.docker_containers.start_states",
+                            lambda project_name: {})
     return fake
 
 

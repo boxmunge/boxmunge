@@ -225,7 +225,7 @@ def _snapshot_production(paths: BoxPaths, project: str) -> str | None:
     """A new pre-deploy snapshot of the untouched production, with the
     manifest and compose file of the release its containers run (backup_source)."""
     from boxmunge.backup_source import backup_source
-    from boxmunge.commands.backup_cmd import backup_locked, list_snapshots
+    from boxmunge.commands.backup_cmd import take_snapshot
     source = backup_source(paths, project)
     if source.manifest is None:
         raise LegacyStageError(f"production cannot be backed up: {source.skip}")
@@ -236,17 +236,16 @@ def _snapshot_production(paths: BoxPaths, project: str) -> str | None:
         raise LegacyStageError(
             f"{project} is {block.reason.value}, so no pre-deploy snapshot of production can "
             f"be taken, and resuming it is refused while the stage is in place; use --discard")
-    before = {p.name for p in list_snapshots(paths, project)}
     print("  Taking pre-deploy snapshot...")
-    if backup_locked(project, paths, kind=BackupKind.PREDEPLOY, manifest=source.manifest,
-                     compose_file=source.compose_file) != 0:
+    rc, name = take_snapshot(project, paths, BackupKind.PREDEPLOY, source.manifest,
+                             source.compose_file)
+    if rc != 0:
         raise LegacyStageError("the pre-deploy snapshot failed (see above); without it a "
                                "rollback could not restore production's data")
-    new = [p.name for p in list_snapshots(paths, project) if p.name not in before]
-    if not new:
+    if name is None:
         raise LegacyStageError("the backup made no new pre-deploy snapshot; without one a "
                                "rollback could not restore production's data")
-    return new[0]
+    return name
 
 
 def _pairing_snapshot(paths: BoxPaths, project: str, ev: Evidence) -> str | None:

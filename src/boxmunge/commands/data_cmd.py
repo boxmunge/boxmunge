@@ -15,10 +15,14 @@ anonymous volume is left in place for the operator to remove once the
 redeployed service runs on the named one.
 
 `data chown <project> <service> <uid>:<gid>` is the one deliberate change of
-a service's data ownership: it stops the service, gives its read-write
-binds and named volumes to <uid>:<gid> through the helper, records that
-user, and leaves the service stopped for the deploy that runs it as that
-user (deploy refuses a user change over data the old user owns).
+a service's data ownership: it takes the project's backup snapshot while the
+service still runs, stops the service, gives its read-write binds and named
+volumes to <uid>:<gid> through the helper, records that user, and leaves the
+service stopped for the deploy that runs it as that user (deploy refuses a
+user change over data the old user owns). When the stopped service is the
+backup service, that deploy's dump has nothing to run in, so its pre-deploy
+step uses data chown's snapshot instead (pending_snapshot): a rollback of it
+restores the data from before the change.
 """
 from __future__ import annotations
 
@@ -27,7 +31,10 @@ from pathlib import Path
 import re
 import sys
 
+from boxmunge.backup import BackupKind, resolve_backup_service
+from boxmunge.backup_source import backup_source
 from boxmunge.bind_sources import BindSourceError, project_rel, source_kind
+from boxmunge.commands.backup_cmd import take_snapshot
 from boxmunge.commands.deploy_checks import (
     persistent, service_mounts, volume_name, writable_by_a_container,
 )
@@ -44,16 +51,22 @@ from boxmunge.fileutil import LockError, project_lock
 from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation
+from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
+from boxmunge.pending_snapshot import age, pending_for_live, record_pending
+from boxmunge.release import ReleaseStateError
 from boxmunge.release_target import production_target, resolved_services
 from boxmunge.run_as import (
     MAX_ID, SOURCE_CHOWN, RunAsError, ServiceUser, numeric_ids, read_users, write_users,
 )
+from boxmunge.state import StateError
 
 _VOLUME_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]{0,62}")
 _STOP_TIMEOUT = 15
 _USAGE = ("usage: boxmunge data adopt <project> <service>:<path> <name> | "
-          "boxmunge data chown <project> <service> <uid>:<gid>")
+          "boxmunge data chown <project> <service> <uid>:<gid> [--no-snapshot]")
+_TAKEN_BY = "data chown"
+_NO_SNAPSHOT_COST = "a rollback of the next deploy then cannot restore data"
 
 
 class DataError(Exception):
@@ -205,11 +218,80 @@ def _chown_mount(paths: BoxPaths, project: str, model: dict, m, ids: tuple[int, 
     return True
 
 
-def chown_locked(paths: BoxPaths, project: str, service: str, ids: tuple[int, int]) -> None:
-    """Stop the service, chown its persistent mounts to `ids`, record the
-    user. Caller holds the project lock. The service is left stopped: its
-    next start (the deploy) runs it as `ids`. Raises DataError, DockerError,
-    BindSourceError or RunAsError."""
+def _rw_sharer(services: dict, service: str, mounts: list) -> str | None:
+    """Another service that mounts `service`'s data (`mounts`) read-write,
+    and so can change it while `service` is stopped; None when none does."""
+    def overlaps(own, m) -> bool:
+        if own.kind == "volume":
+            return own.source == m.source
+        a, b = Path(str(own.source)), Path(str(m.source))
+        return a == b or a in b.parents or b in a.parents
+    for other, svc in sorted(services.items()):
+        for m in service_mounts(svc) if other != service else ():
+            if m.read_only or m.kind not in ("bind", "volume"):
+                continue
+            hit = next((own for own in mounts if own.kind == m.kind and overlaps(own, m)), None)
+            if hit is not None:
+                return f"{other} also mounts {hit.source} read-write"
+    return None
+
+
+def _snapshot_first(paths: BoxPaths, project: str, service: str, services: dict,
+                    mounts: list, no_snapshot: bool) -> str | None:
+    """Take the project's snapshot while `service` still runs; a failed one
+    refuses the chown. Returns its name when the next deploy is to use it:
+    `service` is the backup service (stopping it leaves that deploy's dump
+    nothing to run in) and no other service can write its data meanwhile.
+    The caller records it once the stop succeeded."""
+    taken = pending_for_live(paths, project)
+    if taken is not None:
+        print(f"  The snapshot {taken['name']}, taken {age(taken)} ago before an earlier "
+              f"ownership change, stays the next deploy's pre-deploy snapshot: "
+              f"{taken['service']} has not run since. No new one is taken.")
+        return None
+    if no_snapshot:
+        print(f"  No snapshot (--no-snapshot): {_NO_SNAPSHOT_COST}.")
+        return None
+    # The running release's manifest: during an open install the project
+    # dir may already hold the new one's.
+    source = backup_source(paths, project)
+    if source.manifest is None:
+        raise DataError(f"no snapshot can be taken before the ownership change: "
+                        f"{source.skip}. Nothing was changed. Add --no-snapshot to change "
+                        f"ownership without one ({_NO_SNAPSHOT_COST})")
+    if source.manifest.get("backup", {}).get("type", "none") == "none":
+        print("  No snapshot: backup.type is none, so there is no data backup to take.")
+        return None
+    print("  Taking a snapshot before changing ownership...")
+    rc, name = take_snapshot(project, paths, BackupKind.PRECHOWN, source.manifest,
+                             source.compose_file)
+    if rc != 0 or name is None:
+        raise DataError(f"the snapshot before the ownership change was not taken (the "
+                        f"backup said why above), so nothing was changed. Fix the backup "
+                        f"and run data chown again, or add --no-snapshot to change "
+                        f"ownership without one ({_NO_SNAPSHOT_COST})")
+    backup_service = resolve_backup_service(source.manifest)
+    sharer = _rw_sharer(services, service, mounts) if service == backup_service else None
+    if service == backup_service and sharer is None:
+        return name
+    why = (f"{sharer}, so the data can change after the snapshot while {service} is "
+           f"stopped; the next deploy dumps afresh if it can (it warns if it cannot)"
+           if sharer else
+           f"the backup service {backup_service} keeps running, so the next deploy takes "
+           f"its own pre-deploy snapshot")
+    print(f"  {name} stays in backups/ for a manual restore, not for the next deploy: {why}.")
+    return None
+
+
+def chown_locked(paths: BoxPaths, project: str, service: str, ids: tuple[int, int],
+                 no_snapshot: bool = False) -> None:
+    """Snapshot the project, stop the service, chown its persistent mounts
+    to `ids`, record the user. A restart policy is not held: a start Docker
+    makes on its own drops the snapshot record when it is used
+    (pending_snapshot). Caller holds the project lock. The service
+    is left stopped: its next start (the deploy) runs it as `ids`. Raises
+    DataError, DockerError, BindSourceError, RunAsError, ManifestError,
+    ReleaseStateError or StateError."""
     _refuse_if_migrating(paths, project)
     refusal = legacy_stage_refusal(paths, project)
     if refusal is not None:
@@ -223,9 +305,16 @@ def chown_locked(paths: BoxPaths, project: str, service: str, ids: tuple[int, in
                         f"bind or a named volume; there is nothing to chown")
     users = read_users(paths, project)
     running = _running(project, service)
+    keep = _snapshot_first(paths, project, service, services, mounts, no_snapshot)
     if running:
         print(f"  Stopping {', '.join(running)}; it stays stopped until you deploy.")
         _run(["docker", "stop", "-t", str(_STOP_TIMEOUT), *running], capture=True)
+    if keep is not None:
+        # Only once the stop succeeded: a failed or interrupted stop leaves
+        # the service running, and its data moving on from the snapshot.
+        record_pending(paths, project, keep, _TAKEN_BY, service, running)
+        print(f"  {keep} is the next deploy's pre-deploy snapshot while {service} (the "
+              f"backup service) stays stopped until that deploy.")
     done = [m.target for m in mounts if _chown_mount(paths, project, model, m, ids)]
     image_user = users[service].image_user if service in users else ""
     users[service] = ServiceUser(f"{ids[0]}:{ids[1]}", SOURCE_CHOWN, image_user)
@@ -236,7 +325,8 @@ def chown_locked(paths: BoxPaths, project: str, service: str, ids: tuple[int, in
           f"next start.")
 
 
-def run_data_chown(paths: BoxPaths, project: str, service: str, spec: str) -> int:
+def run_data_chown(paths: BoxPaths, project: str, service: str, spec: str,
+                   no_snapshot: bool = False) -> int:
     ids = numeric_ids(spec)
     if ids is None or not all(1 <= i <= MAX_ID for i in ids):
         print(f"ERROR: {spec!r} must be <uid>:<gid>, each between 1 and {MAX_ID} "
@@ -244,9 +334,10 @@ def run_data_chown(paths: BoxPaths, project: str, service: str, spec: str) -> in
         return 2
     try:
         with project_lock(project, paths):
-            chown_locked(paths, project, service, ids)
+            chown_locked(paths, project, service, ids, no_snapshot)
     except (DataError, DockerError, LockError, BindSourceError, RunAsError,
-            ComposeResolveError, OSError) as e:
+            ComposeResolveError, ManifestError, ReleaseStateError, StateError,
+            OSError) as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
     return 0
@@ -261,11 +352,12 @@ def cmd_data(args: list[str]) -> None:
     from boxmunge.commands.argv import parse_args, require_project_name
     if not args or args[0] not in ("adopt", "chown"):
         _usage_error()
-    parsed = parse_args("data", args[1:], min_positional=3, max_positional=3)
+    flags = frozenset({"--no-snapshot"}) if args[0] == "chown" else frozenset()
+    parsed = parse_args("data", args[1:], flags=flags, min_positional=3, max_positional=3)
     project = require_project_name("data", parsed.positional[0])
     if args[0] == "chown":
         sys.exit(run_data_chown(BoxPaths(), project, parsed.positional[1],
-                                parsed.positional[2]))
+                                parsed.positional[2], parsed.has("--no-snapshot")))
     service, sep, path = parsed.positional[1].partition(":")
     if not sep or not service or not path.startswith("/"):
         _usage_error("the second argument is <service>:<absolute path in the container>; ")

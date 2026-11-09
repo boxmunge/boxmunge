@@ -18,7 +18,8 @@ SLEEP = ["sleep", "infinity"]
 
 
 def bundle(project: str, services: dict, *, declare: dict | None = None,
-           volumes: tuple[str, ...] = (), files: dict | None = None) -> dict[str, str]:
+           volumes: tuple[str, ...] = (), files: dict | None = None,
+           backup: dict | None = None) -> dict[str, str]:
     # One ULID per project, the same for each of its bundles.
     ulid = ("01" + project.upper()).ljust(26, "0")
     manifest = yaml.safe_load(manifest_text(project, ulid=ulid))
@@ -29,6 +30,8 @@ def bundle(project: str, services: dict, *, declare: dict | None = None,
         name: ({"security": declare[name]} if declare and name in declare
                else {"internal": True, "writable": {"external": True}})
         for name in services}
+    if backup is not None:
+        manifest["backup"] = backup
     compose = {"services": services, **({"volumes": {v: {} for v in volumes}} if volumes else {})}
     return {"manifest.yml": yaml.safe_dump(manifest), "compose.yml": yaml.safe_dump(compose),
             **(files or {})}
@@ -159,3 +162,73 @@ def case_user_change_needs_chown(paths, p, capsys) -> None:
     rc, out = deploy(paths, p, bundle(p, svc, files=files), capsys)
     assert rc == 0, out
     assert compose(paths, p, "exec", "-T", "app", "id", "-u").strip() == "10001"
+
+
+_ROOT_RUN = {"app": {"user": "root", "reason": "it ran as root before"}}
+_UPLOADS = {"app": {"build": ".", "command": SLEEP, "volumes": ["./uploads:/uploads"]}}
+_BACKUP = {"type": "custom", "service": "app", "dump_command": "cat /uploads/f",
+           "restore_command": "cat > /uploads/f"}
+_FILES = {"Dockerfile": f"FROM {BUSYBOX}\n"}
+
+
+def _chowned_with_data(paths, p: str, capsys) -> str:
+    """A root-run release whose backup service holds `before-chown`, then
+    data chown; the snapshot it kept for the next deploy."""
+    from boxmunge.commands.data_cmd import run_data_chown
+    rc, out = deploy(paths, p, bundle(p, _UPLOADS, declare=_ROOT_RUN, files=_FILES,
+                                      backup=_BACKUP), capsys)
+    assert rc == 0, out
+    compose(paths, p, "exec", "-T", "app", "sh", "-c",
+            "echo before-chown > /uploads/f && chmod 600 /uploads/f")
+    assert run_data_chown(paths, p, "app", "10001:10001") == 0
+    out = capsys.readouterr().out
+    assert "is the next deploy's pre-deploy snapshot" in out, out
+    [taken] = [f.name for f in paths.project_backups(p).glob("*-prechown.tar.gz.age")]
+    return taken
+
+
+def _rollback(paths, p: str, capsys) -> tuple[int, str]:
+    from boxmunge.commands.rollback import run_rollback
+    from tests.integration.slot_release import no_caddy
+    with no_caddy():
+        rc = run_rollback(p, paths, yes=True)
+    out = capsys.readouterr()
+    return rc, out.out + out.err
+
+
+def case_chown_snapshot_pairs_with_the_next_deploy(paths, p, capsys) -> None:
+    """data chown stops the backup service, so the deploy after it cannot
+    dump: it uses the snapshot data chown took while the service still ran,
+    and its rollback restores the data from before the ownership change
+    (not the ownership)."""
+    taken = _chowned_with_data(paths, p, capsys)
+    rc, out = deploy(paths, p, bundle(p, _UPLOADS, files=_FILES, backup=_BACKUP), capsys)
+    assert rc == 0, out
+    assert "Pre-deploy backup failed" not in out
+    assert f"has not run since) as the pre-deploy snapshot: {taken}" in out, out
+    compose(paths, p, "exec", "-T", "app", "sh", "-c", "echo after-deploy > /uploads/f")
+    rc, out = _rollback(paths, p, capsys)
+    assert rc == 0, out
+    assert compose(paths, p, "exec", "-T", "app", "cat", "/uploads/f").strip() == "before-chown"
+    # The restored release runs as it declared; the ownership is not reverted.
+    assert compose(paths, p, "exec", "-T", "app", "id", "-u").strip() == "0"
+    assert compose(paths, p, "exec", "-T", "app", "stat", "-c", "%u",
+                   "/uploads/f").strip() == "10001"
+
+
+def case_chown_snapshot_dropped_after_a_docker_start(paths, p, capsys) -> None:
+    """A start boxmunge did not make: pairing the snapshot would make the
+    rollback lose the write made meanwhile. The deploy drops it (and, the
+    service being stopped, warns as for any failed backup); the rollback
+    refuses rather than restore older data."""
+    _chowned_with_data(paths, p, capsys)
+    [cid] = compose(paths, p, "ps", "-a", "-q", "app").split()
+    for args in (["start", cid], ["exec", cid, "sh", "-c", "echo after-chown > /uploads/f"],
+                 ["stop", "-t", "1", cid]):
+        subprocess.run(["docker", *args], check=True, capture_output=True, timeout=120)
+    rc, out = deploy(paths, p, bundle(p, _UPLOADS, files=_FILES, backup=_BACKUP), capsys)
+    assert rc == 0, out
+    assert "is not used, and is dropped: app has run since" in out, out
+    rc, out = _rollback(paths, p, capsys)
+    assert rc == 1 and "no pre-deploy data snapshot" in out, out
+    assert compose(paths, p, "exec", "-T", "app", "cat", "/uploads/f").strip() == "after-chown"
