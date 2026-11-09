@@ -918,16 +918,39 @@ the old user owns, the deploy is refused until `data chown <project> <service> 1
 `security.user` that keeps the old user). `data chown` first takes the project's backup snapshot
 (`prechown`) while the service still runs; if that backup fails it refuses and changes nothing
 (fix the backup, or add `--no-snapshot` to go on without one: a rollback of the next deploy then
-cannot restore data), and a project with `backup.type: none` skips it, saying so. Then it stops
-the service and leaves it stopped: deploy straight after. When the stopped service is the backup
+cannot restore data), and a project with `backup.type: none` skips it, saying so. When the
+backup service is not running (the project is CVE-quarantined, paused or stopped by the health
+monitor, or the service is stopped), its data is at rest, and the dump runs in a one-off
+container of the image the service's stopped container runs, as its user, over its mounts, with
+no network, no ports, no stdin and none of its `post_start`/`pre_stop` hooks, only for the dump
+(`sh` is its entrypoint, so the service itself never starts); the output says so. A dump that
+needs its service running (`pg_dump`) cannot run that way: the refusal then names the state's own
+way out first (an open install's own options, `security resume`, `resume`, `recover`, or a deploy
+that starts the service), and `--no-snapshot` only last. Then it stops the service, gives its read-write
+binds and named volumes, and staging's own copies of them (`<entry>-staging`, the
+`<project>-staging` volumes), to the new user, records the user and regenerates the compose
+overlay with it, so whatever starts the service next runs it as the new user. It leaves the
+service stopped, with its restart policy held at "no" (as a pause holds a project's) until
+boxmunge starts it again, so a reboot does not bring it back first; that start gives it its
+release's own policy. Deploy straight after. While
+staging has a container of the service, `data chown` refuses and names `unstage <project>` (it
+keeps the copies). A stage with `staging.copy_data` gives each store it copies to the user the
+staged release runs its service as, so staging tries a new user before production's data changes
+hands. A stage refuses a service whose user does not own the rest of staging's data (stores the
+copy did not fill outlive stages): `data chown <project> <service> <uid>:<gid> --staging` keeps
+that data, giving staging's copies alone to that user and changing nothing of production's; or
+`unstage <project>` (which keeps them) and remove them as the refusal says, then stage again. A start that would run the overlay or a container as it was before the users
+record changed (the overlay could not be regenerated, or an install was open) is refused, naming
+`prod-deploy`. When the stopped service is the backup
 service, that deploy's own dump has nothing to run in, so its pre-deploy step uses the `prechown`
 snapshot instead, saying so and how old it is, and a rollback of that deploy restores the data as
 it was before the ownership change. A rollback does not revert the ownership: the data stays
 owned by the new user, while the restored release runs as its own manifest says (as the recorded
 user when it says nothing), so one that ran as another non-root user may not be able to write it.
 The deploy uses the snapshot only while Docker shows the service has not run since: if a
-container of it runs, has started since (a restart policy after a reboot, a `docker start`,
-`recover`), or was removed or recreated, the deploy says so, drops it and takes its own snapshot
+container of it runs, has started since (a `docker start`, `recover`), or was removed (other
+than by the health monitor's critical stop, which notes the containers it removes) or recreated,
+the deploy says so, drops it and takes its own snapshot
 (warning, as for any failed backup, when the service is stopped). A second `data chown` before
 the deploy keeps the first snapshot on the same terms. It is not kept for the deploy when another
 service mounts the same data read-write, since that service can change it meanwhile; nor when
@@ -1954,7 +1977,8 @@ rollback, and the older release ignores what is left.
 A rollback swaps the venvs back, restores the stash, and re-runs `upgrade --apply` with the
 previous release, so its overlays and Caddy sites are regenerated and projects restarted on
 them. Pause and quarantine markers are not restored from the stash: a project you resumed after
-the upgrade stays resumed. If either the restore or the re-apply fails, you get a "ROLLBACK
+the upgrade stays resumed. Nor are the users records: a service you gave to a new user with
+`data chown` after the upgrade keeps running as that user. If either the restore or the re-apply fails, you get a "ROLLBACK
 PARTIAL" alert and the shim exits 2; inspect the box as `supervisor`.
 
 Probation ends early, promoting the upgrade, when you deploy, roll back, restore, or run

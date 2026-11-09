@@ -363,8 +363,9 @@ to change: a numeric non-root service whose image owns a volume's mount path as 
 it in the Dockerfile: `RUN chown <uid>:<gid> <path>`; a path the image lacks is given to the user
 once); a service whose user changes while it keeps data the old user owns (run
 `boxmunge data chown <project> <service> <uid>:<gid>` first: it takes the project's backup
-snapshot while the service still runs, and refuses if that fails, then stops the service, gives its
-read-write binds and volumes to that user, and leaves it stopped for the deploy; a rollback of that
+snapshot while the service still runs (offline, from its data at rest, when it is stopped), and
+refuses if that fails, then stops the service, gives its read-write binds and volumes, and
+staging's copies of them, to that user, and leaves it stopped for the deploy; a rollback of that
 deploy restores the data from before the change, not its ownership); a release that
 would replace a non-empty anonymous volume with an empty named one (`data adopt` first, see
 OPERATIONS.md). Data in an anonymous volume warns at every deploy until it is adopted, and is refused on a
