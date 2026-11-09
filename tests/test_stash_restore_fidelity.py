@@ -112,3 +112,18 @@ class TestLifecycleMarkers:
         paths.project_paused_state("myapp").write_text('{"reason": "now"}')
         restore_stash(paths, archive)
         assert paths.project_paused_state("myapp").read_text() == '{"reason": "now"}'
+
+    def test_a_users_record_written_since_stays(self, tmp_path: Path) -> None:
+        """Review 06: data chown during probation wrote the record; the
+        rollback's restore put the old user back over data the new one owns,
+        and the regenerated overlay started the service as it."""
+        paths = self._paths(tmp_path)
+        for staging in (False, True):
+            paths.project_users_record("myapp", staging=staging).write_text("old\n")
+        archive = create_stash(paths)
+        for staging in (False, True):
+            paths.project_users_record("myapp", staging=staging).write_text("chowned\n")
+        restore_stash(paths, archive)
+        for staging in (False, True):
+            assert paths.project_users_record(
+                "myapp", staging=staging).read_text() == "chowned\n"
