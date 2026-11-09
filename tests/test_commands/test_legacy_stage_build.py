@@ -34,7 +34,8 @@ def test_the_release_is_built_under_candidates_before_the_start(
 
     def decide(paths_, target, manifest, *, component, rollback=False, refetch=frozenset()):
         overlay = yaml.safe_load(Path(target.compose.files[-1]).read_text())
-        order.append(("build", overlay["services"]["web"]["image"]))
+        # A release 0.10.1 deployed predates users being decided: as a rollback.
+        order.append(("build", overlay["services"]["web"]["image"], rollback))
         return {}
     monkeypatch.setattr(deploy_images, "prepare_release_users", decide)
     real_promote = legacy_stage_ops.promote_candidates
@@ -43,5 +44,6 @@ def test_the_release_is_built_under_candidates_before_the_start(
     with fake_backups([]):  # --keep-staged takes the pre-deploy snapshot
         assert legacy_run(paths, choice, confirm=confirm, created=created) == 0
     assert legacy_stage(paths, "myapp") is None
-    assert order == [("build", "boxmunge.invalid/myapp/web:boxmunge-candidate"), ("promote",)]
+    assert order == [("build", "boxmunge.invalid/myapp/web:boxmunge-candidate", True),
+                     ("promote",)]
     legacy_run.up.assert_called()
