@@ -65,6 +65,12 @@ load_probation() {
         || die "$PROBATION_FILE previous_slot '$PROB_PREV_SLOT' is not a working venv a rollback could use; inspect it as supervisor, or remove the file to accept $PROB_VERSION"
 }
 
+# work_interrupted: an upgrade or rollback was cut short, and check-probation
+# has yet to finish it.
+work_interrupted() {
+    [[ -e "$(inflight_marker "$ACTIVE_SLOT")" || -e "$(rollback_marker a)" || -e "$(rollback_marker b)" ]]
+}
+
 # refuse_during_probation <version> <mode>: while a release is on probation,
 # the standby slot holds the last proven release and is the only rollback
 # target. Building another release there would leave nothing proven to fall
@@ -75,7 +81,7 @@ load_probation() {
 # 0 like a blocklisted version, and retries on its next run.
 refuse_during_probation() {
     local version="$1" mode="$2" why retry
-    if [[ -e "$(inflight_marker "$ACTIVE_SLOT")" || -e "$(rollback_marker a)" || -e "$(rollback_marker b)" ]]; then
+    if work_interrupted; then
         why="an earlier upgrade or rollback was interrupted, and the health timer's check-probation finishes it within minutes"
         retry="Retry after that."
     elif load_probation; then

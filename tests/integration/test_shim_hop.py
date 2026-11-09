@@ -10,7 +10,9 @@ waits for the old shim's upgrade (which locks only the legacy upgrade.lock).
 
 The old shims in old_shims/ are copies of released files: v0.10.1 (the
 latest release before the shim was split, identical to main at the time)
-and v0.6.3 (from before the shim re-ran install.sh).
+and v0.6.3 (from before the shim re-ran install.sh). v0.10.1's builds the new
+venv without requirements-mcp.txt, so the hop also checks that install.sh
+completes that venv before the swap.
 """
 from __future__ import annotations
 
@@ -102,3 +104,9 @@ def test_old_shim_hop_leaves_a_working_shim(bundle: Path, old_shim: str, mode: s
         assert "Failed to download bundle" in facts["target_out"], log
     if mode == "ok" and not old_shim.endswith("v0.6.3"):
         assert facts["LEFTOVER_LIBS"] == "no", log
+        # The 0.10.1 shim builds the standby without requirements-mcp.txt;
+        # this release's install.sh, which it runs before the swap, puts it
+        # into that slot, the one that goes live, and leaves the previous
+        # release (the rollback target) alone.
+        assert facts["MCP_INSTALLED_BY"] == "/opt/boxmunge/env-b/bin/pip,", log
+        assert facts["ENV_A_PIP_CALLS"] == "0", log

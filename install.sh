@@ -8,8 +8,8 @@
 # Upgrade (SSH in as deploy user, elevate with sudo):
 #   sudo bash install.sh
 #
-# From the upgrade shim (system pieces only; the shim installs the package
-# into the standby venv and records the version itself):
+# From the upgrade shim (system pieces and the standby venv's hash-pinned
+# dependencies; the shim installs the package and records the version itself):
 #   bash install.sh --upgrade-shim
 
 set -euo pipefail
@@ -19,7 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # During an upgrade env-active is still the PREVIOUS release's venv, the one a
 # rollback returns to. Installing the new package into it would leave nothing
-# to roll back to, so the shim passes --upgrade-shim and keeps venvs to itself.
+# to roll back to, so the shim passes --upgrade-shim and env-active is left alone.
 FROM_UPGRADE_SHIM=0
 if [[ "${1:-}" == "--upgrade-shim" ]]; then
     FROM_UPGRADE_SHIM=1
@@ -457,17 +457,17 @@ if [[ -f "${BOXMUNGE_ROOT}/config/backup.key" ]]; then
     chown root:deploy "${BOXMUNGE_ROOT}/config/backup.key"
     chmod 640 "${BOXMUNGE_ROOT}/config/backup.key"
 fi
-# Dependencies come only from the hash-pinned requirements files in the signed
-# bundle; the package itself installs without resolving anything further and
-# builds with the hash-pinned backend already in the venv. The venv's own pip
-# (from the distro's python3-venv) is used as is: upgrading it would be one
-# more unpinned download. MCP is always installed: it is how agents operate
-# the box, and every upgrade installs the same files into the new slot.
+# Dependencies come only from the bundle's hash-pinned requirements files, MCP
+# included (bootstrap/venv-deps.sh); the package itself installs with no further
+# resolution, built by the hash-pinned backend already in the venv. The venv's
+# own pip (distro python3-venv) is used as is: upgrading it is one more unpinned
+# download. From the shim, the standby it built is completed instead: an older
+# shim leaves out requirements files it does not know.
 if [[ "${FROM_UPGRADE_SHIM}" -eq 0 ]]; then
-    "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --no-cache-dir --require-hashes \
-        -r "${SCRIPT_DIR}/requirements-build.txt" -r "${SCRIPT_DIR}/requirements-tui.txt" \
-        -r "${SCRIPT_DIR}/requirements-mcp.txt"
+    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/venv-deps.sh" active
     "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --no-cache-dir --no-deps --no-build-isolation "${SCRIPT_DIR}"
+else
+    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/venv-deps.sh" standby
 fi
 
 # pip install as root leaves root-owned build artifacts in the source directory.

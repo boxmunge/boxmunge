@@ -276,10 +276,10 @@ On a host with no deploy user the hook is not run and the deploy fails, saying s
 
 ### What deploy may ask root to do
 
-`/etc/sudoers.d/boxmunge-deploy` grants deploy exactly two shim invocations:
+`/etc/sudoers.d/boxmunge-deploy` grants deploy exactly three shim invocations:
 
 ```text
-deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmunge/bin/boxmunge-upgrade target *
+deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmunge/bin/boxmunge-upgrade target *, /opt/boxmunge/bin/boxmunge-upgrade repair-deps
 ```
 
 - `auto` discovers the latest release and upgrades to it.
@@ -287,12 +287,18 @@ deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmun
   version that is blocklisted on this box and any version below the installed
   one (`config/version`, which deploy cannot write). Reinstalling the installed
   version is allowed.
+- `repair-deps` takes no argument. It installs the hash-pinned dependencies of
+  the installed release (`config/version` again) into the live venv, from that
+  release's bundle, verified like an upgrade's; it refuses if the live venv
+  runs another version. It builds, swaps and removes no venv, so it is allowed
+  during probation.
 
 Everything else is root-only: `run` (the auto-update timer), `check-probation`
 (the health timer), `clear-blocklist`, `install-sudoers`, `install-docs`, the
 `userns-*` commands, and `force-target <version>`, the operator override that
 skips the blocklist and the downgrade floor. sudo matches the whole
-argument string, so `target *` cannot reach `force-target`. The auto-update timer's
+argument string, so `target *` cannot reach `force-target`, and `auto` and
+`repair-deps` take no further words. The auto-update timer's
 `run` applies the same downgrade floor and skips blocklisted versions.
 
 The rule text lives in the shim (`boxmunge-upgrade install-sudoers`). install.sh

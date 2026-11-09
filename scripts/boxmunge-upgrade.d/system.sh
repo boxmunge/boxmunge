@@ -1,57 +1,19 @@
 # shellcheck shell=bash
-# system.sh — release signature check, deploy's sudo rule, on-box docs, and
-# the shim's own self-update.
+# system.sh — deploy's sudo rule, on-box docs, and the shim's own self-update.
 # Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
 # the shim that releases ship.
-
-# Cosign verification pins. The release workflow keyless-signs SHA256SUMS via
-# Sigstore's Fulcio + Rekor. We pin the OIDC issuer and the workflow identity
-# so a signature from any other workflow (or any other repo) is rejected.
-COSIGN_CERT_IDENTITY_REGEXP='^https://github\.com/boxmunge/boxmunge/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
-COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
-
-# verify_release_signature <download_dir>
-#
-# Verifies $download_dir/SHA256SUMS against $download_dir/SHA256SUMS.sig with
-# certificate $download_dir/SHA256SUMS.cert, pinning the certificate identity
-# to this repo's release workflow on a vX.Y.Z tag.
-#
-# Hard-requires cosign on PATH; aborts noisily if missing. Returns 0 on success
-# and non-zero on any failure (cosign missing, signature/cert files missing,
-# verification failed).
-verify_release_signature() {
-    local download_dir="${1:?usage: verify_release_signature <download_dir>}"
-    if ! command -v cosign >/dev/null 2>&1; then
-        log "ERROR: cosign required for upgrade verification but not installed."
-        log "       Re-run install.sh on this host, or install cosign manually."
-        return 1
-    fi
-    local sums="$download_dir/SHA256SUMS"
-    local sig="$download_dir/SHA256SUMS.sig"
-    local cert="$download_dir/SHA256SUMS.cert"
-    if [[ ! -f "$sig" || ! -f "$cert" ]]; then
-        log "ERROR: cosign signature/certificate not found in release artifacts"
-        log "       missing: $([[ -f "$sig" ]] || echo "SHA256SUMS.sig") $([[ -f "$cert" ]] || echo "SHA256SUMS.cert")"
-        return 1
-    fi
-    cosign verify-blob \
-        --certificate-identity-regexp "$COSIGN_CERT_IDENTITY_REGEXP" \
-        --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
-        --signature "$sig" \
-        --certificate "$cert" \
-        "$sums" >/dev/null 2>&1
-}
 
 # ---------------------------------------------------------------------------
 # deploy's sudo rule. Owned here so install.sh and every upgrade write the
 # same text; a box whose rule predates a tightening is fixed on its next
-# upgrade. `target *` cannot reach force-target or any other subcommand:
-# sudo matches the whole argument string against the pattern.
+# upgrade. sudo matches the whole argument string against each pattern, so
+# `target *` cannot reach force-target or any other subcommand, and `auto`
+# and `repair-deps` take no further words.
 # ---------------------------------------------------------------------------
 sudoers_rule() {
     cat <<EOF
 # Managed by boxmunge-upgrade install-sudoers; rewritten on every install and upgrade.
-deploy ALL=(root) NOPASSWD: $BIN_DIR/boxmunge-upgrade auto, $BIN_DIR/boxmunge-upgrade target *
+deploy ALL=(root) NOPASSWD: $BIN_DIR/boxmunge-upgrade auto, $BIN_DIR/boxmunge-upgrade target *, $BIN_DIR/boxmunge-upgrade repair-deps
 EOF
 }
 
