@@ -267,6 +267,27 @@ def _check_build(svc: dict[str, Any]) -> list[Finding]:
     return hits
 
 
+# What a start may do with a service's image: use the local one, or (a
+# deploy's pull of a missing one aside) nothing else.
+_START_PULL_POLICIES = frozenset({"missing", "if_not_present", "never"})
+
+
+def pull_policy_problem(svc_name: str, svc: dict[str, Any]) -> str | None:
+    """Why a service's `pull_policy` cannot stand, or None. `always`, a
+    period (`daily`, `every_12h`) or `build` would have every start pull or
+    build an image no deploy scanned or decided users for; boxmunge's
+    starts run local images only, so the policy would be silently not
+    applied instead."""
+    policy = svc.get("pull_policy")
+    if policy is None or (isinstance(policy, str) and policy in _START_PULL_POLICIES):
+        return None
+    what = "build" if policy == "build" else "pull"
+    return (f"service {svc_name}: pull_policy: {policy} would {what} a new image at every "
+            f"start, one no deploy scanned or decided users for. Remove it: a deploy builds "
+            f"and pulls what the release needs, and container-update takes new registry "
+            f"images")
+
+
 _RULES = (
     _check_strict_bools, _check_namespaces, _check_devices, _check_daemon_access,
     _check_hooks, _check_cgroup_parent, _check_security_opt, _check_cap_add,

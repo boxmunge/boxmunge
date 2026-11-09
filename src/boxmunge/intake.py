@@ -137,6 +137,7 @@ def validate_release_tree(
             cve_policy=manifest.get("security"),
             manifest_services=manifest.get("services"),
             user_entries=manifest.get(USER_ENTRIES),
+            lenient_values=lenient_values,
         )
     except ComposeSecurityError as e:
         log_error(component, f"Compose validation rejected: {e}",

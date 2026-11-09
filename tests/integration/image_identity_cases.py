@@ -120,6 +120,52 @@ def case_a_start_recreates_a_container_whose_image_is_gone(
     assert [c.image_id for c in project_containers(project)] == [after["Image"]]
 
 
+def case_a_start_whose_image_is_missing_is_refused(
+        paths: BoxPaths, project: str, capsys) -> None:
+    """With its containers and image gone, a restart builds nothing from
+    the files on disk: it is refused, naming the image."""
+    rc, out = nc.deploy(paths, project, _bundle(project, "deployed\n"), capsys)
+    assert rc == 0, out
+    nc.compose(paths, project, "down", "-t", "0")
+    _docker("image", "rm", f"boxmunge.invalid/{project}/web")
+    result = restart_projects(paths, refused=())
+    assert result.start_refused == [project], result
+    assert f"the image for web (boxmunge.invalid/{project}/web) is missing" in \
+        paths.log_file.read_text()
+    assert subprocess.run(["docker", "image", "inspect", f"boxmunge.invalid/{project}/web"],
+                          capture_output=True).returncode != 0
+
+
+def case_a_pinned_up_applies_no_pull_policy(paths: BoxPaths, project: str, capsys) -> None:
+    """`--pull never --no-build` wins over a service's pull_policy: neither a
+    build nor a pull happens, whatever the file says."""
+    project_dir = paths.project_dir(project)
+    project_dir.mkdir(parents=True)
+    (project_dir / "Dockerfile").write_text(f"FROM {nc.BUSYBOX}\nCOPY marker /marker\n")
+    (project_dir / "marker").write_text("built\n")
+    local = f"boxmunge.invalid/{project}/cache:1"
+    if subprocess.run(["docker", "image", "inspect", nc.BUSYBOX],
+                      capture_output=True).returncode != 0:
+        _docker("pull", "-q", nc.BUSYBOX)
+    _docker("tag", nc.BUSYBOX, local)
+    (project_dir / "compose.yml").write_text(json.dumps({"services": {
+        "web": {"build": ".", "image": f"{project}-web", "pull_policy": "build",
+                "command": nc.SLEEP},
+        "cache": {"image": local, "pull_policy": "always", "command": nc.SLEEP}}}))
+    # Unpinned, `always` pulls the cache image, from a registry that does not exist.
+    with pytest.raises(DockerError, match="cache"):
+        compose_up(project_dir, compose_files=["compose.yml"], build=True,
+                   project_name=project)
+    compose_up(project_dir, compose_files=["compose.yml"], build=True, project_name=project,
+               services=["web"])
+    built = _docker("image", "inspect", "--format", "{{.Id}}", f"{project}-web")
+    (project_dir / "marker").write_text("edited\n")
+    compose_up(project_dir, compose_files=["compose.yml"], build=False, pinned=True,
+               project_name=project)
+    assert _docker("image", "inspect", "--format", "{{.Id}}", f"{project}-web") == built
+    assert _docker("exec", f"{project}-web-1", "cat", "/marker") == "built"
+
+
 def _old_naming(paths: BoxPaths, project: str) -> dict:
     """A project as boxmunge 0.10 left it: Compose named its build by the
     service's own `image:`, and its container was created from that name."""
@@ -149,11 +195,13 @@ def case_regenerating_names_a_stopped_containers_build(
     assert built is not None and built.image_id == image_id
 
 
-def case_a_start_names_a_nameless_build_and_runs_it(
+def case_a_pinned_start_names_a_nameless_build_and_runs_it(
         paths: BoxPaths, project: str, capsys) -> None:
     """The container's image lost every name (as an upgrade from 0.10 left
-    some): the next start names it and runs it, not a new build of the
-    files on disk."""
+    some): the next start, which neither pulls nor builds (`--pull never
+    --no-build`, as a quarantine's lift always did), names it and runs it.
+    Without the name it would have had nothing to start; a start that
+    could build would have built the edited files on disk."""
     manifest = _old_naming(paths, project)
     image_id = _web(project)["Image"]
     prepare_compose_override(paths, manifest, component="upgrade")
@@ -170,4 +218,8 @@ def case_a_start_names_a_nameless_build_and_runs_it(
 
 def teardown(paths: BoxPaths, project: str) -> None:
     nc.teardown(paths, project)
-    subprocess.run(["docker", "image", "rm", f"{project}-custom"], capture_output=True)
+    if (paths.project_dir(project) / "compose.yml").exists():
+        subprocess.run(["docker", "compose", "-p", project, "down", "-t", "0"],
+                       cwd=paths.project_dir(project), capture_output=True)
+    subprocess.run(["docker", "image", "rm", f"{project}-web", f"{project}-custom",
+                    f"boxmunge.invalid/{project}/cache:1"], capture_output=True)

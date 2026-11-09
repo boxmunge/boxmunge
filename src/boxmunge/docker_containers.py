@@ -172,12 +172,21 @@ def _local_images(docs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         return {}
     cmd = ["docker", "image", "inspect", *image_ids]
     result = _run(cmd, capture=True, check=False)
-    errors = [e for e in (result.stderr or "").splitlines()
-              if e.strip() and "no such image" not in e.lower()]
+    lines = [e.strip() for e in (result.stderr or "").splitlines() if e.strip()]
+    errors = [e for e in lines if "no such image" not in e.lower()]
     if result.returncode != 0 and errors:
         raise DockerError(f"{' '.join(cmd[:3])} failed: {'; '.join(errors)}")
-    found = _documents(cmd, result.stdout or "[]")
-    return {d.get("Id"): d for d in found if d.get("Id") in image_ids}
+    found = {d.get("Id"): d for d in _documents(cmd, result.stdout or "")
+             if d.get("Id") in image_ids}
+    # An image counts as gone only when Docker says so; a failure that names
+    # nothing must not make a start recreate every container.
+    unsaid = [i for i in image_ids if i not in found
+              and not any("no such image" in e.lower() and e.endswith(i) for e in lines)]
+    if unsaid or (result.returncode != 0 and len(found) == len(image_ids)):
+        raise DockerError(f"{' '.join(cmd[:3])} described neither the image nor its absence "
+                          f"for {', '.join(unsaid) or 'any image'} (exit "
+                          f"{result.returncode}): {'; '.join(lines) or 'no output'}")
+    return found
 
 
 def _image_gone(project_name: str, docs: list[dict[str, Any]]) -> DockerError:

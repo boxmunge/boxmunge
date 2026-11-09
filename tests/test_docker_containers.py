@@ -161,6 +161,27 @@ def test_an_image_inspect_failure_other_than_a_missing_image_raises(daemon, monk
         running_without_image("demo")
 
 
+@pytest.mark.parametrize("answer", [(1, "[]", ""), (0, "", ""), (0, "[]", ""),
+                                    (1, "[]", "Error response from daemon: No such image: x\n")],
+                         ids=["failed, said nothing", "no output", "described nothing",
+                              "another image missing"])
+def test_an_image_counts_as_gone_only_when_docker_says_so(daemon, monkeypatch, answer):
+    """Otherwise a start would recreate every running container."""
+    daemon["containers"] = [_container("demo-web-1", "web")]
+    rc, out, err = answer
+    real = docker_containers._run
+
+    def run(cmd, capture=False, check=True, **kwargs):
+        if cmd[:3] == ["docker", "image", "inspect"]:
+            return MagicMock(returncode=rc, stdout=out, stderr=err)
+        return real(cmd, capture=capture, check=check, **kwargs)
+    monkeypatch.setattr(docker_containers, "_run", run)
+    with pytest.raises(DockerError):
+        running_without_image("demo")
+    with pytest.raises(DockerError):
+        project_containers("demo")
+
+
 def test_docker_failure_is_not_an_empty_answer(monkeypatch):
     def run(cmd, capture=False, **kwargs):
         raise DockerError("Cannot connect to the Docker daemon")
