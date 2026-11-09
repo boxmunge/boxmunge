@@ -229,7 +229,7 @@ def check_start(
             rec = bind_sources.read_record(record_path)
             bind_sources.check_sources(project_dir, sources, rec["sources"])
             bind_sources.check_control(project_dir, read_files, rec["control"],
-                                       redo=f"prod-deploy {project_name}")
+                                       redo=redeploy_command(paths, project_name))
     except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
 

@@ -128,15 +128,25 @@ def test_every_service_needing_a_declaration_is_listed() -> None:
     assert "redis:7" in e.value.problems[0] and "postgres:16" in e.value.problems[1]
 
 
-def test_a_git_projects_compose_link_into_its_checkout_is_read(paths, tmp_path) -> None:
+def test_a_git_projects_compose_link_into_its_checkout_is_read(paths) -> None:
     pdir = paths.project_dir("app")
     (pdir / "repo").mkdir(parents=True)
     (pdir / "repo" / "compose.yml").write_text(
         "services:\n  tool:\n    build:\n      context: .\n      pull: false\n")
     (pdir / "compose.yml").symlink_to("repo/compose.yml")
     assert deploy_build.local_base_builds(production_target(paths, "app")) == {"tool"}
-    (pdir / "compose.yml").unlink()
-    (tmp_path / "elsewhere.yml").write_text("services: {}\n")
-    (pdir / "compose.yml").symlink_to(tmp_path / "elsewhere.yml")
-    with pytest.raises(OSError):
+
+
+def test_pull_false_in_an_included_file_counts(paths) -> None:
+    """Read as the reference walk follows include: (compose_references)."""
+    _compose(paths, "include:\n  - parts/tools.yml\nservices:\n  web:\n    build: .\n")
+    (paths.project_dir("app") / "parts").mkdir()
+    (paths.project_dir("app") / "parts" / "tools.yml").write_text(
+        "services:\n  tool:\n    build:\n      context: .\n      pull: false\n")
+    assert deploy_build.local_base_builds(production_target(paths, "app")) == {"tool"}
+
+
+def test_unreadable_compose_files_refuse_the_deploy(paths) -> None:
+    _compose(paths, "include:\n  - parts/missing.yml\nservices: {}\n")
+    with pytest.raises(DeployRefused, match="build.pull: false"):
         deploy_build.local_base_builds(production_target(paths, "app"))

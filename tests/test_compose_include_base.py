@@ -308,7 +308,7 @@ def test_start_record_hashes_the_env_files_the_model_reads(
     record = json.loads(paths.project_bind_record("shop").read_text())
     assert "hidden/x.env" in record["control"]
     (shop / "hidden/x.env").write_text("A=2\n")
-    with pytest.raises(ComposeRefused, match="hidden/x.env changed.*prod-deploy shop to run it"):
+    with pytest.raises(ComposeRefused, match="hidden/x.env changed.*prod-deploy shop --redeploy to run it"):
         _start(paths)
 
 
@@ -326,7 +326,7 @@ def test_a_file_the_old_record_lacks_is_reported_as_newly_tracked(
         shop, [shop / "compose.yml"])["compose.yml"]
     record_path.write_text(json.dumps(rec))
     with pytest.raises(ComposeRefused, match=r"parts/db.yml is newly tracked.*"
-                       r"prod-deploy shop to record it"):
+                       r"prod-deploy shop --redeploy to record it"):
         _start(paths)
 
 
@@ -346,6 +346,6 @@ def test_deployed_project_with_a_refused_include_is_refused_with_the_fix(
     _start(paths, record=True)
     _tree(shop, {"compose.yml": _top([{"path": "sub/inc.yml", "project_directory": "sub"}]),
                  "sub/inc.yml": _services(s={"image": "x"})})
-    with pytest.raises(ComposeRefused, match=r"sets project_directory\. .*Then deploy "
-                       r"the fixed release: prod-deploy shop\. Nothing was started"):
+    with pytest.raises(ComposeRefused, match=r"sets project_directory\. .*Then upload "
+                       r"the fixed release and deploy it: prod-deploy shop\. Nothing was started"):
         _start(paths)

@@ -8,7 +8,7 @@ moves a tag in the box's local image store: BuildKit keeps what it pulled
 in its own cache. A build without --pull resolves each base from the local
 image store, and asks the registry only for a base that is not there.
 
-A service whose compose.yml sets `build: {pull: false}` builds from the
+A service whose compose files set `build: {pull: false}` builds from the
 local image store even in a pulling deploy: its FROM may name an image
 only this box has (docker load, a hand build), which no registry serves.
 Compose's CLI --pull would override that setting, so those services are
@@ -18,10 +18,9 @@ from __future__ import annotations
 
 import yaml
 
+from boxmunge import compose_references
 from boxmunge.docker_run import DockerError, run as _run
-from boxmunge.fs_nofollow import read_text_nofollow
-from boxmunge.git_layout import links_into_repo
-from boxmunge.release_target import ReleaseTarget
+from boxmunge.release_target import DeployRefused, ReleaseTarget
 
 _BUILD_TIMEOUT = 1800
 # BuildKit's wording when it cannot read a base image's manifest from its
@@ -33,19 +32,23 @@ _BASE_UNREADABLE = "failed to resolve source metadata"
 
 
 def local_base_builds(target: ReleaseTarget) -> frozenset[str]:
-    """The services whose compose.yml, as written, sets `build.pull: false`.
-    Compose's resolved model drops a false `pull`, so the file itself is
-    read (validated already; a service from an include: is not covered).
-    A git project's compose.yml is a link into its checkout (git_layout);
-    any other link is refused."""
+    """The services whose definition, as written, sets `build.pull: false`:
+    in compose.yml or in a file it includes or extends from, read as the
+    reference walk follows them (compose_references). Compose's resolved
+    model drops a false `pull`, so the files themselves are read. A
+    service that extends another under a different name sets it itself."""
     release = target.compose.project_directory or target.compose.cwd
-    path = release / "compose.yml"
-    if links_into_repo(release, "compose.yml"):
-        path = path.resolve()
-    doc = yaml.safe_load(read_text_nofollow(path)) or {}
-    services = doc.get("services") or {}
-    return frozenset(n for n, s in services.items() if isinstance(s, dict)
-                     and isinstance(s.get("build"), dict) and s["build"].get("pull") is False)
+    found: set[str] = set()
+    try:
+        for path in compose_references.compose_files(release / "compose.yml", (release,)):
+            doc = yaml.safe_load(path.read_text()) or {}
+            services = doc.get("services") if isinstance(doc, dict) else None
+            found |= {n for n, s in (services or {}).items() if isinstance(s, dict)
+                      and isinstance(s.get("build"), dict) and s["build"].get("pull") is False}
+    except (OSError, ValueError, yaml.YAMLError) as e:
+        raise DeployRefused([f"cannot read the release's compose files to see which "
+                             f"builds set build.pull: false: {e}"]) from e
+    return frozenset(found)
 
 
 def build_services(target: ReleaseTarget, builds: list[str], *, pull: bool) -> None:
