@@ -10,9 +10,12 @@ service and the containers it stopped.
 
 The record is trusted only as long as Docker shows the service has not run
 since: it is checked when it is used (pending_for_live). A start boxmunge
-did not make (a restart policy after a reboot, a plain `docker start`), a
-recreate or a removal of its containers drops it, and the deploy takes its
-own snapshot as usual. Recording a deploy clears it (record_deploy_state).
+did not make (a plain `docker start`), a recreate or a removal of its
+containers drops it, and the deploy takes its own snapshot as usual. The
+health monitor's critical stop removes every container of the project: it
+first notes which of the service's containers it removes while Docker still
+shows they have not run (note_removal), and those are not taken as a sign
+that the service ran. Recording a deploy clears it (record_deploy_state).
 """
 from __future__ import annotations
 
@@ -25,16 +28,15 @@ from boxmunge.state import StateError, read_state, write_state
 
 KEY = "pending_snapshot"
 _FIELDS = ("name", "taken_by", "service", "ref", "at")
+# Containers of the service the health monitor removed before they ran again.
+_REMOVED = "removed_unrun"
 
 
 def record_pending(paths: BoxPaths, project: str, name: str, taken_by: str,
                    service: str, containers: list[str]) -> None:
-    """Record `name` for the next deploy. Only after `containers` (the
-    service's, stopped by the caller) are stopped: the time recorded is
-    what their next start is compared with."""
-    if not containers:
-        raise ValueError(f"{project}: a pending snapshot records the containers stopped; "
-                         f"none was named")
+    """Record `name` for the next deploy. Only once `containers` (every
+    container of the service; none when it has none) are stopped: the time
+    recorded is what their next start is compared with."""
     state_path = paths.project_deploy_state(project)
     state = read_state(state_path)
     state[KEY] = {"name": name, "taken_by": taken_by, "service": service,
@@ -51,8 +53,10 @@ def pending(paths: BoxPaths, project: str) -> dict | None:
         return None
     if not (isinstance(entry, dict)
             and all(isinstance(entry.get(k), str) for k in _FIELDS)
-            and isinstance(entry.get("containers"), list) and entry["containers"]
-            and all(isinstance(c, str) for c in entry["containers"])):
+            and isinstance(entry.get("containers"), list)
+            and all(isinstance(c, str) for c in entry["containers"])
+            and isinstance(entry.get(_REMOVED, []), list)
+            and all(isinstance(c, str) for c in entry.get(_REMOVED, []))):
         raise StateError(f"{paths.project_deploy_state(project)}: {KEY} is not a "
                          f"snapshot record: {entry!r}")
     try:
@@ -94,7 +98,7 @@ def _has_run_since(project: str, entry: dict) -> str | None:
     """Why the service may have changed its data since the record, or None."""
     at = datetime.fromisoformat(entry["at"])
     states = docker_containers.start_states(project)
-    gone = sorted(set(entry["containers"]) - set(states))
+    gone = sorted(set(entry["containers"]) - set(states) - set(entry.get(_REMOVED, [])))
     if gone:
         return (f"{', '.join(gone)} of {entry['service']} no longer exists (removed or "
                 f"recreated), so it may have run since")
@@ -107,6 +111,24 @@ def _has_run_since(project: str, entry: dict) -> str | None:
             return (f"{entry['service']} has run since ({name} started at "
                     f"{st.started_at.isoformat(timespec='seconds')})")
     return None
+
+
+def note_removal(paths: BoxPaths, project: str) -> None:
+    """Before every container of the project is removed (the health
+    monitor's critical stop): note those of the recorded service, while
+    Docker still shows whether they ran since the record. A removal is not
+    a start, so the record stays usable; one that has run is left to be
+    dropped when it is used. Raises DockerError or StateError."""
+    entry = pending(paths, project)
+    if entry is None or _has_run_since(project, entry) is not None:
+        return
+    states = docker_containers.start_states(project)
+    removed = sorted(set(entry.get(_REMOVED, [])) | {
+        name for name, st in states.items() if st.service == entry["service"]})
+    state_path = paths.project_deploy_state(project)
+    state = read_state(state_path)
+    state[KEY] = {**entry, _REMOVED: removed}
+    write_state(state_path, state)
 
 
 def drop(paths: BoxPaths, project: str) -> None:
