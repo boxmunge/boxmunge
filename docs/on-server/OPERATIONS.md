@@ -579,6 +579,13 @@ Live-tail logs (stream new output, press Ctrl-C to stop):
 logs myapp --follow
 ```
 
+Read the staged release's containers instead of production's (with any of the options above):
+
+```
+logs myapp --staging
+logs myapp backend --staging --follow
+```
+
 View the last 100 journal lines of the boxmunge systemd units (timers and services):
 
 ```
