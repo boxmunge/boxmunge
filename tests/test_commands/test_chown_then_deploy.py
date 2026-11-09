@@ -16,9 +16,9 @@ from unittest.mock import patch
 
 import pytest
 
-from boxmunge import docker_containers
+from boxmunge import chown_hold, docker_containers
 from boxmunge.backup import BackupKind
-from boxmunge.commands import data_cmd
+from boxmunge.commands import chown_snapshot, data_cmd
 from boxmunge.commands.deploy import run_deploy
 from boxmunge.commands.deploy_steps import take_pre_deploy_snapshot
 from boxmunge.commands.rollback import find_rollback_target, run_rollback
@@ -89,6 +89,10 @@ def _chowned(paths, monkeypatch) -> str:
     monkeypatch.setattr(data_cmd, "_running", lambda p, s: ["myapp-web-1"])
     monkeypatch.setattr(data_cmd, "_run", lambda cmd, **kw: None)
     monkeypatch.setattr(data_cmd, "chown_under", lambda *a: None)
+    monkeypatch.setattr(data_cmd, "_containers", lambda p, s: ["myapp-web-1"])
+    monkeypatch.setattr(data_cmd, "staging_copies", lambda *a: [])
+    monkeypatch.setattr(chown_hold, "hold", lambda *a: [])
+    monkeypatch.setattr(chown_snapshot, "running_by_service", lambda p: {"web": ["myapp-web-1"]})
     with _backups(paths, service_running=True):
         data_cmd.chown_locked(paths, "myapp", "web", (10001, 10001))
     return pending(paths, "myapp")["name"]
