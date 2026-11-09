@@ -383,7 +383,7 @@ def test_a_refused_promote_leaves_upgrade_probation_alone(paths) -> None:
 def test_an_install_without_a_tree_is_refused_while_staged(paths, capsys) -> None:
     from boxmunge.commands.deploy_tree import TreeDeploy, deploy_tree_locked
     prod_and_stage(paths)
-    req = TreeDeploy(tree=None, ref="myapp-x", source="bundle", manifest={})
+    req = TreeDeploy(tree=None, ref="myapp-x", source="bundle", manifest={}, pull=False)
     assert deploy_tree_locked("myapp", paths, req) == 1
     assert "should be unreachable" in capsys.readouterr().err
     assert load_txn(paths, "myapp") is None

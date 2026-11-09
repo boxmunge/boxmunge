@@ -351,7 +351,7 @@ def restore_rolled_back_data(project_name: str, paths: BoxPaths, manifest: dict,
     try:
         # The backup service restores as the user the restored release runs as.
         users = decide_release_users(project_name, paths, manifest, "rollback",
-                                     carry_record=True).users
+                                     pull=False, carry_record=True).users
         # The backup service is the restored release's: its images get
         # their names now, not at the switch.
         promote_candidates(paths, project_name)
@@ -380,7 +380,7 @@ def start_rolled_back(project_name: str, paths: BoxPaths, manifest: dict,
             return rc
     try:
         users = decide_release_users(project_name, paths, manifest, "rollback",
-                                     carry_record=True).users
+                                     pull=False, carry_record=True).users
         generate_release_config(project_name, paths, manifest, "rollback", users)
     except (DeployRefused, DockerError, OSError, ValueError) as e:
         print(f"ERROR: Generating the previous release's configs failed: {e}. Rerun "

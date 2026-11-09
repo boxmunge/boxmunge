@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from boxmunge.commands import deploy_images as di
+from boxmunge.commands import deploy_build, deploy_images as di
 from boxmunge.docker_containers import ImageFacts
 from boxmunge.docker_run import DockerError
 from boxmunge.release_target import (
@@ -16,8 +16,16 @@ S = 1048576
 
 def _calls(monkeypatch) -> list:
     calls: list = []
-    monkeypatch.setattr(di, "_run", lambda cmd, **kw: calls.append((cmd, kw)))
+    record = lambda cmd, **kw: calls.append((cmd, kw))  # noqa: E731
+    monkeypatch.setattr(di, "_run", record)
+    monkeypatch.setattr(deploy_build, "_run", record)
     return calls
+
+
+def _compose(paths, text: str = "services:\n  web:\n    build: .\n") -> None:
+    pdir = paths.project_dir("app")
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / "compose.yml").write_text(text)
 
 
 def test_build_and_pull_names_services_and_pulls_only_missing(paths, monkeypatch) -> None:
@@ -35,6 +43,7 @@ def test_build_and_pull_names_services_and_pulls_only_missing(paths, monkeypatch
 
 def test_a_pulling_build_asks_for_each_base_images_current_digest(paths, monkeypatch) -> None:
     calls = _calls(monkeypatch)
+    _compose(paths)
     di.build_and_pull(production_target(paths, "app"),
                       {"web": {"build": ".", "image": "boxmunge.invalid/app/web"}}, pull=True)
     assert calls[0][0][-3:] == ["build", "--pull", "web"]
@@ -48,16 +57,33 @@ _UNREADABLE = ("Command failed: docker compose build --pull web\nfailed to solve
 def _failing_build(monkeypatch, message: str) -> None:
     def run(cmd, **kw):
         raise DockerError(message)
-    monkeypatch.setattr(di, "_run", run)
+    monkeypatch.setattr(deploy_build, "_run", run)
 
 
 def test_an_unreadable_base_registry_fails_naming_no_pull(paths, monkeypatch) -> None:
+    _compose(paths)
     _failing_build(monkeypatch, _UNREADABLE)
     with pytest.raises(DockerError) as e:
         di.build_and_pull(production_target(paths, "app"),
                           {"web": {"build": ".", "image": "boxmunge.invalid/app/web"}},
                           pull=True)
-    assert "--no-pull" in str(e.value) and "i/o timeout" in str(e.value)
+    text = str(e.value)
+    assert "--no-pull" in text and "i/o timeout" in text and "docker image ls" in text
+    assert "build: {pull: false}" in text and "no such image" in text
+
+
+def test_a_build_that_sets_pull_false_is_built_apart_without_pull(paths, monkeypatch) -> None:
+    """Its FROM may name an image only this box has; compose's CLI --pull
+    would override its own `pull: false`."""
+    calls = _calls(monkeypatch)
+    _compose(paths, "services:\n  web:\n    build: .\n"
+                    "  tool:\n    build:\n      context: .\n      pull: false\n")
+    services = {n: {"build": ".", "image": f"boxmunge.invalid/app/{n}"} for n in ("web", "tool")}
+    di.build_and_pull(production_target(paths, "app"), services, pull=True)
+    assert [c[0][-3:] for c in calls] == [["build", "--pull", "web"], ["*", "build", "tool"]]
+    calls.clear()
+    di.build_and_pull(production_target(paths, "app"), services, pull=False)
+    assert [c[0][-3:] for c in calls] == [["build", "tool", "web"]]
 
 
 @pytest.mark.parametrize("pull, message", [
@@ -66,6 +92,7 @@ def test_an_unreadable_base_registry_fails_naming_no_pull(paths, monkeypatch) ->
 ])
 def test_other_build_failures_are_not_blamed_on_the_pull(paths, monkeypatch, pull,
                                                          message) -> None:
+    _compose(paths)
     _failing_build(monkeypatch, message)
     with pytest.raises(DockerError) as e:
         di.build_and_pull(production_target(paths, "app"),

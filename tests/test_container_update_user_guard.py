@@ -132,7 +132,7 @@ def test_the_deploy_decides_from_the_held_back_image_and_names_it_only_at_the_sw
     from boxmunge.commands.release_config import (
         decide_release_users, generate_release_config, promote_candidates,
     )
-    users = decide_release_users("shop", paths, _manifest(True), "deploy").users
+    users = decide_release_users("shop", paths, _manifest(True), "deploy", pull=False).users
     assert users["db"].image_user == "nginx"
     assert registry["postgres:16"] == OLD and registry[CANDIDATE] == NEW
     generate_release_config("shop", paths, _manifest(True), "deploy", users)
@@ -152,7 +152,7 @@ def test_a_refused_deploy_leaves_the_running_image_named(paths, registry, monkey
     from boxmunge.release_target import DeployRefused
     monkeypatch.setattr(di, "image_facts", lambda ref: ImageFacts(registry[ref], "", ()))
     with pytest.raises(DeployRefused):
-        rc.decide_release_users("shop", paths, _manifest(False), "deploy")
+        rc.decide_release_users("shop", paths, _manifest(False), "deploy", pull=False)
     assert registry["postgres:16"] == OLD
     REAL_REMOVE("shop")  # what abandon and the next deploy do
     assert CANDIDATE not in registry

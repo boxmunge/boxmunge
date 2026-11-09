@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -50,7 +50,7 @@ class GitDeploy:
     staged_id: str | None = None
     component: str = "deploy"
     no_snapshot: bool = False
-    pull: bool = False              # build with --pull (deploy_images.build_and_pull)
+    pull: bool = field(kw_only=True)  # build with --pull (commands/deploy_build)
     candidate: Path | None = None   # the commit already materialised (a git slot's release)
     on_installed: Callable[[], None] | None = None
     on_switched: Callable[[int], None] | None = None  # after replace_release returns
