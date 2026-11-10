@@ -15,6 +15,39 @@ class BundleError(ValueError):
     """A bundle is malformed or carries content a deploy must not install."""
 
 
+# How far a bundle may expand, checked on the archive's headers before
+# anything is written: a small .tar.gz can otherwise fill the disk under
+# the project's incoming workspace. Far above any project's source tree.
+MAX_TOTAL_BYTES = 4 * 1024 ** 3
+MAX_MEMBER_BYTES = 2 * 1024 ** 3
+MAX_MEMBERS = 100_000
+_SHRINK = ("Leave build output, dependencies and data out of the bundle (list them in "
+           ".boxmungeignore), then bundle and upload it again.")
+
+
+def _size(n: int) -> str:
+    for unit, scale in (("GiB", 1024 ** 3), ("MiB", 1024 ** 2)):
+        if n >= scale:
+            return f"{n / scale:.1f} {unit}"
+    return f"{n} bytes"
+
+
+def _check_size(members: list[tarfile.TarInfo]) -> None:
+    """Refuse a bundle over MAX_MEMBERS entries, with a file over
+    MAX_MEMBER_BYTES, or expanding past MAX_TOTAL_BYTES."""
+    if len(members) > MAX_MEMBERS:
+        raise BundleError(f"Bundle has {len(members)} entries; a bundle may have at most "
+                          f"{MAX_MEMBERS}. {_SHRINK}")
+    for m in members:
+        if m.size > MAX_MEMBER_BYTES:
+            raise BundleError(f"Bundle entry '{m.name}' is {_size(m.size)}; a file in a "
+                              f"bundle may be at most {_size(MAX_MEMBER_BYTES)}. {_SHRINK}")
+    total = sum(m.size for m in members)
+    if total > MAX_TOTAL_BYTES:
+        raise BundleError(f"Bundle expands to {_size(total)}; a bundle may expand to at "
+                          f"most {_size(MAX_TOTAL_BYTES)}. {_SHRINK}")
+
+
 def _member_parts(name: str) -> list[str]:
     return [p for p in name.split("/") if p not in ("", ".")]
 
@@ -119,14 +152,17 @@ def extract_bundle(bundle_path: Path, dest: Path) -> Path:
     """Extract a tar.gz bundle into dest and return the project directory.
 
     Raises BundleError (a ValueError) for anything unsafe or malformed: a
-    corrupt archive, members outside a single top-level directory, special
-    files, or links that resolve outside the project.
+    corrupt archive, one over the size limits, members outside a single
+    top-level directory, special files, or links that resolve outside the
+    project.
     """
     if not bundle_path.exists():
         raise BundleError(f"Bundle not found: {bundle_path}")
     try:
         with tarfile.open(bundle_path, "r:gz") as tar:
-            top = _check_members(tar.getmembers())
+            members = tar.getmembers()
+            _check_size(members)
+            top = _check_members(members)
             # The "data" filter re-checks links against the real filesystem
             # as it extracts: defence in depth behind _check_members.
             tar.extractall(path=dest, filter="data")

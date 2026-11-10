@@ -176,3 +176,33 @@ def test_extracted_tree_check_resolves_links_on_disk(tmp_path: Path) -> None:
 def test_missing_bundle_is_a_bundle_error(tmp_path: Path) -> None:
     with pytest.raises(BundleError, match="not found"):
         extract_bundle(tmp_path / "nope.tar.gz", tmp_path)
+
+
+@pytest.mark.parametrize("limit, value, extra, words", [
+    ("MAX_MEMBER_BYTES", 1000, lambda t: _file(t, "myapp/blob.bin", b"\0" * 1001),
+     ["'myapp/blob.bin'", "1001 bytes", "1000 bytes"]),
+    ("MAX_TOTAL_BYTES", 1500, lambda t: [_file(t, f"myapp/f{i}", b"\0" * 400) for i in range(4)],
+     ["expands to", "1500 bytes"]),
+    ("MAX_MEMBERS", 5, lambda t: [_file(t, f"myapp/f{i}") for i in range(4)],
+     ["7 entries", "at most 5"]),
+])
+def test_a_bundle_over_a_size_limit_is_refused_before_anything_is_written(
+        tmp_path, monkeypatch, limit, value, extra, words) -> None:
+    """B-02: a small .tar.gz can expand without bound into the project's
+    incoming workspace; each limit is checked on the headers first."""
+    monkeypatch.setattr(f"boxmunge.bundle.{limit}", value)
+    bundle = _bundle(tmp_path / "myapp.tar.gz", extra)
+    dest = tmp_path / "incoming"
+    with pytest.raises(BundleError) as e:
+        extract_bundle(bundle, dest)
+    text = str(e.value)
+    assert all(w in text for w in words), text
+    assert ".boxmungeignore" in text
+    assert not dest.exists() or not any(dest.iterdir())
+
+
+def test_the_limits_leave_room_for_real_projects() -> None:
+    from boxmunge import bundle
+    assert bundle.MAX_TOTAL_BYTES >= 4 * 1024 ** 3
+    assert bundle.MAX_MEMBER_BYTES >= 2 * 1024 ** 3
+    assert bundle.MAX_MEMBERS >= 100_000
