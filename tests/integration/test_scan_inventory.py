@@ -249,3 +249,21 @@ def test_services_scaled_to_zero_are_not_expected(tmp_path):
         assert result.complete and scanned == {web_id}
     finally:
         tear_down(project_dir, name, [web])
+
+
+def test_compose_profiles_in_the_env_file_make_a_profiled_service_expected(tmp_path):
+    """COMPOSE_PROFILES in the project's .env activates a profile for `up`
+    that the all-profiles model cannot show, so Compose is still asked."""
+    from boxmunge.deployed_inventory import load_deployed_inventory
+    name = f"bminv-{uuid.uuid4().hex[:8]}"
+    project_dir = tmp_path / name
+    project_dir.mkdir()
+    (project_dir / "compose.yml").write_text(
+        "services:\n"
+        "  web:\n    image: busybox:1\n"
+        "  dev:\n    image: busybox:1\n    profiles: [dev]\n"
+        "  tools:\n    image: busybox:1\n    profiles: [tools]\n")
+    (project_dir / ".env").write_text("COMPOSE_PROFILES=dev\n")
+    inventory = load_deployed_inventory(project_dir, ["compose.yml"], name)
+    assert {n: s.expected for n, s in inventory.services.items()} == {
+        "web": True, "dev": True, "tools": False}
