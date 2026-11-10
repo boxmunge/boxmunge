@@ -96,13 +96,26 @@ clean:
 # Regenerate hash-pinned requirements files from pyproject.toml.
 # Run when pyproject.toml's [project.dependencies] or optional-dependencies
 # changes. CI does not run this — it consumes the checked-in files.
-.PHONY: lock
-lock:
-	pip-compile --generate-hashes -o requirements.txt pyproject.toml
-	pip-compile --generate-hashes --extra=tui -o requirements-tui.txt pyproject.toml
-	pip-compile --generate-hashes --extra=mcp -o requirements-mcp.txt pyproject.toml
+#
+# The runtime locks (lock-runtime) are pyproject extras, which Dependabot
+# never regenerates: `make relock` upgrades them, before each release
+# (docs/DEVELOPMENT.md). Both take no release younger than Dependabot's
+# 7-day cooldown (.github/dependabot.yml; pip >= 26, from requirements-dev.txt).
+# Majors not yet taken are held in relock-holds.txt.
+RUNTIME_COMPILE := pip-compile --generate-hashes --pip-args='--uploaded-prior-to P7D' -c relock-holds.txt
+
+.PHONY: lock lock-runtime relock
+lock: lock-runtime
 	pip-compile --generate-hashes --allow-unsafe -o requirements-dev.txt requirements-dev.in
 	pip-compile --generate-hashes --allow-unsafe -o requirements-build.txt requirements-build.in
-	pip-compile --generate-hashes -o cli/requirements.txt cli/pyproject.toml
 	pip-compile --generate-hashes --strip-extras --allow-unsafe -o cli/requirements-publish.txt cli/requirements-publish.in
 	pip-compile --generate-hashes --strip-extras --allow-unsafe -o services/version-check/requirements.txt services/version-check/requirements.in
+
+lock-runtime:
+	$(RUNTIME_COMPILE) $(UPGRADE) -o requirements.txt pyproject.toml
+	$(RUNTIME_COMPILE) $(UPGRADE) --extra=tui -o requirements-tui.txt pyproject.toml
+	$(RUNTIME_COMPILE) $(UPGRADE) --extra=mcp -o requirements-mcp.txt pyproject.toml
+	$(RUNTIME_COMPILE) $(UPGRADE) -o cli/requirements.txt cli/pyproject.toml
+
+relock:
+	$(MAKE) lock-runtime UPGRADE=--upgrade
