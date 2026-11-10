@@ -180,6 +180,7 @@ HEALTHY='if [[ "$1" == health ]]; then exec health-report 0; fi'
 # "<slot> stash restore <archive name>" and only says it restored it.
 REAL_PYTHON3_FOR_VENV="$(command -v python3)"
 mock_python() {
+    # shellcheck disable=SC2016  # the script's own lines: literal bash
     printf '%s\n' '#!/usr/bin/env bash' \
         'if [[ -n "${BM_STASH:-}" ]]; then' \
         "    echo \"$1 stash restore \${BM_STASH##*/}\" >> \"\$BOXMUNGE_ROOT/calls\"" \
