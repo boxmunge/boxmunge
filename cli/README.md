@@ -52,11 +52,13 @@ on the server's console), or be confirmed at the terminal. An IP target needs
 | `bundle [DIR] [--list] [--validate] [--json]` | Build `<project>-<timestamp>.tar.gz` |
 | `stage [--dry-run] [--no-pull]` | Bundle, upload, stage |
 | `promote [--dry-run] [--no-pull]` | Promote staging to production |
-| `prod-deploy [--dry-run] [--no-snapshot] [--no-pull]` | Bundle, upload, deploy to production |
+| `prod-deploy [--dry-run] [--no-snapshot] [--no-pull] [--accept-stale-kev]` | Bundle, upload, deploy to production |
+| `prod-deploy --redeploy [...]` | Deploy the installed release again (uploads nothing) |
+| `prod-deploy --ref REF [...]` | Deploy or finish REF, already on the server (uploads nothing) |
 | `prod-deploy --abandon` | Undo an interrupted install before its pre-deploy hook ran |
 | `rollback [--yes]` | Roll production back to the previous deploy |
 | `status [--json]` | The server's project dashboard |
-| `logs [SERVICE] [--tail N] [--follow]` | This project's logs |
+| `logs [SERVICE] [--tail N] [--follow] [--staging]` | This project's logs |
 | `secrets set\|get\|list\|unset [KEY]` | This project's secrets on the server |
 | `validate [--json]` | Validate the deployed project on the server |
 | `remote COMMAND [ARGS...]` | Any other server command, e.g. `remote inbox` |
@@ -69,14 +71,26 @@ codes: 0 success, 1 failure, 2 usage error, 3 client and server incompatible,
 
 `rollback` and the server commands that ask before acting (`remote pause`,
 `resume`, `recover`, `restore`, `inbox clean`, `project-delete`) show the
-server's plan and ask `Proceed? [y/N]` when run at a terminal (standard input
-is one; output may be piped, as in `boxmunge rollback | tee rollback.log`).
-Without a terminal (a script, CI) nobody can answer, so the command is refused before
-anything is sent unless `--yes` is given.
+server's plan and ask `Proceed? [y/N]` when run at a terminal. What counts is
+standard input: output may be piped, as in `boxmunge rollback | tee
+rollback.log`. When standard input is not a terminal (a script, CI, a pipe
+into the command) nobody can answer, so the command is refused before anything
+is sent unless `--yes` is given.
 
-`secrets set KEY` asks for the value without echo (or reads one line of stdin)
-and sends it on ssh's stdin, so it is in no shell history and in no command
-line: process listings on your machine and on the server do not show it.
+`secrets set KEY` asks for the value without echo at a terminal. When standard
+input is not a terminal it reads the value from it instead: one line of UTF-8
+text, at most 64 KiB, whose trailing newline is dropped (a second line is
+refused, not dropped):
+
+```bash
+pass show myapp/token | boxmunge secrets set API_TOKEN
+```
+
+Either way the value goes to the server on ssh's stdin, so it is in no shell
+history and in no command line: process listings on your machine and on the
+server do not show it. Only the command that needs it reads standard input:
+the handshake before it never does, so it cannot swallow the value (nor an MCP
+host's first message to `mcp-serve`).
 `secrets set KEY=VALUE` works too, but puts the value in your shell history and
 in the CLI's own process listing. The server stores the value in plain text in
 the project's `secrets.env` (readable by the deploy user and root), and the
@@ -137,16 +151,35 @@ manifest on `stage` and `prod-deploy` before it changes anything; add
 The server builds `build:` services on the current digest of each base
 image. `--no-pull` (on `stage`, `prod-deploy` and `promote`) builds from the
 base images in the server's local image store, for when a registry cannot be
-reached. The client refuses it, before uploading anything, when the server is
-older than 0.11.4.
+reached.
+
+`prod-deploy --redeploy` deploys the release already installed again (after
+changing a secret, say), as strictly checked as a new deploy (the server's
+own `prod-deploy` refuses to run with no new bundle in its inbox, and names
+this). `prod-deploy --ref REF`
+deploys a release the server already has: a bundle in its inbox, or the open
+install of REF that an interrupted deploy left. Neither bundles nor uploads
+anything; `--dry-run`, `--no-snapshot`, `--no-pull` and `--accept-stale-kev`
+go with both.
+
+`prod-deploy --accept-stale-kev` lets the fix for a CVE-quarantined project
+through when the server has no usable CISA KEV catalog to check it against.
+The server logs and alerts it, and never lets it override a catalog that
+lists a CVE still in the release's images.
+
+Some flags need a newer server than the client's minimum: `--abandon` needs
+boxmunge-server 0.11.0, `--no-pull`, `--redeploy` and `logs --staging` need
+0.11.4, and
+`--accept-stale-kev` and `secrets set` need 0.11.5. On an older server the
+client refuses them before anything is sent or uploaded, names the upgrade,
+and names what the older server accepts instead where there is something.
 
 If a `prod-deploy` is interrupted or fails before the project's pre-deploy
 hook ran, `boxmunge prod-deploy --abandon` uploads nothing and runs
 `prod-deploy <project> --abandon` on the server: the previous release's files
 go back (a first deploy's code is removed), and containers and data were never
 touched. Once a hook may have run, use `boxmunge rollback` (or, for a first
-deploy, deploy a fix). Servers older than the release that added it refuse it
-as an unknown argument.
+deploy, deploy a fix). It needs boxmunge-server 0.11.0 or newer.
 
 ## MCP
 
