@@ -23,6 +23,8 @@ name: cosign rehearsal
 # - pull requests that change it, from branches of this repository only. A
 #   fork's pull request skips the sign job (and so the verify job): GitHub
 #   gives it no OIDC token, and nothing from a fork signs as this repository.
+# - Dependabot's runs get no OIDC token either, so its pull requests (an
+#   actions bump touches this file) skip both jobs too, rather than fail.
 # The identity it signs as is this workflow at the run's ref
 # (cosign-rehearsal.yml@refs/heads/main, @refs/pull/<n>/merge). Boxes accept
 # only release.yml@refs/tags/vX.Y.Z, which the verify job proves this
@@ -56,7 +58,10 @@ defaults:
 
 jobs:
   sign:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      (github.event_name != 'pull_request'
+       || github.event.pull_request.head.repo.full_name == github.repository)
+      && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
