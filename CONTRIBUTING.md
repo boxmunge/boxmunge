@@ -90,8 +90,8 @@ that would not merge.
 
 ### Paths that need maintainer review
 
-Some paths are security-sensitive and always need review from a maintainer (enforced by
-`.github/CODEOWNERS`): the restricted shell and bundle reception, bootstrap and install scripts,
+Some paths are security-sensitive, and the maintainer reviews every change to them (they are listed
+in `.github/CODEOWNERS`): the restricted shell and bundle reception, bootstrap and install scripts,
 the upgrade shim, CI workflows, the CVE policy engine, the container security overlay and compose
 validation, and secrets handling. Changes there are welcome. Expect a slower, more careful review.
 

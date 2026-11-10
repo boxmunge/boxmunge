@@ -143,6 +143,7 @@ apt-get install -y -qq \
     age \
     rclone \
     jq
+bash "$(dirname "$0")/python-floor.sh"
 
 # ---------------------------------------------------------------------------
 # Step 3: Install Docker (official repo)

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs inside the web container (python:3.12-slim has no wget or curl).
+# Runs inside the web container (python:3.13-slim has no wget or curl).
 SERVICE="$1"
 if [ "$SERVICE" = "web" ]; then
     exec python3 -c '
