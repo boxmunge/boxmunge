@@ -100,6 +100,21 @@ refresh_docs_for_slot() {
     fi
 }
 
+# install_by_rename <src> <dest>: <src> as <dest>, 0755 and root's (root
+# makes the temp), through a temp file renamed over <dest>. install(1)
+# truncates and rewrites <dest> in place, and bash reads a script from its
+# file as it runs: writing through the running shim's inode would hand this
+# very upgrade the new bytes part-way through (sshd execs boxmunge-sftp for
+# every SFTP request, too). A temp a run killed before its rename is removed
+# by the next (bin/ is root's, and every caller holds upgrade.lock).
+install_by_rename() {
+    local tmp prefix
+    prefix="$(dirname "$2")/.$(basename "$2")"
+    rm -f "$prefix".*
+    tmp="$(mktemp "$prefix.XXXXXX")"
+    { cp "$1" "$tmp" && chmod 0755 "$tmp" && mv -f "$tmp" "$2"; } || { rm -f "$tmp"; return 1; }
+}
+
 # self_update_shim <bundle_dir>: install the bundle's shim (and other bin/
 # wrappers) over the running ones. Without this, shim fixes would take effect
 # only on the upgrade after they ship. Gated on `bash -n`, and on the shim
@@ -118,7 +133,7 @@ self_update_shim() {
             bm_log error upgrade "shim self-update skipped: unbuilt shim" "{}"
         else
             log "Self-updating upgrade shim from bundle..."
-            install -m 0755 -o root -g root "$new_shim" "$BIN_DIR/boxmunge-upgrade"
+            install_by_rename "$new_shim" "$BIN_DIR/boxmunge-upgrade"
             bm_log info upgrade "shim self-updated" "{}"
         fi
     fi
@@ -129,7 +144,7 @@ self_update_shim() {
         f="$bundle/scripts/$name"
         [[ -f "$f" ]] || continue
         if bash -n "$f" 2>/dev/null; then
-            install -m 0755 -o root -g root "$f" "$BIN_DIR/$name"
+            install_by_rename "$f" "$BIN_DIR/$name"
             bm_log info upgrade "wrapper self-updated" "{\"name\": \"$name\"}"
         else
             log "ERROR: new $name has syntax errors; refusing to install. Old wrapper retained."

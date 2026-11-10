@@ -45,6 +45,9 @@ mkdir -p "$RELEASE/boxmunge/on-server" "$RELEASE/boxmunge/bootstrap"
 for f in requirements-build.txt requirements-tui.txt requirements-mcp.txt; do echo "x==1" > "$RELEASE/boxmunge/$f"; done
 echo "ops" > "$RELEASE/boxmunge/on-server/OPERATIONS.md"
 echo "# helper" > "$RELEASE/boxmunge/bootstrap/helper.sh"
+# A built shim and the SFTP wrapper, which the upgrade self-updates into bin/.
+mkdir -p "$RELEASE/boxmunge/scripts"
+for name in boxmunge-upgrade boxmunge-sftp; do printf '#!/usr/bin/env bash\necho new %s\n' "$name" > "$RELEASE/boxmunge/scripts/$name"; done
 printf '#!/usr/bin/env bash\necho "install.sh ran: $*" >> "$BOXMUNGE_ROOT/calls"\nexit 0\n' > "$RELEASE/boxmunge/install.sh"
 tar czf "$RELEASE/boxmunge-1.5.0.tar.gz" -C "$RELEASE" boxmunge
 (cd "$RELEASE" && sha256sum boxmunge-1.5.0.tar.gz > SHA256SUMS)
@@ -52,9 +55,11 @@ touch "$RELEASE/SHA256SUMS.sig" "$RELEASE/SHA256SUMS.cert"
 # The fingerprint install.sh records for that bundle (the pipeline both use).
 BUNDLE_HASH="$( (cd "$RELEASE/boxmunge" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' -o -path './system/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}')"
 
-# box: slot a live on 1.4.0; its python records bm_log messages and details.
+# box: slot a live on 1.4.0, with the running shim and SFTP wrapper in bin/;
+# its python records bm_log messages and details.
 box() {
     new_root a
+    for name in boxmunge-upgrade boxmunge-sftp; do printf '#!/usr/bin/env bash\necho old\n' > "$BOXMUNGE_ROOT/bin/$name"; done
     echo "1.4.0" > "$BOXMUNGE_ROOT/config/version"
     mock_server a '[[ "$1" != --version ]] || echo "boxmunge 1.4.0"; exit 0'
     rm "$BOXMUNGE_ROOT/env-a/bin/python"
@@ -83,6 +88,34 @@ recorded="$(calls | sed -n 's/^record before probation.json: //p')"
 read -r slot version expiry <<< "$recorded"
 [[ "$slot $version" == "b 1.5.0" && "$expiry" -gt $(( $(date +%s) + 6 * 3600 - 120 )) ]] \
     && pass "the probation is recorded root-only before probation.json is written" || fail "recorded: '$recorded'"
+drop_root
+
+# --- the shim's self-update ----------------------------------------------------
+
+# The running shim is replaced by rename, never written through: bash reads a
+# script from its file as it runs, and install(1) rewrites the destination's
+# inode in place. Likewise the SFTP wrapper, which sshd runs for every request.
+inode() { python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino)' "$1"; }
+box
+root_print
+echo "half" > "$BOXMUNGE_ROOT/bin/.boxmunge-upgrade.AbC123"  # left by a killed run
+before_shim="$(inode "$BOXMUNGE_ROOT/bin/boxmunge-upgrade")"
+before_sftp="$(inode "$BOXMUNGE_ROOT/bin/boxmunge-sftp")"
+exec 5< "$BOXMUNGE_ROOT/bin/boxmunge-upgrade"  # keep the old inode alive, as the running shim does
+run_shim target 1.5.0
+expect 0 "Self-updating upgrade shim" "the upgrade self-updates the shim"
+for name in boxmunge-upgrade boxmunge-sftp; do
+    [[ "$(cat "$BOXMUNGE_ROOT/bin/$name")" == *"echo new $name"* && -x "$BOXMUNGE_ROOT/bin/$name" ]] \
+        && pass "bin/$name is the bundle's, executable" || fail "bin/$name: $(ls -l "$BOXMUNGE_ROOT/bin/$name")"
+done
+[[ "$(inode "$BOXMUNGE_ROOT/bin/boxmunge-upgrade")" != "$before_shim" \
+    && "$(inode "$BOXMUNGE_ROOT/bin/boxmunge-sftp")" != "$before_sftp" ]] \
+    && pass "both are new files renamed into place" || fail "a bin/ file was rewritten in place"
+[[ "$(cat <&5)" == *"echo old"* ]] && pass "the running shim's file is left as it was" \
+    || fail "the running shim's bytes changed under it"
+exec 5<&-
+[[ -z "$(find "$BOXMUNGE_ROOT/bin" -name '.boxmunge-*')" ]] && pass "no temp left in bin/" \
+    || fail "temps left: $(ls -a "$BOXMUNGE_ROOT/bin")"
 drop_root
 
 box
