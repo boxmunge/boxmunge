@@ -1,6 +1,6 @@
 # Build + test tooling used by the release workflow.
 # Regenerate with: make lock
-pytest>=8.0
+pytest>=9.2.0
 # Parallel test runs (`-n auto`): CI's unit job and the local fast loop.
 pytest-xdist>=3.8
 cyclonedx-bom>=4.5
