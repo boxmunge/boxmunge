@@ -12,13 +12,16 @@ A service whose compose files set `build: {pull: false}` builds from the
 local image store even in a pulling deploy: its FROM may name an image
 only this box has (docker load, a hand build), which no registry serves.
 Compose's CLI --pull would override that setting, so those services are
-built in a separate invocation without it.
+built in a separate invocation without it. Building a service also builds
+the services it names as `service:` build contexts, so a pulling build on
+a local one is built locally too, and a local build on a pulling one is
+refused (it would rebuild that service on the stale local bases).
 """
 from __future__ import annotations
 
 import yaml
 
-from boxmunge import compose_references
+from boxmunge.compose_build_specs import build_specs, service_contexts
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.release_target import DeployRefused, ReleaseTarget
 
@@ -32,48 +35,48 @@ _BASE_UNREADABLE = "failed to resolve source metadata"
 
 
 def _build_specs(target: ReleaseTarget) -> dict[str, dict]:
-    """{service: its `build:` mapping as written}, from compose.yml and every
-    file it includes or extends from, as the reference walk follows them
-    (compose_references). Compose's resolved model drops a false `pull`, so
-    the files themselves are read. Raises DeployRefused."""
+    """{service: its merged `build:` mapping} (compose_build_specs).
+    Raises DeployRefused."""
     release = target.compose.project_directory or target.compose.cwd
-    specs: dict[str, dict] = {}
     try:
-        for path in compose_references.compose_files(release / "compose.yml", (release,)):
-            doc = yaml.safe_load(path.read_text()) or {}
-            services = doc.get("services") if isinstance(doc, dict) else None
-            specs.update({n: s["build"] for n, s in (services or {}).items()
-                          if isinstance(s, dict) and isinstance(s.get("build"), dict)})
+        return build_specs(release / "compose.yml", (release,))
     except (OSError, ValueError, yaml.YAMLError) as e:
         raise DeployRefused([f"cannot read the release's compose files to see which "
                              f"builds set build.pull: false: {e}"]) from e
-    return specs
-
-
-def _service_contexts(spec: dict) -> set[str]:
-    """The services a build names as `service:<name>` additional contexts."""
-    contexts = spec.get("additional_contexts") or {}
-    values = (contexts.values() if isinstance(contexts, dict)
-              else [str(c).split("=", 1)[-1] for c in contexts if isinstance(c, str)])
-    return {v.removeprefix("service:") for v in values
-            if isinstance(v, str) and v.startswith("service:")}
 
 
 def local_base_builds(target: ReleaseTarget) -> frozenset[str]:
     """The services built from the local image store in a pulling deploy:
-    each whose definition sets `build.pull: false`, and each that builds on
-    one of those through a `service:` additional context (a pulling build
-    would build that service again, with --pull). A service that extends
-    another under a different name sets pull: false itself."""
+    each whose merged definition sets `build.pull: false`, and each that
+    builds on one of those through a `service:` additional context (a
+    pulling build would build that service again, with --pull). Raises
+    DeployRefused for the reverse: a local build on a pulling service."""
     specs = _build_specs(target)
     local = {n for n, spec in specs.items() if spec.get("pull") is False}
     grew = True
     while grew:
         more = {n for n, spec in specs.items()
-                if n not in local and _service_contexts(spec) & local}
+                if n not in local and service_contexts(spec) & local}
         local |= more
         grew = bool(more)
+    _refuse_pulling_contexts(specs, local)
     return frozenset(local)
+
+
+def _refuse_pulling_contexts(specs: dict[str, dict], local: set[str]) -> None:
+    """Building a local service builds its `service:` contexts too, without
+    --pull, so a pulling context would be built again, over its pulled
+    build, on the base images this box already has."""
+    problems = [
+        f"'{name}' builds from the local image store (compose build.pull: false) but "
+        f"names '{context}' as a `service:` build context, and '{context}' pulls its "
+        f"base images: building '{name}' would build '{context}' again without "
+        f"--pull, on the base images this box already has. Set `build: {{pull: false}}` "
+        f"on '{context}' too, or run the command again with --no-pull."
+        for name in sorted(local) for context in sorted(service_contexts(specs[name]))
+        if context in specs and context not in local]
+    if problems:
+        raise DeployRefused(problems)
 
 
 def build_services(target: ReleaseTarget, builds: list[str], *, pull: bool) -> None:

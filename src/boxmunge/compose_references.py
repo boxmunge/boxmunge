@@ -21,6 +21,7 @@ and resolves it from the wrong directory below depth two), its `env_file`
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -84,7 +85,10 @@ class _ReferenceWalk:
         self.roots = roots
         self.problems: list[str] = []
         self.files: list[Path] = []
-        self.compose_files: list[Path] = []  # the top file, its includes and extends
+        self.documents: dict[Path, dict[str, Any]] = {}  # each compose file, parsed once
+        self.project_files: list[Path] = []  # the top file and its includes
+        # (file, service) -> the (file, service) it extends
+        self.extends: dict[tuple[Path, str], tuple[Path, str]] = {}
         self._seen: set[tuple[str, str, int]] = set()
 
     def _confined(self, what: str, ref: Any, base: Path, *, read: bool = True) -> bool:
@@ -154,26 +158,34 @@ class _ReferenceWalk:
         for target in targets:
             self.visit(target, new_base, depth + 1)
 
-    def visit(self, path: Path, base: Path | None = None, depth: int = 0) -> None:
+    def _parsed(self, path: Path) -> Any:
+        if path not in self.documents:
+            try:
+                doc = yaml.safe_load(path.read_text())
+            except yaml.YAMLError as e:
+                self.problems.append(f"{path.name}: cannot parse: {e}")
+                return None
+            self.documents[path] = doc if isinstance(doc, dict) else {}
+        return self.documents[path]
+
+    def visit(self, path: Path, base: Path | None = None, depth: int = 0, *,
+              extended: bool = False) -> None:
         """``base`` resolves the file's relative paths: its own directory for
         the top file and an extends file, the include entry's base for an
         included one (entry_base). ``depth`` counts includes from the top
         file; an extends file keeps its referrer's. The same file reached
-        with another base or depth is walked again."""
+        with another base or depth is walked again. ``extended``: reached
+        only through `extends`, so its services are not the project's."""
         base = base or path.parent
+        if not extended and path not in self.project_files:
+            self.project_files.append(path)
         key = (str(path.resolve()), str(base), depth)
         if key in self._seen:
             return
         self._seen.add(key)
         self.files.append(path)
-        if path not in self.compose_files:
-            self.compose_files.append(path)
-        try:
-            doc = yaml.safe_load(path.read_text())
-        except yaml.YAMLError as e:
-            self.problems.append(f"{path.name}: cannot parse: {e}")
-            return
-        if not isinstance(doc, dict):
+        doc = self._parsed(path)
+        if not doc:
             return
         for compose_paths, extra in include_entries(doc):
             self._include(path.name, compose_paths, extra, base, depth)
@@ -190,7 +202,10 @@ class _ReferenceWalk:
                 f"{what}: extends file", ext_file, base)
             if target is not None:
                 # Compose resolves an extended file's paths from its own directory.
-                self.visit(target, None, depth)
+                self.visit(target, None, depth, extended=True)
+            parent = extends.get("service") if isinstance(extends, dict) else extends
+            if isinstance(parent, str) and (ext_file is None or target is not None):
+                self.extends[(path, svc_name)] = (target or path, parent)
             for ref in env_file_paths(svc.get("env_file")):
                 self._confined(f"{what}: env_file", ref, base)
             # label_file is read by the daemon, as root, like env_file.
@@ -210,13 +225,28 @@ def walk_references(
     return walk.problems, walk.files
 
 
-def compose_files(compose_path: Path, roots: tuple[Path, ...]) -> list[Path]:
-    """The compose files Compose reads for ``compose_path``: it, then every
-    file its include entries and extends name, as walk_references follows
-    them. Raises ValueError for references the walk refuses (validation
-    has refused them already, so this is a broken assumption)."""
+@dataclass(frozen=True)
+class ComposeSources:
+    """The compose files Compose reads for a project, as the walk parsed
+    them: ``documents`` holds every one (top file, includes, extends files),
+    ``project_files`` those whose services the project has (the top file
+    and its includes), ``extends`` each service's `extends` parent."""
+    documents: dict[Path, dict[str, Any]]
+    project_files: list[Path]
+    extends: dict[tuple[Path, str], tuple[Path, str]]
+
+    def services(self, path: Path) -> dict[str, Any]:
+        services = self.documents[path].get("services")
+        return services if isinstance(services, dict) else {}
+
+
+def compose_sources(compose_path: Path, roots: tuple[Path, ...]) -> ComposeSources:
+    """The compose files ``compose_path`` makes Compose read, each parsed
+    once, as walk_references follows them. Raises ValueError for references
+    the walk refuses (validation has refused them already, so this is a
+    broken assumption)."""
     walk = _ReferenceWalk(roots)
     walk.visit(compose_path)
     if walk.problems:
         raise ValueError(f"{compose_path}: {walk.problems[0]}")
-    return walk.compose_files
+    return ComposeSources(walk.documents, walk.project_files, walk.extends)

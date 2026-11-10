@@ -159,3 +159,61 @@ def test_a_build_on_a_pull_false_service_is_local_too(paths, contexts) -> None:
                     f"  web:\n    build:\n      context: .\n      additional_contexts: {contexts}\n"
                     "  other:\n    build: .\n")
     assert deploy_build.local_base_builds(production_target(paths, "app")) == {"tool", "web"}
+
+
+def test_a_pull_false_build_on_a_pulling_service_context_is_refused(paths, monkeypatch) -> None:
+    """Building `web` without --pull would build its `service:` context
+    `tool` again from the local image store, over the pulled build, on the
+    stale base: refused before anything is built, naming both services."""
+    calls = _calls(monkeypatch)
+    _compose(paths, "services:\n  tool:\n    build: .\n"
+                    "  web:\n    build:\n      context: .\n      pull: false\n"
+                    "      additional_contexts: {tools: 'service:tool'}\n")
+    services = {n: {"build": ".", "image": f"boxmunge.invalid/app/{n}"} for n in ("web", "tool")}
+    with pytest.raises(DeployRefused) as e:
+        di.build_and_pull(production_target(paths, "app"), services, pull=True)
+    assert calls == []
+    text = " ".join(e.value.problems)
+    assert "'web'" in text and "'tool'" in text
+    assert "pull: false" in text and "--no-pull" in text
+    di.build_and_pull(production_target(paths, "app"), services, pull=False)
+    assert [c[0][-3:] for c in calls] == [["build", "tool", "web"]]
+
+
+def test_compose_yml_pull_true_beats_pull_false_in_the_file_it_extends(paths) -> None:
+    """Compose merges an extended build key by key, the extending file
+    winning, so an explicit pull: true in compose.yml stands."""
+    _compose(paths, "services:\n  web:\n    extends: {file: base.yml, service: web}\n"
+                    "    build:\n      pull: true\n"
+                    "  api:\n    extends: {file: base.yml, service: common}\n"
+                    "    build:\n      pull: false\n")
+    (paths.project_dir("app") / "base.yml").write_text(
+        "services:\n  web:\n    build:\n      context: .\n      pull: false\n"
+        "  common:\n    build:\n      context: .\n      pull: true\n")
+    assert deploy_build.local_base_builds(production_target(paths, "app")) == {"api"}
+
+
+def test_pull_false_is_inherited_through_extends_under_another_name(paths) -> None:
+    _compose(paths, "services:\n  api:\n    extends: base\n"
+                    "  base:\n    build:\n      context: .\n      pull: false\n"
+                    "  web:\n    extends: {file: parts/more.yml, service: tool}\n")
+    (paths.project_dir("app") / "parts").mkdir()
+    (paths.project_dir("app") / "parts" / "more.yml").write_text(
+        "services:\n  tool:\n    build:\n      context: .\n      pull: false\n"
+        "  unused:\n    build:\n      context: .\n      pull: false\n")
+    assert deploy_build.local_base_builds(production_target(paths, "app")) == {
+        "api", "base", "web"}
+
+
+def test_each_compose_file_is_read_once(paths, monkeypatch) -> None:
+    from pathlib import Path
+    _compose(paths, "include:\n  - parts/tools.yml\nservices:\n  web:\n    build: .\n")
+    (paths.project_dir("app") / "parts").mkdir()
+    (paths.project_dir("app") / "parts" / "tools.yml").write_text(
+        "services:\n  tool:\n    build:\n      context: .\n      pull: false\n")
+    reads: list[str] = []
+    real = Path.read_text
+    monkeypatch.setattr(Path, "read_text",
+                        lambda self, *a, **kw: reads.append(self.name) or real(self, *a, **kw))
+    deploy_build.local_base_builds(production_target(paths, "app"))
+    assert sorted(reads) == ["compose.yml", "tools.yml"]
