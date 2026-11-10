@@ -57,6 +57,14 @@ def _require_deploy_owned(repo: Path, uid: int) -> None:
                               f"uid {owner}")
 
 
+# Set on every git call, over any config file. The ext:: and fd:: transports
+# run commands (or read file descriptors) instead of fetching, and git's own
+# default refuses them, but /etc/gitconfig or deploy's ~/.gitconfig could
+# allow them: an add-git-project URL reaches `git clone` verbatim.
+_FORCED_CONFIG = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+                  "-c", "protocol.ext.allow=never", "-c", "protocol.fd.allow=never")
+
+
 def _git(args: list[str], cwd: Path, *, timeout: int = 60) -> subprocess.CompletedProcess:
     """git's result; a hang, output that is not UTF-8 or no deploy user to
     run it as root raises GitRefError, so callers handle one error type.
@@ -66,12 +74,12 @@ def _git(args: list[str], cwd: Path, *, timeout: int = 60) -> subprocess.Complet
     deploy's supplementary groups, and like every run it gets the deploy
     shell's environment, no stdin and its own session (as_deploy). It reads
     the config git run by deploy itself reads: deploy's own and the system
-    config (/etc/gitconfig). The repository's hooks and fsmonitor never run."""
+    config (/etc/gitconfig). The repository's hooks and fsmonitor never run,
+    and the ext:: and fd:: transports are refused (_FORCED_CONFIG)."""
     try:
         if running_as_root():
             _require_deploy_owned(cwd, deploy_account().pw_uid)
-        return run_as_deploy(["git", "-c", "core.hooksPath=/dev/null",
-                              "-c", "core.fsmonitor=false", *args], cwd,
+        return run_as_deploy(["git", *_FORCED_CONFIG, *args], cwd,
                              supplementary_groups=False, timeout=timeout, check=False)
     except NoDeployUser as e:
         raise GitRefError(str(e)) from e
