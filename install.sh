@@ -28,6 +28,8 @@ fi
 
 # shellcheck source=bootstrap/cosign.sh
 source "${SCRIPT_DIR}/bootstrap/cosign.sh"
+# shellcheck source=bootstrap/python-floor.sh
+source "${SCRIPT_DIR}/bootstrap/python-floor.sh"
 
 # ---------------------------------------------------------------------------
 # Pre-flight
@@ -56,6 +58,10 @@ if grep -q '^# >>> boxmunge-upgrade.d:' "${SCRIPT_DIR}/scripts/boxmunge-upgrade"
     exit 1
 fi
 [[ "${FROM_UPGRADE_SHIM}" -eq 1 ]] || FROM_UPGRADE_SHIM="$(BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/run-by-old-shim.sh")"
+
+# Before anything is changed. A fresh install whose image lacks python3 is
+# checked again once the bootstrap has installed it.
+command -v python3 >/dev/null && require_python_floor
 
 # ---------------------------------------------------------------------------
 # Docker Compose version.
@@ -226,6 +232,7 @@ if [[ ! -f "${BOXMUNGE_ROOT}/config/boxmunge.yml" ]]; then
     fi
     bash "${SCRIPT_DIR}/bootstrap/init-host.sh" "$@"
     require_compose_version
+    require_python_floor
 else
     echo "Existing installation detected — upgrading boxmunge package only."
 fi

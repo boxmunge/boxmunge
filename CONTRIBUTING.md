@@ -135,6 +135,9 @@ security floor of a box that installs it.
 
 ## Development setup
 
+The server needs Python 3.13 or newer, the version Debian 13 ships. The client under `cli/`
+supports Python 3.10 and newer.
+
 ```bash
 git clone https://github.com/boxmunge/boxmunge.git
 cd boxmunge
