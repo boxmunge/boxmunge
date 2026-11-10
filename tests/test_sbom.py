@@ -7,7 +7,6 @@ true`, and the release shipped a hand-written SBOM with four components."""
 from __future__ import annotations
 
 import importlib.util
-import json
 import re
 import sys
 import tomllib

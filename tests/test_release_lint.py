@@ -11,7 +11,7 @@ import pytest
 from boxmunge.release_selection import (
     github_release_breaking, github_release_class, github_release_held,
 )
-from tests.release_lint_helpers import GH, REPO, SCRIPT, lint, write_tree
+from tests.release_lint_helpers import REPO, SCRIPT, lint, write_tree
 
 
 def _run(*args: str) -> subprocess.CompletedProcess:
