@@ -307,7 +307,8 @@ def test_mount_not_recorded_at_deploy_is_refused(box) -> None:
 
 
 def test_project_never_recorded_is_refused(box) -> None:
-    _refused(box, "no record of the bind sources")
+    """The refusal names the command that records one."""
+    _refused(box, "no record of the bind sources .*; prod-deploy shop --redeploy to record them")
 
 
 def test_unreadable_record_is_refused(box) -> None:

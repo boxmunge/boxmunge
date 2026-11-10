@@ -204,7 +204,7 @@ def refresh_control_hash(project_dir: Path, path: Path, rel: str) -> None:
     blesses nothing a container wrote. No record yet: nothing to refresh."""
     if not os.path.lexists(path):
         return
-    doc = read_record(path)
+    doc = _load_record(path)
     doc["control"][rel] = _hash_file(project_dir, project_dir / rel, rel)
     atomic_write_text(path, json.dumps(doc, indent=2) + "\n")
 
@@ -213,7 +213,7 @@ def control_file_unchanged(project_dir: Path, path: Path, rel: str) -> bool:
     """True if a record exists and control file ``rel`` still hashes to it."""
     if not os.path.lexists(path):
         return False
-    recorded = read_record(path)["control"]
+    recorded = _load_record(path)["control"]
     return rel in recorded and recorded[rel] == _hash_file(project_dir, project_dir / rel, rel)
 def _open_in_project(root: str, target: str, rel: str) -> int:
     """Open a control file's resolved target, one component at a time from
@@ -242,15 +242,25 @@ def _open_in_project(root: str, target: str, rel: str) -> int:
     return out
 
 
-def read_record(path: Path) -> dict[str, Any]:
+def read_record(path: Path, *, redo: str) -> dict[str, Any]:
     """The bind sources, kinds and control hashes deploy recorded. Raises
-    BindSourceError when there is no readable record."""
+    BindSourceError when there is no readable record; ``redo`` is the
+    command that records one."""
     try:
-        doc = json.loads(read_text_nofollow(path))
+        return _load_record(path)
     except FileNotFoundError:
         raise BindSourceError(
             f"no record of the bind sources this project was deployed with "
-            f"({path}). Deploy it again to record them.") from None
+            f"({path}); {redo} to record them.") from None
+
+
+def _load_record(path: Path) -> dict[str, Any]:
+    """read_record for a record known to exist (FileNotFoundError if it
+    went meanwhile)."""
+    try:
+        doc = json.loads(read_text_nofollow(path))
+    except FileNotFoundError:
+        raise
     except (OSError, ValueError) as e:
         raise BindSourceError(f"cannot read {path}: {e}") from e
     sources = doc.get("sources") if isinstance(doc, dict) else None
@@ -321,7 +331,7 @@ def check_kept_control(project_dir: Path, read_files: Iterable[Path], path: Path
     now = control_hashes(project_dir, read_files)
     if not os.path.lexists(path):
         return now
-    recorded = read_record(path)["control"]
+    recorded = _load_record(path)["control"]
     for rel in sorted((set(now) & set(recorded)) - {OVERLAY}):
         if now[rel] != recorded[rel]:
             raise _changed(rel, redo)

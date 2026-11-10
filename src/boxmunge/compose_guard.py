@@ -158,7 +158,7 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
             bind_sources.record(project_dir, sources, bind_sources.control_hashes(
                 project_dir, read_files, control_root=release), record_path)
         else:
-            rec = bind_sources.read_record(record_path)
+            rec = bind_sources.read_record(record_path, redo=f"stage {project_name} again")
             bind_sources.check_sources(project_dir, sources, rec["sources"])
             bind_sources.check_control(project_dir, read_files, rec["control"],
                                        control_root=release, redo=f"stage {project_name} again")
@@ -238,7 +238,8 @@ def check_start(
                 if regenerated else bind_sources.control_hashes(project_dir, read_files))
             bind_sources.record(project_dir, sources, control, record_path)
         else:
-            rec = bind_sources.read_record(record_path)
+            rec = bind_sources.read_record(record_path,
+                                           redo=redeploy_command(paths, project_name))
             bind_sources.check_sources(project_dir, sources, rec["sources"])
             bind_sources.check_control(project_dir, read_files, rec["control"],
                                        redo=redeploy_command(paths, project_name))
@@ -396,7 +397,8 @@ def check_containers_start(paths: BoxPaths, project_name: str, names: list[str],
         if problems:
             raise BindSourceError(problems[0] + _REDEPLOY)
         sources = {bind_sources.project_rel(src, project_dir) for src, _rw in existing}
-        rec = bind_sources.read_record(paths.project_bind_record(project_name))
+        rec = bind_sources.read_record(paths.project_bind_record(project_name),
+                                       redo=redeploy_command(paths, project_name))
         bind_sources.check_sources(project_dir, sources, rec["sources"])
     except (BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
