@@ -153,8 +153,8 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
         sources = bind_sources.model_sources(model, project_dir)
         record_path = paths.project_bind_record(project_name, staging=True)
         if record:
-            bind_sources.record(project_dir, sources, read_files, record_path,
-                                control_root=release)
+            bind_sources.record(project_dir, sources, bind_sources.control_hashes(
+                project_dir, read_files, control_root=release), record_path)
         else:
             rec = bind_sources.read_record(record_path)
             bind_sources.check_sources(project_dir, sources, rec["sources"])
@@ -230,11 +230,11 @@ def check_start(
             project_dir, compose_files, project_name, all_profiles=True)
         read_files = [*read_files, *compose_resolve.model_env_files(model, project_dir)]
         sources = bind_sources.model_sources(model, project_dir)
-        if regenerated:
-            bind_sources.check_kept_control(project_dir, read_files, record_path,
-                                            redo=redeploy_command(paths, project_name))
         if record:
-            bind_sources.record(project_dir, sources, read_files, record_path)
+            control = (bind_sources.check_kept_control(
+                project_dir, read_files, record_path, redo=redeploy_command(paths, project_name))
+                if regenerated else bind_sources.control_hashes(project_dir, read_files))
+            bind_sources.record(project_dir, sources, control, record_path)
         else:
             rec = bind_sources.read_record(record_path)
             bind_sources.check_sources(project_dir, sources, rec["sources"])

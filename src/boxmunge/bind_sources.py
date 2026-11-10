@@ -309,31 +309,32 @@ def _changed(rel: str, redo: str) -> BindSourceError:
 
 
 def check_kept_control(project_dir: Path, read_files: Iterable[Path], path: Path, *,
-                       redo: str) -> None:
+                       redo: str) -> dict[str, str | None]:
     """Before a record is renewed from configs boxmunge regenerated in place
     (an upgrade, the user-namespace switch): every control file both the
     record and this boxmunge track, but the overlay boxmunge just wrote,
     still hashes to the record, so the renewal blesses nothing a container
     wrote. A file only one side tracks (this boxmunge reads a new one, or no
-    longer reads one) is taken as it is. No record yet: nothing to compare."""
-    if not path.exists():
-        return
-    recorded = read_record(path)["control"]
+    longer reads one) is taken as it is. No record yet: nothing to compare.
+    Returns the hashes checked, for the record to hold exactly those (a
+    file rewritten after the check must not be recorded)."""
     now = control_hashes(project_dir, read_files)
+    if not path.exists():
+        return now
+    recorded = read_record(path)["control"]
     for rel in sorted((set(now) & set(recorded)) - {OVERLAY}):
         if now[rel] != recorded[rel]:
             raise _changed(rel, redo)
+    return now
 
 
-def record(
-    project_dir: Path, sources: set[str], read_files: Iterable[Path], path: Path, *,
-    control_root: Path | None = None,
-) -> None:
+def record(project_dir: Path, sources: set[str], control: dict[str, str | None],
+           path: Path) -> None:
     """Check every source, creating missing ones, record their kinds, and
-    record the sha256 of every file boxmunge reads."""
+    record ``control``: the sha256 of every file boxmunge reads, as
+    control_hashes (or check_kept_control) took them."""
     kinds = {rel: source_kind(project_dir, rel, create=True) for rel in sorted(sources)}
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps({
-        "version": RECORD_VERSION, "sources": kinds,
-        "control": control_hashes(project_dir, read_files, control_root=control_root),
+        "version": RECORD_VERSION, "sources": kinds, "control": control,
     }, indent=2) + "\n")

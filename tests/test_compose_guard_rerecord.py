@@ -104,3 +104,23 @@ def test_a_manifest_the_upgrade_migrates_is_renewed_only_from_the_recorded_one(
     else:
         _upgrade_record(paths)
         _restart(paths)
+
+
+def test_the_record_holds_exactly_the_hashes_that_were_checked(box, monkeypatch) -> None:
+    """A container rewriting a file between the check and the record must
+    not get its version recorded: the record is the checked hashes."""
+    from boxmunge import bind_sources
+    paths, project_dir, *_ = box
+    _deploy(paths)
+    before = _record(paths)["control"]
+    real = bind_sources.check_kept_control
+
+    def check_then_tamper(*args, **kwargs):
+        checked = real(*args, **kwargs)
+        _profile_off(project_dir)
+        return checked
+    monkeypatch.setattr(bind_sources, "check_kept_control", check_then_tamper)
+    _upgrade_record(paths)
+    assert _record(paths)["control"]["manifest.yml"] == before["manifest.yml"]
+    with pytest.raises(ComposeRefused, match="control file manifest.yml changed"):
+        _restart(paths)
