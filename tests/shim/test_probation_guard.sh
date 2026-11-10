@@ -92,15 +92,54 @@ expect_deferred "target (probation expired, not yet promoted)"
     || fail "expired refusal lacks the promotion note: $OUT"
 drop_root
 
-# A forged far-future expiry cannot defer upgrades for good: beyond a fresh
-# probation's length it counts as expired, so check-probation promotes it.
+# A forged far-future expiry cannot defer upgrades for good: the first run
+# that reads it records, root-only, an expiry at most a fresh probation's
+# length away, and the probation ends then.
 on_probation "2999-01-01T00:00:00+00:00"
 run_shim target 1.5.0
 expect_deferred "target (expiry beyond the cap)"
-[[ "$OUT" == *"beyond a 6h probation; treating it as expired"* && "$OUT" == *"health timer promotes it"* ]] \
-    && pass "beyond-cap expiry is treated as expired, with a warning" || fail "beyond-cap expiry: $OUT"
+[[ "$OUT" == *"beyond a 6h probation; it ends at"* && "$OUT" != *"2999"* ]] \
+    && pass "a beyond-cap expiry is capped, with a warning" || fail "beyond-cap expiry: $OUT"
 run_shim check-probation
-expect 0 "promoted" "check-probation promotes a beyond-cap probation"
+expect 0 "" "check-probation carries on with a capped probation"
+[[ -f "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] && pass "a capped probation is not promoted at once" \
+    || fail "a capped probation was promoted at once"
+recorded="$(cut -d' ' -f2 "$BOXMUNGE_ROOT/upgrade-root/probation-expiry")"
+now="$(date +%s)"
+[[ "$recorded" -gt $((now + 5 * 3600)) && "$recorded" -le $((now + 6 * 3600)) ]] \
+    && pass "the capped expiry is a fresh probation's length away" || fail "recorded expiry $recorded (now $now)"
+# Deploy cannot lengthen it again: a later, longer expires_at is ignored.
+write_probation "1.4.0" "b" "2999-06-01T00:00:00+00:00"
+run_shim check-probation
+[[ "$(cut -d' ' -f2 "$BOXMUNGE_ROOT/upgrade-root/probation-expiry")" == "$recorded" ]] \
+    && pass "a rewritten expires_at does not move the recorded expiry" || fail "recorded expiry moved"
+# It can still end the probation early, as ever.
+write_probation "1.4.0" "b" "2000-01-01T00:00:00+00:00"
+run_shim check-probation
+expect 0 "promoted" "an earlier expires_at still ends the probation"
+drop_root
+
+# A clock stepped back after the upgrade (an NTP step, a VM restore) puts
+# expires_at more than a probation's length ahead. That is not the end of the
+# probation: it runs a probation's length from now.
+for back in 20 600; do
+    on_probation "$(python3 -c "from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) + timedelta(hours=6, minutes=$back)).isoformat())")"
+    run_shim check-probation
+    expect 0 "" "a clock $back minutes back: check-probation carries on"
+    [[ -f "$BOXMUNGE_ROOT/upgrade-state/probation.json" && "$(readlink "$BOXMUNGE_ROOT/env-active")" == "$BOXMUNGE_ROOT/env-a" ]] \
+        && pass "a clock $back minutes back does not promote the probation" || fail "promoted after a clock step of $back minutes"
+    drop_root
+done
+# Likewise once the expiry is recorded: one more than a probation's length
+# ahead means the clock went back, and it is moved to a probation from now.
+on_probation
+mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+echo "a $(( $(date +%s) + 10 * 3600 ))" > "$BOXMUNGE_ROOT/upgrade-root/probation-expiry"
+run_shim check-probation
+expect 0 "the clock went back" "a recorded expiry beyond a probation from now says the clock went back"
+recorded="$(cut -d' ' -f2 "$BOXMUNGE_ROOT/upgrade-root/probation-expiry")"
+[[ "$recorded" -le $(( $(date +%s) + 6 * 3600 )) && -f "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] \
+    && pass "the recorded expiry is moved to a probation from now, not promoted" || fail "recorded $recorded"
 drop_root
 
 on_probation

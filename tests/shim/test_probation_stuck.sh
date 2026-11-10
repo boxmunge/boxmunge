@@ -25,7 +25,7 @@ export PATH="$UPGRADEBIN:$PATH"
 slot_gone() {
     new_root a
     echo "1.4.0" > "$BOXMUNGE_ROOT/config/version"
-    mock_server a "if [[ \"\$1\" == health ]]; then exit ${2:-0}; fi; exit 0"
+    mock_server a "if [[ \"\$1\" == health ]]; then exec health-report ${2:-0}; fi; exit 0"
     rm "$BOXMUNGE_ROOT/env-a/bin/python"
     printf '%s\n' '#!/usr/bin/env bash' \
         'if [[ "$1" == "-" ]]; then cat >/dev/null; echo "bm_log $BM_LEVEL $BM_MSG" >> "$BOXMUNGE_ROOT/calls"; exit 0; fi' \

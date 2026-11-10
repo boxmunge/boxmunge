@@ -1606,13 +1606,19 @@ run from the deploy shell) reports `SKIP`, which does not affect the exit code. 
 tool runs the same checks.
 
 Outside an upgrade nothing runs `health` on a schedule: the 5-minute health timer runs `check-all`
-(the per-project checks and alerts). A platform upgrade runs `health` as root twice over: once
-right after it switches to the new release (60-second budget), then on every health-timer fire for
-the 6-hour probation that follows (`boxmunge-upgrade check-probation`, 180-second budget). An exit
-of 2 from either rolls the platform back to the previous release and blocklists the new one, so
+(the per-project checks and alerts). A platform upgrade runs `health --json` as root: once with
+the previous release just before it starts (180-second budget), once right after it switches to
+the new release (60 seconds), then on every health-timer fire for the 6-hour probation that
+follows (`boxmunge-upgrade check-probation`, 180 seconds). An error in a check that did not fail
+before the upgrade rolls the platform back to the previous release and blocklists the new one, so
 auto-update does not retry it (`sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist <version>`
-forgets it). Exit 0 or 1 keeps the release; a `health` that runs past its budget is retried on the
-next fire, not rolled back.
+forgets it). An error that was already there before the upgrade is logged but does not roll back
+(rolling back would not fix it); if `health` gave no report before the upgrade, every error
+counts. Warnings keep the release. The output must be a valid report: a `health` that crashes
+before it (a module that cannot be imported, say), prints something else, or exits with a code
+its checks do not mean gives no verdict, and two probation runs in a row without one roll back.
+One that runs past its budget is retried on the next fire; six in a row (half an hour) roll back,
+unless `health` also ran past its budget before the upgrade.
 
 | Check | Warns (or errors) when | What to do |
 |---|---|---|
@@ -2053,8 +2059,9 @@ How an upgrade is applied and undone:
    0.10.1 needs a redeploy (or the next upgrade) instead: its previous overlay names its
    image by the old name, which the upgrade dropped, and its previous record lacks this
    release's mounts, so the scan and the start checks refuse it.
-4. A health check runs, then a 6-hour probation. A critical health result during probation
-   rolls back. So does a live environment whose `boxmunge-server` no longer starts, once two
+4. A health check runs, then a 6-hour probation. A health error during probation that was not
+   there before the upgrade rolls back (see [Verifying Platform Health](#verifying-platform-health)
+   for what counts). So does a live environment whose `boxmunge-server` no longer starts, once two
    health-timer runs in a row (5 minutes apart) find it so, expired or not; a crash counts like
    any other failure, and one that only times out needs four runs in a row. A health check that
    cannot run at all has the live environment checked the same way.
@@ -2076,8 +2083,8 @@ teardown itself does not finish (it is stopped after 10 minutes), one high-prior
 those commands for every project still holding `.releases/staged/`. It never blocks the
 rollback, and the older release ignores what is left.
 
-A rollback swaps the venvs back, restores the stash, and re-runs `upgrade --apply` with the
-previous release, so its overlays and Caddy sites are regenerated and projects restarted on
+A rollback swaps the venvs back, restores the stash the upgrade made (never just the newest in
+`stashes/`), and re-runs `upgrade --apply` with the previous release, so its overlays and Caddy sites are regenerated and projects restarted on
 them. Pause and quarantine markers are not restored from the stash: a project you resumed after
 the upgrade stays resumed. Nor are the users records: a service you gave to a new user with
 `data chown` after the upgrade keeps running as that user. If either the restore or the re-apply fails, you get a "ROLLBACK

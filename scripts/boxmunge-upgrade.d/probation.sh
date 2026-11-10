@@ -7,15 +7,24 @@
 
 # read_probation: parse probation.json into PROB_VERSION, PROB_PREV_SLOT,
 # PROB_EXPIRED (yes/no) and PROB_EXPIRES_AT (re-formatted in UTC, so safe to
-# print). The file is deploy-writable, so an expires_at beyond a fresh
-# probation's length (plus slack for clock steps) is forged or corrupt: it
-# counts as expired, or a far-future value would defer upgrades for good.
+# print). The file is deploy-writable: deploy may end a probation early, but
+# must not lengthen one (a far-future expires_at would defer upgrades for
+# good). So the first run that reads a probation records its expiry in
+# root-only upgrade-root/probation-expiry, keyed by the live slot, at most a
+# fresh probation's length from then, and the probation ends at the earlier
+# of that and expires_at. A recorded expiry more than a probation's length
+# ahead means the clock went back (an NTP step, a VM restore); it is moved to
+# a probation's length from now rather than promoting at once, which deleted
+# the rollback target.
+PROBATION_EXPIRY_FILE="$UPGRADE_ROOT_DIR/probation-expiry"
 read_probation() {
-    local out content
+    local out content recorded=""
     refuse_symlink "$PROBATION_FILE"
     content="$(read_untrusted "$PROBATION_FILE")" || exit 1
-    out="$(BM_PROBATION="$content" BM_HOURS="$PROBATION_HOURS" python3 - <<'PYPROB'
-import json, os, sys
+    refuse_symlink "$PROBATION_EXPIRY_FILE"
+    [[ ! -e "$PROBATION_EXPIRY_FILE" ]] || recorded="$(cat "$PROBATION_EXPIRY_FILE")"
+    out="$(BM_PROBATION="$content" BM_RECORDED="$recorded" BM_SLOT="$ACTIVE_SLOT" BM_HOURS="$PROBATION_HOURS" python3 - <<'PYPROB'
+import json, os, re, sys
 from datetime import datetime, timedelta, timezone
 d = json.loads(os.environ["BM_PROBATION"])
 keys = ("version", "previous_slot", "expires_at")
@@ -25,12 +34,25 @@ expires = datetime.fromisoformat(d["expires_at"])
 if expires.tzinfo is None:
     sys.exit("probation.json expires_at has no timezone")
 now = datetime.now(timezone.utc)
-beyond_cap = expires > now + timedelta(hours=int(os.environ["BM_HOURS"]), minutes=15)
+cap = now + timedelta(hours=int(os.environ["BM_HOURS"]))
+recorded, note = None, ""
+m = re.fullmatch(r"([ab]) ([0-9]+)\n?", os.environ["BM_RECORDED"])
+if os.environ["BM_RECORDED"] and not m:
+    sys.exit("upgrade-root/probation-expiry is malformed; remove it (the next run records the expiry again)")
+if m and m.group(1) == os.environ["BM_SLOT"]:
+    recorded = datetime.fromtimestamp(int(m.group(2)), timezone.utc)
+if recorded is None:
+    recorded = min(expires, cap)
+    note = "beyond_cap" if expires > cap else ""
+elif recorded > cap:
+    recorded, note = cap, "clock_back"
+ends = min(expires, recorded)
 print(d["version"])
 print(d["previous_slot"])
-print("yes" if now >= expires or beyond_cap else "no")
-print(expires.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
-print("beyond_cap" if beyond_cap else "")
+print("yes" if now >= ends else "no")
+print(ends.strftime("%Y-%m-%d %H:%M UTC"))
+print(note)
+print(int(recorded.timestamp()))
 PYPROB
 )" || die_logged "$PROBATION_FILE is malformed; refusing to act on it"
     PROB_VERSION="$(echo "$out" | sed -n '1p')"
@@ -39,10 +61,17 @@ PYPROB
     PROB_EXPIRES_AT="$(echo "$out" | sed -n '4p')"
     require_semver "$PROB_VERSION" "$PROBATION_FILE"
     require_slot "$PROB_PREV_SLOT" "$PROBATION_FILE"
-    if [[ "$(echo "$out" | sed -n '5p')" == beyond_cap ]]; then
-        log "WARN: $PROBATION_FILE expires_at $PROB_EXPIRES_AT is beyond a ${PROBATION_HOURS}h probation; treating it as expired"
-        bm_log warn upgrade "probation expiry beyond cap" "{\"version\": \"$PROB_VERSION\"}"
-    fi
+    local record
+    record="$ACTIVE_SLOT $(echo "$out" | sed -n '6p')"
+    [[ "$record" == "${recorded%$'\n'}" ]] || write_root_file "$PROBATION_EXPIRY_FILE" "$record"
+    case "$(echo "$out" | sed -n '5p')" in
+        beyond_cap)
+            log "WARN: $PROBATION_FILE expires_at is beyond a ${PROBATION_HOURS}h probation; it ends at $PROB_EXPIRES_AT"
+            bm_log warn upgrade "probation expiry beyond cap" "{\"version\": \"$PROB_VERSION\"}" ;;
+        clock_back)
+            log "WARN: the probation of $PROB_VERSION was to end more than ${PROBATION_HOURS}h from now, so the clock went back; it now ends at $PROB_EXPIRES_AT"
+            bm_log warn upgrade "probation expiry moved: the clock went back" "{\"version\": \"$PROB_VERSION\"}" ;;
+    esac
 }
 
 # load_probation: 0 with PROB_* set while a release is on probation, 1 when
@@ -150,7 +179,7 @@ recover_interrupted_upgrade() {
 # starts, so a new one never inherits them.
 clear_probation_markers() {
     rm -f "$UPGRADE_ROOT_DIR/rollback-impossible" "$UPGRADE_ROOT_DIR/rollback-impossible.logged" \
-        "$UPGRADE_ROOT_DIR/live-slot-failed"
+        "$UPGRADE_ROOT_DIR/live-slot-failed" "$PROBATION_EXPIRY_FILE" "$HEALTH_BASELINE_FILE" "$HEALTH_UNJUDGED_FILE"
 }
 
 # rollback_impossible <version> <prev_slot> <why>: the release on probation
@@ -226,7 +255,9 @@ probation_failed() {
 # is rolled back, expired or not. Not on one failure: a healthy release must
 # not be rolled back and blocklisted for a blip. Every failure counts, a crash
 # (a signal: 128 and up) included; consecutive ones are counted in a
-# root-only marker, which a working run resets. Two in a row roll back, or
+# root-only marker, which a working run resets. The count is keyed by the
+# live slot, not by the version in deploy-writable probation.json, which deploy
+# could rewrite between runs to start it again. Two in a row roll back, or
 # four when the latest only timed out (124, or 137 once timeout escalated to
 # SIGKILL), since a busy box can be slow for a while.
 check_live_slot() {
@@ -246,7 +277,7 @@ check_live_slot() {
     out="$(printf '%s' "$out" | tail -n 1 | tr -d '\n' | tr -c '[:print:]' '?')"
     why="env-$ACTIVE_SLOT/bin/boxmunge-server --version exited $rc: ${out:0:200}"
     read -r seen count < "$marker" 2>/dev/null || true
-    [[ "$seen" == "$version" && "$count" =~ ^[0-9]+$ ]] || count=0
+    [[ "$seen" == "$ACTIVE_SLOT" && "$count" =~ ^[0-9]+$ ]] || count=0
     count=$((count + 1))
     local state="does not run"
     if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
@@ -254,7 +285,7 @@ check_live_slot() {
         needed=4
     fi
     if [[ "$count" -lt "$needed" ]]; then
-        echo "$version $count" > "$marker"
+        echo "$ACTIVE_SLOT $count" > "$marker"
         log "WARN: the live slot $state ($why), $count time(s) in a row; $version is rolled back at $needed"
         bm_log warn upgrade "live slot $state" \
             "{\"version\": \"$version\", \"slot\": \"$ACTIVE_SLOT\", \"exit\": $rc, \"in_a_row\": $count}"
@@ -273,6 +304,7 @@ cmd_check_probation() {
     inactive="$(standby_slot)"
     if ! load_probation; then
         clear_probation_markers
+        rm -rf "$STASH_RECORD_FILE" "$STASH_COPY_DIR"
         # No probation, so a standby venv is an orphan: left by a rollback, an
         # upgrade that failed before its swap, or a promotion made from the
         # deploy context (deploy cannot rmtree root-owned dirs).
@@ -292,39 +324,35 @@ cmd_check_probation() {
         remove_slot "$prev_slot"
         rm -f "$PROBATION_FILE"
         clear_probation_markers
+        rm -rf "$STASH_RECORD_FILE" "$STASH_COPY_DIR"
         interruptions "$version" 0
         log "Version $version promoted"
         bm_log info upgrade "probation passed" "{\"version\": \"$version\"}"
         exit 0
     fi
 
-    # Probation health check semantics:
-    #   exit 2        -> CRITICAL: real health regression -> rollback
-    #   exit 126/127  -> health could not run at all (timeout's exit when the
-    #                    command cannot be executed or found): the live slot
-    #                    is checked again, as above, and rolled back if it
-    #                    still does not run on the next fire
-    #   other 124+    -> OPERATIONAL: timed out / killed (e.g. multiple
-    #                    sequential docker subprocess timeouts on a busy host
-    #                    can exceed our budget without any platform
-    #                    regression). Skip rollback; the next health-timer
-    #                    fire will retry.
-    #   else          -> healthy (or warnings only) -> continue probation
-    # --kill-after=10 escalates SIGTERM -> SIGKILL if the health subprocess
-    # ignores the initial SIGTERM (e.g. wedged docker socket). Without it,
-    # `timeout 180` waits indefinitely for an unresponsive process and
-    # successive timer fires stack stuck health invocations.
-    local health_exit=0
-    timeout --kill-after=10 180 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
-
-    case "$health_exit" in
-        2) probation_failed "$version" "$prev_slot" "failed its probation health check" ;;
-        126|127)
-            log "WARN: the probation health check of $version could not run (exit $health_exit); checking the live slot"
+    # The health check (health.sh), 180 s. A health error the baseline from
+    # before the upgrade lacks rolls back. One that could not run at all
+    # (126/127) has the live slot checked again, as above, and rolled back if
+    # it still does not run on the next fire. One that gave no verdict (it did
+    # not finish, or gave no valid report) is counted (health_unjudged).
+    local baseline
+    baseline="$(probation_baseline)"
+    health_run 180 "$baseline"
+    case "${HEALTH_VERDICT%% *}" in
+        failed)
+            log "New health errors since the upgrade: ${HEALTH_VERDICT#failed }"
+            probation_failed "$version" "$prev_slot" "failed its probation health check" \
+                "new_health_errors: ${HEALTH_VERDICT#failed }" ;;
+        not_run)
+            log "WARN: the probation health check of $version could not run (exit ${HEALTH_VERDICT#not_run }); checking the live slot"
             check_live_slot "$version" "$prev_slot"
             log "WARN: the live slot runs; the next health-timer run checks $version again" ;;
-        *) [[ "$health_exit" -lt 124 ]] \
-            || log "WARN: probation health check timed out (exit $health_exit) for $version — skipping rollback, next health-timer will retry" ;;
+        ok)
+            rm -f "$HEALTH_UNJUDGED_FILE"
+            [[ "$HEALTH_VERDICT" == ok ]] \
+                || log "WARN: health errors that were there before the upgrade, not counted against $version: ${HEALTH_VERDICT#ok }" ;;
+        *) health_unjudged "$version" "$prev_slot" "$baseline" ;;
     esac
 
     exit 0

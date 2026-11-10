@@ -62,7 +62,7 @@ src_new="$(docs_src "OPERATIONS.md=new ops" "IMAGES.md=new images")"
 run_shim install-docs "$src_new"
 mkdir -p "$BOXMUNGE_ROOT/env-b/boxmunge-docs"
 echo "previous ops" > "$BOXMUNGE_ROOT/env-b/boxmunge-docs/OPERATIONS.md"
-mock_server a 'if [[ "$1" == "health" ]]; then exit 2; fi; exit 0'
+mock_server a 'if [[ "$1" == "health" ]]; then exec health-report 2; fi; exit 0'
 rm "$BOXMUNGE_ROOT/env-b/bin/python"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$BOXMUNGE_ROOT/env-b/bin/python"
 chmod +x "$BOXMUNGE_ROOT/env-b/bin/python"
