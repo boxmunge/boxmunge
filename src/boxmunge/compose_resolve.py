@@ -9,10 +9,9 @@ So the validator and the overlay generator work on the output of
 `docker compose -p <project> config`, which is exactly the model Compose
 will start.
 
-What `config` output cannot show is where it read things from: `env_file`
-and `label_file` contents are inlined and `extends`/`include` are merged
-away. Those file references are checked on the literal files instead,
-following every include and extends file they lead to.
+What `config` output cannot show is where it read things from: those
+references are checked on the literal files (boxmunge.compose_references),
+and the env files the model names are checked here too.
 """
 from __future__ import annotations
 
@@ -27,6 +26,7 @@ import yaml
 
 from boxmunge import docker
 from boxmunge.compose_mounts import has_env_substitution, host_path_forms, outside_roots
+from boxmunge.compose_references import entry_base, env_file_paths, include_entries
 
 
 class ComposeResolveError(Exception):
@@ -58,7 +58,7 @@ def _missing_env_files_present(compose_path: Path, base: Path | None = None) -> 
         for svc in (services.values() if isinstance(services, dict) else []):
             if not isinstance(svc, dict):
                 continue
-            for ref in _env_file_paths(svc.get("env_file")):
+            for ref in env_file_paths(svc.get("env_file")):
                 if (not isinstance(ref, str) or not ref or has_env_substitution(ref)
                         or outside_roots(ref, base, (base,))):
                     continue  # the reference walk reports these
@@ -90,11 +90,14 @@ def _parse_config(out: str) -> dict[str, Any]:
     return doc
 
 
-def _literal_service_names(path: Path, root: Path, seen: set[Path]) -> set[str]:
-    """Service names a compose file and the files it includes declare."""
-    if path in seen or not path.is_file():
+def _literal_service_names(path: Path, root: Path, seen: set[tuple[Path, Path]],
+                           base: Path | None = None) -> set[str]:
+    """Service names a compose file and the files it includes declare.
+    ``base`` resolves the file's relative paths (see compose_references.entry_base)."""
+    base = base or path.parent
+    if (path, base) in seen or not path.is_file():
         return set()
-    seen.add(path)
+    seen.add((path, base))
     try:
         doc = yaml.safe_load(path.read_text())
     except yaml.YAMLError:
@@ -112,11 +115,12 @@ def _literal_service_names(path: Path, root: Path, seen: set[Path]) -> set[str]:
                 f"name as text. Quote the service name (for example 'on':) or "
                 f"rename the service."
             )
-    for compose_paths, _env, _dir in _include_entries(doc):
-        for ref in compose_paths:
-            if isinstance(ref, str) and not outside_roots(ref, path.parent, (root,)):
+    for compose_paths, _extra in include_entries(doc):
+        new_base = entry_base(compose_paths, base)
+        for ref in compose_paths if new_base is not None else []:
+            if isinstance(ref, str) and not outside_roots(ref, base, (root,)):
                 names |= _literal_service_names(
-                    Path(host_path_forms(ref, path.parent)[0]), root, seen)
+                    Path(host_path_forms(ref, base)[0]), root, seen, new_base)
     return names
 
 
@@ -206,7 +210,7 @@ def resolve_compose_config(compose_path: Path, project_name: str, *,
         ) from e
     model = _parse_config(out)
     resolved = model.get("services")
-    missing = _literal_service_names(compose_path, compose_path.parent, set()) - {
+    missing = _literal_service_names(compose_path, cwd, set(), cwd) - {
         str(name) for name in (resolved if isinstance(resolved, dict) else ())}
     if missing:
         raise ComposeResolveError(
@@ -252,122 +256,35 @@ def resolve_deployed_config(
     return model
 
 
-def _as_list(value: Any) -> list[Any]:
-    if value is None:
-        return []
-    return value if isinstance(value, list) else [value]
+def model_env_files(model: dict[str, Any], base_dir: Path) -> list[Path]:
+    """Every service env file the resolved model makes Compose read. Compose
+    emits them absolute; a relative one means relative to ``base_dir``, the
+    directory Compose resolved from."""
+    services = model.get("services")
+    return [Path(host_path_forms(ref, base_dir)[0])
+            for svc in (services.values() if isinstance(services, dict) else [])
+            if isinstance(svc, dict)
+            for ref in env_file_paths(svc.get("env_file")) if isinstance(ref, str) and ref]
 
 
-def _env_file_paths(value: Any) -> list[Any]:
-    """env_file is a string, a list of strings, or a list of {path: ...}."""
-    return [e.get("path") if isinstance(e, dict) else e for e in _as_list(value)]
+def model_env_file_problems(model: dict[str, Any], base_dir: Path, roots: tuple[Path, ...],
+                            project_name: str) -> list[str]:
+    """Every env file of the resolved model that lies outside ``roots``.
 
-
-def _include_entries(doc: dict[str, Any]) -> list[tuple[list[Any], list[Any], Any]]:
-    """Return (compose paths, env files, project_directory) per include entry."""
-    entries = []
-    for item in _as_list(doc.get("include")):
-        if isinstance(item, dict):
-            entries.append((
-                _as_list(item.get("path")), _env_file_paths(item.get("env_file")),
-                item.get("project_directory"),
-            ))
-        else:
-            entries.append(([item], [], None))
-    return entries
-
-
-class _ReferenceWalk:
-    """Follow include/extends files from one compose file, checking every
-    host path they name stays inside the project, and noting every file
-    Compose reads: compose, include, extends and env files."""
-
-    def __init__(self, roots: tuple[Path, ...]) -> None:
-        self.roots = roots
-        self.problems: list[str] = []
-        self.files: list[Path] = []
-        self._seen: set[str] = set()
-
-    def _confined(self, what: str, ref: Any, base: Path, *, read: bool = True) -> bool:
-        if not isinstance(ref, str) or not ref:
-            self.problems.append(f"{what} {ref!r} must be a file path")
-            return False
-        if "://" in ref or ref.startswith("git@"):
-            self.problems.append(
-                f"{what} {ref!r} is remote. Copy the file into the project instead."
-            )
-            return False
-        if has_env_substitution(ref):
-            self.problems.append(
-                f"{what} {ref!r} uses variable substitution, which cannot be "
-                f"checked. Write the path literally."
-            )
-            return False
-        if outside_roots(ref, base, self.roots):
-            norm, _ = host_path_forms(ref, base)
-            self.problems.append(
-                f"{what} {ref!r} resolves to {norm}, outside the project "
-                f"directory. Keep every compose, extends, include, env_file and "
-                f"label_file path inside the project."
-            )
-            return False
-        if read:
-            self.files.append(Path(host_path_forms(ref, base)[0]))
-        return True
-
-    def visit(self, path: Path, base: Path | None = None) -> None:
-        """``base`` resolves the file's relative paths (default: its directory)."""
-        key = str(path.resolve())
-        if key in self._seen or not path.is_file():
-            return  # Compose itself reports a missing file.
-        self._seen.add(key)
-        self.files.append(path)
-        try:
-            doc = yaml.safe_load(path.read_text())
-        except yaml.YAMLError as e:
-            self.problems.append(f"{path.name}: cannot parse: {e}")
-            return
-        if not isinstance(doc, dict):
-            return
-        base = base or path.parent
-        for compose_paths, env_files, project_dir in _include_entries(doc):
-            for ref in compose_paths:
-                if self._confined(f"{path.name}: include", ref, base):
-                    self.visit(Path(host_path_forms(ref, base)[0]))
-            for ref in env_files:
-                self._confined(f"{path.name}: include env_file", ref, base)
-            if project_dir is not None and self._confined(
-                f"{path.name}: include project_directory", project_dir, base, read=False,
-            ):
-                # Compose loads `.env` from an include's project_directory,
-                # so that file steers interpolation of the included model.
-                self.files.append(Path(host_path_forms(project_dir, base)[0]) / ".env")
-        services = doc.get("services") or {}
-        if not isinstance(services, dict):
-            return
-        for svc_name, svc in services.items():
-            if not isinstance(svc, dict):
-                continue
-            extends = svc.get("extends")
-            ext_file = extends.get("file") if isinstance(extends, dict) else None
-            if ext_file is not None and self._confined(
-                f"{path.name}: service {svc_name}: extends file", ext_file, base,
-            ):
-                self.visit(Path(host_path_forms(ext_file, base)[0]))
-            for ref in _env_file_paths(svc.get("env_file")):
-                self._confined(f"{path.name}: service {svc_name}: env_file", ref, base)
-            # label_file is read by the daemon, as root, like env_file.
-            for ref in _as_list(svc.get("label_file")):
-                self._confined(f"{path.name}: service {svc_name}: label_file", ref, base)
-
-
-def walk_references(
-    compose_path: Path, roots: tuple[Path, ...], *, base: Path | None = None,
-) -> tuple[list[str], list[Path]]:
-    """Return (every include/extends/env_file/label_file reference that
-    leaves the project, every file the compose file makes Compose read).
-    ``base`` is the project directory Compose resolves the file from, when
-    that is not the file's own directory."""
-    walk = _ReferenceWalk(roots)
-    walk.visit(compose_path, base)
-    return walk.problems, walk.files
+    The literal walk is the first line (it reports the file that wrote the
+    reference); this checks what Compose itself concluded, so a resolution
+    rule the walk does not mirror cannot let another project's or the
+    host's file through. `label_file` cannot be checked here: `config`
+    inlines its contents into `labels` and drops the path."""
+    services = model.get("services")
+    problems = []
+    for name, svc in (services.items() if isinstance(services, dict) else []):
+        refs = env_file_paths(svc.get("env_file")) if isinstance(svc, dict) else []
+        problems += [
+            f"service {name}: env_file {ref!r} in the model Compose resolved lies "
+            f"outside the project directory. Keep every env_file path inside the "
+            f"project, then upload the fixed release and deploy it: prod-deploy "
+            f"{project_name}."
+            for ref in refs
+            if not isinstance(ref, str) or not ref or outside_roots(ref, base_dir, roots)]
+    return problems

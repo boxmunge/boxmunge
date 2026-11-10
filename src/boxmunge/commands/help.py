@@ -27,6 +27,7 @@ Project lifecycle:
   unstage <project>       Tear down staging
   prod-deploy <project>   Deploy directly to production (skip staging)
   prod-deploy <p> --abandon  Put back the files of an install left open
+  prod-deploy <p> --redeploy Deploy the installed release again (no new upload)
   rollback <project>      Restore previous deployment
   pause <project>         Take offline with a styled maintenance page
   resume <project>        Bring back online (pulls latest images first)
@@ -37,7 +38,7 @@ Project lifecycle:
   project-delete <p>      Destructive: stop, remove files, deregister (with confirm)
   data adopt <p> <svc>:<path> <name>
                           Copy an anonymous volume into a named one deploy adopts
-  data chown <p> <svc> <uid>:<gid> [--no-snapshot]
+  data chown <p> <svc> <uid>:<gid> [--no-snapshot | --staging]
                           Snapshot, then give a service's data to its new user
                           (stays stopped until you deploy)
 

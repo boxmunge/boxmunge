@@ -14,7 +14,9 @@ from boxmunge.commands import quarantine_lift, security_actions, security_resume
 from boxmunge.commands.security_actions import cmd_security_scan
 from boxmunge.commands.security_resume import cmd_security_resume
 from boxmunge.cve.scan_state import write_scan_state
-from tests.test_commands.cve_helpers import Pushover, make_box, scan_result, seed_quarantine
+from tests.test_commands.cve_helpers import (
+    Pushover, fresh_kev, make_box, scan_result, seed_quarantine,
+)
 
 pytestmark = pytest.mark.skipif(os.getuid() == 0, reason="root can write a 0555 directory")
 
@@ -74,6 +76,7 @@ def test_a_kev_found_by_a_run_whose_write_fails_is_still_enforced_and_alerted(
     tmp_path, monkeypatch,
 ):
     from boxmunge.cve.kev import KevCatalog
+    from boxmunge.cve.kev_refresh import KevRefresh
     from boxmunge.cve.quarantine import is_quarantined
     from tests.test_commands.cve_helpers import Docker, finding
     paths = make_box(tmp_path)
@@ -82,9 +85,9 @@ def test_a_kev_found_by_a_run_whose_write_fails_is_still_enforced_and_alerted(
     cve = "CVE-2026-13221"
     monkeypatch.setattr(security_scan_core, "scan_image",
                         lambda ref, timeout: scan_result(ref, [finding(cve)]))
-    kev = KevCatalog(frozenset({cve}), datetime.now(timezone.utc))
-    monkeypatch.setattr(security_actions, "load_kev", lambda p: kev)
-    monkeypatch.setattr(security_actions, "refresh_kev", lambda p: type("R", (), {"rejected": None})())
+    kev = KevCatalog(frozenset({cve}), datetime.now(timezone.utc), datetime.now(timezone.utc), 'test')
+    monkeypatch.setattr("boxmunge.commands.security_kev.load_kev", lambda p: kev)
+    monkeypatch.setattr("boxmunge.commands.security_kev.refresh_kev", lambda p: KevRefresh(source="test"))
     _unwritable_scans(paths)
 
     assert cmd_security_scan([], paths) == 1
@@ -98,6 +101,7 @@ def test_resume_does_not_write_scan_state(tmp_path, monkeypatch):
     """The lift's re-scan is audit-only, so an unwritable state/scans is no obstacle."""
     paths = make_box(tmp_path)
     seed_quarantine(paths)
+    fresh_kev(monkeypatch)
     _unwritable_scans(paths)
     lifted: list[str] = []
     monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)
@@ -195,7 +199,7 @@ def test_cve_texts_name_real_actions():
     from boxmunge.cve._alerting_formatters import format_fixable_alert
     from boxmunge.cve.policy_explain import HARDENING_UPCOMING_FIX, explain_fix_available
     body = format_fixable_alert("demo", []).body
-    assert "pull the base image" not in body and "build: {pull: true}" in body
+    assert "pull: true" not in body and "prod-deploy demo --redeploy" in body
     assert "Shipping a fix the upstream image does not have yet" in body
     assert "pull the base image" not in explain_fix_available("1.2", meets_gate=False, gate_quarantines=True, posture_label="x")
     assert "suppress the CVE after review" in HARDENING_UPCOMING_FIX

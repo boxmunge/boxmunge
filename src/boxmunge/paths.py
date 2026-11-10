@@ -146,9 +146,15 @@ class BoxPaths:
         # before each scan; consumed by the CVE policy engine as the
         # active-exploitation signal.
         self.kev_catalog = self.state / "kev" / "catalog.json"
+        # CVEs a KEV refresh withdrew, until the catalog lists them again:
+        # a quarantine held for one is not lifted without the operator.
+        self.kev_withdrawn = self.state / "kev" / "withdrawn.json"
         # Last auto-update discovery that installed nothing: any security or
         # break-fix release it could not install, and the alert sent for it.
         self.platform_update_state = self.state / "platform-updates.json"
+        # When auto-update's discovery last got a usable answer from the
+        # version-check service, and since when it has been failing.
+        self.update_discovery_state = self.state / "update-discovery.json"
         # Last OS-update check by auto-update, and the alert sent for it.
         self.os_update_state = self.state / "os-updates.json"
         # When notify() last logged that Pushover is not configured.

@@ -31,6 +31,7 @@ class DashboardScreen(Screen):
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("d", "deploy_project", "Deploy"),
+        ("D", "redeploy_project", "Redeploy"),
         ("b", "backup_project", "Backup"),
         ("r", "refresh", "Refresh"),
     ]
@@ -96,6 +97,10 @@ class DashboardScreen(Screen):
             self.app.run_action_with_confirm(
                 "deploy", self._selected_project
             )
+
+    def action_redeploy_project(self) -> None:
+        if self._selected_project:
+            self.app.run_action_with_confirm("redeploy", self._selected_project)
 
     def action_backup_project(self) -> None:
         if self._selected_project:

@@ -45,6 +45,7 @@ class ProjectDetailScreen(Screen):
         ("3", "show_tab('backups')", "Backups"),
         ("4", "show_tab('config')", "Config"),
         ("d", "deploy", "Deploy"),
+        ("D", "redeploy", "Redeploy"),
         ("b", "backup", "Backup"),
         ("r", "rollback", "Rollback"),
         ("f", "filter_logs", "Filter"),
@@ -248,6 +249,9 @@ class ProjectDetailScreen(Screen):
 
     def action_deploy(self) -> None:
         self.app.run_action_with_confirm("deploy", self.project_name)
+
+    def action_redeploy(self) -> None:
+        self.app.run_action_with_confirm("redeploy", self.project_name)
 
     def action_backup(self) -> None:
         self.app.run_action_with_confirm("backup", self.project_name)

@@ -18,7 +18,7 @@ from typing import Any
 
 import yaml
 
-from boxmunge import compose_resolve
+from boxmunge import compose_references, compose_resolve
 from boxmunge.compose_images import image_warnings
 from boxmunge.compose_isolation import isolation_problems
 from boxmunge.compose_mounts import has_named_volume
@@ -318,11 +318,10 @@ def validate_user_compose(
     Off services log a warning instead of raising. Rule A (disable
     quarantine) runs before Rule B (strict posture) — first rejection wins.
 
-    The literal file is checked for a top-level `name:` and for
-    include/extends/env_file references leaving the project; every other
-    rule runs on the fully resolved model from `docker compose config`
-    (interpolation, `.env`, extends and include applied), so nothing the
-    literal file hides reaches the containers unchecked.
+    The literal file is checked for a top-level `name:` and for references
+    leaving the project (env files on the model too); every other rule runs
+    on the resolved `config` model, so nothing the literal file hides
+    reaches the containers unchecked.
 
     `project_directory` is where Compose resolves the file's relative
     paths when that is not the file's own directory (staging's base sits
@@ -382,11 +381,11 @@ def validate_user_compose(
             f"got {type(doc['services']).__name__}"
         )
 
-    # include/extends/env_file references only exist in the literal files;
-    # everything else is checked on the model Compose will actually run.
-    references, read_files = compose_resolve.walk_references(compose_path, roots, base=base_dir)
+    # File references are checked on the literal files, everything else on the model.
+    references, read_files = compose_references.walk_references(compose_path, roots, base=base_dir)
     if references:
-        raise ComposeSecurityError(references[0])
+        raise ComposeSecurityError(f"{references[0]} Then upload the fixed release and "
+                                   f"deploy it: prod-deploy {project_name}.")
     try:
         doc = compose_resolve.resolve_compose_config(
             compose_path, project_name, project_directory=project_directory)
@@ -395,6 +394,8 @@ def validate_user_compose(
     services = doc.get("services") or {}
 
     isolation = isolation_problems(doc, project_name, base_dir, roots)
+    isolation += compose_resolve.model_env_file_problems(doc, base_dir, roots, project_name)
+    read_files += compose_resolve.model_env_files(doc, base_dir)
     isolation += own_file_problems(doc, base_dir, paths.project_dir(project_name), read_files,
                                    in_place=project_directory is not None)
     if isolation:

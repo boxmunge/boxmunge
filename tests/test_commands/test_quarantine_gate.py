@@ -54,6 +54,7 @@ class Box:
                                                           for n in self.services}})
         monkeypatch.setattr(gate, "refresh_db", lambda: None)
         monkeypatch.setattr("boxmunge.commands.security_scan_core.scan_image", self._scan)
+        self.kev()  # fresh: a stale catalog keeps a balanced quarantine (cve.lift_rule)
 
     def _scan(self, ref, timeout=None):
         self.scanned.append(ref)
@@ -64,7 +65,8 @@ class Box:
     def kev(self, *cves: str) -> None:
         self.paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
         self.paths.kev_catalog.write_text(json.dumps({
-            "fetched_at": datetime.now(timezone.utc).isoformat(), "cve_ids": list(cves)}))
+            "fetched_at": datetime.now(timezone.utc).isoformat(), "source": "test",
+            "released_at": datetime.now(timezone.utc).isoformat(), "cve_ids": list(cves)}))
 
     def clear(self, manifest=MANIFEST):
         return gate.clear_release(self.paths, production_target(self.paths, "demo"), manifest)
@@ -280,7 +282,8 @@ def test_a_refused_switch_puts_the_maintenance_page_back(box, monkeypatch, capsy
                    staged_id=None, snapshot="")
     for phase in ("previous_kept", "installed"):
         txn = advance(box.paths, "demo", txn, phase)
-    req = deploy_tree.TreeDeploy(tree=None, ref="demo-r2", source="bundle", manifest=MANIFEST)
+    req = deploy_tree.TreeDeploy(tree=None, ref="demo-r2", source="bundle", manifest=MANIFEST,
+                                pull=False)
     assert deploy_tree.switch_and_close("demo", box.paths, req, txn,
                                         ReleaseDecision({}, clearance)) == 1
     err = capsys.readouterr().err

@@ -272,19 +272,27 @@ def check_sources(project_dir: Path, sources: set[str], record: dict[str, str]) 
 
 def check_control(
     project_dir: Path, read_files: Iterable[Path], record: dict[str, str | None], *,
-    control_root: Path | None = None,
+    redo: str, control_root: Path | None = None,
 ) -> None:
     """Every file boxmunge reads hashes to what deploy recorded. A rewritten
     control file (a tampered manifest or compose), or one newly created or
     removed, is refused: a later root `up` must never run container-modified
-    control files."""
+    control files. ``redo`` is the command that records the files again
+    (a deploy, or for staging a new stage). A file the record does not
+    track yet (one this boxmunge newly reads) says so rather than "changed"."""
     now = control_hashes(project_dir, read_files, control_root=control_root)
     for rel in sorted(set(now) | set(record)):
-        if now.get(rel) != record.get(rel):
+        if now.get(rel) == record.get(rel):
+            continue
+        if rel not in record:
             raise BindSourceError(
-                f"control file {rel} changed since the project was deployed; "
-                f"redeploy to run it. Boxmunge will not start a release from "
-                f"files it did not validate.")
+                f"control file {rel} is newly tracked and was not recorded when the "
+                f"project was last deployed; {redo} to record it. Boxmunge will not "
+                f"start a release from files it did not validate.")
+        raise BindSourceError(
+            f"control file {rel} changed since the project was deployed; "
+            f"{redo} to run it. Boxmunge will not start a release from "
+            f"files it did not validate.")
 
 
 def record(

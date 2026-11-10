@@ -169,10 +169,14 @@ def format_fixable_alert(project: str, hits: Sequence[Hit]) -> Alert:
         "A fix exists for each of these, but the running image predates it:",
         *_listing(hits),
         "",
-        "boxmunge does not rebuild images, and a deploy does not pull a newer",
-        "base image. Bump the image tag or digest, change FROM, or set compose",
-        "`build: {pull: true}` (and no_cache if needed), then redeploy. See",
-        "CVE_POLICY.md, \"Shipping a fix the upstream image does not have yet\".",
+        "boxmunge does not rebuild images on its own. A `build:` service is",
+        "rebuilt on its base image's current digest by its next stage and",
+        f"promote, or prod-deploy (`prod-deploy {project} --redeploy` when",
+        "nothing new was uploaded). Otherwise bump the image tag or digest (a",
+        "FROM pinned by digest is never refreshed), or, for a package your",
+        "Dockerfile installs, set compose `build: {no_cache: true}`, then",
+        "redeploy. See CVE_POLICY.md, \"Base images and the build cache\" and",
+        "\"Shipping a fix the upstream image does not have yet\".",
     ])
     return Alert(kind="fix_available", title=title, body=body, priority=0)
 
@@ -295,3 +299,24 @@ def format_quarantine_lifted_alert(
     ])
     failed = smoke is not None and not smoke[0]
     return Alert(kind="quarantine_lifted", title=title, body=body, priority=1 if failed else 0)
+
+
+def format_kev_withdrawal_hold_alert(project: str, cve_id: str, source: str) -> Alert:
+    """This scan would have lifted the quarantine because a KEV refresh
+    withdrew its CVE. One source can do that, so the lift waits for the
+    operator. Priority 1: the site stays down until then."""
+    return Alert(
+        kind="kev_withdrawal_held",
+        title=f"[boxmunge:{project}] Quarantine kept — CISA KEV withdrew {cve_id}",
+        body="\n".join([
+            f"Project: {project}",
+            f"Quarantined for {cve_id}. The KEV catalog from {source} no longer",
+            "lists it, so nothing else keeps the project quarantined. The images",
+            "still contain it, and a single source can drop an entry, so scans and",
+            "deploys keep the quarantine. Check CISA's KEV page; if the withdrawal",
+            "is real, accept it with:",
+            f"  boxmunge security resume {project}",
+            f"Details: boxmunge security {project}",
+        ]),
+        priority=1,
+    )

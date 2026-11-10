@@ -103,7 +103,7 @@ def _stub_scanner(monkeypatch) -> Trivy:
     monkeypatch.setattr("boxmunge.commands.security_scan_core.scan_image", trivy)
     monkeypatch.setattr(quarantine_gate, "refresh_db", lambda: None)
     # Actively exploited: the release's balanced posture quarantines only on KEV.
-    kev = KevCatalog(frozenset({CVE}), datetime.now(timezone.utc))
+    kev = KevCatalog(frozenset({CVE}), datetime.now(timezone.utc), datetime.now(timezone.utc), 'test')
     monkeypatch.setattr(quarantine_gate, "load_kev", lambda paths: kev)
     # The suite keeps restart-policy holds off the daemon; these tests are about them.
     monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies",

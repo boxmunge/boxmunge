@@ -170,6 +170,22 @@ def mark_quarantine_incomplete(project_name: str, paths: BoxPaths) -> None:
     _write_record(project_name, paths, {**state, "action_complete": False})
 
 
+# Quarantine record field: {CVE: when its KEV withdrawal was recorded} for
+# each withdrawal whose hold this quarantine has announced
+# (commands/kev_withdrawal). The hold itself follows the withdrawals file.
+KEV_WITHDRAWAL_HOLD = "held_for_kev_withdrawal"
+
+
+def hold_for_kev_withdrawal(
+    project_name: str, paths: BoxPaths, announced: dict[str, str],
+) -> None:
+    """Record which KEV withdrawal holds this quarantine has announced."""
+    state = read_quarantine_state(project_name, paths)
+    if state is None:
+        raise QuarantineError(f"cannot hold the quarantine of {project_name!r}: no record")
+    _write_record(project_name, paths, {**state, KEV_WITHDRAWAL_HOLD: announced})
+
+
 def clear_quarantine_state(project_name: str, paths: BoxPaths) -> None:
     """Remove the quarantine state file. Idempotent (no-op if missing)."""
     paths.project_quarantine_state(project_name).unlink(missing_ok=True)

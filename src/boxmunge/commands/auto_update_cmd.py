@@ -34,6 +34,7 @@ def run_auto_update(paths: BoxPaths) -> int:
     Hands off to the boxmunge-upgrade shim via os.execvp on success.
     """
     from boxmunge.blocked_update import record_blocked
+    from boxmunge.discovery_freshness import record_discovery
     from boxmunge.os_update_alert import record_os_updates
     from boxmunge.os_updates import inspect_os_updates
     from boxmunge.upgrade_discovery import auto_update_mode, discover_update
@@ -65,12 +66,19 @@ def run_auto_update(paths: BoxPaths) -> int:
         log_error("auto-update", str(e), paths)
         return 1
     action = result.get("action")
+    record_discovery(paths, result)
 
     if result.get("endpoint_error"):
         print(f"WARNING: version-check endpoint not used ({result['endpoint_error']}); "
               "discovered via GitHub releases instead.", file=sys.stderr)
         log_warning("auto-update", "Version-check endpoint not used; fell back to GitHub",
                     paths, detail={"endpoint_error": result["endpoint_error"]})
+
+    if result.get("held"):
+        held = ", ".join(result["held"])
+        print(f"Release(s) {held} held by the version-check circuit breaker; not installed.")
+        log_operation("auto-update", f"Release(s) {held} held by the circuit breaker",
+                      paths, detail={"held": result["held"]})
 
     if action == "up_to_date":
         print(f"No {scope} updates available.")

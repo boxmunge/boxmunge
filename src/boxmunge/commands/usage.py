@@ -57,24 +57,36 @@ Usage: boxmunge add-git-project <name> <repo-url> [--ref REF]
 
 Register a git-backed project.""",
     "stage": """\
-Usage: boxmunge stage <project> [--ref REF] [--dry-run]
+Usage: boxmunge stage <project> [--ref REF] [--no-pull] [--dry-run]
 
-Deploy alongside production on the staging hostname for verification.""",
+Deploy alongside production on the staging hostname for verification.
+Build services are built on their base images' current registry digests;
+--no-pull builds from the base images in this box's local image store.""",
     "promote": """\
-Usage: boxmunge promote <project> [--dry-run]
+Usage: boxmunge promote <project> [--no-pull] [--dry-run]
 
-Promote the staged build to production.""",
+Promote the staged build to production. Build services are built again on
+their base images' current registry digests: normally the ones the stage
+pulled, so the build is cached. A base image that moved since the stage
+reaches production untested; stage again to test it. --no-pull builds from
+the base images in this box's local image store, which can be older than
+the stage's.""",
     "unstage": """\
 Usage: boxmunge unstage <project> [--dry-run]
 
 Tear down staging.""",
     "prod-deploy": """\
-Usage: boxmunge prod-deploy <project> [--ref REF] [--no-snapshot] [--dry-run]
+Usage: boxmunge prod-deploy <project> [--ref REF] [--no-snapshot] [--no-pull] [--dry-run]
+       boxmunge prod-deploy <project> --redeploy [--no-snapshot] [--no-pull] [--dry-run]
        boxmunge prod-deploy <project> --abandon
 
-Deploy directly to production (skips staging). --abandon undoes an install
-that stopped before its pre-deploy hook ran: the replaced release's files
-go back; containers and data are not touched.""",
+Deploy directly to production (skips staging). Build services are built on
+their base images' current registry digests; --no-pull builds from the base
+images in this box's local image store. With no new bundle in the inbox,
+prod-deploy refuses; --redeploy deploys the installed release again (as
+strictly checked as a new deploy).
+--abandon undoes an install that stopped before its pre-deploy hook ran:
+the replaced release's files go back; containers and data are not touched.""",
     "install-txn": """\
 Usage: boxmunge install-txn <project> --drop
 
@@ -152,7 +164,7 @@ confirmation unless --yes. If container teardown fails, nothing is deleted
 and the command exits 1; --force deletes anyway. Does not support --dry-run.""",
     "data": """\
 Usage: boxmunge data adopt <project> <service>:<path> <name>
-       boxmunge data chown <project> <service> <uid>:<gid> [--no-snapshot]
+       boxmunge data chown <project> <service> <uid>:<gid> [--no-snapshot | --staging]
 
 adopt copies the service's anonymous volume at <path> into a new named volume
 <project>_<name> that the next deploy adopts. Stops the service's containers
@@ -163,15 +175,21 @@ refused for this leaves its install open: prod-deploy <project> --abandon
 first. The anonymous volume is kept until you remove it.
 
 chown first takes the project's backup snapshot (kind prechown) while the
-service still runs, then stops the service, gives its read-write binds and
-named volumes to <uid>:<gid>, and leaves it stopped until you deploy, which
-runs it as that user. When the service is the backup service, that deploy
+service still runs (when the backup service is stopped, the dump runs over
+its data at rest in a one-off container of its image, offline), then stops
+the service, gives its read-write binds and named volumes, and staging's
+copies of them, to <uid>:<gid>, records the user and regenerates the
+overlay, and leaves it stopped (its restart policy held) until you deploy,
+which runs it as that user. When the service is the backup service, that deploy
 uses the snapshot as its pre-deploy snapshot (its own dump could not run)
 while Docker shows the service has not run since, so its rollback restores
 the data from before the change; a rollback does not revert the ownership.
 A failed snapshot refuses and changes nothing. --no-snapshot goes on without
 one: a rollback of the next deploy then cannot restore data. A project with
-backup.type: none has no snapshot to take, and says so.""",
+backup.type: none has no snapshot to take, and says so. --staging gives
+staging's copies alone to <uid>:<gid> (no snapshot; production unchanged),
+as a stage refused for their owner asks (a stage with staging.copy_data
+gives the stores it copies to the staged users itself).""",
     "inbox": """\
 Usage: boxmunge inbox [project] [--json]
        boxmunge inbox clean [project] [--yes]
@@ -256,10 +274,13 @@ Usage: boxmunge security [--json]
        boxmunge security suppress <CVE>|--current (--project <name>|--host)
                                   --until <YYYY-MM-DD> --reason <text>
        boxmunge security unsuppress <CVE> (--project <name>|--host)
-       boxmunge security resume <project>
+       boxmunge security resume <project> [--accept-stale-kev]
 
 Container security and CVE policy: fleet or per-project view, scan,
 suppressions, and lifting a quarantine. --until is at most 90 days ahead.
+--accept-stale-kev lifts a quarantine although there is no usable CISA KEV
+catalog; it is logged and alerted. It never overrides a stale catalog that
+lists a CVE still in the images: deploy a release without it instead.
 Operator only (refused by the deploy shell): --host suppressions, and
 scan --apply-held, which applies quarantines the CVE circuit breaker held.""",
     "bundle": """\

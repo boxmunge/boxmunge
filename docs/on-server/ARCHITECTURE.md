@@ -42,7 +42,7 @@ Key features:
     .site-journal/            # site files written since Caddy last accepted its config (deploy 700)
     maintenance/              # the maintenance page (root:deploy 755)
   upgrade-state/              # upgrade slots, probation, blocklist (root:deploy 770)
-  upgrade-root/               # root-only (0700): upgrade.lock, userns-migration.json
+  upgrade-root/               # root-only (0700): upgrade.lock, userns-migration.json, installer.sha256
   stashes/                    # pre-upgrade stashes, for an upgrade rollback (root:deploy 770)
   canary/                     # the self-test canary project (root:root)
   projects/                   # project directories (deploy:deploy 755)
@@ -208,7 +208,7 @@ boxmunge supports two project sources, declared in `manifest.yml` via the `sourc
 4. Pre-deploy snapshot -- encrypted backup of the current data, taken with the outgoing release's own backup configuration (unless `--no-snapshot`); a `prechown` snapshot that `data chown` took before it stopped the backup service is used instead while Docker shows that service has not run since
 5. Keep the outgoing release -- its code is copied to `.releases/previous/` and paired with that snapshot, for `rollback`
 6. Install -- only a release that passed every check replaces the live project files
-7. Decide users -- build and pull the release's images, read each image's `USER`, and decide who every service runs as (refusing a registry image that would run as root without a declaration, and data the new user could not own); a refusal leaves the install open and starts nothing
+7. Decide users -- build the release's images (`build --pull` unless `--no-pull`; a rollback never pulls) and pull missing registry images, read each image's `USER`, and decide who every service runs as (refusing a registry image that would run as root without a declaration, and data the new user could not own); a refusal leaves the install open and starts nothing
 8. Pre-deploy command -- run `deploy.pre_deploy` from manifest if defined, on the host in the project directory, without a shell, as deploy (PROJECT_CONVENTIONS.md, TRUST_MODEL.md)
 9. Generate configs -- write Caddy site config and compose overlay (networking, env_files, resource limits)
 10. Start containers -- prepare storage (the data helper creates or chowns fresh volumes and bind sources a numeric non-root or remapped service needs), re-validate the installed files, check every bind source without following symlinks and record its kind (creating missing ones as directories), then `docker compose up -d` with overlay. Every later start (upgrade, container update, `recover`, `resume`, `restore`) repeats the check against that record first, and runs only the local images the deploy built and pulled: no start pulls or builds (`--pull never --no-build`); a missing image refuses the start; see TRUST_MODEL.md, "Container Escape and Root Restarts"
@@ -259,7 +259,7 @@ Secrets are never edited manually. The CLI handles file creation, permissions, a
 Operational state is stored as JSON files under `/opt/boxmunge/state/`:
 
 - `state/health/<project>.json` -- last check time, status, consecutive failure count, alert state, failure reason
-- `state/deploy/<project>.json` -- current ref (the bundle name, e.g. `myapp-2026-10-13T101500123456`, or the git commit), deploy timestamp, pre-deploy snapshot filename, recent history, and a `data chown` snapshot pending for the next deploy
+- `state/deploy/<project>.json` -- current ref (the bundle name, e.g. `myapp-2026-10-13T101500123456`, or the git commit), deploy timestamp, pre-deploy snapshot filename, recent history, a `data chown` snapshot pending for the next deploy, and the restart policies `data chown` holds at "no" until boxmunge starts the service again
 - `<project>/.releases/staged/meta.json` -- the staged release (id, ref, state); there is none while nothing is staged
 
 All state writes are atomic: the new content is written to a temporary file in the same directory, then renamed into place with `os.rename()`. This prevents partial reads if a check or deploy runs concurrently.
@@ -416,7 +416,7 @@ See `agent-help writable` and `PROJECT_CONVENTIONS.md` for the schema reference.
 Beyond per-container hardening, boxmunge runs a CVE policy engine that scans deployed images and quarantines projects whose findings meet their posture's quarantine gate (under the default `balanced`, only a CVE on CISA KEV); a `balanced` quarantine is lifted at the first scan that finds nothing quarantine-level and nothing on KEV.
 
 - **Where it sits** — runs via `boxmunge-cve-scan.timer` daily at 03:00 (up to 30 min jitter), on demand with `security scan [<project>]`, and in `security resume`, which re-scans before lifting a quarantine. An ordinary deploy, stage or promote does not scan; only a quarantined project's release is scanned before it starts (see "Deploy Flow"). Lives in `src/boxmunge/cve/` (scanner, policy, quarantine, suppressions, alerting, scan_state, grace, kev, relevance, breaker) plus the orchestrating `commands/security_*.py`.
-- **Inputs** — Trivy's vulnerability DB (refreshed before each scan), the CISA KEV catalog (cached in `state/kev/`), the project's `manifest.yml` (`security.posture`, `dangerously_disable_quarantine`, hardening fields), the project's `security/suppressions.yml` if present, and the host-scope `config/suppressions.yml`.
+- **Inputs** — Trivy's vulnerability DB (refreshed before each scan), the CISA KEV catalog (fetched from an ordered list of sources, CISA's feed and then its GitHub mirror by default, and cached in `state/kev/` with the source that answered), the project's `manifest.yml` (`security.posture`, `dangerously_disable_quarantine`, hardening fields), the project's `security/suppressions.yml` if present, and the host-scope `config/suppressions.yml`.
 - **Outputs** — per-project `state/scans/<project>.json` (the durable record), quarantine actions (maintenance Caddy fragment, then `compose stop`, with a critical Pushover alert) and their lifts (`commands/quarantine_lift.py`, shared with `security resume`), alerts for findings that do not quarantine, and structured `log_operation` entries under `cve-scan` / `cve-suppress` / `cve-quarantine` components. A circuit breaker holds new non-KEV quarantines when one scan would quarantine a large share of the fleet at once, alerting instead, until the operator runs `security scan --apply-held` (state in `state/cve-breaker.json`).
 - **Per-project scan budget** — each project gets a 600-second wall-clock budget across its image scans. Exceeding it skips remaining images (logged at WARNING) and resumes on the next tick.
 

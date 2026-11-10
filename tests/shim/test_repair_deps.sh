@@ -199,8 +199,14 @@ drop_root
 on_probation
 RC=0
 OUT="$(FAIL_PIP="break" bash "$SHIM" repair-deps 2>&1)" || RC=$?
-expect 1 "its boxmunge-server NO LONGER RUNS: inspect env-a as supervisor" \
-    "a pip failure that breaks the live slot says so"
+expect 1 "its boxmunge-server NO LONGER RUNS (1.5.0 is on probation, so the health timer rolls back" \
+    "a pip failure that breaks the live slot on probation says the health timer rolls it back"
+rm "$BOXMUNGE_ROOT/upgrade-state/probation.json"
+mock_server a '[[ "$1" != --version ]] || echo "boxmunge 1.5.0+def5678"; exit 0'
+RC=0
+OUT="$(FAIL_PIP="break" bash "$SHIM" repair-deps 2>&1)" || RC=$?
+expect 1 "its boxmunge-server NO LONGER RUNS (inspect env-a as supervisor)" \
+    "outside probation it says to inspect the live slot"
 drop_root
 rm -rf "$RELEASE"
 

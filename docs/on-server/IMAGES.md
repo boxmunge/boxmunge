@@ -83,7 +83,13 @@ Pinning means you choose when to take upstream fixes, so rebuild regularly. `con
 refreshes services that use a published `image:` (including ones from `include:` files or
 `${VAR:-image}`); with `strategy: rollback_to_previous` an unhealthy update is rolled back to the
 exact image that ran before. Services that
-`build:` from your Dockerfile only change when you rebuild and redeploy.
+`build:` from your Dockerfile only change when you rebuild and redeploy. `stage`, `prod-deploy` and
+`promote` rebuild them on the current digest of each `FROM` tag. A `FROM` pinned by digest stays
+exactly the image you pinned. A `FROM` naming an image only the box has (`docker load`, a hand
+build) cannot be pulled: set `build: {pull: false}` on that service. To build on
+another service of the project, name it as a context (`additional_contexts: {base: service:base}`,
+then `FROM base`) instead of by its image name. See CVE_POLICY.md, "Base images and the build
+cache".
 
 ## Also remember
 

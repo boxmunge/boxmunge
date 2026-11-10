@@ -31,6 +31,7 @@ from typing import Any
 
 from boxmunge.docker import COMPOSE_ONEOFF_LABEL as _ONEOFF_LABEL, compose_project_filter
 from boxmunge.docker_run import DockerError, run as _run
+from boxmunge.redeploy_hint import redeploy_either
 
 _SERVICE_LABEL = "com.docker.compose.service"
 
@@ -200,7 +201,8 @@ def _image_gone(project_name: str, docs: list[dict[str, Any]]) -> DockerError:
         f"the local image store no longer has the image these containers of {project_name} "
         f"were created from: {named}. A build replaced the image their name points at "
         f"while they kept running. The project's next start recreates a running one from "
-        f"the deployed image: prod-deploy {project_name} (or stage, for its staged copy). "
+        f"the deployed image: {redeploy_either(project_name)}, or stage for its staged "
+        f"copy. "
         f"A stopped one must be removed first (docker rm, as the operator).")
 
 

@@ -99,10 +99,13 @@ def explain_fix_available(
     """Explanation for a non-KEV finding with an upstream fix."""
     text = (
         f"Fix available upstream ({fixed_version}) but not running in this "
-        "image. A deploy does not pull a newer base image: bump the image tag "
-        "or digest, change FROM, or set compose `build: {pull: true}`, then "
-        "redeploy (CVE_POLICY.md, \"Shipping a fix the upstream image does not "
-        "have yet\"); boxmunge does not rebuild images for you."
+        "image. A `build:` service is rebuilt on its base image's current "
+        "digest by its next stage and promote, or prod-deploy (--redeploy "
+        "when nothing new was uploaded); otherwise bump the image tag or "
+        "digest, or, for a package the Dockerfile installs, set compose "
+        "`build: {no_cache: true}`, then redeploy (CVE_POLICY.md, \"Base "
+        "images and the build cache\"); boxmunge does not rebuild images for "
+        "you."
     )
     if meets_gate and gate_quarantines:
         text += (

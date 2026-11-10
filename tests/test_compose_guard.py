@@ -105,7 +105,7 @@ def test_a_start_whose_image_is_missing_is_refused_before_anything_runs(
     monkeypatch.setattr("boxmunge.docker_containers.absent_images",
                         lambda images: asked.append(images) or [("web", images["web"])])
     with pytest.raises(ComposeRefused, match=r"the image for web \(nginx:1.27\) is missing.*"
-                       r"run prod-deploy shop. Nothing was started"):
+                       r"run prod-deploy shop --redeploy. Nothing was started"):
         _restart(paths)
     up.assert_not_called()
     assert asked == [{"web": "nginx:1.27"}] and "the image for web" in sent[0]
@@ -402,7 +402,7 @@ def test_container_mount_outside_the_project_is_refused(box) -> None:
     _deploy(paths)
     with patch("boxmunge.docker_containers.container_bind_sources", return_value=[("/", True)]):
         with pytest.raises(ComposeRefused, match="outside the project"):
-            check_containers_start(paths, NAME, component="stage")
+            check_containers_start(paths, NAME, [f"{NAME}-web-1"], component="stage")
 
 
 def test_platform_start_is_only_for_platform_stacks(box) -> None:

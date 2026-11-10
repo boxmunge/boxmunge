@@ -39,7 +39,7 @@ LIFTED_TITLE = "Quarantine lifted"
 
 
 def _kev(*ids: str) -> KevCatalog:
-    return KevCatalog(frozenset(ids), datetime.now(timezone.utc))
+    return KevCatalog(frozenset(ids), datetime.now(timezone.utc), datetime.now(timezone.utc), 'test')
 
 
 @pytest.fixture
@@ -95,7 +95,7 @@ def test_the_fix_landing_alerts_with_the_rebuild_advice(box) -> None:
     assert fd.disposition is Disposition.IGNORED_FIXED and fd.fix_would_quarantine
     [(title, body, priority)] = pushover.sent
     assert "fixable CVE finding" in title and "rebuild to apply the fix" in title
-    assert priority == 0 and "build: {pull: true}" in body and "redeploy" in body
+    assert priority == 0 and "prod-deploy demo --redeploy" in body
     assert not is_quarantined("demo", paths)
     pushover.clear()
     _scan(paths)
@@ -172,7 +172,7 @@ def test_a_stale_kev_catalog_never_lifts(box) -> None:
     """A stale catalog reads as "nothing exploited": it cannot clear a site."""
     paths, pushover = box()
     seed_quarantine(paths)
-    _scan(paths, KevCatalog(frozenset(), None))
+    _scan(paths, KevCatalog(frozenset(), None, None, None))
     assert is_quarantined("demo", paths)
     assert paths.docker.calls == ["caddy_reload", "compose_stop"]
     assert not _titles(pushover, LIFTED_TITLE)

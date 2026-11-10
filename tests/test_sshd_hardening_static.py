@@ -74,7 +74,7 @@ def test_every_install_and_upgrade_applies_it_before_recording_the_installer() -
     source = 'source "${SCRIPT_DIR}/bootstrap/install-ssh.sh"'
     assert source in text
     # A failed run leaves the old fingerprint, so the next upgrade re-runs install.sh.
-    assert text.index(source) < text.index('INSTALLER_HASH_FILE="${BOXMUNGE_ROOT}/state/installer.sha256"')
+    assert text.index(source) < text.index('installer-fingerprint.sh" record')
     assert text.index(source) > text.index("init-host.sh")
     helper = (REPO / "bootstrap" / "install-ssh.sh").read_text()
     call = 'bash "${SCRIPT_DIR}/bootstrap/sshd-hardening.sh"'
