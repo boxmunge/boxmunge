@@ -63,7 +63,7 @@ def _run_deploy_inner(
     project_dir = paths.project_dir(project_name)
     is_new = not (project_dir / "manifest.yml").exists()
     git = not is_new and (project_dir / "repo").exists()
-    refused = no_bundle.redeploy_problem(project_name, git=git, ref=ref) if redeploy else None
+    refused = redeploy and no_bundle.redeploy_problem(project_name, paths, git=git, ref=ref)
     if refused:
         print(f"ERROR: {refused}", file=sys.stderr)
         return 1

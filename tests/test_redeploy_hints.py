@@ -5,6 +5,7 @@ its inbox is empty (deploy_no_bundle), so those remedies name
 `--redeploy`, or `--ref <installed commit>` for a git project."""
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from pathlib import Path
@@ -21,27 +22,59 @@ from tests.txn_helpers import docker_off
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "boxmunge"
 DOCS = Path(__file__).resolve().parents[1] / "docs" / "on-server"
-# A message's `prod-deploy {project}` with no option after it (`<project>`
-# forms are command listings: help, usage, the shell's menu).
-BARE = re.compile(r"prod-deploy \{[a-z_]+\}(?!\s*--)")
-# Files whose bare ones are printed where the bare command is accepted.
+# `prod-deploy {project}`, `prod-deploy <project>` or `prod-deploy <p>`
+# with no option after it.
+BARE = re.compile(r"prod-deploy (\{[^{}]+\}|<project>|<p>)(?!\s*--)")
+# Files whose bare ones are accepted where they are printed: command
+# listings (help, usage, the shell's menu, the upload walk-through), a git
+# project's (no inbox), and diff's (a bundle is waiting).
 ACCEPTED = {
-    "redeploy_hint.py": "a git project never deployed: its ref is what there is",
+    "commands/help.py": "the command listing",
+    "commands/usage.py": "the usage text",
+    "shell.py": "the deploy shell's menu",
+    "commands/bundle_cmd.py": "the upload walk-through: after the scp",
     "commands/add_git_project_cmd.py": "a git project: no inbox",
     "commands/diff_cmd.py": "printed after comparing the bundle waiting in the inbox",
-    "commands/deploy_no_bundle.py": "after an upload, or for a git project",
+    "redeploy_hint.py": "a git project never deployed: its ref is what there is",
 }
-# Anywhere else a bare one must sit beside the redeploy (the message then
-# names both, an upload's deploy and the installed release's), or say that
-# it follows an upload, after which the bare command is accepted.
+# Anywhere else a bare one must name the redeploy in the same string (the
+# message then names both, an upload's deploy and the installed release's),
+# or say there that it follows an upload.
 BESIDE = ("redeploy_command(", "redeploy_either(", "--redeploy", "pload")
 
 
+def _docstrings(tree: ast.AST) -> set[int]:
+    ids = set()
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if isinstance(body, list) and body and isinstance(body[0], ast.Expr) \
+                and isinstance(body[0].value, ast.Constant):
+            ids.add(id(body[0].value))
+    return ids
+
+
+def _strings(path: Path) -> list[tuple[int, str]]:
+    """(line, text) of every string literal but docstrings. Adjacent
+    literals are one string (the parser joins them, so an f-string split
+    over lines is whole); an f-string's fields read as `{expression}`."""
+    tree = ast.parse(path.read_text())
+    skip = _docstrings(tree)
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.JoinedStr):
+            found.append((node.lineno, "".join(
+                v.value if isinstance(v, ast.Constant) else "{" + ast.unparse(v.value) + "}"
+                for v in node.values)))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) \
+                and id(node) not in skip:
+            found.append((node.lineno, node.value))
+    return found
+
+
 def _bare_without_the_redeploy(path: Path) -> list[str]:
-    lines = path.read_text().splitlines()
-    return [f"{path.relative_to(SRC)}:{i + 1}: {line.strip()}"
-            for i, line in enumerate(lines) if BARE.search(line)
-            and not any(b in "\n".join(lines[max(i - 2, 0):i + 3]) for b in BESIDE)]
+    return [f"{path.relative_to(SRC)}:{line}: {text.strip()[:100]}"
+            for line, text in _strings(path)
+            if BARE.search(text) and not any(b in text for b in BESIDE)]
 
 
 def test_no_remedy_names_a_bare_prod_deploy_where_it_is_refused() -> None:
@@ -57,9 +90,20 @@ def test_the_operations_guide_names_the_redeploy_for_a_missing_image() -> None:
         assert "--redeploy" in after, anchor
 
 
-def test_the_pattern_catches_a_bare_remedy() -> None:
+def test_the_pattern_catches_a_bare_remedy(tmp_path) -> None:
     assert BARE.search("the deployed image: prod-deploy {project_name} (or stage")
+    assert BARE.search("until `prod-deploy <project>`)")
     assert not BARE.search("prod-deploy {project} --redeploy")
+    split = tmp_path / "split.py"
+    split.write_text('def f(p):\n    return (f"run `prod-"\n            f"deploy {p}` now")\n')
+    beside = tmp_path / "beside.py"
+    beside.write_text('A = "prod-deploy <p>"\nB = "use --redeploy"\n')
+    assert _bare_without_the_redeploy_in(split) and _bare_without_the_redeploy_in(beside)
+
+
+def _bare_without_the_redeploy_in(path: Path) -> list[str]:
+    return [text for _line, text in _strings(path)
+            if BARE.search(text) and not any(b in text for b in BESIDE)]
 
 
 def _deployed_bundle(paths: BoxPaths) -> None:

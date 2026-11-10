@@ -1404,9 +1404,10 @@ holds. To keep one there, `docker pull` it on the box.
 
 A `FROM` that names an image only this box has (one from `docker load` or a
 hand build) cannot be pulled, so a pulling build fails on it. Set
-`build: {pull: false}` on that service in `compose.yml` (not in an included
-file). Its build then uses the local image store while the others pull. To
-build on another service of the same project instead, use a named context
+`build: {pull: false}` on that service (in `compose.yml` or a file it
+includes). Its build then uses the local image store while the others pull,
+and so does the build of any service that names it as a `service:` context.
+To build on another service of the same project instead, use a named context
 rather than its image name:
 
 ```yaml

@@ -14,6 +14,7 @@ import sys
 from typing import TYPE_CHECKING
 
 from boxmunge.data_dirs import ReleaseStateError
+from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.release import live_ref
 from boxmunge.source import SourceError, resolve_bundle_source
 from boxmunge.staged_release import SlotError, load_slot
@@ -22,12 +23,14 @@ if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 
-def redeploy_problem(project: str, *, git: bool, ref: str | None) -> str | None:
+def redeploy_problem(project: str, paths: BoxPaths, *, git: bool,
+                     ref: str | None) -> str | None:
     """Why `prod-deploy <project> --redeploy` cannot run as asked, or None."""
     if git:
         return (f"'{project}' is a git project: prod-deploy deploys the commit its ref "
-                f"names and has no inbox bundle to miss. Run 'prod-deploy {project}' "
-                f"(add --ref <ref> for another commit).")
+                f"names and has no inbox bundle to miss. To deploy the installed commit "
+                f"again, run '{redeploy_command(paths, project)}' (or --ref <ref> for "
+                f"another commit).")
     if ref:
         return (f"--redeploy deploys the installed release again, and --ref names an inbox "
                 f"bundle to deploy instead. Run 'prod-deploy {project} --ref {ref}' or "
@@ -35,9 +38,16 @@ def redeploy_problem(project: str, *, git: bool, ref: str | None) -> str | None:
     return None
 
 
-def nothing_installed(project: str) -> str:
-    return (f"--redeploy deploys the release already installed, and '{project}' has "
-            f"none yet. Upload its first bundle, then run 'prod-deploy {project}'.")
+def nothing_installed(project: str, paths: BoxPaths) -> str:
+    """--redeploy before a first deploy: say what deploys one."""
+    try:
+        waiting = resolve_bundle_source(project, paths)
+    except SourceError:
+        return (f"--redeploy deploys the release already installed, and '{project}' has "
+                f"none yet. Upload its first bundle, then run 'prod-deploy {project}'.")
+    return (f"--redeploy deploys the release already installed, and '{project}' has none "
+            f"yet. Its first bundle, {waiting.name}, is waiting in the inbox: run "
+            f"'prod-deploy {project}' to deploy it.")
 
 
 def note_waiting_bundle(project: str, paths: BoxPaths) -> None:
@@ -102,7 +112,7 @@ def deploy_without_bundle(project: str, paths: BoxPaths, *, missing: SourceError
         return 1
     if txn is None:
         if redeploy and is_new:
-            print(f"ERROR: {nothing_installed(project)}", file=sys.stderr)
+            print(f"ERROR: {nothing_installed(project, paths)}", file=sys.stderr)
             return 1
         if missing is not None and (is_new or ref):
             print(f"ERROR: {missing}", file=sys.stderr)

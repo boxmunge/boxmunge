@@ -82,10 +82,24 @@ def test_redeploy_with_a_ref_is_refused(paths, capsys) -> None:
     assert f"'prod-deploy myapp --ref {V1}'" in capsys.readouterr().err
 
 
-def test_redeploy_is_refused_for_a_git_project() -> None:
-    problem = redeploy_problem("myapp", git=True, ref=None)
-    assert problem and "git project" in problem and "'prod-deploy myapp'" in problem
-    assert redeploy_problem("myapp", git=False, ref=None) is None
+def test_redeploy_is_refused_for_a_git_project_naming_its_installed_commit(paths) -> None:
+    from boxmunge.state import write_state
+    (paths.project_dir("myapp") / "repo").mkdir(parents=True)
+    write_state(paths.project_deploy_state("myapp"), {"current_ref": "a" * 40})
+    problem = redeploy_problem("myapp", paths, git=True, ref=None)
+    assert problem and "git project" in problem
+    assert f"'prod-deploy myapp --ref {'a' * 40}'" in problem
+    assert redeploy_problem("myapp", paths, git=False, ref=None) is None
+
+
+def test_redeploy_before_a_first_deploy_names_the_waiting_bundle(paths, capsys) -> None:
+    add_project("myapp", paths)
+    waiting = place_bundle(paths, timestamp=V1)
+    with docker_off():
+        assert run_deploy("myapp", paths, redeploy=True) == 1
+    err = capsys.readouterr().err
+    assert f"{waiting.name}, is waiting in the inbox" in err and "'prod-deploy myapp'" in err
+    assert "Upload its first bundle" not in err
 
 
 def test_redeploy_finishes_an_open_first_install(paths, capsys) -> None:

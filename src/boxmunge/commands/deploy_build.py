@@ -31,24 +31,49 @@ _BUILD_TIMEOUT = 1800
 _BASE_UNREADABLE = "failed to resolve source metadata"
 
 
-def local_base_builds(target: ReleaseTarget) -> frozenset[str]:
-    """The services whose definition, as written, sets `build.pull: false`:
-    in compose.yml or in a file it includes or extends from, read as the
-    reference walk follows them (compose_references). Compose's resolved
-    model drops a false `pull`, so the files themselves are read. A
-    service that extends another under a different name sets it itself."""
+def _build_specs(target: ReleaseTarget) -> dict[str, dict]:
+    """{service: its `build:` mapping as written}, from compose.yml and every
+    file it includes or extends from, as the reference walk follows them
+    (compose_references). Compose's resolved model drops a false `pull`, so
+    the files themselves are read. Raises DeployRefused."""
     release = target.compose.project_directory or target.compose.cwd
-    found: set[str] = set()
+    specs: dict[str, dict] = {}
     try:
         for path in compose_references.compose_files(release / "compose.yml", (release,)):
             doc = yaml.safe_load(path.read_text()) or {}
             services = doc.get("services") if isinstance(doc, dict) else None
-            found |= {n for n, s in (services or {}).items() if isinstance(s, dict)
-                      and isinstance(s.get("build"), dict) and s["build"].get("pull") is False}
+            specs.update({n: s["build"] for n, s in (services or {}).items()
+                          if isinstance(s, dict) and isinstance(s.get("build"), dict)})
     except (OSError, ValueError, yaml.YAMLError) as e:
         raise DeployRefused([f"cannot read the release's compose files to see which "
                              f"builds set build.pull: false: {e}"]) from e
-    return frozenset(found)
+    return specs
+
+
+def _service_contexts(spec: dict) -> set[str]:
+    """The services a build names as `service:<name>` additional contexts."""
+    contexts = spec.get("additional_contexts") or {}
+    values = (contexts.values() if isinstance(contexts, dict)
+              else [str(c).split("=", 1)[-1] for c in contexts if isinstance(c, str)])
+    return {v.removeprefix("service:") for v in values
+            if isinstance(v, str) and v.startswith("service:")}
+
+
+def local_base_builds(target: ReleaseTarget) -> frozenset[str]:
+    """The services built from the local image store in a pulling deploy:
+    each whose definition sets `build.pull: false`, and each that builds on
+    one of those through a `service:` additional context (a pulling build
+    would build that service again, with --pull). A service that extends
+    another under a different name sets pull: false itself."""
+    specs = _build_specs(target)
+    local = {n for n, spec in specs.items() if spec.get("pull") is False}
+    grew = True
+    while grew:
+        more = {n for n, spec in specs.items()
+                if n not in local and _service_contexts(spec) & local}
+        local |= more
+        grew = bool(more)
+    return frozenset(local)
 
 
 def build_services(target: ReleaseTarget, builds: list[str], *, pull: bool) -> None:

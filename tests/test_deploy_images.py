@@ -150,3 +150,12 @@ def test_unreadable_compose_files_refuse_the_deploy(paths) -> None:
     _compose(paths, "include:\n  - parts/missing.yml\nservices: {}\n")
     with pytest.raises(DeployRefused, match="build.pull: false"):
         deploy_build.local_base_builds(production_target(paths, "app"))
+
+
+@pytest.mark.parametrize("contexts", ["{tools: 'service:tool'}", "['tools=service:tool']"])
+def test_a_build_on_a_pull_false_service_is_local_too(paths, contexts) -> None:
+    """A pulling build would build its `service:` context again, with --pull."""
+    _compose(paths, "services:\n  tool:\n    build:\n      context: .\n      pull: false\n"
+                    f"  web:\n    build:\n      context: .\n      additional_contexts: {contexts}\n"
+                    "  other:\n    build: .\n")
+    assert deploy_build.local_base_builds(production_target(paths, "app")) == {"tool", "web"}
