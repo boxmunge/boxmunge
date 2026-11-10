@@ -203,3 +203,24 @@ def test_an_abort_redoes_a_project_an_earlier_bring_up_left_failed(
                           component="userns-rollback", prefix="abort", only_stopped=True)
     assert results["good"] == "up" and ("route", "good") in box
     assert ("up", "good", ("app", "worker"), True) in box
+
+
+def test_a_project_whose_files_changed_since_its_deploy_is_left_as_it_was(
+        paths, box, monkeypatch) -> None:
+    """D-02: nothing is regenerated from files a deploy did not record (no
+    maintenance page, overlay or route from them); the project stays down,
+    journalled failed, until a redeploy."""
+    from boxmunge.compose_guard import ComposeRefused
+
+    def check(paths, p, *, component):
+        if p in ("good", "held"):
+            raise ComposeRefused(f"control file manifest.yml changed ({p})")
+    monkeypatch.setattr(bu, "check_kept_files", check)
+    events = box
+    j = Journal(FORWARD, "rebuilt", 1048576)
+    results = bu.bring_up(paths, _inv(), j, lambda: None, component="userns-migrate")
+    for p in ("good", "held"):
+        assert results[p] == f"failed: control file manifest.yml changed ({p})"
+        assert not any(len(e) > 1 and e[1] == p for e in events), events
+        assert not paths.project_caddy_site(p).exists()
+    assert ("route", "bad") not in events and results["bad"] == "failed: container exited"

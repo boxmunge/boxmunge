@@ -34,6 +34,7 @@ failed start.
 from __future__ import annotations
 
 import functools
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -242,6 +243,27 @@ def check_start(
             bind_sources.check_control(project_dir, read_files, rec["control"],
                                        redo=redeploy_command(paths, project_name))
     except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError) as e:
+        raise _refused(paths, project_name, component, str(e)) from e
+
+
+def check_kept_files(paths: BoxPaths, project_name: str, *, component: str) -> None:
+    """Before an upgrade (or the user-namespace switch) regenerates anything
+    from a project's files (its Caddy site, overlay, maintenance page): the
+    control files it reads still hash to the record, so a file changed since
+    the deploy changes nothing live (bind_sources.check_kept_control). The
+    renewal itself checks again (check_start's `regenerated`). Raises
+    ComposeRefused."""
+    project_dir = paths.project_dir(project_name)
+    compose = project_dir / "compose.yml"
+    try:
+        # No compose.yml names no further files; its own absence is a
+        # mismatch against a recorded hash, and the validator refuses it.
+        read_files = (compose_references.walk_references(compose, (project_dir,))[1]
+                      if os.path.lexists(compose) else [])
+        bind_sources.check_kept_control(project_dir, read_files,
+                                        paths.project_bind_record(project_name),
+                                        redo=_renewal_redo(paths, project_name))
+    except (BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
 
 

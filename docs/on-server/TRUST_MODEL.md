@@ -118,9 +118,11 @@ What closes them:
   the project) and create missing sources as plain directories, rather
   than leaving Docker to create them as root through whatever a symlink
   points at. An upgrade (and the user-namespace switch) renews each
-  project's record from the configs it regenerates, after checking that
-  every file it did not write itself still matches the record: it blesses
-  only its own overlay, and a manifest it migrated from the recorded one.
+  project's record from the configs it regenerates. Before it regenerates
+  anything (Caddy site, overlay, maintenance page), it checks that every
+  file it did not write itself still matches the record; a project that
+  fails keeps the generated files it had. It blesses only its own overlay,
+  and a manifest it migrated from the recorded one.
   The check also confirms every file boxmunge reads (the
   compose files, the manifest, `.env`, the generated overlay, whatever
   `compose.yml` includes, extends or names in `env_file`/`label_file`,

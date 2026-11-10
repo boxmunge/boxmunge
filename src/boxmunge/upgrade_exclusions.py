@@ -22,6 +22,7 @@ from boxmunge.commands.upgrade_steps import (
     ManifestMigration, Regeneration, _links_into_repository, _migrated, _project_dirs,
     _regenerate_project, exclusion, install_exclusion_text, require_manifest,
 )
+from boxmunge.compose_guard import ComposeRefused, check_kept_files
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.git_layout import alert_old_schema, alert_unlinked, relink_advice
 from boxmunge.legacy_stage import (
@@ -93,6 +94,11 @@ def _apply_locked(paths: BoxPaths, project_dir: Path, migration: ManifestMigrati
                               load_manifest_as_written(require_manifest(project_dir)))
     if unlinked:
         migration.unlinked[name] = relink_advice(project_dir, unlinked)
+    try:  # before anything is migrated or regenerated from its files (D-02)
+        check_kept_files(paths, name, component="upgrade")
+    except ComposeRefused as e:
+        regen.refused[name] = str(e)
+        return
     done = migrate_one(paths, project_dir)
     if done == "written":
         migration.written.append(name)

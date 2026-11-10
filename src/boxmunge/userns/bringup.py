@@ -21,7 +21,9 @@ from boxmunge.caddy import prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.deploy_steps import smoke_ok
 from boxmunge.compose import ComposeError, prepare_compose_override
-from boxmunge.compose_guard import compose_up_checked, compose_up_platform
+from boxmunge.compose_guard import (
+    ComposeRefused, check_kept_files, compose_up_checked, compose_up_platform,
+)
 from boxmunge.data_helper import HELPER_IMAGE
 from boxmunge.docker import caddy_reload
 from boxmunge.docker_run import DockerError, run as _run
@@ -133,6 +135,21 @@ def _platform(paths: BoxPaths, behind_page: list[str], journal: Journal, prefix:
     caddy_reload(paths.caddy, paths.state)
 
 
+def _changed_since_deploy(paths: BoxPaths, projects: list[str], journal: Journal,
+                          prefix: str, component: str) -> dict[str, str]:
+    """Projects about to be touched (not up yet) whose control files changed
+    since their deploy: nothing is regenerated from those files
+    (compose_guard.check_kept_files). One left running is left alone."""
+    refused = {}
+    for p in projects:
+        if journal.items.get(f"{prefix}:{p}") != "up":
+            try:
+                check_kept_files(paths, p, component=component)
+            except ComposeRefused as e:
+                refused[p] = str(e)
+    return refused
+
+
 def bring_up(paths: BoxPaths, inv: Inventory, journal: Journal, save: Callable[[], None], *,
              component: str, prefix: str = "project",
              only_stopped: bool = False) -> dict[str, str]:
@@ -150,13 +167,17 @@ def bring_up(paths: BoxPaths, inv: Inventory, journal: Journal, save: Callable[[
             for p in projects if p not in held}
     untouched = {p for p, services in todo.items()
                  if only_stopped and not services and _running_services(inv, p)}
-    _platform(paths, [p for p in todo if p not in untouched], journal, prefix)
+    refused = _changed_since_deploy(paths, [p for p in projects if p not in untouched],
+                                    journal, prefix, component)
+    _platform(paths, [p for p in todo if p not in untouched | set(refused)], journal, prefix)
     for p in projects:
         key = f"{prefix}:{p}"
         if journal.items.get(key) == "up":
             continue
         try:
-            if p in held:
+            if p in refused:
+                journal.items[key] = f"failed: {refused[p]}"
+            elif p in held:
                 prepare_compose_override(paths, load_manifest(paths.project_manifest(p)),
                                          component=component)
                 journal.items[key] = f"left {held[p]}"
