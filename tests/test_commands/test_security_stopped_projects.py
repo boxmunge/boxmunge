@@ -20,7 +20,9 @@ from boxmunge.cve.scan_state import BASIS_CONTAINERS, BASIS_STARTUP_IMAGES, read
 from boxmunge.docker_containers import LocalImage
 from boxmunge.pause import write_paused_state
 from boxmunge.state import write_state
-from tests.test_commands.cve_helpers import Docker, make_box, scan_result, seed_quarantine
+from tests.test_commands.cve_helpers import (
+    Docker, fresh_kev, make_box, scan_result, seed_quarantine,
+)
 
 _RUNNING = "sha256:" + "1" * 64
 _PULLED = "sha256:" + "2" * 64
@@ -116,6 +118,7 @@ def test_missing_startup_image_makes_the_scan_incomplete(box, fake_containers):
 @pytest.fixture
 def resume(monkeypatch):
     lifted: list[str] = []
+    fresh_kev(monkeypatch)
     monkeypatch.setattr(security_resume, "refresh_db", lambda: None)
     monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)
     monkeypatch.setattr(quarantine_lift, "prepare_compose_override",

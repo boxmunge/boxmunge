@@ -329,6 +329,12 @@ def paths(tmp_root: Path) -> BoxPaths:
 
 
 @pytest.fixture(autouse=True)
+def _no_container_reprobe_wait(monkeypatch):
+    """health re-probes a missing Caddy or system container after 5 s; not in tests."""
+    monkeypatch.setattr("boxmunge.commands.health_cmd.REPROBE_DELAY", 0)
+
+
+@pytest.fixture(autouse=True)
 def _unremapped_daemon(request, monkeypatch, tmp_path_factory):
     """Outside the integration tier the box is not remapped: an empty /etc
     and a daemon reporting no userns. tests.userns_helpers.remap_box makes

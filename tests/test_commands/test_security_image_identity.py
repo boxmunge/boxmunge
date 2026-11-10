@@ -17,7 +17,9 @@ from boxmunge.commands.security_scan_inputs import identify_images
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.deployed_inventory import load_deployed_inventory
 from boxmunge.docker_containers import LocalImage
-from tests.test_commands.cve_helpers import Docker, Pushover, make_box, scan_result, seed_quarantine
+from tests.test_commands.cve_helpers import (
+    Docker, Pushover, fresh_kev, make_box, scan_result, seed_quarantine,
+)
 
 _WEB_ID = "sha256:" + "1" * 64
 _NEW_ID = "sha256:" + "2" * 64
@@ -150,6 +152,7 @@ def test_resume_lifts_a_build_only_project(build_only_box, monkeypatch, fake_con
     """Quarantined, so the re-scan checks what the lift starts: the build tag."""
     fake_containers.images["demo-web"] = LocalImage(image_id=_WEB_ID, repo_digests=())
     seed_quarantine(build_only_box)
+    fresh_kev(monkeypatch)
     Docker(monkeypatch)
     monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)
     monkeypatch.setattr(quarantine_lift, "prepare_compose_override",

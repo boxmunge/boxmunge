@@ -9,7 +9,7 @@ from boxmunge.commands import quarantine_lift, security_resume, security_scan_co
 from boxmunge.commands.security_resume import cmd_security_resume
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.cve.scanner import ScannerError
-from tests.test_commands.cve_helpers import CRIT, Docker, make_box, seed_quarantine
+from tests.test_commands.cve_helpers import CRIT, Docker, fresh_kev, make_box, seed_quarantine
 from tests.test_commands.cve_helpers import scan_result as _sr
 
 
@@ -24,6 +24,7 @@ def make_paths(tmp_path, services=("web", "worker"), images=None):
 def lift(monkeypatch):
     """Stub the lift primitives; record whether the lift ran."""
     calls: list[str] = []
+    fresh_kev(monkeypatch)
     monkeypatch.setattr(security_resume, "refresh_db", lambda: None)
     monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)
     monkeypatch.setattr(
@@ -131,6 +132,7 @@ def test_resume_lifts_after_complete_clean_rescan(tmp_path, monkeypatch, lift, c
 @pytest.fixture
 def real_lift(monkeypatch):
     """Clean re-scan; real lift; Caddy/compose/restart-policy Docker calls faked."""
+    fresh_kev(monkeypatch)
     monkeypatch.setattr(security_resume, "refresh_db", lambda: None)
     monkeypatch.setattr(security_scan_core, "scan_image", lambda ref, timeout: _sr(ref))
     rendered: list[str] = []

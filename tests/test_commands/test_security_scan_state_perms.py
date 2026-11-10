@@ -14,7 +14,9 @@ from boxmunge.commands import quarantine_lift, security_actions, security_resume
 from boxmunge.commands.security_actions import cmd_security_scan
 from boxmunge.commands.security_resume import cmd_security_resume
 from boxmunge.cve.scan_state import write_scan_state
-from tests.test_commands.cve_helpers import Pushover, make_box, scan_result, seed_quarantine
+from tests.test_commands.cve_helpers import (
+    Pushover, fresh_kev, make_box, scan_result, seed_quarantine,
+)
 
 pytestmark = pytest.mark.skipif(os.getuid() == 0, reason="root can write a 0555 directory")
 
@@ -99,6 +101,7 @@ def test_resume_does_not_write_scan_state(tmp_path, monkeypatch):
     """The lift's re-scan is audit-only, so an unwritable state/scans is no obstacle."""
     paths = make_box(tmp_path)
     seed_quarantine(paths)
+    fresh_kev(monkeypatch)
     _unwritable_scans(paths)
     lifted: list[str] = []
     monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)

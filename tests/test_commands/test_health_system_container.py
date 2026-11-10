@@ -15,3 +15,24 @@ def test_error_with_remediation_when_missing(paths, monkeypatch) -> None:
     assert check.status == "error"
     assert "up -d --build" in check.detail
     assert "fallback active" not in check.detail
+
+
+def test_missing_then_running_is_ok(paths, system_container, monkeypatch) -> None:
+    """An upgrade recreating it: one missing probe is re-probed, not an error."""
+    from boxmunge.commands import health_cmd
+    real, answers, slept = sc._inspect, [None], []
+    monkeypatch.setattr(sc, "_inspect", lambda name: answers.pop(0) if answers else real(name))
+    monkeypatch.setattr(health_cmd, "REPROBE_DELAY", 5.0)
+    monkeypatch.setattr(health_cmd.time, "sleep", slept.append)
+    assert check_system_container(paths).status == "ok"
+    assert slept == [5.0]
+
+
+def test_missing_twice_is_an_error(paths, monkeypatch) -> None:
+    from boxmunge.commands import health_cmd
+    calls, slept = [], []
+    monkeypatch.setattr(sc, "_inspect", lambda name: calls.append(name))
+    monkeypatch.setattr(health_cmd, "REPROBE_DELAY", 5.0)
+    monkeypatch.setattr(health_cmd.time, "sleep", slept.append)
+    assert check_system_container(paths).status == "error"
+    assert len(calls) == 2 and slept == [5.0]

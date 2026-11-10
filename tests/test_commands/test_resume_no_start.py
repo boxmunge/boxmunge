@@ -150,7 +150,7 @@ def test_an_open_install(paths, capsys, tmp_path) -> None:
 
 def test_it_stays_paused_for_everything_but_a_deploy(paths, capsys) -> None:
     from boxmunge.commands.check import _check_one
-    from boxmunge.commands.health_cmd import check_lifecycle_blocked
+    from boxmunge.health_checks.projects import check_lifecycle_blocked
     from boxmunge.commands.status import collect_status, display_rows
     _paused_v1(paths)
     assert _resume(paths, no_start=True) == 0

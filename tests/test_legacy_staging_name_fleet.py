@@ -44,12 +44,12 @@ def test_health_reports_the_legacy_name_and_finishes(box: BoxPaths, capsys,
     run_health(box, as_json=True)
     report = json.loads(capsys.readouterr().out)
     lifecycle = next(c for c in report["checks"] if c["name"] == "lifecycle")
-    assert lifecycle["status"] == "error"
+    assert lifecycle["status"] == "warn"  # exit 2 would roll back an upgrade
     assert LEGACY in lifecycle["detail"] and HINT in lifecycle["detail"]
 
 
 def test_lifecycle_still_reports_the_other_projects(box: BoxPaths) -> None:
-    from boxmunge.commands.health_cmd import check_lifecycle_blocked
+    from boxmunge.health_checks.projects import check_lifecycle_blocked
     from boxmunge.pause import write_paused_state
     write_paused_state("aaa", box)
     check = check_lifecycle_blocked(box)
