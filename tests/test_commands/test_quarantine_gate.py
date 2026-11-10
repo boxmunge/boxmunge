@@ -54,6 +54,7 @@ class Box:
                                                           for n in self.services}})
         monkeypatch.setattr(gate, "refresh_db", lambda: None)
         monkeypatch.setattr("boxmunge.commands.security_scan_core.scan_image", self._scan)
+        self.kev()  # fresh: a stale catalog keeps a balanced quarantine (cve.lift_rule)
 
     def _scan(self, ref, timeout=None):
         self.scanned.append(ref)

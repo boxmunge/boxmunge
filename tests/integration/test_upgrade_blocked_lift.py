@@ -175,9 +175,11 @@ def test_lift_scan_after_the_upgrade_brings_it_back(box) -> None:
     _back_on_the_0_11_overlay(paths, p, image_id)
 
 
-def test_security_resume_after_the_upgrade_brings_it_back(box, capsys) -> None:
+def test_security_resume_after_the_upgrade_brings_it_back(box, capsys, monkeypatch) -> None:
     paths, p, image_id = box
     seed_quarantine(paths, p)
+    # Fresh: a stale catalog keeps a balanced quarantine (cve.lift_rule).
+    monkeypatch.setattr("boxmunge.commands.security_resume.load_kev", lambda paths: _kev())
     _upgrade(paths)
     rc = security_resume_locked(paths, p)
     out = capsys.readouterr()

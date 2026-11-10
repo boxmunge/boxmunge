@@ -46,6 +46,16 @@ CRIT = finding()
 STRICT = {"posture": "strict"}
 
 
+def fresh_kev(monkeypatch, *cves: str):
+    """A fresh KEV catalog listing ``cves`` for `security resume`, which
+    refuses a lift no usable catalog backs (cve.lift_rule)."""
+    from boxmunge.cve.kev import KevCatalog
+    now = datetime.now(timezone.utc)
+    kev = KevCatalog(frozenset(cves), now, now, "https://kev.example/feed.json")
+    monkeypatch.setattr("boxmunge.commands.security_resume.load_kev", lambda paths: kev)
+    return kev
+
+
 def scan_result(ref: str, findings=()) -> ScanResult:
     return ScanResult(ref, tuple(findings), datetime.now(timezone.utc), None)
 

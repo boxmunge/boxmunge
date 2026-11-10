@@ -159,8 +159,10 @@ def _scan_and_quarantine(box, seen, monkeypatch):
 def _security_resume(box, seen, monkeypatch):
     from boxmunge.commands import security_resume, security_scan_core
     from tests.test_commands.cve_helpers import scan_result, seed_quarantine
+    from tests.test_commands.cve_helpers import fresh_kev
     seed_quarantine(box.paths, "myapp")
     monkeypatch.setattr(security_scan_core, "scan_image", lambda ref, timeout: scan_result(ref))
+    fresh_kev(monkeypatch)  # resume refuses a lift no usable KEV catalog backs
     with staging_docker_off(), patch("boxmunge.cve.quarantine.caddy_reload"):
         assert security_resume.security_resume_locked(box.paths, "myapp") == 0
     assert box.ran

@@ -439,7 +439,8 @@ This alert fires once per scan run, not once per finding, to avoid alert
 storms. The degradation must not go unnoticed: under `relaxed` and
 `balanced` (the default) KEV is the only quarantine trigger, so while the
 catalog is stale nothing can quarantine those projects. A stale catalog
-also never lifts a quarantine (see "Automatic lift").
+never lifts a quarantine on its own, and limits what `security resume` and
+a fix deploy may lift (see "Lifting on a stale catalog").
 
 ## Runtime relevance gate
 
@@ -1130,6 +1131,7 @@ boxmunge security scan --apply-held                     Apply breaker-held quara
 boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason <text>
 boxmunge security unsuppress <CVE> --project <name>
 boxmunge security resume <project>                      Lift CVE quarantine
+boxmunge security resume <project> --accept-stale-kev  Lift with no usable KEV catalog (audited)
 ```
 
 The fleet view shows posture distribution, currently quarantined projects,
@@ -1221,6 +1223,9 @@ is published, while the running image is still the vulnerable one; under
 `strict` and `paranoid`, a distro re-triage or a newly published fix is not
 evidence that what runs is safe. Those decisions stay with the operator.
 
+The automatic lift needs a fresh catalog: nobody is there to judge a stale
+one (see "Lifting on a stale catalog" for the operator routes).
+
 The lift is `security resume`'s: the normal Caddy site is restored, the
 saved restart policies are given back, the scanned local images are
 started with no pull or build, and the smoke test runs. A project that is
@@ -1241,6 +1246,47 @@ get the maintenance page back, not a 502; `security resume` does the same.
 
 One alert says so, `Quarantine lifted — back online (<CVE>)`, naming why,
 and `security scan` prints `<project>: quarantine lifted (<CVE>)`.
+
+## Lifting on a stale catalog
+
+A stale catalog reads as "nothing is exploited", so a clear re-scan on one
+does not show a quarantine's cause is gone. `security resume` and a deploy
+of a fix to production judge the catalog the same way:
+
+- **Fresh:** the lift goes ahead.
+- **Stale, with a cached catalog:** the CVEs the re-scan found in the
+  images are judged against the cached IDs. If any is listed (the
+  quarantine's own CVE on unchanged images, for example), the lift is
+  refused. A fix whose images no longer contain a listed CVE goes ahead,
+  and a priority-1 alert says
+  it was lifted on a stale catalog: CVEs CISA added since the catalog was
+  fetched could not be checked, and why the catalog is stale.
+- **No usable catalog** (never fetched, or the cache is unreadable): the
+  lift is refused under every posture.
+
+A refusal keeps the quarantine and names the exits that work:
+
+- **Fresh data**, always: `boxmunge security scan` fetches the catalog from
+  each source in `kev.sources` (by default CISA's feed, then CISA's GitHub
+  mirror `cisagov/kev-data`). If no source answers from this box, add one it
+  can reach to `kev.sources`, for example an https copy of the feed you host.
+- **A stale catalog listing a CVE still in the images:** ship a release
+  without it. A fresh catalog would refuse this lift too, so
+  `--accept-stale-kev` does not apply.
+- **No usable catalog,** once the operator has judged the risk:
+  `boxmunge security resume <project> --accept-stale-kev` lifts anyway. It
+  still needs a complete re-scan with no quarantine-level finding, says what
+  it gives up, is logged before the lift and sends a priority-1 alert after
+  it. It brings the images the project runs now back online: for a fix
+  deploy the gate refused, those are the old images, until the deploy
+  (repeated after the resume) replaces them. Under `strict` or `paranoid`,
+  if that resume refuses a finding that is still quarantine-level in the old
+  images, the route is: `security suppress` it for the project, resume with
+  `--accept-stale-kev`, deploy the fix, then `security unsuppress` it. (A
+  deploy that carries the acceptance itself is planned for 0.11.5.)
+
+Staging lifts nothing, so `stage` is not judged against the catalog; the
+promote is.
 
 ## Recovering a quarantined project
 
@@ -1286,7 +1332,11 @@ and `security scan` prints `<project>: quarantine lifted (<CVE>)`.
    - any image failed to scan (Trivy DB or registry unreachable, for
      example), or every image did;
    - the per-project scan budget ran out before every image was scanned;
-   - an image the lift would start is not in the local image store.
+   - an image the lift would start is not in the local image store;
+   - the CISA KEV catalog cannot back the lift: it is stale and lists a CVE
+     still in the images, or there is none (see "Lifting on a stale
+     catalog"; with no usable catalog, `--accept-stale-kev` is the audited
+     override).
 
    The error lists each image or service that was not covered. Fix the
    cause and retry; an incomplete re-scan is never treated as clean.
@@ -1306,8 +1356,9 @@ cleared.
    and pulls them all. A quarantine-level finding, a failed or skipped
    image scan, or an image that cannot be identified refuses the release:
    the error names each CVE, package, service and image and the fix, the
-   candidates are removed, and the quarantine stays. A first attempt
-   leaves the install open before its hook, so `prod-deploy <project>
+   candidates are removed, and the quarantine stays. So does a clear scan
+   of a production release that the KEV catalog cannot back (see "Lifting
+   on a stale catalog"). A first attempt leaves the install open before its hook, so `prod-deploy <project>
    --abandon` or a different release (fix-forward) ends it; a resumed
    install stays at its phase. A clean release deploys as usual, refused
    if its hook changed what it would start or the hardening it was judged

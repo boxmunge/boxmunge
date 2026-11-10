@@ -40,7 +40,7 @@ from boxmunge.staged_release import load_slot
 from boxmunge.state import write_state
 
 from tests.bundle_helpers import place_bundle
-from tests.test_commands.cve_helpers import make_box, scan_result, seed_quarantine
+from tests.test_commands.cve_helpers import fresh_kev, make_box, scan_result, seed_quarantine
 from tests.test_commands.test_restore_cmd import _setup_project
 from tests.stage_helpers import V1, V2, staging_docker_off as _docker
 from tests.test_lifecycle_locks import _cu_target, _setup
@@ -173,6 +173,7 @@ def test_project_delete_core(tmp_path, lock_attempts) -> None:
 def test_security_resume_core(tmp_path, monkeypatch, lock_attempts) -> None:
     paths = make_box(tmp_path, services=("web",))
     seed_quarantine(paths)
+    fresh_kev(monkeypatch)
     monkeypatch.setattr(security_scan_core, "scan_image", lambda ref, timeout: scan_result(ref))
     monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)
     monkeypatch.setattr(quarantine_lift, "prepare_compose_override",
