@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-ROOT_SCRIPTS = sorted([REPO / "install.sh", *(REPO / "bootstrap").glob("*.sh"),
+ROOT_SCRIPTS = sorted([REPO / "install.sh", REPO / "system" / "Dockerfile",
+                       *(REPO / "bootstrap").glob("*.sh"),
                        *(REPO / "scripts" / "boxmunge-upgrade.d").glob("*.sh")])
 _CURL = re.compile(r"\bcurl\s+-")  # an invocation, not `command -v curl` or a package name
 
@@ -26,7 +27,8 @@ def _curls() -> list[tuple[str, str]]:
 
 def test_the_downloads_are_found() -> None:
     where = {w.split(":")[0] for w, _ in _curls()}
-    assert {"install.sh", "bootstrap/cosign.sh", "scripts/boxmunge-upgrade.d/release.sh"} <= where
+    assert {"install.sh", "system/Dockerfile", "bootstrap/cosign.sh",
+            "scripts/boxmunge-upgrade.d/release.sh"} <= where
 
 
 @pytest.mark.parametrize("where, line", _curls(), ids=[w for w, _ in _curls()])
