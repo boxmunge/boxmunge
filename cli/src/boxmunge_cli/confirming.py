@@ -24,7 +24,7 @@ def have_terminal() -> bool:
     """Whether a person can answer here: stdin is a terminal. stdout may be
     a pipe (`boxmunge rollback | tee log`): ssh -t still gives the server a
     pty when stdin is a terminal, and the plan and prompt reach the pipe."""
-    return sys.stdin.isatty()
+    return sys.stdin is not None and sys.stdin.isatty()  # None: stdin was closed
 
 
 def asks(command: str, args: list[str] | tuple[str, ...]) -> bool:

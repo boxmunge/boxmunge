@@ -5,9 +5,9 @@ A reporter is prefix_store.network_prefix of the client address (the IPv4
 boxes (at some hosters one /48 spans many customers), so a reporter's
 report is stored unless it repeats one the same reporter already sent for
 that version in REPORT_WINDOW (same from-version, stage and detail), up to
-REPORTS_PER_REPORTER per version per window. The auto-trip threshold
-counts distinct reporters in that same window, never reports: a network
-counts once, however many of its boxes fail.
+REPORTS_PER_REPORTER per version per window. The maintainer alert
+(failure_alert) counts distinct reporters in that same window, never
+reports: a network counts once, however many of its boxes fail.
 Reports, reporter included, are deleted after RETENTION by expire(), which
 retention.sweep runs on a schedule.
 """
@@ -24,8 +24,8 @@ REPORTS_PER_REPORTER = 10
 WINDOW_SQL = ("SELECT installed_from, stage, detail FROM failures WHERE reporter = ? "
               "AND version = ? AND reported_at > ?")
 EXPIRE_SQL = "DELETE FROM failures WHERE reported_at <= ?"
-COUNT_SQL = ("SELECT COUNT(DISTINCT reporter) FROM failures WHERE version = ? "
-             "AND reported_at > ?")
+REPORTED_BY_SQL = ("SELECT version FROM failures WHERE reported_at > ? GROUP BY version "
+                   "HAVING COUNT(DISTINCT reporter) >= ?")
 
 
 def record_failure(db_path: Path, version: str, installed_from: str, stage: str,
@@ -68,13 +68,15 @@ def expire(db_path: Path, now: datetime) -> None:
         conn.close()
 
 
-def count_recent(db_path: Path, version: str, now: datetime) -> int:
-    """Reports for `version` in the window: the number of distinct reporters."""
+def versions_reported_by(db_path: Path, now: datetime, reporters: int) -> set[str]:
+    """Versions with reports from at least `reporters` distinct reporters in the window."""
     conn = db.connect(db_path)
     try:
-        return conn.execute(COUNT_SQL, (version, (now - REPORT_WINDOW).isoformat())).fetchone()[0]
+        rows = conn.execute(REPORTED_BY_SQL,
+                            ((now - REPORT_WINDOW).isoformat(), reporters)).fetchall()
     finally:
         conn.close()
+    return {row[0] for row in rows}
 
 
 def recent_failures(db_path: Path, limit: int) -> list[dict]:

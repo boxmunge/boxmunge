@@ -52,6 +52,12 @@ jobs:
       - name: Server unit tests (includes pinning, file-length, and DCO-script lints)
         # One pytest-xdist worker per CPU; the suite is parallel-safe.
         run: python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -m 'not integration' -q -n auto
+      - name: Runtime locks are current (release pull requests)
+        # Dependabot never regenerates the pyproject-extra locks: a release
+        # pull request fails until `make relock` has taken every same-major
+        # release out longer than the script's limit (docs/DEVELOPMENT.md).
+        if: startsWith(github.head_ref, 'release/')
+        run: python scripts/lock-freshness.py requirements.txt requirements-tui.txt requirements-mcp.txt cli/requirements.txt
       - name: The release SBOM builds, lists every pin a box installs, and validates
         # The release workflow's own step: a venv built from the box's
         # hash-pinned requirements, read by cyclonedx-py, checked and

@@ -1,0 +1,7 @@
+# Majors `make relock` holds back (a pip constraints file, docs/DEVELOPMENT.md),
+# each waiting on a decision of its own: lift a line together with whatever
+# code change that major needs, then `make relock`.
+#
+# mcp 2 rebuilt the low-level Server that src/boxmunge/mcp_server.py is built
+# on: its list_tools()/call_tool() decorators are gone.
+mcp<2
