@@ -25,7 +25,9 @@ from boxmunge import fs_nofollow
 from boxmunge.bind_sources import read_record
 from boxmunge.blocked_update import read_blocked_state
 from boxmunge.container_update_targets import read_target_state
-from boxmunge.cve import breaker, grace, kev, kev_withdrawals, quarantine, scan_state
+from boxmunge.cve import (
+    breaker, grace, kev, kev_source_history, kev_withdrawals, quarantine, scan_state,
+)
 from boxmunge.discovery_freshness import stale_discovery_warning
 from boxmunge.health_checks.container_updates import check_container_updates
 from boxmunge.notify import _unconfigured_logged_recently
@@ -79,6 +81,10 @@ READERS = [
     Reader("kev_withdrawals", lambda p: p.kev_withdrawn,
            {"withdrawn": {"CVE-1": {"source": "cisa", "at": ISO}}},
            kev_withdrawals.load_withdrawals),
+    Reader("kev_source_history", lambda p: p.kev_sources,
+           {"sources": {"https://cisa.example/kev.json":
+                        {"released_at": ISO, "disagreed_runs": 0}}},
+           kev_source_history.load_history),
     Reader("blocked_update", lambda p: p.platform_update_state,
            {"checked_at": ISO, "current_version": "0.1.0", "blocked": None, "alerted": None},
            read_blocked_state),
@@ -178,3 +184,20 @@ def test_read_state_reports_a_link_as_a_state_error(paths, tmp_path) -> None:
 
 def test_read_state_of_a_missing_file_is_the_default(paths) -> None:
     assert read_state(paths.project_deploy_state(P), {"a": 1}) == {"a": 1}
+
+
+@pytest.mark.parametrize("path, read, error", [
+    (lambda p: p.kev_withdrawn, kev_withdrawals.load_withdrawals,
+     kev_withdrawals.KevWithdrawalsError),
+    (lambda p: p.kev_sources, kev_source_history.load_history,
+     kev_source_history.KevHistoryError),
+], ids=["kev_withdrawals", "kev_source_history"])
+def test_a_dangling_link_is_not_read_as_no_record(paths, tmp_path, path, read, error) -> None:
+    """An empty answer from these records lifts a withdrawal hold or lets a
+    lagging KEV source roll the catalog back, so a link whose target is gone
+    must fail closed, not read as "no record yet"."""
+    link = path(paths)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(tmp_path / "gone.json")
+    with pytest.raises(error):
+        read(paths)

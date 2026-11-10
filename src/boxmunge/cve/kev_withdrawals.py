@@ -17,6 +17,7 @@ for it again.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -40,7 +41,9 @@ class Withdrawal:
 
 def _entries(paths: BoxPaths) -> dict[str, dict[str, Any]]:
     path = paths.kev_withdrawn
-    if not path.exists():
+    # lexists: a link whose target is gone is not "nothing withdrawn"; an
+    # empty answer would lift every withdrawal hold.
+    if not os.path.lexists(path):
         return {}
     try:
         entries = json.loads(read_text_nofollow(path))["withdrawn"]
