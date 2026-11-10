@@ -116,6 +116,101 @@ send_notification() {
     [[ "$rc" -eq 0 || "$rc" -eq 3 ]] || log "WARN: alert not delivered (exit $rc): $1"
 }
 
+# ---------------------------------------------------------------------------
+# The rollback's stash. stashes/ is deploy-writable (root:deploy 0770): deploy
+# can add, rename and replace entries there, though not write the 0600 stash
+# root makes. So a rollback neither takes the newest-named stash there nor
+# opens one by name. The upgrade records the stash it made, with the version
+# it installs, in root-only upgrade-root/upgrade-stash; the rollback copies
+# exactly that archive into root-only upgrade-root/rollback-stash/, opened
+# without following a link and only if it is a plain file root owns, and has
+# the previous release restore the copy (restore_stash takes an archive path
+# since 0.10.0). An upgrade run by a shim before this one recorded nothing:
+# its rollback takes the newest-named stash, as that shim would, under the
+# same checks.
+# ---------------------------------------------------------------------------
+STASH_RECORD_FILE="$UPGRADE_ROOT_DIR/upgrade-stash"
+STASH_COPY_DIR="$UPGRADE_ROOT_DIR/rollback-stash"
+STASH_NAME_RE='^boxmunge-stash-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}\.tar\.gz$'
+
+# record_stash <version> <stash create output>: record the stash `stash
+# create` said it made; returns 1 when it named none.
+record_stash() {
+    local name
+    name="$(printf '%s\n' "$2" | sed -n 's/^Stash created: //p' | tail -n 1)"
+    [[ "$name" =~ $STASH_NAME_RE ]] || return 1
+    write_root_file "$STASH_RECORD_FILE" "$1 $name"
+}
+
+# copy_rollback_stash <new_version>: copy the stash the rollback of
+# <new_version> restores into STASH_COPY_DIR and print the copy's path; on
+# failure print why and return 1.
+copy_rollback_stash() {
+    local recorded="" name=""
+    refuse_symlink "$STASH_RECORD_FILE"
+    refuse_symlink "$STASH_COPY_DIR"
+    [[ ! -e "$STASH_RECORD_FILE" ]] || recorded="$(cat "$STASH_RECORD_FILE")"
+    if [[ "${recorded%% *}" == "$1" && "${recorded#* }" =~ $STASH_NAME_RE ]]; then
+        name="${recorded#* }"
+    elif [[ -n "$recorded" ]]; then
+        log "WARN: $STASH_RECORD_FILE ('$(printable "$recorded")') is not the stash of the upgrade to $1; taking the newest-named stash"
+    fi
+    BM_STASHES="$BOXMUNGE_ROOT/stashes" BM_NAME="$name" BM_DEST="$STASH_COPY_DIR" python3 - <<'PYSTASH'
+import errno, fnmatch, os, stat, sys, tempfile
+stashes, name, dest = os.environ["BM_STASHES"], os.environ["BM_NAME"], os.environ["BM_DEST"]
+fix = (" (stashes/ is deploy-writable: it was removed, planted or replaced). Put the right stash back"
+       " or remove the wrong one, then, as supervisor, run: sudo boxmunge-server stash restore --latest;"
+       " sudo boxmunge-server upgrade --apply")
+
+def refuse(why):
+    print(why + fix)
+    sys.exit(1)
+
+if not name:
+    names = sorted(n for n in os.listdir(stashes) if fnmatch.fnmatch(n, "boxmunge-stash-*.tar.gz"))
+    if not names:
+        refuse(f"no stash in {stashes} to restore")
+    name = names[-1]
+    print(f"WARN: no stash recorded for this upgrade; restoring the newest-named, {name}", file=sys.stderr)
+src = os.path.join(stashes, name)
+try:
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+except OSError as e:
+    refuse(f"{src} {'is a symlink' if e.errno == errno.ELOOP else 'cannot be opened: ' + e.strerror}")
+with os.fdopen(fd, "rb") as f:
+    st = os.fstat(f.fileno())
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_nlink != 1:
+        refuse(f"{src} is not a plain file of root's")
+    os.makedirs(dest, mode=0o700, exist_ok=True)
+    for old in os.listdir(dest):
+        os.unlink(os.path.join(dest, old))
+    out_fd, tmp = tempfile.mkstemp(dir=dest, prefix=".copy.")
+    with os.fdopen(out_fd, "wb") as out:
+        while chunk := f.read(1 << 20):
+            out.write(chunk)
+        out.flush()
+        os.fsync(out.fileno())
+copy = os.path.join(dest, name)
+os.replace(tmp, copy)
+print(copy)
+PYSTASH
+}
+
+# restore_stash_copy <archive>: the previous (now live) release restores
+# <archive>; prints what it says.
+restore_stash_copy() {
+    BM_STASH="$1" "$(active_venv)/bin/python" -c "
+import os, sys
+from pathlib import Path
+from boxmunge.paths import BoxPaths
+from boxmunge.stash import StashError, restore_stash
+try:
+    print('Restored from:', restore_stash(BoxPaths(), Path(os.environ['BM_STASH'])).name)
+except (OSError, StashError) as e:
+    sys.exit(f'ERROR: {e}')
+"
+}
+
 # rollback_partial <new_version> <from_version> <stage> <prev_slot> <step> <exit> <output>
 #
 # The venv is back on the previous slot but disk state may be partly
@@ -220,11 +315,15 @@ complete_rollback() {
     rm -f "$PROBATION_FILE"
     clear_probation_markers
 
-    # 1. Stash restore returns config + state to the pre-upgrade snapshot.
-    local output rc=0
-    output="$("$(active_venv)/bin/boxmunge-server" stash restore --latest 2>&1)" || rc=$?
+    # 1. Stash restore returns config + state to the pre-upgrade snapshot: a
+    #    root-only copy of the stash this upgrade made (copy_rollback_stash).
+    local output rc=0 archive
+    archive="$(copy_rollback_stash "$new_version")" || rollback_partial "$new_version" "$from_version" "$stage" \
+        "$prev_slot" "stash restore" 1 "$archive"
+    output="$(restore_stash_copy "$archive" 2>&1)" || rc=$?
     [[ "$rc" -eq 0 ]] || rollback_partial "$new_version" "$from_version" "$stage" "$prev_slot" \
         "stash restore" "$rc" "$output"
+    log "$output"
 
     # 2. Re-apply with the previous release's code. The stash holds inputs
     #    (manifests, compose, secrets), not generated output: the overlays and
@@ -249,6 +348,7 @@ complete_rollback() {
     # (restarting every project) all over again. A crash right here loses
     # one interruption from the count: at worst one extra retry.
     rm -f "$(rollback_marker "$prev_slot")"
+    rm -rf "$STASH_RECORD_FILE" "$STASH_COPY_DIR"
     [[ "$stage" != interrupted ]] || interruptions "$new_version" "$count"
     if [[ "$stage" == interrupted ]]; then
         # Not reported to the fleet service: a power cut must not count

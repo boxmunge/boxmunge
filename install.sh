@@ -188,7 +188,7 @@ install_trivy() {
 
     # Fetch and dearmor the signing key into the trusted keyrings dir.
     if [[ ! -f /usr/share/keyrings/trivy.gpg ]]; then
-        curl -sSLf https://aquasecurity.github.io/trivy-repo/deb/public.key \
+        curl -sSLf --connect-timeout 30 --max-time 120 https://aquasecurity.github.io/trivy-repo/deb/public.key \
             | gpg --dearmor -o /usr/share/keyrings/trivy.gpg
     fi
 
@@ -356,6 +356,21 @@ if [[ -f "${SCRIPT_DIR}/caddy/maintenance/index.html" ]]; then
     chmod 644 "${BOXMUNGE_ROOT}/caddy/maintenance/index.html"
 fi
 
+# Steps that are recorded rather than fatal when they fail: the rest of the
+# install carries on, and fail_if_incomplete stops a fresh install or an
+# operator's re-run at the end, naming each. Run by the upgrade shim they only
+# warn: the shim blocklists a release on any install.sh failure, which for a
+# transient download or pull error would hold the release's fixes off the
+# box while the previous container keeps running (`health` and `doctor` say
+# so). Either way the installer fingerprint is left unrecorded, so the next
+# upgrade runs install.sh, and these steps, again.
+INCOMPLETE=""
+# note_incomplete <message words...>
+note_incomplete() {
+    INCOMPLETE="${INCOMPLETE}  - $*"$'\n'
+    echo "WARNING: $*" >&2
+}
+
 # Caddy logs access to stdout, not to the caddy/logs mount the compose file
 # below no longer has: fix site configs before Caddy is recreated on it.
 bash "${SCRIPT_DIR}/bootstrap/caddy-access-log.sh" sites
@@ -364,14 +379,19 @@ bash "${SCRIPT_DIR}/bootstrap/caddy-access-log.sh" sites
 # (e.g., the v0.4 maintenance bind-mount). Compose recreates Caddy only when
 # its definition changed; asking every time also finishes a recreate that an
 # earlier run copied the file for but did not get to.
-if [[ -f "${SCRIPT_DIR}/caddy/compose.yml" ]]; then
+# A failed `up` (a transient pull of the pinned image, say) is noted.
+refresh_caddy() {
+    [[ -f "${SCRIPT_DIR}/caddy/compose.yml" ]] || return 0
     cp "${SCRIPT_DIR}/caddy/compose.yml" "${BOXMUNGE_ROOT}/caddy/compose.yml"
     chown root:deploy "${BOXMUNGE_ROOT}/caddy/compose.yml"
     chmod 640 "${BOXMUNGE_ROOT}/caddy/compose.yml"
-    if docker inspect boxmunge-caddy >/dev/null 2>&1; then
-        docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d
-    fi
-fi
+    docker inspect boxmunge-caddy >/dev/null 2>&1 || return 0
+    docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d \
+        || note_incomplete "Caddy was not started from the new caddy/compose.yml (see above); the" \
+            "previous container, if any, keeps running. Start it as supervisor once the cause is" \
+            "fixed: sudo docker compose -f ${BOXMUNGE_ROOT}/caddy/compose.yml up -d"
+}
+refresh_caddy
 bash "${SCRIPT_DIR}/bootstrap/caddy-access-log.sh" retire
 
 # CrowdSec reads Caddy's stdout through Docker; verified after the restart.
@@ -394,24 +414,21 @@ fi
 
 # Build + (re)start the boxmunge-system container: isolation for age and
 # rclone, also the data helper's image. There is no host fallback: without it
-# backups, restores, backup-sync and data operations fail. A failed build is
-# recorded and the rest of the install carries on, so the box is complete
-# but for this image; fail_if_system_image_stale then stops a fresh install
-# or an operator's re-run at the end, before "installed successfully".
-# Run by the upgrade shim it only warns: the shim blocklists a release on any
-# install.sh failure, which for a transient download error would hold the
-# release's fixes off the box, while the previous container keeps running on
-# its previous image (`health` and `doctor` warn about it). The installer
-# fingerprint is then left unrecorded, so the next upgrade runs install.sh,
-# and the build, again.
-SYSTEM_IMAGE_STALE=0
+# backups, restores, backup-sync and data operations fail, so a failure is
+# noted (note_incomplete) and names its fix.
 SYSTEM_REBUILD="sudo docker compose -f ${BOXMUNGE_ROOT}/system/compose.yml up -d --build"
 refresh_system_container() {
-    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/system-container.sh" && return 0
-    SYSTEM_IMAGE_STALE=1
-    echo "WARNING: the boxmunge-system image did not build (see above); the previous" \
-         "container, if any, keeps running. Backups, restores and data operations need" \
-         "it. Rebuild it as supervisor once the cause is fixed: ${SYSTEM_REBUILD}" >&2
+    local rc=0
+    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/system-container.sh" || rc=$?
+    case "${rc}" in
+        0) ;;
+        3) note_incomplete "the boxmunge-system container did not start (see above); its image is" \
+               "current. Backups, restores and data operations need it. Start it as supervisor once" \
+               "the cause is fixed: sudo docker compose -f ${BOXMUNGE_ROOT}/system/compose.yml up -d" ;;
+        *) note_incomplete "the boxmunge-system image did not build (see above); the previous" \
+               "container, if any, keeps running. Backups, restores and data operations need it." \
+               "Rebuild it as supervisor once the cause is fixed: ${SYSTEM_REBUILD}" ;;
+    esac
 }
 refresh_system_container
 
@@ -475,10 +492,10 @@ source "${SCRIPT_DIR}/bootstrap/install-ssh.sh"
 #
 # The bundle's shim is built self-contained (scripts/build-shim.py). A
 # pre-release build of this change installed its libraries separately into
-# bin/boxmunge-upgrade.d/; nothing reads that any more.
+# bin/boxmunge-upgrade.d/; nothing reads that any more. Renamed into place, never
+# copied over the running shim (bootstrap/install-shim.sh).
 # ---------------------------------------------------------------------------
-cp "${SCRIPT_DIR}/scripts/boxmunge-upgrade" "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade"
-chmod 755 "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade"
+BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/install-shim.sh"
 rm -rf "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade.d"
 
 # Symlink into /usr/local/bin so boxmunge works in non-interactive SSH sessions
@@ -538,46 +555,51 @@ systemctl enable --now \
 # ---------------------------------------------------------------------------
 # Record installed version (read by boxmunge auto-update to decide if a
 # new release is available). Package is named boxmunge-server in pyproject.
+# Run by the upgrade shim, this is before its swap: env-active is still the
+# previous release, so the version being installed is the bundle's, and the
+# shim's apply records it.
 # ---------------------------------------------------------------------------
-INSTALLED_VERSION="$("${BOXMUNGE_ROOT}/env-active/bin/pip" show boxmunge-server 2>/dev/null \
-    | grep '^Version:' | cut -d' ' -f2 || echo "unknown")"
+INSTALLED_VERSION="$(if [[ "${FROM_UPGRADE_SHIM}" -eq 1 ]]; then
+        sed -n 's/^version = "\(.*\)"$/\1/p' "${SCRIPT_DIR}/pyproject.toml" | head -n 1
+    else
+        "${BOXMUNGE_ROOT}/env-active/bin/pip" show boxmunge-server 2>/dev/null | grep '^Version:' | cut -d' ' -f2
+    fi)" || true
+INSTALLED_VERSION="${INSTALLED_VERSION:-unknown}"
 
 if [[ "${INSTALLED_VERSION}" != "unknown" && "${FROM_UPGRADE_SHIM}" -eq 0 ]]; then
     echo "${INSTALLED_VERSION}" > "${BOXMUNGE_ROOT}/config/version"
 fi
 
-# The boxmunge-system build failed (refresh_system_container): everything
-# else is in place, so a fresh install or an operator's re-run stops here
-# with the rebuild to run. Under the upgrade shim it only warned. Either way
-# the installer fingerprint goes first, so the next upgrade re-runs install.sh
-# to retry the build.
-fail_if_system_image_stale() {
-    [[ "${SYSTEM_IMAGE_STALE}" -eq 1 ]] || return 0
+# A step noted incomplete (note_incomplete): everything else is in place, so a
+# fresh install or an operator's re-run stops here with what to run. Under the
+# upgrade shim it only warned. Either way the installer fingerprint goes first,
+# so the next upgrade re-runs install.sh to retry it.
+fail_if_incomplete() {
+    [[ -n "${INCOMPLETE}" ]] || return 0
     BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/installer-fingerprint.sh" forget
     echo "  Installer fingerprint not recorded: the next upgrade re-runs install.sh" \
-         "to retry the boxmunge-system build"
+         "to retry what did not complete"
     [[ "${FROM_UPGRADE_SHIM}" -eq 0 ]] || return 0
     echo "" >&2
-    echo "ERROR: boxmunge is installed, but the boxmunge-system image did not build" \
-         "(see the WARNING above), so backups, restores and data operations cannot" \
-         "run yet. Fix the cause, then rebuild it as supervisor: ${SYSTEM_REBUILD}" \
-         "and check with: boxmunge doctor" >&2
+    echo "ERROR: boxmunge is installed, but these steps did not complete (see the WARNINGs above):" >&2
+    printf '%s' "${INCOMPLETE}" >&2
+    echo "Fix each as it says, then check with: boxmunge doctor" >&2
     exit 1
 }
-fail_if_system_image_stale
+fail_if_incomplete
 
 # Record the installer fingerprint last, so a partial install (which exits
 # earlier under `set -e`) leaves the prior one in place and the shim re-runs
 # install.sh on the next upgrade (see bootstrap/installer-fingerprint.sh).
-if [[ "${SYSTEM_IMAGE_STALE}" -eq 0 ]]; then
+if [[ -z "${INCOMPLETE}" ]]; then
     BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/installer-fingerprint.sh" record "${SCRIPT_DIR}"
 fi
 
 echo ""
 echo "========================================================"
-if [[ "${SYSTEM_IMAGE_STALE}" -eq 1 ]]; then
-    echo "  boxmunge ${INSTALLED_VERSION} installed, but boxmunge-system did not build"
-    echo "  (see the WARNING above)"
+if [[ -n "${INCOMPLETE}" ]]; then
+    echo "  boxmunge ${INSTALLED_VERSION} installed, but not every step completed:"
+    printf '%s' "${INCOMPLETE}"
 else
     echo "  boxmunge ${INSTALLED_VERSION} installed successfully"
 fi

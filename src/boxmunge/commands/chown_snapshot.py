@@ -71,7 +71,10 @@ def _why_stopped(paths: BoxPaths, project: str, backup_service: str) -> tuple[st
             awaiting_deploy(project, paths):
         return ("the project is paused, awaiting a deploy (resume --no-start)",
                 f"deploy it (`{redeploy_command(paths, project)}`; the pause ends once it "
-                f"starts), then run data chown again")
+                f"starts), then run data chown again. If that deploy is the user change "
+                f"this chown is for, it is refused until the data is re-owned: run "
+                f"`boxmunge resume {project}` instead (it starts the release as it was and "
+                f"ends the pause), then run data chown again")
     if block is not None and block.reason is BlockReason.PAUSED:
         return ("the project is paused",
                 f"run `boxmunge resume {project}`, then run data chown again")

@@ -145,27 +145,35 @@ def run_check(project_name: str, paths: BoxPaths, verbose: bool = True) -> int:
 
     Returns 0 if healthy, 1 if warning, 2 if critical.
     """
+    return check_with_reason(project_name, paths, verbose)[0]
+
+
+def check_with_reason(project_name: str, paths: BoxPaths,
+                  verbose: bool = True) -> tuple[int, str]:
+    """run_check's status, and the smoke message that decided it ("" when
+    smoke passed or did not run): check-all records the very failure that
+    set the status, from the one smoke run."""
     project_dir = paths.project_dir(project_name)
     manifest_path = paths.project_manifest(project_name)
 
     if not project_dir.exists():
         if verbose:
             print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
-        return 1
+        return 1, ""
 
     if paths.is_project_pre_registered(project_name):
         if verbose:
             print(f"ERROR: Project '{project_name}' is pre-registered (secrets set) but "
                   f"not yet deployed. Upload its first bundle, then deploy it with: "
                   f"boxmunge prod-deploy {project_name}", file=sys.stderr)
-        return 1
+        return 1, ""
 
     try:
         manifest = load_manifest(manifest_path)
     except ManifestError as e:
         if verbose:
             print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+        return 1, ""
 
     if verbose:
         print(f"{project_name}: checking...")
@@ -177,6 +185,7 @@ def run_check(project_name: str, paths: BoxPaths, verbose: bool = True) -> int:
             print(f"  git:      WARNING {relink_advice(project_dir, unlinked)}")
 
     worst_status = 0
+    smoke_message = ""
 
     # Surface security posture during routine checks.
     # - profile: off services produce a WARNING line (no exit-code escalation
@@ -217,6 +226,8 @@ def run_check(project_name: str, paths: BoxPaths, verbose: bool = True) -> int:
             worst_status = max(worst_status, 2)
         elif result.status == "warning":
             worst_status = max(worst_status, 1)
+        if result.status != "ok":
+            smoke_message = result.message
 
     if verbose:
         if worst_status == 0:
@@ -226,7 +237,7 @@ def run_check(project_name: str, paths: BoxPaths, verbose: bool = True) -> int:
         else:
             print(f"{project_name}: CRITICAL")
 
-    return worst_status
+    return worst_status, smoke_message
 
 
 _STATUS_FROM_EXIT = {0: "ok", 1: "warning", 2: "critical"}
@@ -451,33 +462,17 @@ def _check_one(name: str, paths: BoxPaths, read_only: bool) -> int:
             record_still_stopped(name, paths)
         return 2
     try:
-        manifest = load_manifest(paths.project_manifest(name))
+        load_manifest(paths.project_manifest(name))
     except ManifestError as e:
         if not read_only:
             update_health_state(name, 1, str(e), paths)
         raise
 
-    result = run_check(name, paths)
-
+    # One smoke run: its status decides, its message is what is recorded
+    # and alerted (a second run could pass and leave the reason empty).
+    result, message = check_with_reason(name, paths)
     if not read_only:
-        # Mutator path: also runs the smoke a second time to capture
-        # the failure message for Pushover. Skipped under --read-only
-        # because there is no state to update and no alert to send.
-        message = ""
-        if result != 0:
-            has_smoke = any(
-                svc.get("smoke") for svc in manifest.get("services", {}).values()
-            )
-            if has_smoke:
-                project_dir = paths.project_dir(name)
-                compose_files = ["compose.yml", "compose.boxmunge.yml"]
-                sr = run_smoke_in_container(
-                    project_dir, manifest, compose_files,
-                )
-                message = sr.message
-
-        update_health_state(name, result, message, paths)
-
+        update_health_state(name, result, message if result != 0 else "", paths)
     return result
 
 

@@ -171,3 +171,40 @@ def test_shipped_catalog_agrees_for_every_listed_caller():
             assert (box or {}).get("version") == (offers[mode] or {}).get("version"), caller
         assert release_selection.find_blocked(entries, caller) == catalog.find_blocked(
             entries, caller), caller
+
+
+# (releases, caller, held versions): the service's circuit-breaker holds
+# against the same versions marked [held] in their GitHub titles.
+HOLD_SCENARIOS = [
+    (LINES, "0.10.3", {"0.11.2"}),
+    (LINES, "0.12.0", {"0.12.2"}),
+    (LINES, "0.12.0", {"0.12.1", "0.12.2"}),
+    (LINES, "0.12.1", {"0.12.2"}),
+    (BREAKING_SECURITY, "0.21.0", {"0.21.1"}),
+]
+
+
+def _outcome(result):
+    return (result["action"], result.get("version"), result.get("held"))
+
+
+@pytest.mark.parametrize("releases,caller,held", HOLD_SCENARIOS,
+                         ids=[f"{s[1]}-held-{'+'.join(sorted(s[2]))}" for s in HOLD_SCENARIOS])
+@pytest.mark.parametrize("mode", ["security", "breakfix", "latest"])
+def test_holds_agree_via_endpoint_and_via_github(tmp_path, mode, releases, caller, held):
+    entries = _service_entries(releases)
+    offers, held_list = catalog.apply_holds(catalog.select_offers(entries, caller),
+                                            held.__contains__)
+    body = catalog.check_response(offers, held_list, catalog.find_blocked(entries, caller))
+    with patch("urllib.request.OpenerDirector.open", return_value=_response(body)):
+        via_endpoint = discover_update(_box(tmp_path / "e", caller), mode=mode)
+    github = _github_entries(releases)
+    for release in github:
+        if release["tag_name"][1:] in held:
+            release["name"] += " [held]"
+    with patch("urllib.request.OpenerDirector.open",
+               side_effect=[URLError("down"), _response(github)]):
+        via_github = discover_update(_box(tmp_path / "g", caller), mode=mode)
+    assert _outcome(via_github) == _outcome(via_endpoint)
+    assert via_github.get("source", "github") == "github"
+    assert via_github["action"] != "upgrade" or via_github["version"] not in held

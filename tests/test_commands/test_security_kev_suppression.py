@@ -77,11 +77,11 @@ def test_kev_listed_flag_round_trips_through_scan_state(box, monkeypatch):
     assert prior[0].findings[0].kev_listed is True
 
 
-def _seed_kev_cache(paths, *ids: str) -> None:
+def _seed_kev_cache(paths, *ids: str, age_days: int = 0) -> None:
+    when = (datetime.now(timezone.utc) - timedelta(days=age_days)).isoformat()
     paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
     paths.kev_catalog.write_text(kev_module.json.dumps({
-        "fetched_at": datetime.now(timezone.utc).isoformat(), "source": "test",
-        "released_at": datetime.now(timezone.utc).isoformat(), "cve_ids": list(ids),
+        "fetched_at": when, "source": "test", "released_at": when, "cve_ids": list(ids),
     }))
 
 
@@ -95,6 +95,18 @@ def test_suppress_refuses_a_kev_listed_cve(box, capsys):
     rc = cmd_security_suppress(_suppress_args(_CVE), box)
     assert rc == 1
     assert "Suppressions do not apply to KEV-listed CVEs" in capsys.readouterr().err
+    assert not (box.project_dir("demo") / "security" / "suppressions.yml").exists()
+
+
+def test_suppress_refuses_a_cve_on_a_stale_cached_catalog(box, capsys):
+    """CVE-04: staleness turns the KEV gate off for new quarantines, but the
+    cached IDs still say the CVE is listed; once the catalog is fresh the
+    suppression would not apply, so it is refused now."""
+    _seed_kev_cache(box, _CVE, age_days=30)
+    assert cmd_security_suppress(_suppress_args(_CVE), box) == 1
+    err = capsys.readouterr().err
+    assert "Suppressions do not apply to KEV-listed CVEs" in err
+    assert "the cached catalog is stale" in err
     assert not (box.project_dir("demo") / "security" / "suppressions.yml").exists()
 
 

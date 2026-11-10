@@ -1,9 +1,13 @@
-"""Upgrade-failure reports: one per reporter per version per window, bounded.
+"""Upgrade-failure reports: distinct failures per reporter per window, bounded.
 
 A reporter is prefix_store.network_prefix of the client address (the IPv4
-/24 or IPv6 /48), never the address itself. A reporter counts once per
-version per REPORT_WINDOW, and the auto-trip threshold counts reports in that
-same window, so the threshold is a number of distinct reporting networks.
+/24 or IPv6 /48), never the address itself. One network can hold many
+boxes (at some hosters one /48 spans many customers), so a reporter's
+report is stored unless it repeats one the same reporter already sent for
+that version in REPORT_WINDOW (same from-version, stage and detail), up to
+REPORTS_PER_REPORTER per version per window. The auto-trip threshold
+counts distinct reporters in that same window, never reports: a network
+counts once, however many of its boxes fail.
 Reports, reporter included, are deleted after RETENTION by expire(), which
 retention.sweep runs on a schedule.
 """
@@ -15,27 +19,32 @@ import db
 
 REPORT_WINDOW = timedelta(hours=6)
 RETENTION = timedelta(days=90)
+REPORTS_PER_REPORTER = 10
 
-DUPLICATE_SQL = ("SELECT 1 FROM failures WHERE reporter = ? AND version = ? "
-                 "AND reported_at > ? LIMIT 1")
+WINDOW_SQL = ("SELECT installed_from, stage, detail FROM failures WHERE reporter = ? "
+              "AND version = ? AND reported_at > ?")
 EXPIRE_SQL = "DELETE FROM failures WHERE reported_at <= ?"
-COUNT_SQL = "SELECT COUNT(*) FROM failures WHERE version = ? AND reported_at > ?"
+COUNT_SQL = ("SELECT COUNT(DISTINCT reporter) FROM failures WHERE version = ? "
+             "AND reported_at > ?")
 
 
 def record_failure(db_path: Path, version: str, installed_from: str, stage: str,
                    reporter: str, now: datetime, detail: str | None = None) -> bool:
-    """Store a report; False if `reporter` already reported `version` in the window.
+    """Store a report; False if `reporter` already sent this one for `version`
+    in the window, or REPORTS_PER_REPORTER others.
 
-    The duplicate check and the insert share one IMMEDIATE transaction, so
-    concurrent reports from one reporter (one per gunicorn worker) store one.
+    The check and the insert share one IMMEDIATE transaction, so concurrent
+    copies of one report (one per gunicorn worker) store one.
     """
     window_start = (now - REPORT_WINDOW).isoformat()
     conn = db.connect(db_path, isolation_level=None)
     try:
         conn.execute("BEGIN IMMEDIATE")
         try:
-            duplicate = conn.execute(DUPLICATE_SQL, (reporter, version, window_start)).fetchone()
-            if duplicate is None:
+            sent = conn.execute(WINDOW_SQL, (reporter, version, window_start)).fetchall()
+            store = ((installed_from, stage, detail) not in sent
+                     and len(sent) < REPORTS_PER_REPORTER)
+            if store:
                 conn.execute(
                     "INSERT INTO failures (version, installed_from, stage, detail, reported_at, "
                     "reporter) VALUES (?, ?, ?, ?, ?, ?)",
@@ -46,7 +55,7 @@ def record_failure(db_path: Path, version: str, installed_from: str, stage: str,
             raise
     finally:
         conn.close()
-    return duplicate is None
+    return store
 
 
 def expire(db_path: Path, now: datetime) -> None:
@@ -82,14 +91,16 @@ def recent_failures(db_path: Path, limit: int) -> list[dict]:
 
 
 def query_failures(db_path: Path, version: str) -> dict:
+    """Reports for `version` in retention: `total` reports, from `reporters`
+    distinct networks (legacy rows without a reporter are not counted there)."""
     conn = db.connect(db_path)
     try:
         rows = conn.execute(
             "SELECT stage, COUNT(*) FROM failures WHERE version = ? GROUP BY stage",
             (version,)).fetchall()
         time_range = conn.execute(
-            "SELECT MIN(reported_at), MAX(reported_at) FROM failures WHERE version = ?",
-            (version,)).fetchone()
+            "SELECT MIN(reported_at), MAX(reported_at), COUNT(DISTINCT reporter) FROM failures "
+            "WHERE version = ?", (version,)).fetchone()
     finally:
         conn.close()
     by_stage = {row[0]: row[1] for row in rows}
@@ -97,6 +108,7 @@ def query_failures(db_path: Path, version: str) -> dict:
     return {
         "version": version,
         "total": total,
+        "reporters": time_range[2],
         "by_stage": by_stage,
         "first_seen": time_range[0] if total > 0 else None,
         "last_seen": time_range[1] if total > 0 else None,

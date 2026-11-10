@@ -78,7 +78,7 @@ def test_the_overlays_own_user_is_not_taken_for_compose_ymls(paths, images, monk
 
 def test_check_refusals_stop_before_recording(paths, images, monkeypatch) -> None:
     _resolved(monkeypatch, SERVICES)
-    monkeypatch.setattr(di.deploy_checks, "release_problems", lambda *a: (["no"], ["w"]))
+    monkeypatch.setattr(di.deploy_checks, "release_problems", lambda *a, **k: (["no"], ["w"]))
     manifest = {**MANIFEST, "services": {**MANIFEST["services"], "db": DB_IMAGE}}
     with pytest.raises(DeployRefused, match="no"):
         di.prepare_release_users(paths, production_target(paths, "shop"), manifest,

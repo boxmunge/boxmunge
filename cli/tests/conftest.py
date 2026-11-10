@@ -31,8 +31,10 @@ _FAKE_TOOL = """\
 import json, os, sys
 name = os.path.basename(sys.argv[0])
 argv = sys.argv[1:]
+reads = os.environ.get("FAKE_REMOTE_READ_STDIN") and argv[-1:] != ["handshake"]
+stdin = sys.stdin.read() if reads else None
 with open(os.environ["FAKE_REMOTE_LOG"], "a") as log:
-    log.write(json.dumps({{"prog": name, "argv": argv}}) + "\\n")
+    log.write(json.dumps({{"prog": name, "argv": argv, "stdin": stdin}}) + "\\n")
 joined = " ".join([name] + argv)
 with open(os.environ["FAKE_REMOTE_RULES"]) as f:
     rules = json.load(f)
@@ -79,6 +81,11 @@ class FakeRemote:
         self._rules.insert(0, {"prog": prog, "match": match, "stdout": stdout,
                                "stderr": stderr, "rc": rc})
         self._save()
+
+    def stdins(self, prog: str) -> list[str | None]:
+        """What each call of `prog` read on stdin (with FAKE_REMOTE_READ_STDIN set)."""
+        entries = [json.loads(line) for line in self.log.read_text().splitlines()]
+        return [e["stdin"] for e in entries if e["prog"] == prog]
 
     def calls(self, prog: str | None = None) -> list[list[str]]:
         entries = [json.loads(line) for line in self.log.read_text().splitlines()]

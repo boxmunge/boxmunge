@@ -170,14 +170,14 @@ OUT="$(bash "$FINGERPRINT" record "$RELEASE/boxmunge" 2>&1)" || RC=$?
 expect 1 "upgrade-root is a symlink" "a linked upgrade-root/ is refused"
 drop_root
 
-# install.sh forgets it (in fail_if_system_image_stale) before an incomplete
+# install.sh forgets it (in fail_if_incomplete) before an incomplete
 # run can exit, and records it last.
 INSTALL_SH="$(cat "$REPO_DIR/install.sh")"
 forget_at="${INSTALL_SH%%installer-fingerprint.sh\" forget*}"
-stale_exit_at="${INSTALL_SH%%$'\n'fail_if_system_image_stale$'\n'*}"
+stale_exit_at="${INSTALL_SH%%$'\n'fail_if_incomplete$'\n'*}"
 record_at="${INSTALL_SH%%installer-fingerprint.sh\" record*}"
 [[ "${#forget_at}" -lt "${#stale_exit_at}" && "${#stale_exit_at}" -lt "${#record_at}" && "${#record_at}" -lt "${#INSTALL_SH}" ]] \
-    && pass "install.sh forgets the fingerprint before the stale-image exit and records it at the end" \
+    && pass "install.sh forgets the fingerprint before the incomplete-run exit and records it at the end" \
     || fail "install.sh does not call bootstrap/installer-fingerprint.sh in that order"
 [[ "$INSTALL_SH" != *"state/installer.sha256"* ]] && pass "install.sh no longer touches state/installer.sha256" \
     || fail "install.sh still touches state/installer.sha256"

@@ -21,7 +21,7 @@ live_intact() {  # live_intact <description>: env-a still runs and is live
 
 for standby in absent half-built inflight; do
     new_root a
-    mock_server a 'if [[ "$1" == "health" ]]; then exit 2; fi; exit 0'
+    mock_server a 'if [[ "$1" == "health" ]]; then exec health-report 2; fi; exit 0'
     case "$standby" in
         absent) rm -r "$BOXMUNGE_ROOT/env-b" ;;
         half-built) rm "$BOXMUNGE_ROOT/env-b/bin/boxmunge-server" ;;

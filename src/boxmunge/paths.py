@@ -149,6 +149,8 @@ class BoxPaths:
         # CVEs a KEV refresh withdrew, until the catalog lists them again:
         # a quarantine held for one is not lifted without the operator.
         self.kev_withdrawn = self.state / "kev" / "withdrawn.json"
+        # What each KEV source last served (cve.kev_source_history).
+        self.kev_sources = self.state / "kev" / "sources.json"
         # Last auto-update discovery that installed nothing: any security or
         # break-fix release it could not install, and the alert sent for it.
         self.platform_update_state = self.state / "platform-updates.json"

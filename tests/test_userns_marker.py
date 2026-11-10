@@ -135,7 +135,7 @@ def test_after_a_reboot_the_timers_entry_points_leave_the_box_alone(migrating, c
                         lambda *a, **kw: pytest.fail("backed up"))
     run_backup_all(migrating)
     assert "a userns migration is in progress" in capsys.readouterr().out
-    monkeypatch.setattr(check_mod, "run_check", lambda *a, **kw: pytest.fail("checked"))
+    monkeypatch.setattr(check_mod, "check_with_reason", lambda *a, **kw: pytest.fail("checked"))
     monkeypatch.setattr("boxmunge.health_checks.userns.alert_docker_userns",
                         lambda paths: type("C", (), {"status": "warn"})())
     check_mod.run_check_all(migrating, read_only=False)

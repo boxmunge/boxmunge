@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+"""The boxmunge.yml opt-out from the version-check service, and what it costs.
+
+``version_check: {enabled: false}`` stops every call the box makes to the
+service: update checks (auto-update's and a plain ``upgrade``'s, and the
+GitHub fallback with them) and failure reports. The box then discovers no
+releases at all, so no security release reaches it unattended. Discovery,
+the failure report, auto-update, ``health`` (platform-updates) and
+``doctor`` all read the setting here and say so in the same words.
+"""
+from __future__ import annotations
+
+from boxmunge.config import load_config, version_check_enabled
+from boxmunge.paths import BoxPaths
+
+RELEASES_PAGE = "https://github.com/boxmunge/boxmunge/releases"
+
+OFF = ("version checks are off (version_check.enabled: false in boxmunge.yml), so this "
+       "box discovers no releases and installs no security or break-fix release "
+       "automatically. Watch " + RELEASES_PAGE + " and install a release with "
+       "`upgrade --target X.Y.Z`, or set version_check.enabled: true to discover them again")
+
+
+def version_checks_off(paths: BoxPaths) -> bool:
+    """True if boxmunge.yml turns version checks off. Raises ConfigError
+    when it cannot be read: whether the operator opted out is then unknown,
+    and nothing may be sent."""
+    return not version_check_enabled(load_config(paths))

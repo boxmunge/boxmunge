@@ -26,9 +26,17 @@ DEFAULTS: dict[str, Any] = {
     # Platform auto-update. Security releases always apply; break-fix
     # releases (critical non-security fixes) apply unless disabled here.
     "auto_update": {"breakfix": True},
+    # The opt-out from everything the box sends the version-check service:
+    # with enabled: false the box neither checks for releases (nor asks
+    # GitHub instead) nor reports failed upgrades.
+    "version_check": {"enabled": True},
 }
 
-AUTO_UPDATE_KEYS = frozenset({"breakfix"})
+# Blocks of boolean switches: block -> its keys.
+BOOLEAN_BLOCKS = {
+    "auto_update": ("breakfix", "auto_update: {breakfix: true}"),
+    "version_check": ("enabled", "version_check: {enabled: true}"),
+}
 
 REQUIRED_FIELDS = ["hostname", "admin_email"]
 
@@ -72,31 +80,34 @@ def load_config(paths: BoxPaths) -> dict[str, Any]:
                 f"Required field '{field}' missing from {config_file}"
             )
 
-    _validate_auto_update(config, config_file)
+    for name, (key, example) in BOOLEAN_BLOCKS.items():
+        _validate_boolean_block(config, name, key, example, config_file)
     return config
 
 
-def _validate_auto_update(config: dict[str, Any], config_file: object) -> None:
-    """auto_update must be a mapping of known keys; breakfix must be a boolean."""
-    block = config["auto_update"]
+def _validate_boolean_block(config: dict[str, Any], name: str, key: str, example: str,
+                            config_file: object) -> None:
+    """`name` must be a mapping holding only `key`, which must be a boolean."""
+    block = config[name]
     if not isinstance(block, dict):
-        raise ConfigError(
-            f"'auto_update' in {config_file} must be a mapping, e.g. "
-            f"'auto_update: {{breakfix: true}}'"
-        )
-    unknown = sorted(set(block) - AUTO_UPDATE_KEYS)
+        raise ConfigError(f"'{name}' in {config_file} must be a mapping, e.g. '{example}'")
+    unknown = sorted(set(block) - {key})
     if unknown:
         raise ConfigError(
-            f"Unknown key(s) under 'auto_update' in {config_file}: "
-            f"{', '.join(map(str, unknown))} (allowed: {', '.join(sorted(AUTO_UPDATE_KEYS))})"
+            f"Unknown key(s) under '{name}' in {config_file}: "
+            f"{', '.join(map(str, unknown))} (allowed: {key})"
         )
-    if not isinstance(block["breakfix"], bool):
+    if not isinstance(block[key], bool):
         raise ConfigError(
-            f"'auto_update.breakfix' in {config_file} must be true or false, "
-            f"got {block['breakfix']!r}"
+            f"'{name}.{key}' in {config_file} must be true or false, got {block[key]!r}"
         )
 
 
 def auto_update_breakfix_enabled(config: dict[str, Any]) -> bool:
     """True if this box auto-applies break-fix releases (validated by load_config)."""
     return config["auto_update"]["breakfix"]
+
+
+def version_check_enabled(config: dict[str, Any]) -> bool:
+    """False if boxmunge.yml opts out of the version-check service (validated by load_config)."""
+    return config["version_check"]["enabled"]

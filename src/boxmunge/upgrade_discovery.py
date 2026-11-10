@@ -16,17 +16,23 @@ install, and why, or None.
 
 The version-check endpoint is asked first. Its answer also carries the
 releases its circuit breaker holds (``held``): a held release is never
-installed, in any mode. Only when the endpoint cannot be reached at all (no
-HTTP answer: DNS, connection or timeout failure) is the GitHub releases API
-the fallback, using the same rules on the ``[security]``, ``[breakfix]`` and
-``[breaking]`` markers in release titles and notes; a fallback result carries
-``endpoint_error`` so callers can log it. An answer the box cannot use (an
-HTTP error such as the service's own 429, or a body that breaks the contract)
-is an error, not a reason to ask GitHub: GitHub cannot know about holds, so
-its answer could install the very release the maintainer withdrew. The box
-retries on its next check. The trade-off: a security release waits while the
-service answers with errors, rather than a held (known-broken) release being
+installed automatically, and a manual upgrade refuses one. Only when the
+endpoint cannot be reached at all (no HTTP answer: DNS, connection or
+timeout failure) is the GitHub releases list the fallback, using the same
+rules on the ``[security]``, ``[breakfix]`` and ``[breaking]`` markers in
+release titles and notes, and taking ``[held]`` in a release title as a hold
+(boxmunge.release_selection); a fallback result carries ``endpoint_error``
+so callers can log it. An answer the box cannot use (an HTTP error such as
+the service's own 429, or a body that breaks the contract) is an error, not
+a reason to ask GitHub: the maintainer marks a hold on GitHub by hand, after
+tripping the breaker, so GitHub's holds can lag the service's, and its answer
+could install the very release the maintainer withdrew. The box retries on
+its next check. The trade-off: a security release waits while the service
+answers with errors, rather than a held (known-broken) release being
 installed fleet-wide.
+
+With ``version_check.enabled: false`` in boxmunge.yml nothing is asked, of
+the service or of GitHub (boxmunge.version_check_optout).
 """
 from __future__ import annotations
 
@@ -36,14 +42,15 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from boxmunge.config import auto_update_breakfix_enabled
+from boxmunge.config import ConfigError, auto_update_breakfix_enabled
 from boxmunge.paths import BoxPaths
 from boxmunge.version_check_url import version_check_base
 from boxmunge.release_selection import (
-    AUTO_CLASSES, GITHUB_REPO, MODE_CLASSES, MODES, VERSION_RE, find_blocked, newer,
-    parse_github_releases, select,
+    AUTO_CLASSES, GITHUB_REPO, MODE_CLASSES, MODES, VERSION_RE, github_check_response, newer,
+    parse_github_releases,
 )
 from boxmunge.upgrade_state import UpgradeStateError, is_blocklisted
+from boxmunge.version_check_optout import OFF, version_checks_off
 from boxmunge.version import read_installed_version, parse_version_string
 
 
@@ -194,8 +201,8 @@ def _endpoint_offer(result: dict[str, Any], mode: str, held: list[str]) -> dict[
     return best or candidate
 
 
-def _check_github(current: str, mode: str) -> tuple[dict[str, Any] | None, dict | None]:
-    """(candidate, blocked) from the GitHub releases list."""
+def _check_github(current: str) -> dict[str, Any]:
+    """The GitHub releases list as a /v1/check answer (``[held]`` titles as holds)."""
     req = urllib.request.Request(
         RELEASES_URL,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "boxmunge"},
@@ -204,8 +211,7 @@ def _check_github(current: str, mode: str) -> tuple[dict[str, Any] | None, dict 
     raw = json.loads(resp.read())
     if not isinstance(raw, list):
         raise EndpointContractError("GitHub releases response is not a list")
-    releases = parse_github_releases(raw)
-    return select(releases, current, mode), find_blocked(releases, current)
+    return github_check_response(parse_github_releases(raw), current)
 
 
 def auto_update_mode(config: dict[str, Any]) -> str:
@@ -221,14 +227,24 @@ def discover_update(paths: BoxPaths, mode: str) -> dict[str, Any]:
       - "up_to_date": {action, ...}
       - "blocklisted": {action, version, class, ...}
       - "error": {action, message}
+    With ``version_check.enabled: false`` in boxmunge.yml (or a boxmunge.yml
+    that cannot be read) it asks nobody and returns an error saying so.
     Every action but "error" also carries ``current_version``, ``blocked``
     (see the module docstring) and ``source`` ("endpoint" or "github"), and
-    ``held`` (the versions the service holds) when it is not empty. A github
+    ``held`` (the versions held: by the service's circuit breaker, or by
+    ``[held]`` in a GitHub release title) when it is not empty. A github
     result, and an error the service caused, also carry ``endpoint_error``
     (why the endpoint was not used).
     """
     if mode not in MODES:
         raise ValueError(f"unknown discovery mode {mode!r}; expected one of {MODES}")
+    try:
+        if version_checks_off(paths):
+            return {"action": "error", "message": f"Not checking for updates: {OFF}."}
+    except ConfigError as e:
+        return {"action": "error", "message": (
+            f"Not checking for updates: cannot read boxmunge.yml to see whether version "
+            f"checks are on ({e}). Fix the file, then run the command again.")}
     current, _ = parse_version_string(read_installed_version(paths))
 
     meta: dict[str, Any] = {"source": "endpoint"}
@@ -240,7 +256,7 @@ def discover_update(paths: BoxPaths, mode: str) -> dict[str, Any]:
     except OSError as e:  # no answer at all: the service is unreachable
         meta = {"source": "github", "endpoint_error": str(e)}
         try:
-            candidate, blocked = _check_github(current, mode)
+            candidate, blocked, held = _read_endpoint(_check_github(current), mode)
         except _SOURCE_ERRORS as gh:
             return {"action": "error", "endpoint_error": str(e),
                     "message": f"Cannot use boxmunge.dev ({e}) or GitHub ({gh})"}
@@ -250,9 +266,12 @@ def discover_update(paths: BoxPaths, mode: str) -> dict[str, Any]:
 
     if candidate is not None and candidate["version"] in held:
         version = candidate["version"]
+        by = ("the version-check circuit breaker" if meta["source"] == "endpoint"
+              else "its GitHub release title ([held]; the version-check service could "
+                   "not be reached)")
         return {"action": "error", "message": (
-            f"Release {version} is held by the version-check circuit breaker (withdrawn "
-            f"as broken); not installing it. It is offered again once the hold is reset. "
+            f"Release {version} is held by {by} (withdrawn as broken); not installing "
+            f"it. It is offered again once the hold is reset. "
             f"To install it deliberately anyway: `upgrade --target {version}` (as root, "
             f"`boxmunge-upgrade target {version}`, or `force-target {version}` past the "
             f"blocklist).")}
@@ -272,6 +291,6 @@ def discover_update(paths: BoxPaths, mode: str) -> dict[str, Any]:
 
 def _unusable_answer(error: EndpointContractError) -> str:
     return (f"The version-check service at {version_check_base()} gave an answer this "
-            f"box cannot use: {error}. GitHub is not asked instead: it cannot know "
-            "which releases the service has held as broken. Nothing is installed; "
+            f"box cannot use: {error}. GitHub is not asked instead: its holds can lag "
+            "the releases the service has held as broken. Nothing is installed; "
             "auto-update retries on its next check, or run `boxmunge upgrade` again later.")
