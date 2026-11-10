@@ -135,18 +135,21 @@ class TestServerContract:
             "success": False, "exit_code": 1, "data": {},
             "messages": ["Unknown tool: no_such_tool"]}
 
-    def test_a_raising_tool_is_a_tool_error_the_agent_can_read(self) -> None:
+    @pytest.mark.parametrize("error,text", [
+        (RuntimeError("compose exploded"), "compose exploded"),
+        (KeyError(), "KeyError"),  # str() of a bare exception is empty
+    ])
+    def test_a_raising_tool_is_a_tool_error_the_agent_can_read(self, error, text) -> None:
         """Not a JSON-RPC error: the agent gets the message as an isError result."""
         from unittest.mock import patch
 
         async def call(client):
             return await client.call_tool("health", {})
 
-        with patch("boxmunge.mcp_tools._run_health_checks",
-                   side_effect=RuntimeError("compose exploded")):
+        with patch("boxmunge.mcp_tools._run_health_checks", side_effect=error):
             result = _in_process(call)
         assert result.is_error is True
-        assert [c.text for c in result.content] == ["compose exploded"]
+        assert [c.text for c in result.content] == [text]
 
     @pytest.mark.parametrize("arguments,needle", [
         ({}, "missing required argument(s): project"),

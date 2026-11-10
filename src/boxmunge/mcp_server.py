@@ -405,8 +405,9 @@ def create_mcp_server() -> Any:
         try:
             result = call_tool(params.name, params.arguments)
         except Exception as e:
-            return CallToolResult(content=[TextContent(type="text", text=str(e))],
-                                  is_error=True)
+            return CallToolResult(
+                content=[TextContent(type="text", text=str(e) or type(e).__name__)],
+                is_error=True)
         return CallToolResult(content=[TextContent(type="text",
                                                    text=json.dumps(result, default=str))])
 
