@@ -262,7 +262,8 @@ def test_an_open_install_with_unreadable_release_files_is_excluded_not_fatal(
     _unreadable_live_json(paths)
     _m, _r, excluded = apply_projects(paths)
     assert "an install of myapp-x (bundle) is open" in excluded.install["myapp"]
-    assert "IsADirectoryError" in excluded.install["myapp"]
+    assert "is not a plain regular file" in excluded.install["myapp"]
+    assert "Remove it so it can be recreated" in excluded.install["myapp"]
     with patch("boxmunge.upgrade_exclusions.notify"):
         assert _apply(paths) == 0
     assert "LEFT AS IS: myapp:" in capsys.readouterr().out
@@ -276,7 +277,7 @@ def test_dry_run_reports_the_same_unreadable_release_files(paths, capsys) -> Non
     assert _run_dry(paths) == 0
     line = next(l for l in capsys.readouterr().out.splitlines() if "myapp:" in l)
     assert f"myapp: an install (myapp-x, {txn.phase}) is open; the project will be left as is" in line
-    assert "IsADirectoryError" in line
+    assert "is not a plain regular file" in line
 
 
 def test_a_summary_alert_that_raises_never_fails_the_apply(paths, capsys) -> None:

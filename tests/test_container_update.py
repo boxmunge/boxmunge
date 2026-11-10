@@ -461,12 +461,11 @@ class TestImageServices:
 
 class TestTargetStateErrors:
     def test_read_target_state_raises_on_corrupt(self, paths):
-        import json
         import pytest
-        from boxmunge.container_update_targets import read_target_state
+        from boxmunge.container_update_targets import TargetStateError, read_target_state
         paths.container_update_state.mkdir(parents=True)
         paths.container_update_target_state("caddy").write_text("not json {")
-        with pytest.raises(json.JSONDecodeError):
+        with pytest.raises(TargetStateError):
             read_target_state(paths, "caddy")
 
 

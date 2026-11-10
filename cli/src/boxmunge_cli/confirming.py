@@ -5,8 +5,8 @@ they act (the server's commands/confirm.py).
 ssh gives a remote command no terminal unless asked to (-t), and the server
 refuses to ask without one, so without --yes such a command could never
 succeed. At a terminal here, ssh -t lets the server show its plan and ask.
-With no terminal here nobody can answer either, so the command is refused
-before anything is sent, naming --yes.
+With no terminal on stdin here nobody can answer either, so the command is
+refused before anything is sent, naming --yes.
 """
 
 from __future__ import annotations
@@ -21,8 +21,10 @@ _ASKING = frozenset({"rollback", "pause", "resume", "recover", "restore", "proje
 
 
 def have_terminal() -> bool:
-    """Whether a person can see the plan and answer here."""
-    return sys.stdin.isatty() and sys.stdout.isatty()
+    """Whether a person can answer here: stdin is a terminal. stdout may be
+    a pipe (`boxmunge rollback | tee log`): ssh -t still gives the server a
+    pty when stdin is a terminal, and the plan and prompt reach the pipe."""
+    return sys.stdin.isatty()
 
 
 def asks(command: str, args: list[str] | tuple[str, ...]) -> bool:

@@ -152,3 +152,16 @@ def test_remote_passthrough_keeps_arguments_intact(project, fake_remote) -> None
 def test_remote_needs_a_command(project, fake_remote) -> None:
     assert run_cli(["remote"]) == 2
     assert fake_remote.calls() == []
+
+
+@pytest.mark.parametrize("stdin_tty, stdout_tty, expected", [
+    (True, True, True), (True, False, True), (False, True, False), (False, False, False)])
+def test_a_terminal_is_one_that_can_answer(monkeypatch, stdin_tty, stdout_tty, expected) -> None:
+    """Review of #159 (P3-4): `boxmunge rollback | tee log` has someone at
+    the keyboard. ssh -t allocates the server's pty when stdin is a
+    terminal, whatever stdout is, and the prompt reaches the pipe; only
+    stdin decides whether anyone can answer."""
+    from boxmunge_cli import confirming
+    monkeypatch.setattr(confirming.sys.stdin, "isatty", lambda: stdin_tty)
+    monkeypatch.setattr(confirming.sys.stdout, "isatty", lambda: stdout_tty)
+    assert confirming.have_terminal() is expected

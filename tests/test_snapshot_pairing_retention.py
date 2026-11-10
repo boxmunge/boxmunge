@@ -96,3 +96,14 @@ def test_an_unreadable_pairing_prunes_nothing_and_says_why(paths, backups, capsy
     assert _backup(paths) == 0
     assert (backups / PAIRED).exists() and (backups / NEWER[0]).exists()
     assert "Not pruning old predeploy backups" in capsys.readouterr().err
+
+
+def test_a_previous_json_that_is_not_utf8_warns_and_the_backup_succeeds(
+        paths, backups, capsys) -> None:
+    """Review of #159 (P3-3): a UnicodeDecodeError escaped _read_meta and
+    aborted the backup instead of suppressing the prune with a warning."""
+    previous_dir(paths, P).mkdir(parents=True)
+    (paths.project_releases(P) / "previous.json").write_bytes(b"\xff\xfe")
+    assert _backup(paths) == 0
+    assert (backups / PAIRED).exists()
+    assert "Not pruning old predeploy backups" in capsys.readouterr().err

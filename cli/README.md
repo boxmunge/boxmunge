@@ -69,8 +69,9 @@ codes: 0 success, 1 failure, 2 usage error, 3 client and server incompatible,
 
 `rollback` and the server commands that ask before acting (`remote pause`,
 `resume`, `recover`, `restore`, `inbox clean`, `project-delete`) show the
-server's plan and ask `Proceed? [y/N]` when run at a terminal. Without a
-terminal (a script, CI) nobody can answer, so the command is refused before
+server's plan and ask `Proceed? [y/N]` when run at a terminal (standard input
+is one; output may be piped, as in `boxmunge rollback | tee rollback.log`).
+Without a terminal (a script, CI) nobody can answer, so the command is refused before
 anything is sent unless `--yes` is given.
 
 `secrets set KEY` asks for the value without echo (or reads one line of stdin)

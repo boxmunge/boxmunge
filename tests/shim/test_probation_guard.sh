@@ -119,6 +119,27 @@ run_shim check-probation
 expect 0 "promoted" "an earlier expires_at still ends the probation"
 drop_root
 
+# A temp file a run killed between writing and renaming left in
+# upgrade-root/ is removed by the next write of that file.
+on_probation
+mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+echo "half" > "$BOXMUNGE_ROOT/upgrade-root/.probation-expiry.AbC123"
+run_shim check-probation
+[[ ! -e "$BOXMUNGE_ROOT/upgrade-root/.probation-expiry.AbC123" && -f "$BOXMUNGE_ROOT/upgrade-root/probation-expiry" ]] \
+    && pass "a temp left by a killed root-file write is swept" || fail "temp left: $(ls -a "$BOXMUNGE_ROOT/upgrade-root")"
+drop_root
+
+# A malformed expiry record is named as such: it is root's file, not
+# deploy's probation.json.
+on_probation
+mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+echo "a soon" > "$BOXMUNGE_ROOT/upgrade-root/probation-expiry"
+run_shim check-probation
+expect 1 "upgrade-root/probation-expiry is malformed" "a malformed expiry record is named"
+[[ "$OUT" != *"probation.json is malformed"* ]] && pass "a malformed expiry record does not blame probation.json" || fail "out: $OUT"
+[[ -f "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] && pass "nothing acted on a malformed expiry record" || fail "probation removed"
+drop_root
+
 # A clock stepped back after the upgrade (an NTP step, a VM restore) puts
 # expires_at more than a probation's length ahead. That is not the end of the
 # probation: it runs a probation's length from now.
