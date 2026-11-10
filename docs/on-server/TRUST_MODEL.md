@@ -258,9 +258,12 @@ temps). A planted link makes the operation fail with an error naming the path, i
 redirecting root to another file. Remove the link and re-run.
 
 A platform rollback restores exactly the stash its upgrade made, never whichever is newest in
-`stashes/`: the shim records the stash's name root-only, copies that archive into
-`upgrade-root/rollback-stash/` (opened without following a link, and only if it is a plain file
-root owns, which deploy cannot write), and has the previous release restore the copy. A missing
+`stashes/`: the shim records the stash's name, size and sha256 root-only, copies that archive
+into `upgrade-root/rollback-stash/` (opened without following a link, and only if it is a plain
+file root owns, which deploy cannot write, with the recorded size and sha256, so no other stash
+renamed onto the name passes), and has the previous release restore the copy. A stash with link
+members, made by a release before 0.10.2, is recorded by name alone: the upgrade rewrites it
+without them. A missing
 or replaced stash stops the rollback as "ROLLBACK PARTIAL", naming the file.
 
 This protects the last path component only. Deploy can still swap an intermediate directory it

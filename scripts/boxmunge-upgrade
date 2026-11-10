@@ -310,8 +310,8 @@ upgrade_to() {
     stash_out="$("$(active_venv)/bin/boxmunge-server" stash create 2>&1)" \
         || stash_failed "$version" "$stash_out"
     log "$stash_out"
-    record_stash "$version" "$stash_out" \
-        || stash_failed "$version" "stash create did not name the stash it made (no 'Stash created: <name>' line): $stash_out"
+    local stash_problem
+    stash_problem="$(record_stash "$version" "$stash_out")" || stash_failed "$version" "$stash_problem"
 
     # 3a. Refresh tree-level templates that aren't shipped in the venv.
     # Today: the canary project, used by `boxmunge self-test`. Without this,
