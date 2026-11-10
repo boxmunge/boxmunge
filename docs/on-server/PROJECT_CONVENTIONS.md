@@ -54,8 +54,8 @@ on the server changes (`ERROR:` naming each entry, exit 1):
 The archive itself must hold exactly one top-level directory (the project), and only regular files,
 directories and links. A link must resolve inside the project directory: a bundle with an absolute
 link, a link that climbs out of the project (also through a chain of other links), a link with `..`
-anywhere but at the start of its target (`sub/../x`), or a device or FIFO entry is refused with an
-`ERROR:` naming the entry. Links are installed as links and are never followed.
+anywhere but at the start of its target (`sub/../x`), or a device, FIFO or sparse-file entry
+(`boxmunge bundle` writes none of these) is refused with an `ERROR:` naming the entry. Links are installed as links and are never followed.
 
 A bundle may expand to at most 4 GiB, hold at most 100,000 entries, carry no single file over
 2 GiB, and carry no extended (PAX or long-name) header over 1 MiB (128 MiB of them in all). These

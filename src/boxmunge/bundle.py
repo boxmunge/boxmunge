@@ -23,10 +23,11 @@ class BundleError(ValueError):
 # headers tarfile holds in memory, or into extended (PAX, GNU long-name)
 # headers that tarfile reads into memory whole. So each entry is checked as
 # its header arrives (_read_members), each extended header before its body
-# is read (_CheckedTarInfo), and the decompressed stream refuses any
-# position past what those limits allow (_LimitedStream), whatever else a
-# header makes tarfile read. Nothing is written, and no more than that is
-# held, before the limits pass.
+# is read and a sparse member (whose map tarfile holds in memory) outright
+# (_CheckedTarInfo), and the decompressed stream refuses any position past
+# what those limits allow (_LimitedStream), whatever else a header makes
+# tarfile read. Nothing is written, and no more than that is held, before
+# the limits pass.
 MAX_TOTAL_BYTES = 4 * 1024 ** 3
 MAX_MEMBER_BYTES = 2 * 1024 ** 3
 MAX_MEMBERS = 100_000
@@ -39,6 +40,7 @@ MAX_EXTENDED_TOTAL_BYTES = 128 * 1024 ** 2
 HEADER_ALLOWANCE = 1024
 _SHRINK = ("Leave build output, dependencies and data out of the bundle (list them in "
            ".boxmungeignore), then bundle and upload it again.")
+_GNU_SPARSE = tarfile.GNUTYPE_SPARSE
 _EXTENDED = (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE,
              tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK)
 
@@ -92,20 +94,45 @@ class _LimitedStream:
         return getattr(self._raw, name)
 
 
+def _sparse(name: str) -> BundleError:
+    return BundleError(
+        f"Bundle entry '{name}' is a sparse file; bundles may contain only files, "
+        f"directories and links. Re-create the bundle with `boxmunge bundle` and upload "
+        f"it again.")
+
+
 class _CheckedTarInfo(tarfile.TarInfo):
     """Every header tarfile parses (an entry's, and each extended header
-    chained before it) passes _proc_member, before any body is read."""
+    chained before it) passes _proc_member, before any body is read. A
+    sparse member is refused before its map is read: tarfile holds the map
+    in memory (old-GNU extension blocks, or a PAX 1.0 map in the member's
+    body) before any limit sees the member, and `boxmunge bundle` never
+    writes one. The _proc_* hooks have these signatures on 3.11 to 3.13."""
 
     def _proc_member(self, tarfile):  # noqa: ANN001 — tarfile's own signature
+        if self.type == _GNU_SPARSE:
+            raise _sparse(self.name)
         if self.type in _EXTENDED:
             tarfile.fileobj.note_extended(self)
         return super()._proc_member(tarfile)
+
+    def _proc_sparse(self, tarfile):  # noqa: ANN001
+        raise _sparse(self.name)
+
+    def _proc_gnusparse_00(self, next, raw_headers):  # noqa: ANN001, A002
+        raise _sparse(next.name)
+
+    def _proc_gnusparse_01(self, next, pax_headers):  # noqa: ANN001, A002
+        raise _sparse(next.name)
+
+    def _proc_gnusparse_10(self, next, pax_headers, tarfile):  # noqa: ANN001, A002
+        raise _sparse(next.name)
 
 
 def _read_members(tar: tarfile.TarFile) -> list[tarfile.TarInfo]:
     """Every member, each header checked against the limits as it arrives:
     at most MAX_MEMBERS entries, no file over MAX_MEMBER_BYTES, and at most
-    MAX_TOTAL_BYTES in all. A sparse member counts at its expanded size."""
+    MAX_TOTAL_BYTES in all."""
     members: list[tarfile.TarInfo] = []
     total = 0
     for m in tar:
