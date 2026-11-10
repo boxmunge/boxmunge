@@ -123,41 +123,90 @@ send_notification() {
 # opens one by name. The upgrade records the stash it made, with the version
 # it installs, in root-only upgrade-root/upgrade-stash; the rollback copies
 # exactly that archive into root-only upgrade-root/rollback-stash/, opened
-# without following a link and only if it is a plain file root owns, and has
-# the previous release restore the copy (restore_stash takes an archive path
-# since 0.10.0). An upgrade run by a shim before this one recorded nothing:
-# its rollback takes the newest-named stash, as that shim would, under the
-# same checks.
+# without following a link and only if it is a plain file root owns with the
+# recorded size and sha256 (so another root-made stash renamed onto the name
+# is refused), and has the previous release restore the copy (restore_stash
+# takes an archive path since 0.10.0). A stash with link members (made by a
+# release before 0.10.2) is recorded by name alone: the new release's apply
+# rewrites it without them (D18), changing its hash. An upgrade run by a shim
+# before this one recorded nothing: its rollback takes the newest-named
+# stash, as that shim would, under the same checks.
+#
+# upgrade-stash: "<version> <name> [<size> <sha256>]"
 # ---------------------------------------------------------------------------
 STASH_RECORD_FILE="$UPGRADE_ROOT_DIR/upgrade-stash"
 STASH_COPY_DIR="$UPGRADE_ROOT_DIR/rollback-stash"
 STASH_NAME_RE='^boxmunge-stash-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}\.tar\.gz$'
 
+# stash_facts <stash>: print "<size> <sha256>" of the stash just made, or
+# "links" when it holds link members; on failure print why and return 1.
+stash_facts() {
+    BM_STASH="$1" python3 - <<'PYREC'
+import hashlib, os, stat, sys, tarfile
+src = os.environ["BM_STASH"]
+try:
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+except OSError as e:
+    print(f"{src}, the stash just made, cannot be opened: {e.strerror}")
+    sys.exit(1)
+with os.fdopen(fd, "rb") as f:
+    st = os.fstat(f.fileno())
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_nlink != 1:
+        print(f"{src}, the stash just made, is not a plain file of root's")
+        sys.exit(1)
+    digest = hashlib.sha256()
+    while chunk := f.read(1 << 20):
+        digest.update(chunk)
+    f.seek(0)
+    try:
+        with tarfile.open(fileobj=f, mode="r:gz") as tar:
+            links = any(m.issym() for m in tar)
+    except (tarfile.TarError, OSError, EOFError):
+        links = False  # nothing the apply's rewrite would touch
+print("links" if links else f"{st.st_size} {digest.hexdigest()}")
+PYREC
+}
+
 # record_stash <version> <stash create output>: record the stash `stash
-# create` said it made; returns 1 when it named none.
+# create` said it made; on failure print why and return 1.
 record_stash() {
-    local name
+    local name facts
     name="$(printf '%s\n' "$2" | sed -n 's/^Stash created: //p' | tail -n 1)"
-    [[ "$name" =~ $STASH_NAME_RE ]] || return 1
-    write_root_file "$STASH_RECORD_FILE" "$1 $name"
+    [[ "$name" =~ $STASH_NAME_RE ]] \
+        || { echo "stash create did not name the stash it made (no 'Stash created: <name>' line): $2"; return 1; }
+    facts="$(stash_facts "$BOXMUNGE_ROOT/stashes/$name")" || { echo "$facts"; return 1; }
+    if [[ "$facts" == links ]]; then
+        log "The stash $name has link members (an older release made it); the upgrade rewrites it without them, so it is recorded by name alone"
+        write_root_file "$STASH_RECORD_FILE" "$1 $name"
+    else
+        write_root_file "$STASH_RECORD_FILE" "$1 $name $facts"
+    fi
 }
 
 # copy_rollback_stash <new_version>: copy the stash the rollback of
 # <new_version> restores into STASH_COPY_DIR and print the copy's path; on
 # failure print why and return 1.
 copy_rollback_stash() {
-    local recorded="" name=""
+    local recorded="" name="" size="" sha="" r_version r_name r_size r_sha r_extra
+    local hash_re='^([0-9]+ [0-9a-f]{64})?$'
     refuse_symlink "$STASH_RECORD_FILE"
     refuse_symlink "$STASH_COPY_DIR"
     [[ ! -e "$STASH_RECORD_FILE" ]] || recorded="$(cat "$STASH_RECORD_FILE")"
-    if [[ "${recorded%% *}" == "$1" && "${recorded#* }" =~ $STASH_NAME_RE ]]; then
-        name="${recorded#* }"
-    elif [[ -n "$recorded" ]]; then
-        log "WARN: $STASH_RECORD_FILE ('$(printable "$recorded")') is not the stash of the upgrade to $1; taking the newest-named stash"
+    if [[ -n "$recorded" ]]; then
+        read -r r_version r_name r_size r_sha r_extra <<< "$recorded"
+        if [[ ! "$r_name" =~ $STASH_NAME_RE || -n "${r_extra:-}" || ! "${r_size:+$r_size $r_sha}" =~ $hash_re ]]; then
+            echo "$STASH_RECORD_FILE is malformed ('$(printable "$recorded")'); restore the stash this upgrade made by hand as supervisor: sudo boxmunge-server stash restore --latest; sudo boxmunge-server upgrade --apply"
+            return 1
+        elif [[ "$r_version" == "$1" ]]; then
+            name="$r_name" size="${r_size:-}" sha="${r_sha:-}"
+        else
+            log "WARN: $STASH_RECORD_FILE ('$(printable "$recorded")') is not the stash of the upgrade to $1; taking the newest-named stash"
+        fi
     fi
-    BM_STASHES="$BOXMUNGE_ROOT/stashes" BM_NAME="$name" BM_DEST="$STASH_COPY_DIR" python3 - <<'PYSTASH'
-import errno, fnmatch, os, stat, sys, tempfile
+    BM_STASHES="$BOXMUNGE_ROOT/stashes" BM_NAME="$name" BM_SIZE="$size" BM_SHA="$sha" BM_DEST="$STASH_COPY_DIR" python3 - <<'PYSTASH'
+import errno, fnmatch, hashlib, os, stat, sys, tempfile
 stashes, name, dest = os.environ["BM_STASHES"], os.environ["BM_NAME"], os.environ["BM_DEST"]
+want = (int(os.environ["BM_SIZE"]), os.environ["BM_SHA"]) if os.environ["BM_SHA"] else None
 fix = (" (stashes/ is deploy-writable: it was removed, planted or replaced). Put the right stash back"
        " or remove the wrong one, then, as supervisor, run: sudo boxmunge-server stash restore --latest;"
        " sudo boxmunge-server upgrade --apply")
@@ -185,11 +234,16 @@ with os.fdopen(fd, "rb") as f:
     for old in os.listdir(dest):
         os.unlink(os.path.join(dest, old))
     out_fd, tmp = tempfile.mkstemp(dir=dest, prefix=".copy.")
+    digest = hashlib.sha256()
     with os.fdopen(out_fd, "wb") as out:
         while chunk := f.read(1 << 20):
+            digest.update(chunk)
             out.write(chunk)
         out.flush()
         os.fsync(out.fileno())
+    if want and (os.path.getsize(tmp), digest.hexdigest()) != want:
+        os.unlink(tmp)
+        refuse(f"{src} is not the stash this upgrade made (its size or sha256 differs from the record)")
 copy = os.path.join(dest, name)
 os.replace(tmp, copy)
 print(copy)

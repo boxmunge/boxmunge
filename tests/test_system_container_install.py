@@ -167,6 +167,7 @@ def _policy(tmp: Path, *, from_shim: int, script_rc: int, caddy_rc: int = 0) -> 
     (tmp / "bootstrap").mkdir()
     (tmp / "bootstrap" / "system-container.sh").write_text(f"exit {script_rc}\n")
     shutil.copy(REPO / "bootstrap" / "installer-fingerprint.sh", tmp / "bootstrap")
+    (tmp / "bootstrap" / "caddy-access-log.sh").write_text('echo "caddy-access-log $1"\n')
     (tmp / "caddy").mkdir()
     (tmp / "caddy" / "compose.yml").write_text("services: {}\n")
     (tmp / "root" / "caddy").mkdir(parents=True)
@@ -181,19 +182,27 @@ def _policy(tmp: Path, *, from_shim: int, script_rc: int, caddy_rc: int = 0) -> 
     script.write_text(
         "set -euo pipefail\n"
         f"SCRIPT_DIR={tmp}\nBOXMUNGE_ROOT={tmp / 'root'}\nFROM_UPGRADE_SHIM={from_shim}\n"
-        'INCOMPLETE=""\n'
+        'INCOMPLETE=""\nCADDY_KEPT_OLD=0\n'
         f'SYSTEM_REBUILD="{REBUILD}"\n'
         + _function_body("note_incomplete")
         + _function_body("refresh_caddy")
         + _function_body("refresh_system_container")
         + _function_body("fail_if_incomplete")
-        + 'refresh_caddy\nrefresh_system_container\necho "rest of the install"\n'
+        + _caddy_step() + 'refresh_system_container\necho "rest of the install"\n'
         + 'fail_if_incomplete\necho "incomplete=[${INCOMPLETE}]"\n')
     return subprocess.run([shutil.which("bash"), str(script)], capture_output=True, text=True,
                           env={"PATH": f"{stubs}:/usr/bin:/bin"})
 
 
 REBUILD = "sudo docker compose -f /opt/boxmunge/system/compose.yml up -d --build"
+
+
+def _caddy_step() -> str:
+    """install.sh's top-level Caddy step: the refresh, then the retire of
+    caddy/logs."""
+    m = re.search(r'^refresh_caddy\n.*?caddy-access-log\.sh" retire\n', INSTALL_SH, re.M | re.S)
+    assert m, "the Caddy step is not in install.sh"
+    return m.group(0)
 
 
 def _fingerprint_kept(tmp: Path) -> bool:
@@ -240,6 +249,13 @@ def test_a_failed_caddy_start_is_noted_not_fatal_at_once(tmp_path: Path, from_sh
     assert "Caddy was not started from the new caddy/compose.yml" in proc.stderr
     assert "caddy/compose.yml up -d" in proc.stderr
     assert not _fingerprint_kept(tmp_path)
+    # The Caddy that kept running may still mount caddy/logs: not removed.
+    assert "caddy-access-log retire" not in proc.stdout
+
+
+def test_caddy_logs_are_retired_once_caddy_was_refreshed(tmp_path: Path) -> None:
+    proc = _policy(tmp_path, from_shim=1, script_rc=0)
+    assert "caddy-access-log retire" in proc.stdout, proc.stderr
 
 
 @pytest.mark.parametrize("from_shim", [0, 1])

@@ -58,50 +58,10 @@ fi
 [[ "${FROM_UPGRADE_SHIM}" -eq 1 ]] || FROM_UPGRADE_SHIM="$(BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/run-by-old-shim.sh")"
 command -v python3 >/dev/null && bash "${SCRIPT_DIR}/bootstrap/python-floor.sh"
 
-# ---------------------------------------------------------------------------
-# Docker Compose version.
-#
-# boxmunge resolves user compose with `config --no-env-resolution`, which
-# Compose accepts from 2.35.0 (2.34 and older: "unknown flag"). That also
-# covers secrets' single-quoted env-file values with \' for a quote, which
-# Compose reads literally from 2.24 on. Keep in step with
-# MIN_COMPOSE_VERSION in src/boxmunge/compose_version.py. An upgrade checks
-# before anything is changed; a fresh install right after the bootstrap has
-# installed Docker.
-# ---------------------------------------------------------------------------
-MIN_COMPOSE_VERSION="2.35.0"
-# Same rule as compose_version.py: trim ASCII whitespace, then the whole
-# output must be one version with an optional packaging suffix; anything
-# else is reported as unreadable, never guessed at.
-require_compose_version() {
-    local ws=$' \t\r\n\v\f' raw found
-    if ! raw="$(docker compose version --short 2>/dev/null)"; then
-        echo "ERROR: 'docker compose version --short' failed. Install" \
-             "docker-compose-plugin ${MIN_COMPOSE_VERSION} or newer from Docker's apt repository." >&2
-        exit 1
-    fi
-    found="${raw#"${raw%%[!${ws}]*}"}"
-    found="${found%"${found##*[!${ws}]}"}"
-    local re='^v?([0-9]+)\.([0-9]+)\.([0-9]+)([-+][^'"${ws}"']*)?$'
-    if [[ ! "${found}" =~ ${re} ]]; then
-        echo "ERROR: could not read the Docker Compose version from" \
-             "'docker compose version --short', which printed: $(printf '%q' "${raw}")" >&2
-        exit 1
-    fi
-    local have=( "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}" )
-    local want=( ${MIN_COMPOSE_VERSION//./ } ) i
-    for i in 0 1 2; do
-        (( 10#${have[i]} > 10#${want[i]} )) && return 0
-        if (( 10#${have[i]} < 10#${want[i]} )); then
-            echo "ERROR: Docker Compose ${found} is older than ${MIN_COMPOSE_VERSION}," \
-                 "which boxmunge needs to pass secrets to containers unchanged." \
-                 "Upgrade it: apt-get install --only-upgrade docker-compose-plugin" >&2
-            exit 1
-        fi
-    done
-}
+# Docker Compose 2.35.0 or newer (bootstrap/compose-version.sh): an upgrade
+# checks before anything is changed, a fresh install after the bootstrap.
 if [[ -f "${BOXMUNGE_ROOT}/config/boxmunge.yml" ]]; then
-    require_compose_version
+    bash "${SCRIPT_DIR}/bootstrap/compose-version.sh"
 fi
 
 # ---------------------------------------------------------------------------
@@ -135,6 +95,7 @@ repair_unattended_origins() {
     local conf=/etc/apt/apt.conf.d/50unattended-upgrades
     [[ -f "${conf}" ]] || return 0
     grep -q '^Unattended-Upgrade::Allowed-Origins {$' "${conf}" || return 0
+    # shellcheck disable=SC2016  # the file's own literal ${distro_codename}
     grep -q '^    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";$' \
         "${conf}" || return 0
     echo "  Repairing ${conf}: unattended-upgrade has been crashing on its origins list"
@@ -226,7 +187,7 @@ if [[ ! -f "${BOXMUNGE_ROOT}/config/boxmunge.yml" ]]; then
         exit 1
     fi
     bash "${SCRIPT_DIR}/bootstrap/init-host.sh" "$@"
-    require_compose_version
+    bash "${SCRIPT_DIR}/bootstrap/compose-version.sh"
 else
     echo "Existing installation detected — upgrading boxmunge package only."
 fi
@@ -373,20 +334,23 @@ bash "${SCRIPT_DIR}/bootstrap/caddy-access-log.sh" sites
 # (e.g., the v0.4 maintenance bind-mount). Compose recreates Caddy only when
 # its definition changed; asking every time also finishes a recreate that an
 # earlier run copied the file for but did not get to.
-# A failed `up` (a transient pull of the pinned image, say) is noted.
+# A failed `up` (a transient pull of the pinned image, say) is noted, and
+# caddy/logs is kept: the Caddy that keeps running may still mount it.
+CADDY_KEPT_OLD=0
 refresh_caddy() {
     [[ -f "${SCRIPT_DIR}/caddy/compose.yml" ]] || return 0
     cp "${SCRIPT_DIR}/caddy/compose.yml" "${BOXMUNGE_ROOT}/caddy/compose.yml"
     chown root:deploy "${BOXMUNGE_ROOT}/caddy/compose.yml"
     chmod 640 "${BOXMUNGE_ROOT}/caddy/compose.yml"
     docker inspect boxmunge-caddy >/dev/null 2>&1 || return 0
-    docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d \
-        || note_incomplete "Caddy was not started from the new caddy/compose.yml (see above); the" \
-            "previous container, if any, keeps running. Start it as supervisor once the cause is" \
-            "fixed: sudo docker compose -f ${BOXMUNGE_ROOT}/caddy/compose.yml up -d"
+    docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d && return 0
+    CADDY_KEPT_OLD=1
+    note_incomplete "Caddy was not started from the new caddy/compose.yml (see above); the" \
+        "previous container, if any, keeps running. Start it as supervisor once the cause is" \
+        "fixed: sudo docker compose -f ${BOXMUNGE_ROOT}/caddy/compose.yml up -d"
 }
 refresh_caddy
-bash "${SCRIPT_DIR}/bootstrap/caddy-access-log.sh" retire
+[[ "${CADDY_KEPT_OLD}" -eq 1 ]] || bash "${SCRIPT_DIR}/bootstrap/caddy-access-log.sh" retire
 
 # CrowdSec reads Caddy's stdout through Docker; verified after the restart.
 if command -v cscli >/dev/null 2>&1; then

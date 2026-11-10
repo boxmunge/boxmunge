@@ -1,8 +1,8 @@
 """Docker Compose >= 2.35 is required: older releases mis-read \\' in
 single-quoted env-file values, which is how secrets are stored.
 
-install.sh and compose_version.py each check it; one table drives both, so
-the two parse every output the same way.
+install.sh (bootstrap/compose-version.sh) and compose_version.py each check
+it; one table drives both, so the two parse every output the same way.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from boxmunge.compose_version import MIN_COMPOSE_VERSION, compose_version_proble
 
 REPO = Path(__file__).resolve().parents[1]
 INSTALL_SH = REPO / "install.sh"
+SCRIPT = REPO / "bootstrap" / "compose-version.sh"
 
 # (exact stdout of `docker compose version --short`, verdict)
 CASES = [
@@ -67,13 +68,8 @@ def _bash_verdict(tmp_path: Path, out: str, rc: int = 0) -> tuple[str, str]:
     fake.parent.mkdir(exist_ok=True)
     fake.write_text(f'#!/bin/sh\nprintf "%s" "$FAKE_COMPOSE_OUT"\nexit {rc}\n')
     fake.chmod(0o755)
-    script = (
-        "set -euo pipefail\n"
-        f"eval \"$(sed -n '/^MIN_COMPOSE_VERSION=/p; /^require_compose_version() {{/,/^}}/p' {INSTALL_SH})\"\n"
-        "require_compose_version\necho OK\n"
-    )
     env = {**os.environ, "PATH": f"{fake.parent}:{os.environ['PATH']}", "FAKE_COMPOSE_OUT": out}
-    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env)
+    result = subprocess.run(["bash", "-c", f'bash "{SCRIPT}" && echo OK'], capture_output=True, text=True, env=env)
     if result.returncode == 0 and result.stdout == "OK\n":
         return "ok", ""
     assert result.returncode == 1 and "OK" not in result.stdout, result
@@ -110,5 +106,11 @@ def test_failing_command_is_an_error_in_both(tmp_path: Path, monkeypatch) -> Non
 
 
 def test_install_sh_minimum_matches_the_python_one() -> None:
-    match = re.search(r'^MIN_COMPOSE_VERSION="([0-9.]+)"$', INSTALL_SH.read_text(), re.M)
+    match = re.search(r'^MIN_COMPOSE_VERSION="([0-9.]+)"$', SCRIPT.read_text(), re.M)
     assert match and match.group(1) == ".".join(map(str, MIN_COMPOSE_VERSION))
+
+
+def test_install_sh_checks_through_the_script_before_and_after_the_bootstrap() -> None:
+    text = INSTALL_SH.read_text()
+    assert text.count('bash "${SCRIPT_DIR}/bootstrap/compose-version.sh"') == 2
+    assert "require_compose_version" not in text
