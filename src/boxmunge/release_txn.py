@@ -26,7 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.fileutil import atomic_write_text, fsync_dir
-from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.fs_nofollow import read_bytes_nofollow, read_text_nofollow
 from boxmunge.git_slot import GitRefError, head_sha, is_full_sha
 from boxmunge.release import live_meta_text
 from boxmunge.release_keep import discard_superseded, kept_previous_text, superseded_paths
@@ -102,10 +102,14 @@ def txn_path(paths: BoxPaths, project: str) -> Path:
 
 
 def _sha(path: Path) -> str | None:
+    """The record's fingerprint, None when there is none. Raises
+    ReleaseStateError for anything but a plain file there."""
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        return hashlib.sha256(read_bytes_nofollow(path)).hexdigest()
     except FileNotFoundError:
         return None
+    except OSError as e:
+        raise ReleaseStateError(f"Cannot read {path}: {e}") from e
 
 
 def _text_sha(text: str) -> str:

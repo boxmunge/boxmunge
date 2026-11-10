@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Callable, Iterable, Iterator
 from boxmunge.bind_mounts import BindMountError, bind_mounted_dirs
 from boxmunge.bundle import BOX_OWNED_ENTRIES, BOXMUNGE_ENTRIES, is_placeholder
 from boxmunge.fileutil import atomic_write_text
-from boxmunge.fs_nofollow import mkdir_p_deploy
+from boxmunge.fs_nofollow import mkdir_p_deploy, read_text_nofollow
 from boxmunge.log import log_warning
 
 if TYPE_CHECKING:
@@ -101,7 +101,7 @@ def _load_record(project_dir: Path) -> set[str] | None:
            f"data, so deploys never delete them: restore it, or rewrite it as "
            f'{{"version": {RECORD_VERSION}, "data_dirs": ["<dir>", ...]}}.')
     try:
-        doc = json.loads(path.read_text())
+        doc = json.loads(read_text_nofollow(path))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise ReleaseStateError(f"Cannot read {path}: {e}. {fix}") from e
     if not isinstance(doc, dict):

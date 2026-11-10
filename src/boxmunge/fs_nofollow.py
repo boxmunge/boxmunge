@@ -113,18 +113,24 @@ def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
 READ_LIMIT_BYTES = 64 * 1024 * 1024
 
 
-def read_text_nofollow(path: Path, *, limit: int = READ_LIMIT_BYTES) -> str:
-    """A UTF-8 file's text, read without following a link (see
+def read_bytes_nofollow(path: Path, *, limit: int = READ_LIMIT_BYTES) -> bytes:
+    """A file's bytes, read without following a link (see
     open_regular_nofollow) and refused past ``limit`` bytes. The one way
     root reads a file by name in a directory deploy can write (state/,
-    a project's tree). Raises OSError (or UnicodeDecodeError); a missing
-    file raises FileNotFoundError, as Path.read_text does."""
+    a project's tree). Raises OSError; a missing file raises
+    FileNotFoundError, as Path.read_bytes does."""
     with os.fdopen(open_regular_nofollow(path, os.O_RDONLY), "rb") as f:
         data = f.read(limit + 1)
     if len(data) > limit:
         raise OSError(f"{path} is larger than {limit} bytes; refusing to read it. "
                       "Remove it so it can be recreated.")
-    return data.decode("utf-8")
+    return data
+
+
+def read_text_nofollow(path: Path, *, limit: int = READ_LIMIT_BYTES) -> str:
+    """read_bytes_nofollow, as UTF-8 text. Raises OSError or
+    UnicodeDecodeError."""
+    return read_bytes_nofollow(path, limit=limit).decode("utf-8")
 
 
 def chmod_nofollow(path: Path, mode: int | None = None, add: int = 0) -> None:

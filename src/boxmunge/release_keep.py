@@ -17,7 +17,7 @@ from boxmunge.data_dirs import naming_set_aside, set_aside_announcer
 from boxmunge.fileutil import (
     atomic_write_text, discard_dir, durable_rename, durable_rename_dir, fsync_dir, sync_tree,
 )
-from boxmunge.fs_nofollow import chown_tree_deploy, mkdir_p_deploy
+from boxmunge.fs_nofollow import chown_tree_deploy, mkdir_p_deploy, read_text_nofollow
 from boxmunge.release import _copy_entry, _ensure_record, live_code_entries, previous_meta_text
 
 if TYPE_CHECKING:
@@ -121,6 +121,16 @@ def ensure_kept_pairing(paths: BoxPaths, project: str, txn: InstallTxn) -> None:
         return
     _building, prev, prev_meta, _sup_dir, _sup_meta = _names(paths, project)
     text = kept_previous_text(txn)
-    if not prev.is_dir() or (prev_meta.is_file() and prev_meta.read_text() == text):
+    if not prev.is_dir() or _reads_as(prev_meta, text):
         return
     atomic_write_text(prev_meta, text, mode=0o644)
+
+
+def _reads_as(path: Path, text: str) -> bool:
+    """Whether the plain file at `path` holds `text`. Anything else there
+    (missing, a link, a FIFO, unreadable) does not, and ensure_kept_pairing
+    replaces it: writing the pairing is its job."""
+    try:
+        return read_text_nofollow(path) == text
+    except (OSError, UnicodeDecodeError):
+        return False
