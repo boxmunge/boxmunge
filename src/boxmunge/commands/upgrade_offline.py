@@ -22,6 +22,7 @@ from boxmunge.compose_guard import check_start
 from boxmunge.cve.quarantine import QuarantineError, is_quarantined, read_quarantine_state
 from boxmunge.fileutil import atomic_write_bytes
 from boxmunge.fs_nofollow import open_regular_nofollow
+from boxmunge.manifest import CURRENT_SCHEMA_VERSION
 from boxmunge.pause import is_paused, read_paused_state
 from boxmunge.paths import BoxPaths
 from boxmunge.redeploy_hint import redeploy_or_bare
@@ -113,6 +114,18 @@ def regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> 
         _put_back(kept)
         return f"its bind sources could not be recorded ({e}); {_STAYS}"
     return None
+
+
+def in_memory_line(name: str, written: object) -> str:
+    """The dry run's line for a git project whose repository manifest is
+    migrated in memory (the checkout is not rewritten)."""
+    if written is None:
+        return (f"{name}: repository manifest.yml has no schema_version; the "
+                f"upgrade will alert to set it to {CURRENT_SCHEMA_VERSION} in the "
+                f"repository")
+    return (f"{name}: repository manifest.yml uses schema v{written}; migrated in "
+            f"memory to v{CURRENT_SCHEMA_VERSION} (the upgrade will alert to update "
+            f"it in the repository)")
 
 
 def offline_dry_run_line(paths: BoxPaths, name: str, manifest: dict[str, Any],
