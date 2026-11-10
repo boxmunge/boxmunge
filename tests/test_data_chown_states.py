@@ -71,6 +71,12 @@ def test_a_failed_regeneration_says_the_data_was_changed_and_to_deploy(
     write_paused_state("shop", paths, reason="maintenance")
     with pytest.raises(data_cmd.DataError, match="boxmunge resume shop"):
         data_cmd.chown_locked(paths, "shop", "app", (10002, 10002), no_snapshot=True)
+    # Paused and quarantined: a deploy is refused while paused, and a lift
+    # while paused regenerates nothing; resume does, once it is lifted.
+    _quarantine(paths)
+    with pytest.raises(data_cmd.DataError, match=r"run `boxmunge security resume shop` once "
+                       r"its images are clean \(it stays paused\), then `boxmunge resume shop`"):
+        data_cmd.chown_locked(paths, "shop", "app", (10002, 10002), no_snapshot=True)
 
 
 def test_the_restart_policy_is_held(paths, monkeypatch) -> None:
