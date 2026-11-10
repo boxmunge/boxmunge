@@ -31,7 +31,7 @@ See what auto-update has been saying (it runs every 6 hours, if you enabled it):
 sudo journalctl -u boxmunge-auto-update --since -7d --no-pager | tail
 ```
 
-On 0.9 it prints `No security updates available.` and on 0.10
+On 0.9 and 0.10.0 it prints `No security updates available.` and on 0.10.1
 `No security and break-fix updates available.` (these two lines are from the code; the
 rehearsal ran the command on 0.11). That's correct, even though newer releases exist: none
 of them can be installed without crossing a breaking release.
@@ -54,7 +54,7 @@ Never target a release after 0.11.6 from 0.9 or 0.10. Once you are on 0.11.5 or 
 `upgrade` (or auto-update) takes you the rest of the way.
 
 **0.7.0 to 0.9.1:** the upgrader those releases installed checks every new release in a way
-that 0.9.0 and everything after it fail. Upgrading to 0.11.5 stops straight away with:
+that 0.9.1 and everything after it fail. Upgrading to 0.11.5 stops straight away with:
 
 ```
 AttributeError: module 'boxmunge' has no attribute '__version__'
@@ -99,6 +99,8 @@ done; ls -la $d'
 
 This copies files as they are. A database's files copied while it runs may not restore
 cleanly, so for a database also keep a dump made with its own tool (`pg_dump`, for example).
+The folder holds secrets: `config/backup.key` and every project's `secrets.env`. Keep it as
+safe as you keep `backup.key`.
 
 ### 2. Make sure everyone can log in with a key
 
@@ -232,11 +234,18 @@ your current release, not 0.11. The real preview runs at the start of the upgrad
 ## Upgrade
 
 Pick a quiet time: each project restarts once. In the rehearsal the upgrade took about two
-minutes. Keep the SSH session open until it finishes.
+minutes. A dropped SSH connection would kill the upgrade part-way, so start it with `nohup`
+(part of Debian's coreutils, so always there), writing to a log file, and follow that file:
 
 ```
-sudo /opt/boxmunge/bin/boxmunge-upgrade target 0.11.x 2>&1 | tee -a ~/upgrade-to-0.11.log
+sudo nohup /opt/boxmunge/bin/boxmunge-upgrade target 0.11.x >> ~/upgrade-to-0.11.log 2>&1 &
+tail -f ~/upgrade-to-0.11.log
 ```
+
+Writing to the file rather than piping through `tee` matters: if the connection dropped, a
+dying `tee` would take the upgrade with it. Stop `tail` with Ctrl-C once you see the last
+line below; the upgrade keeps running if the connection drops. (The rehearsal ran the
+command in the foreground, in a session that was never dropped.)
 
 What it prints, in order:
 
@@ -377,9 +386,13 @@ projects keep running. You see an error and then, for example:
 ERROR: install.sh failed (exit 1); aborting upgrade before slot swap
 ```
 
-Parts of the system may already be updated: the upgrader itself, Caddy and boxmunge's
-system container. That's expected; the retry finishes the job. The release is now
-blocklisted on your box, so running the same command again prints:
+Parts of the system may already be updated. The upgrader itself always is: the old one
+replaces itself before it runs the new release's installer. Caddy and boxmunge's system
+container are replaced only if that installer got past its first checks: Python and Docker
+Compose are checked first, so with an old Compose (step 5) nothing else has changed; the
+sshd check comes last, so after the sshd error (step 2) Caddy and the system container are
+already the new ones. Either way that's expected, and the retry finishes the job. The
+release is now blocklisted on your box, so running the same command again prints:
 
 ```
 FATAL: Version 0.11.x is blocklisted on this box (it failed an earlier upgrade). To override, run as supervisor: sudo /opt/boxmunge/bin/boxmunge-upgrade force-target 0.11.x
@@ -390,7 +403,8 @@ step 5, and so on), then:
 
 ```
 sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.x
-sudo /opt/boxmunge/bin/boxmunge-upgrade target 0.11.x 2>&1 | tee -a ~/upgrade-to-0.11.log
+sudo nohup /opt/boxmunge/bin/boxmunge-upgrade target 0.11.x >> ~/upgrade-to-0.11.log 2>&1 &
+tail -f ~/upgrade-to-0.11.log
 ```
 
 On 0.9, if the upgrade stopped early (during the download or the pre-flight), the old

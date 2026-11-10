@@ -60,7 +60,9 @@ def _hop(bundle: Path, mode: str, old_shim: str) -> dict[str, str]:
     )
     assert result.returncode == 0, result.stdout + result.stderr
     facts = dict(re.findall(r"^([A-Z_]+)=(\S+)$", result.stdout, re.M))
-    facts["hop_rc"] = re.search(r"^HOP rc=(\d+)$", result.stdout, re.M).group(1)
+    hop = re.search(r"^HOP rc=(\d+)$", result.stdout, re.M)
+    assert hop is not None, result.stdout
+    facts["hop_rc"] = hop.group(1)
     for name, rc, out in re.findall(r"^CMD (\S+) rc=(\d+) :: (.*)$", result.stdout, re.M):
         facts[f"{name}_rc"], facts[f"{name}_out"] = rc, out
     for name, rc, out in re.findall(r"^DURING (\S+) rc=(\d+) :: (.*)$", result.stdout, re.M):
