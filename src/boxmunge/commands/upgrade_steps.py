@@ -16,13 +16,12 @@ from typing import Any, Iterator
 from boxmunge.caddy import generate_caddy_config, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.upgrade_offline import (
-    PutBackError, offline_dry_run_line, regenerate_offline, render_overlay,
+    PutBackError, offline_dry_run_line, offline_exit, regenerate_offline, render_overlay,
 )
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.user_entries import USER_ENTRIES, split_user_entries
 from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
-from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.release_txn import InstallTxn, load_txn, stale_reason, start_refusal
 from boxmunge.docker import DockerError
@@ -35,8 +34,7 @@ from boxmunge.manifest import (
 )
 from boxmunge.git_layout import relink_advice, repo_ownership_advice, unlinked_files
 from boxmunge.migration import migrate_manifest, MigrationError
-from boxmunge.pause import is_paused, render_maintenance_caddy_config
-from boxmunge.redeploy_hint import deploy_from_pause, redeploy_command
+from boxmunge.pause import render_maintenance_caddy_config
 from boxmunge.fleet import report_project_failure
 from boxmunge.paths import BoxPaths, InvalidProjectName, validate_project_name
 from boxmunge.security_overlay import services_with_off_profile
@@ -285,28 +283,13 @@ def _regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any], re
                                f"previous ones could not be put back: {e}") from e
     if refusal is not None:
         regen.refused[name] = refusal
-        log_error("upgrade", f"{name} ({reason}): {refusal}. Fix the cause, then "
-                  f"{_offline_exit(paths, name)}.", paths, project=name)
+        log_error("upgrade", f"{name} ({reason}): {refusal}. To bring it back, "
+                  f"{offline_exit(paths, name)}.", paths, project=name)
         return
     log_operation("upgrade", f"{name} is {reason}: it keeps its maintenance page and is not "
                   f"restarted; its overlay was regenerated and recorded for when it comes "
                   f"back", paths, project=name)
     regen.processed.append(name)
-
-
-def _offline_exit(paths: BoxPaths, name: str) -> str:
-    """The commands that bring a paused or quarantined project back. Only a
-    deploy fixes a changed control file (resume and `security resume` run
-    the same check); `resume --no-start` hands a pause to it, and a
-    quarantine lets it through, scanned, and lifts once it starts."""
-    deploy = f"`boxmunge {redeploy_command(paths, name)}`"
-    if not is_paused(name, paths):
-        return (f"run `boxmunge security resume {name}`, or {deploy} (its images are "
-                f"scanned first; once it starts the quarantine lifts)")
-    if not is_quarantined(name, paths):
-        return f"run `boxmunge resume {name}`, or {deploy_from_pause(paths, name)}"
-    return (f"run {deploy_from_pause(paths, name)}: its images are scanned first, and once "
-            f"it starts the pause ends and the quarantine lifts")
 
 
 def _in_memory_line(name: str, written: object) -> str:

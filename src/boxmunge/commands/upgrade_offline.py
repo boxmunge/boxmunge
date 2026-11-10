@@ -18,9 +18,12 @@ from typing import Any
 
 from boxmunge.compose import load_user_compose, prepare_compose_override, render_compose_override
 from boxmunge.compose_guard import check_start
+from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.fileutil import atomic_write_bytes
 from boxmunge.fs_nofollow import open_regular_nofollow
+from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
+from boxmunge.redeploy_hint import redeploy_or_bare
 
 _STAYS = "it keeps its previous overlay and bind record and stays offline"
 
@@ -125,3 +128,23 @@ def offline_dry_run_line(paths: BoxPaths, name: str, manifest: dict[str, Any],
     except Exception as e:  # noqa: BLE001 — the apply refuses on any failure
         return f"{refused} its compose overlay could not be regenerated ({e})"
     return f"{name}: {reason}; keeps its maintenance page, overlay renders OK"
+
+
+def offline_exit(paths: BoxPaths, name: str) -> str:
+    """The ways back for a paused or quarantined project the upgrade
+    refused, each with when it applies. Resume and `security resume` run
+    the start checks, so they work once the project's files are back as
+    deployed; a deploy takes them as they are. A deploy is refused while
+    the project is paused, so `resume --no-start` hands the pause to it,
+    and a quarantine lets it through, scanned, and lifts once it starts."""
+    deploy = f"`boxmunge {redeploy_or_bare(paths, name)}`"
+    back = "once the project's files are back as deployed"
+    if not is_paused(name, paths):
+        return (f"run `boxmunge security resume {name}` {back}, or {deploy} to deploy them "
+                f"as they are (its images are scanned first; once it starts the quarantine "
+                f"lifts)")
+    from_pause = f"`boxmunge resume {name} --no-start`, then {deploy}"
+    if not is_quarantined(name, paths):
+        return f"run `boxmunge resume {name}` {back}, or {from_pause} to deploy them as they are"
+    return (f"run {from_pause}: its images are scanned first, and once it starts the pause "
+            f"ends and the quarantine lifts")
