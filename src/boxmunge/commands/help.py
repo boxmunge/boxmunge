@@ -88,10 +88,11 @@ Platform updates:
   upgrade --repair-deps   Install the installed release's missing hash-pinned
                           dependencies (e.g. MCP), also during probation (deploy
                           shell; as root: boxmunge-upgrade repair-deps)
-  auto-update             Run the auto-update probation/promotion cycle
   mcp-serve               Run MCP server (stdio) for AI agent integration
 
 Operator only (as root, not in the deploy shell):
+  auto-update             Check for and apply a platform update now, as the
+                          auto-update timer does (deploy shell: upgrade)
   container-update        Pull and recreate Caddy and project image: containers
   install-txn <p> --drop  Drop a stale install record
   project-forget <p>      Drop a registry entry whose project directory is gone

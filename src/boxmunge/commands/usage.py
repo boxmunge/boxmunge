@@ -320,7 +320,9 @@ userns-migrate [--check] | userns-rollback | userns-commit. See OPERATIONS.md,
     "auto-update": """\
 Usage: boxmunge auto-update
 
-Run the auto-update probation/promotion cycle.""",
+Check for a platform update and apply it under this box's auto_update policy,
+as the auto-update timer does. Operator-only: run it as root, as
+boxmunge-server (the deploy shell's equivalent is upgrade).""",
     "container-update": """\
 Usage: boxmunge container-update [target] [--force] [--dry-run]
 
