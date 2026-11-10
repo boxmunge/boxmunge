@@ -215,23 +215,41 @@ class _BuildCheck:
             )
 
 
+def local_build_inputs(build: Any, base_dir: Path) -> list[tuple[str, str]]:
+    """(what, absolute path) for every host path a build reads: the local
+    context, the Dockerfile, and each local additional context. Remote and
+    non-path forms read nothing from this host and are left out (and
+    build_problems refuses the ones it cannot check)."""
+    build = {"context": build} if isinstance(build, str) else build
+    if not isinstance(build, dict):
+        return []
+    inputs: list[tuple[str, str]] = []
+    context = build.get("context", ".")
+    local_context = isinstance(context, str) and bool(context) and is_local_ref(context)
+    if local_context:
+        inputs.append(("build context", host_path_forms(context, base_dir)[0]))
+    dockerfile = build.get("dockerfile") or "Dockerfile"
+    if build.get("dockerfile_inline") is None and isinstance(dockerfile, str):
+        if local_context and not dockerfile.startswith("/"):
+            dockerfile = posixpath.join(inputs[0][1], dockerfile)
+        if dockerfile.startswith("/"):
+            inputs.append(("Dockerfile", host_path_forms(dockerfile, base_dir)[0]))
+    contexts = build.get("additional_contexts")
+    if isinstance(contexts, list):
+        contexts = dict(str(e).split("=", 1) for e in contexts if "=" in str(e))
+    for name, ref in (contexts.items() if isinstance(contexts, dict) else ()):
+        if isinstance(ref, str) and ref and is_local_ref(ref, additional=True):
+            inputs.append((f"additional context {name}", host_path_forms(ref, base_dir)[0]))
+    return inputs
+
+
 def local_dockerfile(build: Any, base_dir: Path, roots: tuple[Path, ...]) -> Path | None:
     """The Dockerfile a build reads from this host, if it is inside the
     project (anything else is refused by build_problems, and not read)."""
-    build = {"context": build} if isinstance(build, str) else build
-    if not isinstance(build, dict) or build.get("dockerfile_inline") is not None:
+    dockerfile = dict(local_build_inputs(build, base_dir)).get("Dockerfile")
+    if dockerfile is None or outside_roots(dockerfile, base_dir, roots):
         return None
-    context = build.get("context", ".")
-    dockerfile = build.get("dockerfile") or "Dockerfile"
-    if not isinstance(context, str) or not isinstance(dockerfile, str):
-        return None
-    if not dockerfile.startswith("/"):
-        if _has_scheme(context) or _is_ssh(context) or _is_remote(context):
-            return None
-        dockerfile = posixpath.join(host_path_forms(context, base_dir)[0], dockerfile)
-    if outside_roots(dockerfile, base_dir, roots):
-        return None
-    return Path(host_path_forms(dockerfile, base_dir)[0])
+    return Path(dockerfile)
 
 
 def build_problems(

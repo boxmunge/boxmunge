@@ -82,6 +82,23 @@ def test_bring_up_routes_healthy_projects_and_keeps_failures_on_maintenance(path
     assert len(saved) == 3
 
 
+@pytest.mark.parametrize("record", ["project_paused_state", "project_quarantine_state"])
+def test_an_unreadable_lifecycle_record_fails_that_project_only(
+        paths, box, monkeypatch, tmp_path, record) -> None:
+    """userns-finish and the rollback bring every project up after the
+    daemon switch: a pause or quarantine record that cannot be read (here a
+    dangling link) is that project's failure, journalled, never a raise
+    that strands the rest of the migration."""
+    from boxmunge.lifecycle import lifecycle_block
+    monkeypatch.setattr(bu, "lifecycle_block", lifecycle_block)
+    getattr(paths, record)("held").symlink_to(tmp_path / "gone.json")
+    j = Journal(FORWARD, "rebuilt", 1048576)
+    results = bu.bring_up(paths, _inv(), j, lambda: None, component="userns-finish")
+    assert results["held"].startswith("failed: ") and "symlink" in results["held"]
+    assert results["good"] == "up" and j.items["project:held"] == results["held"]
+    assert not [e for e in box if e[0] in ("up", "overlay") and e[1] == "held"]
+
+
 def test_a_resumed_bring_up_never_redoes_a_project_that_came_up(paths, box) -> None:
     events = box
     j = Journal(FORWARD, "rebuilt", 1048576, items={"project:good": "up"})

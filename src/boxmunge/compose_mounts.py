@@ -182,9 +182,9 @@ def check_volumes(
         if has_env_substitution(src):
             hits.append((
                 str(entry),
-                "uses env-var substitution in volumes: source, which is not "
-                "supported — write the host path literally for hardening "
-                "verification",
+                "has a '$' in its volumes: source after Compose's "
+                "substitution, so the host path cannot be verified; write "
+                "it literally",
                 True,
             ))
             continue

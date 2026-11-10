@@ -178,7 +178,8 @@ def unreadable_record(paths: BoxPaths, name: str) -> UnreadableRecord | None:
         read_paused_state(name, paths)
     except StateError as e:
         problems.append(f"its pause record cannot be read ({e})")
-        ways.append(f"`boxmunge pause {name}` to keep it paused")
+        # Its containers are stopped: a pause's snapshot has nothing to dump.
+        ways.append(f"`boxmunge pause {name} --no-snapshot` to keep it paused")
     if not problems:
         return None
     it = "them" if len(problems) > 1 else "it"

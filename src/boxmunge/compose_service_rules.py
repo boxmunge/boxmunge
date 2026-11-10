@@ -207,6 +207,12 @@ def _security_opt_problem(entry: str) -> str | None:
         return HARDENING_ADVICE
     if key == "label" and value == "disable":
         return HARDENING_ADVICE
+    if key == "label":
+        # type:spc_t runs unconfined; user/role/level change the identity
+        # the policy confines, which boxmunge cannot verify.
+        return ("sets the container's SELinux label, which can run it unconfined "
+                "or under another identity; remove it or set security.profile: off "
+                "with reason")
     if key == "no-new-privileges" and value == "false":
         return HARDENING_ADVICE
     if key == "seccomp" and value not in _SECCOMP_DEFAULTS:
