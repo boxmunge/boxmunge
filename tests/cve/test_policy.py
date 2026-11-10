@@ -18,12 +18,12 @@ from boxmunge.cve.hardening import (
     hardening_profile_from_compose,
 )
 from boxmunge.cve.suppressions import Suppression
+from boxmunge.cve.policy_types import _SEVERITY_GATES
 from boxmunge.cve.policy import (
     Disposition,
     PolicyError,
     Posture,
     ProjectDecision,
-    _POSTURE_THRESHOLDS,
     elevate_severity,
     evaluate_finding,
     evaluate_project,
@@ -215,7 +215,7 @@ def test_suppression_for_other_cve_falls_through() -> None:
     sup = _suppression(cve_id="CVE-2026-9999")
     decision = evaluate_finding(
         finding,
-        posture=Posture.BALANCED,
+        posture=Posture.STRICT,
         hardening_penalty=0,
         dangerously_disable_quarantine=False,
         suppressions=(sup,),
@@ -230,7 +230,7 @@ def test_expired_suppression_falls_through() -> None:
     sup = _suppression(cve_id=finding.cve_id, until=date(2025, 1, 1))
     decision = evaluate_finding(
         finding,
-        posture=Posture.BALANCED,
+        posture=Posture.STRICT,
         hardening_penalty=0,
         dangerously_disable_quarantine=False,
         suppressions=(sup,),
@@ -265,9 +265,10 @@ def test_unknown_severity_is_informational() -> None:
         (Posture.RELAXED, Severity.HIGH, Disposition.INFORMATIONAL),
         (Posture.RELAXED, Severity.MEDIUM, Disposition.INFORMATIONAL),
         (Posture.RELAXED, Severity.LOW, Disposition.INFORMATIONAL),
-        # BALANCED: High and above quarantine
-        (Posture.BALANCED, Severity.CRITICAL, Disposition.QUARANTINE),
-        (Posture.BALANCED, Severity.HIGH, Disposition.QUARANTINE),
+        # BALANCED: High and above meet the gate, which alerts, never
+        # quarantines (only KEV takes a balanced site down).
+        (Posture.BALANCED, Severity.CRITICAL, Disposition.AWAITING_FIX),
+        (Posture.BALANCED, Severity.HIGH, Disposition.AWAITING_FIX),
         (Posture.BALANCED, Severity.MEDIUM, Disposition.INFORMATIONAL),
         (Posture.BALANCED, Severity.LOW, Disposition.INFORMATIONAL),
         # STRICT: Medium and above quarantine
@@ -299,7 +300,7 @@ def test_would_quarantine_with_dangerously_disabled_becomes_at_risk() -> None:
     finding = _finding(severity=Severity.CRITICAL)
     decision = evaluate_finding(
         finding,
-        posture=Posture.BALANCED,
+        posture=Posture.STRICT,
         hardening_penalty=0,
         dangerously_disable_quarantine=True,
         suppressions=(),
@@ -312,7 +313,7 @@ def test_would_quarantine_without_dangerously_quarantines() -> None:
     finding = _finding(severity=Severity.CRITICAL)
     decision = evaluate_finding(
         finding,
-        posture=Posture.BALANCED,
+        posture=Posture.STRICT,
         hardening_penalty=0,
         dangerously_disable_quarantine=False,
         suppressions=(),
@@ -337,7 +338,7 @@ def test_below_threshold_with_dangerously_still_informational() -> None:
 # ---------- evaluate_finding: hardening penalty elevation ----------
 
 
-def test_balanced_medium_with_penalty_one_elevates_to_quarantine() -> None:
+def test_balanced_medium_with_penalty_one_elevates_to_awaiting_fix() -> None:
     finding = _finding(severity=Severity.MEDIUM)
     decision = evaluate_finding(
         finding,
@@ -348,11 +349,11 @@ def test_balanced_medium_with_penalty_one_elevates_to_quarantine() -> None:
         today=_TODAY,
     )
     assert decision.effective_severity == Severity.HIGH
-    assert decision.disposition == Disposition.QUARANTINE
+    assert decision.disposition == Disposition.AWAITING_FIX
     assert decision.hardening_penalty == 1
 
 
-def test_balanced_low_with_penalty_two_elevates_to_quarantine() -> None:
+def test_balanced_low_with_penalty_two_elevates_to_awaiting_fix() -> None:
     finding = _finding(severity=Severity.LOW)
     decision = evaluate_finding(
         finding,
@@ -363,7 +364,7 @@ def test_balanced_low_with_penalty_two_elevates_to_quarantine() -> None:
         today=_TODAY,
     )
     assert decision.effective_severity == Severity.HIGH
-    assert decision.disposition == Disposition.QUARANTINE
+    assert decision.disposition == Disposition.AWAITING_FIX
 
 
 def test_strict_low_with_penalty_one_elevates_to_quarantine() -> None:
@@ -436,7 +437,7 @@ def test_project_decision_mixed_findings() -> None:
     decision = evaluate_project(
         "myproj",
         _scan_result(findings),
-        posture=Posture.BALANCED,
+        posture=Posture.STRICT,
         hardening_profile=_profile(),
         dangerously_disable_quarantine=False,
         suppressions=(),
@@ -476,7 +477,7 @@ def test_project_critical_with_dangerously_marks_at_risk() -> None:
     decision = evaluate_project(
         "myproj",
         _scan_result(findings),
-        posture=Posture.BALANCED,
+        posture=Posture.STRICT,
         hardening_profile=_profile(),
         dangerously_disable_quarantine=True,
         suppressions=(),
@@ -544,21 +545,21 @@ def test_project_propagates_scanned_at() -> None:
 
 
 def test_project_with_hardening_profile_elevates_findings() -> None:
-    """A profile with read_only=False elevates Medium → High under BALANCED."""
+    """A profile with read_only=False elevates Low → Medium under STRICT."""
     findings = (
-        _finding(cve_id="CVE-2026-0001", severity=Severity.MEDIUM),
+        _finding(cve_id="CVE-2026-0001", severity=Severity.LOW),
     )
     decision = evaluate_project(
         "myproj",
         _scan_result(findings),
-        posture=Posture.BALANCED,
+        posture=Posture.STRICT,
         hardening_profile=_profile(read_only=False),
         dangerously_disable_quarantine=False,
         suppressions=(),
         today=_TODAY,
     )
     assert decision.findings[0].hardening_penalty == 1
-    assert decision.findings[0].effective_severity == Severity.HIGH
+    assert decision.findings[0].effective_severity == Severity.MEDIUM
     assert decision.quarantine_required is True
 
 
@@ -580,7 +581,7 @@ def test_project_with_hardening_profile_elevates_findings() -> None:
         (None, Posture.BALANCED, Severity.HIGH, Disposition.INFORMATIONAL),
         (None, Posture.STRICT, Severity.MEDIUM, Disposition.INFORMATIONAL),
         # AV:N under balanced/strict → goes through the threshold gate normally
-        (AttackVector.NETWORK, Posture.BALANCED, Severity.HIGH, Disposition.QUARANTINE),
+        (AttackVector.NETWORK, Posture.BALANCED, Severity.HIGH, Disposition.AWAITING_FIX),
         (AttackVector.NETWORK, Posture.STRICT, Severity.MEDIUM, Disposition.QUARANTINE),
         # AV:N under relaxed → still INFORMATIONAL: relaxed is KEV-only and
         # short-circuits before the AV filter / threshold (no KEV here).
@@ -656,7 +657,7 @@ def test_av_filter_applies_before_hardening_penalty_elevation() -> None:
     assert decision.effective_severity == Severity.CRITICAL  # still recorded
 
 
-def test_av_n_with_hardening_penalty_still_quarantines() -> None:
+def test_av_n_with_hardening_penalty_still_elevates() -> None:
     """AV:N findings still get the elevation behavior."""
     finding = _finding(severity=Severity.MEDIUM, attack_vector=AttackVector.NETWORK)
     decision = evaluate_finding(
@@ -667,12 +668,13 @@ def test_av_n_with_hardening_penalty_still_quarantines() -> None:
         suppressions=(),
         today=_TODAY,
     )
-    assert decision.disposition == Disposition.QUARANTINE
+    assert decision.disposition == Disposition.AWAITING_FIX
     assert decision.effective_severity == Severity.HIGH
 
 
 def test_paranoid_threshold_matches_strict() -> None:
-    assert _POSTURE_THRESHOLDS[Posture.PARANOID] == Severity.MEDIUM
+    assert _SEVERITY_GATES[Posture.PARANOID] == _SEVERITY_GATES[Posture.STRICT] == (
+        Severity.MEDIUM, Disposition.QUARANTINE)
 
 
 def test_paranoid_explanation_mentions_paranoid_label() -> None:
@@ -749,13 +751,20 @@ def test_no_distro_verdict_informational_below_paranoid() -> None:
     assert "distro" in d.explanation.lower()
 
 
-# --- Residual net: distro-affected High + AV:N quarantines balanced ---
-def test_distro_affected_high_quarantines_balanced() -> None:
+# --- Residual net: distro-affected High + AV:N alerts under balanced,
+# quarantines under strict (balanced quarantines only on KEV) ---
+def test_distro_affected_high_awaits_fix_balanced_quarantines_strict() -> None:
     f = _finding(
         status=VulnStatus.AFFECTED,
         vendor_severities={"debian": Severity.HIGH},
     )
-    assert _eval_ladder(f, Posture.BALANCED).disposition is Disposition.QUARANTINE
+    d = _eval_ladder(f, Posture.BALANCED)
+    assert d.disposition is Disposition.AWAITING_FIX
+    for words in ("no fix exists yet", "not known to be exploited",
+                  "nothing needs doing now", "when a fix lands",
+                  "listed as actively exploited", "`security.posture: strict`"):
+        assert words in d.explanation
+    assert _eval_ladder(f, Posture.STRICT).disposition is Disposition.QUARANTINE
     # relaxed does NOT quarantine on it (KEV-only floor):
     assert _eval_ladder(f, Posture.RELAXED).disposition is Disposition.INFORMATIONAL
 
@@ -796,9 +805,9 @@ def test_relaxed_is_kev_only_distro_critical_informational() -> None:
     assert _eval_ladder(f, Posture.RELAXED).disposition is Disposition.INFORMATIONAL
     # KEV still fires under relaxed:
     assert _eval_ladder(f, Posture.RELAXED, kev=True).disposition is Disposition.QUARANTINE
-    # Sanity: the same distro-CRITICAL finding still quarantines under balanced
-    # (its High threshold catches a Critical) — balanced is unchanged.
-    assert _eval_ladder(f, Posture.BALANCED).disposition is Disposition.QUARANTINE
+    # The same distro-CRITICAL finding meets balanced's High gate, which
+    # alerts (AWAITING_FIX); only KEV takes a balanced site down.
+    assert _eval_ladder(f, Posture.BALANCED).disposition is Disposition.AWAITING_FIX
 
 
 # --- Distro-deprioritized statuses → informational below paranoid ---
@@ -821,12 +830,14 @@ def test_distro_deprioritized_status_informational_balanced(status) -> None:
 
 def test_end_of_life_is_not_deprioritized_reaches_threshold() -> None:
     # END_OF_LIFE deliberately excluded from the deprioritized bucket — a
-    # distro-High EOL finding with AV:N still quarantines under balanced.
+    # distro-High EOL finding with AV:N meets the gate: balanced alerts,
+    # strict quarantines.
     f = _finding(
         status=VulnStatus.END_OF_LIFE,
         vendor_severities={"debian": Severity.HIGH},
     )
-    assert _eval_ladder(f, Posture.BALANCED).disposition is Disposition.QUARANTINE
+    assert _eval_ladder(f, Posture.BALANCED).disposition is Disposition.AWAITING_FIX
+    assert _eval_ladder(f, Posture.STRICT).disposition is Disposition.QUARANTINE
 
 
 # --- B-01: a fix that is not running does not escape the KEV floor ---
@@ -847,10 +858,19 @@ def test_fixable_kev_under_relaxed_stays_up_flagged() -> None:
 
 
 def test_fixable_over_threshold_is_flagged_not_silent() -> None:
+    d = _eval_ladder(_finding(fixed_version="1.2"), Posture.STRICT)
+    assert d.disposition is Disposition.IGNORED_FIXED
+    assert d.fix_would_quarantine is True
+    assert "meets the strict quarantine gate" in d.explanation
+
+
+def test_fixable_at_balanced_alert_gate_is_flagged_without_quarantine_claim() -> None:
     d = _eval_ladder(_finding(fixed_version="1.2"), Posture.BALANCED)
     assert d.disposition is Disposition.IGNORED_FIXED
     assert d.fix_would_quarantine is True
-    assert "meets the balanced quarantine gate" in d.explanation
+    assert "quarantine gate" not in d.explanation
+    assert "meets the balanced alert gate" in d.explanation
+    assert "redeploy" in d.explanation
 
 
 def test_fixable_below_threshold_is_not_flagged() -> None:
@@ -1266,7 +1286,7 @@ def test_relevant_runtime_still_quarantines():
     """Declaring perl puts the finding back on the threshold path."""
     d = evaluate_finding(
         _perl_finding(),
-        posture=Posture.BALANCED,
+        posture=Posture.STRICT,
         hardening_penalty=0,
         dangerously_disable_quarantine=False,
         suppressions=(),
@@ -1280,7 +1300,7 @@ def test_runtimes_none_disables_the_gate():
     """Existing callers that pass no runtimes get today's behaviour."""
     d = evaluate_finding(
         _perl_finding(),
-        posture=Posture.BALANCED,
+        posture=Posture.STRICT,
         hardening_penalty=0,
         dangerously_disable_quarantine=False,
         suppressions=(),
@@ -1307,7 +1327,7 @@ def test_openssl_still_quarantines_on_python_project():
     )
     d = evaluate_finding(
         finding,
-        posture=Posture.BALANCED,
+        posture=Posture.STRICT,
         hardening_penalty=0,
         dangerously_disable_quarantine=False,
         suppressions=(),

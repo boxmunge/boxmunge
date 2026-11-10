@@ -5,8 +5,8 @@ boxmunge resolves user compose with ``config --no-env-resolution``, which
 Compose accepts from 2.35.0 (2.34 and older reject the flag, so validation
 could not run). That also covers secrets' single-quoted env-file values with
 ``\\'`` for a quote, which Compose reads literally from 2.24 on.
-install.sh refuses to install or upgrade below this version (keep its
-MIN_COMPOSE_VERSION in step), and `doctor` reports it.
+install.sh refuses to install or upgrade below this version (keep
+bootstrap/compose-version.sh's MIN_COMPOSE_VERSION in step), and `doctor` reports it.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import subprocess
 from boxmunge.docker_run import docker_env
 
 MIN_COMPOSE_VERSION = (2, 35, 0)
-# Same rule as install.sh's require_compose_version: trim ASCII whitespace,
+# Same rule as bootstrap/compose-version.sh: trim ASCII whitespace,
 # then the whole output must be one version, optionally with a packaging
 # suffix (-desktop.1, +ds1-0ubuntu1~24.04.1). Anything else is unreadable,
 # never guessed at.

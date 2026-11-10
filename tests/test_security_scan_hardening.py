@@ -31,7 +31,7 @@ MODEL = {"services": {"web": {"image": "nginx:1"}, "db": {"image": "postgres:16"
 
 
 def _meta(manifest: dict) -> ProjectMeta:
-    return ProjectMeta(manifest=manifest, posture_str="balanced",
+    return ProjectMeta(manifest=manifest,
                        posture=parse_posture("balanced"), dangerously=False,
                        declared_runtimes=None, hosts=[], compose_files=["compose.yml"])
 

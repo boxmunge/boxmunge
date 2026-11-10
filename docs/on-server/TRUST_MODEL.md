@@ -58,7 +58,7 @@ would give deploy read and write access to every file deploy can reach (secrets,
 the shell and the `boxmunge-sftp` subsystem wrapper refuse it. Clients upload with
 `scp -O`, the legacy protocol.
 
-**Compose files** are confined to their own project. A project's `compose.yml` cannot set the compose project name, join or declare another project's networks (or `boxmunge-proxy`, so it cannot claim an alias there), use another project's named volumes, bind-mount or read files outside its own directory (refused under every profile, and again at every start), or join another container's namespaces. See SECURITY.md, "What `compose.yml` may not do". A platform upgrade validates every project's compose file again with the new release's rules. The upgrade does not rebuild or restart a project whose file is now refused. The project keeps the overlay it had, the upgrade leaves its containers as they were, and the operator is alerted (OPERATIONS.md, "Upgrading the Platform"). That guarantee covers the upgrade alone, not other root-run operations such as container-update.
+**Compose files** are confined to their own project. A project's `compose.yml` cannot set the compose project name, join or declare another project's networks (or `boxmunge-proxy`, so it cannot claim an alias there), use another project's named volumes, bind-mount or read files outside its own directory (refused under every profile, and again at every start), or join another container's namespaces. `include:` is limited to plain paths and path lists of files inside the project, at most two levels deep, with no `project_directory` or `env_file` on an entry: Compose's path resolution outside that subset is irregular enough that a reference which looks inside the project can read another project's files. See SECURITY.md, "What `compose.yml` may not do". A platform upgrade validates every project's compose file again with the new release's rules. The upgrade does not rebuild or restart a project whose file is now refused. The project keeps the overlay it had, the upgrade leaves its containers as they were, and the operator is alerted (OPERATIONS.md, "Upgrading the Platform"). That guarantee covers the upgrade alone, not other root-run operations such as container-update.
 
 **Compose interpolation** sees only the project. Compose fills `${VAR}` from the project's own `.env` and from the environment of the process that runs it. boxmunge runs every docker command that touches project compose files (validation, `config`, `up`, `pull`, `build`, `down`, `exec`, `run`, backup and restore, staging copies), and its other docker calls too (the system container, health and doctor probes), with one fixed environment: `PATH` and `LANG=C.UTF-8`, nothing else, whoever started the command. Two docker-adjacent commands do not use it. One is install.sh, which runs `docker compose` for the platform's own Caddy and system stacks, files that ship with the release, as the admin running the installer. The other is `trivy`, which scans images from the daemon, never reads a compose file, and needs `HOME` for its cache. A deploy over SSH, a root systemd timer, `sudo` and MCP therefore resolve a compose file to exactly the model that was validated: a file cannot test for a variable such as systemd's `INVOCATION_ID`, or `COMPOSE_PROFILES`, to behave differently once a timer runs it. `${HOME}`, `${USER}` and every other caller variable are unset. Put project values in the project's `.env`.
 
@@ -119,8 +119,9 @@ What closes them:
   than leaving Docker to create them as root through whatever a symlink
   points at. An upgrade re-records each project from the configs it
   regenerates. The check also confirms every file boxmunge reads (the
-  compose files, the manifest, `.env`, the generated overlay, and whatever
-  `compose.yml` includes, extends or names in `env_file`/`label_file`)
+  compose files, the manifest, `.env`, the generated overlay, whatever
+  `compose.yml` includes, extends or names in `env_file`/`label_file`,
+  and every env file of the resolved model)
   still hashes to what deploy recorded, so a container that rewrote a
   control file boxmunge's validator would still accept — a manifest set to
   `security.profile: off`, say — is refused until a redeploy re-blesses it.
@@ -206,11 +207,16 @@ reads from that directory is checked before use:
   `active-slot`.
 - `probation.json` must be a JSON object with a semver `version`, an
   ISO-8601 `expires_at` with a timezone, and a `previous_slot` of `a` or `b`
-  that is the current standby slot and a working venv (promotion deletes
-  it; a rollback swaps to it). One naming the live slot is stale and is
-  removed. An `expires_at` later than a fresh probation's 6 hours (plus 15
-  minutes for clock steps) counts as expired, so a forged far-future value
-  cannot hold off upgrades.
+  that is the current standby slot. One naming the live slot is stale and is
+  removed. Promotion deletes the standby whatever it holds; a rollback swaps
+  to it only if it is a working venv, and otherwise refuses (with one error
+  and one alert per probation). The first run that reads a probation records
+  its expiry root-only, at most a fresh probation's 6 hours from then, and the
+  probation ends at the earlier of that and `expires_at`: deploy can end a
+  probation early but not lengthen it, so a forged far-future value cannot
+  hold off upgrades. A recorded expiry more than 6 hours ahead means the clock
+  went back (an NTP step, a VM restore); it is moved to 6 hours from then,
+  rather than promoting the release at once.
 - `blocklist.json` must be a JSON object keyed by semver versions.
 - None of these files, nor the legacy `upgrade.lock` (below), may be a
   symlink, a FIFO or anything but a plain file. Root opens them without
@@ -227,8 +233,13 @@ the file as `supervisor` and re-run.
 
 The shim deletes a venv slot only while the live one runs, and never the live
 one. State deploy must not influence is root-only: the crash-safety markers
-inside the venv slots, and the interruption counts and `upgrade.lock` in
-`/opt/boxmunge/upgrade-root/` (root, 0700). One upgrade runs at a time because
+inside the venv slots, and in `/opt/boxmunge/upgrade-root/` (root, 0700) the
+interruption counts, `upgrade.lock`, the installer fingerprint (which decides
+whether an upgrade re-runs `install.sh`), the probation's recorded expiry and
+failure counts (keyed by the live slot, not by the version in `probation.json`),
+the health report from just before the upgrade (`health-baseline`: a health
+error already there then does not roll the release back) and the name of the
+stash the upgrade made (`upgrade-stash`). One upgrade runs at a time because
 the shim, `auto-update`, `check-probation` and `legacy-stage` all hold that
 lock, which deploy cannot replace. Shims up to 0.10.1 locked
 `upgrade-state/upgrade.lock` instead, and the one that installs this release
@@ -243,8 +254,20 @@ writes there too (timers, upgrades). Root opens those files without following a 
 symlink and refuses anything but a plain file with one link (the operational log, lock files,
 the container-update lock, stash archives, decrypted restore snapshots). It sets owner and mode
 on the open descriptor, never by name after the fact (atomic state writes, backup dumps and
-temps). A planted link makes the operation fail with an error naming the path, instead of
-redirecting root to another file. Remove the link and re-run.
+temps). Root reads the `state/` records (deploy, pause, quarantine, health, scan, breaker,
+KEV, alert and update records) the same way: without following a link, refusing a FIFO or
+other non-regular file without blocking on it, and refusing a file over 64 MiB. A planted
+link makes the operation fail with an error naming the path, instead of redirecting root to
+another file. Remove the link and re-run.
+
+A platform rollback restores exactly the stash its upgrade made, never whichever is newest in
+`stashes/`: the shim records the stash's name, size and sha256 root-only, copies that archive
+into `upgrade-root/rollback-stash/` (opened without following a link, and only if it is a plain
+file root owns, which deploy cannot write, with the recorded size and sha256, so no other stash
+renamed onto the name passes), and has the previous release restore the copy. A stash with link
+members, made by a release before 0.10.2, is recorded by name alone: the upgrade rewrites it
+without them. A missing
+or replaced stash stops the rollback as "ROLLBACK PARTIAL", naming the file.
 
 This protects the last path component only. Deploy can still swap an intermediate directory it
 owns (`projects/<p>/backups`, a `state/` subdirectory, `inbox/.tmp`) for a symlink, so a root
@@ -276,10 +299,10 @@ On a host with no deploy user the hook is not run and the deploy fails, saying s
 
 ### What deploy may ask root to do
 
-`/etc/sudoers.d/boxmunge-deploy` grants deploy exactly two shim invocations:
+`/etc/sudoers.d/boxmunge-deploy` grants deploy exactly three shim invocations:
 
 ```text
-deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmunge/bin/boxmunge-upgrade target *
+deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmunge/bin/boxmunge-upgrade target *, /opt/boxmunge/bin/boxmunge-upgrade repair-deps
 ```
 
 - `auto` discovers the latest release and upgrades to it.
@@ -287,11 +310,18 @@ deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmun
   version that is blocklisted on this box and any version below the installed
   one (`config/version`, which deploy cannot write). Reinstalling the installed
   version is allowed.
+- `repair-deps` takes no argument. It installs the hash-pinned dependencies of
+  the installed release (`config/version` again) into the live venv, from that
+  release's bundle, verified like an upgrade's; it refuses if the live venv
+  runs another version. It builds, swaps and removes no venv, so it is allowed
+  during probation.
 
 Everything else is root-only: `run` (the auto-update timer), `check-probation`
-(the health timer), `clear-blocklist`, and `force-target <version>`, the operator
-override that skips the blocklist and the downgrade floor. sudo matches the whole
-argument string, so `target *` cannot reach `force-target`. The auto-update timer's
+(the health timer), `clear-blocklist`, `install-sudoers`, `install-docs`, the
+`userns-*` commands, and `force-target <version>`, the operator override that
+skips the blocklist and the downgrade floor. sudo matches the whole
+argument string, so `target *` cannot reach `force-target`, and `auto` and
+`repair-deps` take no further words. The auto-update timer's
 `run` applies the same downgrade floor and skips blocklisted versions.
 
 The rule text lives in the shim (`boxmunge-upgrade install-sudoers`). install.sh
@@ -373,7 +403,7 @@ Quote `"off"`: PyYAML parses unquoted `off` as YAML 1.1 boolean `False`,
 which the validator catches with a targeted error, but writing the quotes
 in the first place avoids the round-trip.
 
-A deploy-time `[WARNING] SECURITY OFF` message is emitted on every `stage`, `promote`, `prod-deploy`, `resume`, and `upgrade` for any service on `profile: off`. The warning is repeated by design — the shortest path to making it go away is removing `profile: off` from the manifest.
+A deploy-time `[WARNING] SECURITY OFF` message is emitted on every `stage`, `promote`, `prod-deploy`, `rollback`, `recover`, `resume`, `security resume`, and `upgrade` for any service on `profile: off`. The warning is repeated by design — the shortest path to making it go away is removing `profile: off` from the manifest.
 
 ### Profile ladder
 
@@ -409,8 +439,20 @@ release between the box's version and the candidate (the candidate
 included) is breaking, and never into a new major version. A box that
 cannot reach a security or break-fix release for that reason alerts its
 operator and reports a `platform-updates` health warning instead. The
-version-check circuit breaker can hold a broken security or break-fix
-release fleet-wide.
+version-check circuit breaker can hold a broken release fleet-wide. A box
+honours a hold whenever the service answers: a held release (a feature
+release too) is never installed, automatically or by a plain `upgrade`;
+only `upgrade --target` installs it, deliberately. GitHub is consulted only when the service
+cannot be reached at all; an error answer from the service (a 429, a 5xx, a
+malformed body) fails the check instead. On GitHub a hold is the `[held]`
+marker in a release's title, which only someone with write access to the
+repository can set (release notes, which quote contributors' PR titles, do
+not count, and the release workflow refuses to publish a release carrying
+it). The maintainer adds it when tripping the breaker, so a box that cannot
+reach the service still honours the hold; until it is added, GitHub's
+answer lags the service's, which is why an error answer is never a reason to
+ask GitHub. A box whose `boxmunge.yml` sets `version_check.enabled: false`
+asks neither, and gets no automatic updates at all.
 
 The class and the breaking flag are decided from `releases.json` alone. The
 release workflow refuses to build a tag that is not listed there with a
@@ -448,7 +490,9 @@ compromise of any single one cannot silently propagate.
    `release.yml` is pinned to a 40-character commit SHA, not a version
    tag, so a tag-takeover on (e.g.) `actions/checkout` cannot redirect
    to a malicious commit. Dependabot maintains these pins on a weekly
-   schedule. A lint test (`tests/test_release_pinning.py`) refuses any
+   schedule, and proposes a release only once it is 7 days old, so a
+   compromised upload has time to be caught and pulled (security updates
+   are not held back). A lint test (`tests/test_release_pinning.py`) refuses any
    workflow whose `uses:` references a tag.
 
 4. **Python dependencies.** The workflow installs from hash-pinned
@@ -459,11 +503,15 @@ compromise of any single one cannot silently propagate.
    `--require-hashes`.
 
 5. **External binaries inside the system container.** age and rclone are
-   downloaded over HTTPS in `system/Dockerfile`, then verified against
-   `AGE_SHA256` and `RCLONE_SHA256` ARGs baked into the Dockerfile via
-   `sha256sum -c`. Mismatched downloads abort the image build. Version
-   and SHA bumps travel together through Dependabot or a single audit-
-   visible commit.
+   downloaded over HTTPS in `system/Dockerfile`, then verified via
+   `sha256sum -c` against a SHA256 baked into the Dockerfile for each
+   supported architecture (`AGE_SHA256_AMD64`, `AGE_SHA256_ARM64`, and the
+   same for rclone). Mismatched downloads abort the image build, and so does
+   any other architecture. Dependabot does not track these: a version and
+   its hashes are bumped by hand in one audit-visible commit, from
+   upstream's signed checksums (rclone's PGP-signed `SHA256SUMS`, age's
+   Sigsum proofs). The cosign that verifies releases is pinned the same way,
+   per architecture, in `bootstrap/cosign.sh`.
 
 6. **Base container images.** Every internal Dockerfile pins its base
    by digest (`FROM image:tag@sha256:<digest>`), not by tag, so a
@@ -525,12 +573,13 @@ a poisoned PyPI package does not pass step 13 on the box either (hash pin).
 
 ## CVE Policy as a Defensive Layer
 
-boxmunge's CVE policy provides a defensive layer beyond container hardening. The policy treats unfixed upstream CVEs above the project's posture threshold as actionable: it quarantines projects automatically and surfaces operator-suppressible findings via the audit trail.
+boxmunge's CVE policy provides a defensive layer beyond container hardening. The policy treats every CVE on CISA's Known Exploited Vulnerabilities (KEV) catalog, fixed or not, as actionable, and under `strict` and `paranoid` also CVEs above the posture's severity threshold that have no fix upstream (`balanced`, the default, alerts on those instead; `relaxed` and `dangerously_disable_quarantine` alert on every scan instead of quarantining in some of the KEV cases; see CVE_POLICY.md): it quarantines projects automatically and surfaces operator-suppressible findings via the audit trail.
 
 The trust-model assumptions for this layer are explicit:
 
 - **Trivy's vulnerability database is correct.** False negatives in the DB pass through silently; false positives produce noise but never an unsafe outcome.
-- **Suppressions are honest operator decisions.** A suppression is a signed-off declaration that a CVE has been reviewed and judged not exploitable in the deployed config. boxmunge does not second-guess it; the audit trail and the `until` date are the controls.
+- **Suppressions are honest operator decisions.** A suppression is a signed-off declaration that a CVE has been reviewed and judged not exploitable in the deployed config. boxmunge does not second-guess it, with one exception: a suppression never applies to a CVE on the KEV catalog (`suppress` refuses one, and an older suppression stops applying on the first scan after CISA lists the CVE). Otherwise the audit trail, the `until` date (at most 90 days ahead) and the expiry alert are the controls.
+- **The CISA KEV catalog is current.** It is refreshed before every scan, from CISA's feed or, if that fails, CISA's GitHub mirror (an ordered list of trusted sources, `kev.sources` in `boxmunge.yml`). It is stale when no catalog has been accepted for 8 days, or when its own release date is over 21 days old (a lagging mirror). A stale or rejected catalog is alerted at priority 1 with each source's error, and while it is stale the KEV gate is off (fail toward uptime, never toward quarantine).
 - **The operator is responsible for revisiting suppressions before they expire.** boxmunge enforces expiry mechanically (the finding becomes active again on the next scan after `until`) and emits a high-priority Pushover alert; what it cannot do is decide whether the CVE has actually been mitigated upstream or in the deployed code.
 
 Like the rest of the trust model, this layer assumes a single trusted operator. There is no per-project review delegation and no multi-party approval for suppressions; the audit log is the only record of who signed off on what. See `agent-help cve` for the policy reference and `agent-help cve-incident` for the response playbook.

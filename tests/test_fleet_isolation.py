@@ -12,7 +12,7 @@ import yaml
 
 from boxmunge.commands import check as check_mod
 from boxmunge.commands.check import run_check_all
-from boxmunge.commands.health_cmd import (
+from boxmunge.health_checks.projects import (
     check_config_drift,
     check_lifecycle_blocked,
     check_project_containers,
@@ -114,13 +114,13 @@ class TestCheckAllIsolation:
         self, fleet: BoxPaths, monkeypatch, capsys,
     ) -> None:
         checked: list[str] = []
-        real = check_mod.run_check
+        real = check_mod.check_with_reason
 
         def _spy(name, paths, verbose=True):
             checked.append(name)
             return real(name, paths, verbose)
 
-        monkeypatch.setattr(check_mod, "run_check", _spy)
+        monkeypatch.setattr(check_mod, "check_with_reason", _spy)
         _corrupt(fleet.project_quarantine_state("aaa"))
         rc = run_check_all(fleet, read_only=True)
         assert checked == ["bbb", "ccc"]
@@ -190,7 +190,7 @@ class TestHealthIsolation:
     ) -> None:
         _break_manifest(fleet, "aaa")
         check = check_config_drift(fleet)
-        assert check.status == "error"
+        assert check.status == "warn"
         assert "aaa" in check.detail
 
     def test_lifecycle_reports_corrupt_quarantine_state(
@@ -198,7 +198,7 @@ class TestHealthIsolation:
     ) -> None:
         _corrupt(fleet.project_quarantine_state("aaa"))
         check = check_lifecycle_blocked(fleet)
-        assert check.status == "error"
+        assert check.status == "warn"
         assert "aaa" in check.detail
 
     def test_project_containers_reports_corrupt_state(
@@ -210,11 +210,11 @@ class TestHealthIsolation:
             return subprocess.CompletedProcess(cmd, 0, stdout="[{}]", stderr="")
 
         monkeypatch.setattr(
-            "boxmunge.commands.health_cmd.subprocess.run", _fake_run,
+            "boxmunge.health_checks.projects.subprocess.run", _fake_run,
         )
         _corrupt(fleet.project_quarantine_state("aaa"))
         check = check_project_containers(fleet)
-        assert check.status == "error"
+        assert check.status == "warn"
         assert "aaa" in check.detail
 
 

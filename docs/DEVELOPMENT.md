@@ -26,6 +26,8 @@ src/boxmunge/            server package
   cve/                   CVE scanning, the trust-ladder policy engine, KEV feed, quarantine
   health_checks/         checks used by health and check-all
   tui/                   the `console` terminal UI
+  api/                   the action registry and boxmunge-apid, the plugin API daemon (dev mode
+                         only so far; see docs/PLUGIN_API.md)
   mcp_server.py          MCP tool registry (_TOOL_DEFS); mcp_tools.py holds the handlers
   paths.py               every on-box path, derived from one root (BoxPaths)
   manifest.py            manifest loading and validation; migration.py upgrades old schemas
@@ -63,9 +65,10 @@ Every server command is a module in `src/boxmunge/commands/`. The usual shape is
 which only runs names in `ALLOWED_COMMANDS` and starts each as a `boxmunge-server` subprocess.
 The MCP server exposes a subset as tools.
 
-**This is changing.** A single action registry with typed results and capability tiers is being
-built so the CLI, shell, MCP, and plugins all derive from one definition. Until it lands, adding a
-command means touching several places, listed below.
+**This is changing.** A single action registry with typed results and capability tiers
+(`src/boxmunge/api/`) is meant to become the one definition the CLI, shell, MCP, and plugins derive
+from. Today only `boxmunge-apid` serves it, in dev mode against a fixture box; the CLI, shell and
+MCP still keep their own tables, so adding a command means touching several places, listed below.
 
 ### Adding a command today
 
@@ -79,9 +82,11 @@ command means touching several places, listed below.
    a comment saying why. A test fails until you choose.
 4. If agents should call it over MCP, add a tool to `_TOOL_DEFS` in `src/boxmunge/mcp_server.py`
    and a handler in `src/boxmunge/mcp_tools.py`.
-5. Add it to `HELP_TEXT` in `src/boxmunge/commands/help.py`, give it a usage entry in
-   `USAGE` in `src/boxmunge/commands/usage.py` (what `help <command>` prints; a test fails until
-   every registered command has one), and document it in `docs/on-server/OPERATIONS.md`.
+5. Add it to `HELP_TEXT` in `src/boxmunge/commands/help.py` (in the operator section if the
+   deploy shell does not allow it), give it a usage entry in `USAGE` in
+   `src/boxmunge/commands/usage.py` (what `help <command>` prints), and document it in
+   `docs/on-server/OPERATIONS.md`. Tests fail until every registered command has a usage entry
+   and a line in `help`.
 6. If it only reads state, give it `--json`.
 7. Validate every project name with `boxmunge.paths.validate_project_name` before use.
    `BoxPaths` also validates names when it builds a project path, so an invalid name raises rather
@@ -109,6 +114,7 @@ command means touching several places, listed below.
 |---|---|---|
 | `/opt/boxmunge/config/` | root:deploy | `boxmunge.yml`, backup key, host secrets, suppressions |
 | `/opt/boxmunge/projects/<p>/` | deploy | manifest, compose files, generated overlay, secrets, backups, data |
+| `/opt/boxmunge/inbox/` | deploy | uploaded bundles waiting for `stage` or `prod-deploy` |
 | `/opt/boxmunge/state/` | deploy | registry, locks, health, deploy, staging, scan, KEV, container-update, platform-update and OS-update state, and the unconfigured-alerts log throttle |
 | `/opt/boxmunge/upgrade-state/` | root:deploy | active venv slot, probation, blocklist |
 | `/opt/boxmunge/logs/boxmunge.log` | deploy, group-writable | structured JSON-lines operational log, written by root and deploy |
@@ -118,18 +124,27 @@ command means touching several places, listed below.
 
 ## Testing
 
-Three tiers, fastest first.
+Four tiers, fastest first.
 
 | Tier | Command | Needs | Covers |
 |---|---|---|---|
 | Unit | `make test` | Python | Logic, validation, policy, generated config; also the pinning, file-length, and sign-off lints |
-| Client | `make test-cli` | Python | The PyPI client |
+| Client | `make test-cli` | Python | The PyPI client (CI also runs `services/version-check/`'s own tests) |
 | Integration | `make test-integration` | Docker, `age` | Real compose deploys, Caddy, backup and restore round-trips, MCP |
 | Full system | `make test-vm` | QEMU, `mkisofs`, the client | Boots Debian 13, runs `server-setup`, deploys, backs up, restores (see `tests/vm/README.md`) |
 
 Tests that need Docker carry the `integration` marker, wherever they live; `make test` deselects
 them and `make test-integration` selects them. Integration tests skip when Docker or `age` is missing. CI sets `BOXMUNGE_REQUIRE_INTEGRATION=1`,
 which turns a missing prerequisite into a failure, so a green CI run means they actually ran.
+
+CI splits the integration tests and the remapped-daemon (`userns-dind`) tests into parallel shards
+of whole test files (`--shard K/N`, `tests/shard.py`), balanced by the seconds per file in
+`tests/shard_weights.json`. A module marked `shard_by_test` is split test by test instead, for
+tests long enough to dominate a shard (the userns migration crash sweeps); its tests must not
+depend on each other. A new file runs in some shard from its first commit, weighed as the average;
+stale weights only unbalance the shards. Each sharded CI job prints its seconds per unit last; to
+refresh the weights, merge those, or run a tier with `--store-shard-weights
+tests/shard_weights.json`.
 
 Every integration test that backs up, restores or syncs runs through a real `boxmunge-system`
 container, built from `system/Dockerfile` and started from `system/compose.yml` on the test root
@@ -153,7 +168,9 @@ signed bundle. MCP is always installed, not opt-in: the shim builds each venv sl
 anything else would be lost on the next upgrade. Likewise,
 every GitHub Action is pinned to a commit SHA. `tests/test_release_pinning.py` fails the build if
 either rule is broken. To change a dependency, edit the matching `.in` file or `pyproject.toml`, run
-`make lock`, and commit the regenerated `.txt` files. Dependabot proposes routine bumps.
+`make lock`, and commit the regenerated `.txt` files. Dependabot proposes routine bumps: each
+week, one pull request per ecosystem (pip, Actions, Docker) for minor and patch updates, and one per
+major, for releases at least 7 days old (a pip major waits 30). See `.github/dependabot.yml`.
 
 ## How a release reaches a server
 
@@ -173,7 +190,9 @@ either rule is broken. To change a dependency, edit the matching `.in` file or `
 3. Once the release is published, the maintainer redeploys the version-check service so it serves
    the new `releases.json`. Do not redeploy it before then: it would offer a release boxes cannot
    download yet. Servers discover new releases through that service, with the GitHub releases
-   list (and its `[security]` / `[breakfix]` / `[breaking]` markers) as the fallback. If you
+   list (and its `[security]` / `[breakfix]` / `[breaking]` markers) as the fallback only when
+   the service cannot be reached at all; an error answer from it is not a reason to fall back
+   (see "Holding a broken release" below for the `[held]` marker). If you
    change an existing entry in `releases.json`, edit that release's title on GitHub to match, and
    confirm with `python scripts/release-lint.py audit --github-releases FILE`, where FILE is the
    output of `gh api --paginate --slurp 'repos/boxmunge/boxmunge/releases?per_page=100'`.
@@ -197,3 +216,105 @@ The full trust chain is in `docs/on-server/TRUST_MODEL.md`.
 
 The client is published to PyPI by `.github/workflows/publish-cli.yml` on a `cli-v*` tag, using
 PyPI Trusted Publishing, so no API token exists anywhere.
+
+## The version-check admin pages
+
+`services/version-check` serves two maintainer-only views of update checks and failure reports,
+each with its own credential, never interchangeable:
+
+- `/v1/admin/stats` (HTML, for a browser) shows daily checks per version, each network prefix
+  (IPv4 /24, IPv6 /48) that checked in the last 90 days with its latest version and first and
+  last day seen, and recent failure reports with their prefix. It needs a passkey sign-in. Signing in sets an 8-hour
+  session cookie (`Path=/v1/admin`, HttpOnly, Secure, SameSite=Strict). Its signing key needs both
+  `STATS_SECRET` and a random key created in the service's database on first start, so the
+  Bearer secret alone cannot forge a session. Without a session, the page redirects to
+  `/v1/admin/login`.
+- `/v1/admin/version-checks` (JSON, for scripts) needs `Authorization: Bearer <STATS_SECRET>`.
+  The session cookie does not open it, and the HTML page ignores the Bearer header.
+
+Without `STATS_SECRET`, or with one shorter than 32 characters, every admin route answers 503 and
+names the setting. Wrong secrets, whether sent as a Bearer header or as the registration code,
+count against one limit per client (10 per 15 minutes) in each worker: gunicorn runs two, and
+each counts on its own, so a client can make up to 20 wrong guesses per window. Past it, that
+client is refused even with the right secret until the window ends. Each worker tracks at
+most 10,000 guessing clients per window; one IPv6 /48 holds enough /64s to fill that, so once
+it is full a new client is counted by its network (IPv4 /24 or IPv6 /48, 20 wrong guesses per
+window) instead, and a flood locks out only its own network. Only when 10,000 networks are
+tracked too is every new client refused the same way (fail closed). Each client (IPv4 address or IPv6 /64) may start
+5 sign-in or registration ceremonies per 5 minutes in each worker, and each network (IPv4 /24 or
+IPv6 /48) 20, both counted in memory: one client cannot block another's sign-in, the many /64s
+of one /48 cannot fill the database's global backstop of 10,000 pending challenges, and no
+address is stored. The relying
+party is `ADMIN_RP_ID` (default `boxmunge.dev`) with origin `https://<ADMIN_RP_ID>`, so the passkey
+works on the production host only, not on `staging.<host>`. One passkey can be registered. It must
+use ES256 or EdDSA, and the authenticator must verify the user.
+
+### First-time setup
+
+1. Set the registration code (it is `STATS_SECRET`, at least 32 characters), from the deploy
+   shell: `secrets set boxmunge-web STATS_SECRET=<value>`, generating the value with
+   `openssl rand -hex 32`.
+2. Redeploy the service (`stage boxmunge-web`, then `promote boxmunge-web`) so it reads the secret.
+3. Open `https://boxmunge.dev/v1/admin/register`, paste the code into the form, and create the
+   passkey when the browser asks. Registration then closes.
+4. Sign in at `https://boxmunge.dev/v1/admin/login`.
+
+The code goes only in the form, never in a URL.
+
+### Recovery
+
+If the passkey is lost, or you suspect `STATS_SECRET` has leaked, set a new `STATS_SECRET` and
+redeploy (`openssl rand -hex 32` again). The stored passkey was registered under the old code, so it is ignored and registration
+reopens. Every existing session ends too, because the session key changes. Then repeat steps 3
+and 4. Nothing on the web resets the passkey.
+
+## Holding a broken release
+
+The version-check circuit breaker withholds a broken release from every box that can reach
+the service: a security or break-fix release is withdrawn from automatic updates, and any
+release, a feature release included, is refused by a manual `upgrade` (which installs the
+newest unheld release instead, or names `upgrade --target X.Y.Z` to install the held one
+deliberately). Trip it, then mark the hold on GitHub, so that boxes which
+cannot reach the service (and fall back to the GitHub releases list) hold it too:
+
+```bash
+curl -X POST -H "Authorization: Bearer $CB_SECRET" \
+  'https://boxmunge.dev/v1/circuit-breaker/trip?version=X.Y.Z'
+gh release edit vX.Y.Z --title "vX.Y.Z [security] [held]"   # keep any class marker
+```
+
+Boxes read `[held]` from the release title only, never from the notes (auto-generated notes
+quote contributors' PR titles), so only someone with write access to the repository can set
+it. The release workflow refuses to publish a draft carrying `[held]` anywhere: a release is
+published unheld and held afterwards. To release the hold, reset the breaker
+(`/v1/circuit-breaker/reset?version=X.Y.Z`) and take `[held]` out of the title again. Check
+that GitHub matches the service with
+`python scripts/release-lint.py audit --github-releases FILE --held X.Y.Z` (one `--held`
+per held version, none when nothing is held); it fails on a hold missing on either side and
+on a `[held]` left in release notes, where it does nothing.
+
+Auto-trip (`CIRCUIT_BREAKER_AUTO_THRESHOLD`, a number of distinct reporting networks in six
+hours) is off (`0`) and should stay off. Failure reports are unauthenticated, so with it set
+to N, anyone with addresses in N networks (N IPv4 /24s, or N IPv6 /48s, which are cheap)
+holds the newest security release back from the whole fleet until the breaker is reset. The
+service prints that warning at every start while it is set. Only the network a report comes
+from counts; nothing in a report's body, a box ID least of all, may ever count towards the
+threshold, because the sender writes it. Failure reports stay useful without it: the stats
+page lists them, every distinct failure a network reports is kept, and
+`/v1/failures?version=X.Y.Z` counts the reports (by stage) and the networks that sent them.
+For sizing the `check-data` volume: a network stores at most 10 rows (about 200 bytes each)
+per listed version per six-hour window, so at most 40 a day per network and version, kept
+90 days.
+
+The service's limits are per gunicorn worker. Beyond the per-client request limit, a flood
+of distinct clients that fills a worker's table (100,000) no longer locks out every box that
+has not checked yet: a new client is then limited by its network (600 requests a minute per
+IPv4 /24 or IPv6 /48), so the flood exhausts only its own networks.
+
+The service's backup (`backup boxmunge-web`) runs `backup_db.py`, which copies the database
+through SQLite's backup API, never the file itself, while the service runs. Its restore checks
+a snapshot before writing it, and needs the service stopped: any connection inside a
+transaction holds a lock it waits for, then it gives up. Restore with `restore boxmunge-web`,
+which stops the project, runs the restore in the backup service alone and recreates the
+service on the restored data; never run `backup_db.py restore` against the service while it
+serves.

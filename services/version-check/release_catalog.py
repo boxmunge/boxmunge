@@ -35,7 +35,8 @@ from typing import Callable
 RELEASE_CLASSES = ("feature", "breakfix", "security")
 BREAKFIX_CLASSES = frozenset({"breakfix", "security"})
 ENTRY_KEYS = frozenset({"version", "class", "breaking", "url"})
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# ASCII digits only and bounded, so a version is safe to store as a stats key.
+VERSION_RE = re.compile(r"^[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}\Z")
 RELEASE_URL_PREFIX = "https://github.com/boxmunge/boxmunge/releases/tag/v"
 HOLD_REASON = "circuit_breaker"
 
@@ -194,24 +195,36 @@ def find_blocked(releases: list[dict], caller: str) -> dict | None:
 def apply_holds(
     offers: dict[str, dict | None], is_held: Callable[[str], bool],
 ) -> tuple[dict[str, dict | None], list[dict]]:
-    """Withhold circuit-broken auto-apply candidates.
+    """Withhold circuit-broken candidates.
 
-    A held candidate is withdrawn, not replaced by an older one, with one
-    exception: when the breakfix candidate is held, the unheld security
-    candidate stands in for it. A box that accepts break-fixes must never be
-    offered less than a security-only box.
+    A held security or break-fix candidate is withdrawn, not replaced by an
+    older one, with one exception: when the breakfix candidate is held, the
+    unheld security candidate stands in for it. A box that accepts
+    break-fixes must never be offered less than a security-only box.
+
+    A held ``latest`` (of any class: a tripped feature release too) stays in
+    the answer but is listed in ``held``; the box then installs the newest
+    unheld offer instead, or refuses and names ``upgrade --target``.
 
     Returns (offers, held) where held lists each withheld version once.
     """
-    security, breakfix = offers["security"], offers["breakfix"]
+    security, breakfix, latest = offers["security"], offers["breakfix"], offers["latest"]
     held_versions: list[str] = []
-    if security and is_held(security["version"]):
-        held_versions.append(security["version"])
+
+    def hold(version: str) -> bool:
+        if version in held_versions:
+            return True
+        if is_held(version):
+            held_versions.append(version)
+            return True
+        return False
+
+    if security and hold(security["version"]):
         security = None
-    if breakfix and (breakfix["version"] in held_versions or is_held(breakfix["version"])):
-        if breakfix["version"] not in held_versions:
-            held_versions.append(breakfix["version"])
+    if breakfix and hold(breakfix["version"]):
         breakfix = security
+    if latest:
+        hold(latest["version"])
     held = [{"version": v, "reason": HOLD_REASON} for v in held_versions]
     return {**offers, "security": security, "breakfix": breakfix}, held
 

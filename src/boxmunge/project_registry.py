@@ -24,15 +24,23 @@ def _registry_path(paths: BoxPaths) -> Path:
     return paths.state / "projects.txt"
 
 
-def _auto_migrate(paths: BoxPaths, registry: Path) -> set[str]:
-    """One-time migration: populate registry from existing project dirs."""
+def _auto_migrate(paths: BoxPaths, registry: Path) -> None:
+    """One-time migration: write the registry from existing project dirs.
+    A dir whose name is not a valid project name (a legacy `-staging` one)
+    becomes a line of its own, which every read then reports."""
     names: set[str] = set()
+    invalid: list[str] = []
     if paths.projects.exists():
         for d in sorted(paths.projects.iterdir()):
             if d.is_dir() and (d / "manifest.yml").exists():
+                try:
+                    validate_project_name(d.name)
+                except InvalidProjectName:
+                    invalid.append(d.name)
+                    continue
                 names.add(d.name)
-    if names:
-        _save(registry, names, ())
+    if names or invalid:
+        _save(registry, names, tuple(invalid))
         # Already on disk, so registered anyway; add_project refuses new ones.
         pairs = overlapping_pairs(names)
         if pairs:
@@ -43,7 +51,6 @@ def _auto_migrate(paths: BoxPaths, registry: Path) -> set[str]:
                 + ", ".join(f"{a} / {b}" for a, b in pairs),
                 paths,
             )
-    return names
 
 
 def _save(registry: Path, names: set[str], unparsed: tuple[str, ...]) -> None:
@@ -78,7 +85,9 @@ def read_registry(paths: BoxPaths) -> RegistryRead:
     """
     registry = _registry_path(paths)
     if not registry.exists():
-        return RegistryRead(frozenset(_auto_migrate(paths, registry)), (), ())
+        _auto_migrate(paths, registry)
+        if not registry.exists():
+            return RegistryRead(frozenset(), (), ())
     names: set[str] = set()
     unparsed: list[str] = []
     problems: list[str] = []
@@ -124,6 +133,30 @@ def deployed_among(names: frozenset[str] | set[str], paths: BoxPaths) -> list[st
     """
     return sorted(name for name in names
                   if (paths.project_dir(name) / "manifest.yml").exists())
+
+
+def missing_among(names: frozenset[str] | set[str], paths: BoxPaths) -> list[str]:
+    """Those of `names` with no project directory, sorted: not yet deployed
+    (project-add), or left behind by a removal that did not finish
+    (unfinished_removals tells them apart). Nothing to scan either way."""
+    return sorted(name for name in names if not paths.project_dir(name).exists())
+
+
+def unfinished_removals(names: frozenset[str] | set[str], paths: BoxPaths) -> list[str]:
+    """Those of `names` with no project directory that still have deploy,
+    scan or health state: a project that was deployed and then (partly)
+    removed. A name never deployed has none, and is just awaiting its first
+    deploy."""
+    return [name for name in missing_among(names, paths)
+            if any(f.exists() for f in (paths.project_deploy_state(name),
+                                        paths.project_scan_state(name),
+                                        paths.project_health_state(name)))]
+
+
+def forget_advice(name: str) -> str:
+    return (f"{name} was deployed and its project directory is gone (an unfinished "
+            f"removal): drop the entry as the supervisor with "
+            f"`sudo boxmunge-server project-forget {name}`")
 
 
 def name_collisions(name: str, others: set[str]) -> list[str]:

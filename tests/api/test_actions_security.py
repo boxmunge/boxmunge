@@ -5,11 +5,13 @@ from __future__ import annotations
 import json
 
 import pytest
+import yaml
 
 from boxmunge.api.dev.fixture_host import FixtureHost
 from boxmunge.api.principal import Principal, Tier
 from boxmunge.api.result import ActionError, ErrorCode
 from boxmunge.cve.breaker import breaker_path
+from boxmunge.manifest import CURRENT_SCHEMA_VERSION
 from tests.api.fakes import make_invoker
 
 WEBUI = Principal.plugin("webui", Tier.OBSERVE)
@@ -84,10 +86,14 @@ def test_findings_from_older_scan_files_read_as_null(fixture_paths) -> None:
     assert finding["kev_listed"] is None and finding["pkg_class"] is None
 
 
-def test_manifest_without_schema_version_fails(fixture_paths) -> None:
-    fixture_paths.project_manifest("shop").write_text("project: shop\n")
-    error = _error(fixture_paths, "security.project", {"project": "shop"})
-    assert error.code is ErrorCode.FAILED and "missing schema_version" in error.message
+def test_manifest_without_schema_version_reads_as_1(fixture_paths) -> None:
+    path = fixture_paths.project_manifest("shop")
+    manifest = yaml.safe_load(path.read_text())
+    del manifest["schema_version"]
+    path.write_text(yaml.safe_dump(manifest))
+    before = _call(fixture_paths, "security.project", {"project": "shop"})
+    path.write_text(yaml.safe_dump({**manifest, "schema_version": CURRENT_SCHEMA_VERSION}))
+    assert before == _call(fixture_paths, "security.project", {"project": "shop"})
 
 
 def test_pre_registered_project_has_no_security_view(fixture_paths) -> None:
@@ -161,3 +167,23 @@ def test_every_enum_reads_as_a_lowercase_machine_value(fixture_paths) -> None:
     assert (billing["severity"], billing["effective_severity"]) == ("critical", "critical")
     summary = _call(fixture_paths, "security.summary")
     assert [q["severity"] for q in summary["quarantined"]] == ["critical"]
+
+
+def test_summary_reports_where_the_kev_catalog_came_from(fixture_paths) -> None:
+    fixture_paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
+    fixture_paths.kev_catalog.write_text(json.dumps({
+        "source": "https://raw.githubusercontent.com/cisagov/kev-data/main/x.json",
+        "released_at": "2026-01-06T19:44:45.179700+00:00",
+        "fetched_at": "2026-01-07T00:00:00+00:00", "cve_ids": ["CVE-2026-1"]}))
+    kev = _call(fixture_paths, "security.summary")["kev"]
+    assert kev["source"] == "https://raw.githubusercontent.com/cisagov/kev-data/main/x.json"
+    assert kev["released_at"] == "2026-01-06T19:44:45.179700Z"
+    assert kev["fetched_at"] == "2026-01-07T00:00:00Z"
+    assert kev["entries"] == 1
+    assert "no KEV catalog has been accepted" in kev["stale_reason"]
+
+
+def test_summary_without_a_kev_cache_says_so(paths) -> None:
+    kev = _call(paths, "security.summary")["kev"]
+    assert kev == {"source": None, "released_at": None, "fetched_at": None, "entries": 0,
+                   "stale_reason": "no KEV catalog has been fetched yet"}

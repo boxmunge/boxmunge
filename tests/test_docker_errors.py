@@ -56,12 +56,13 @@ def test_check_false_does_not_raise():
 @pytest.mark.parametrize("capture", [False, True])
 def test_timeout_carries_stderr_so_far(tmp_path, capture):
     # The timeout must comfortably exceed the time the shell needs to start
-    # and print, or a loaded machine times out before anything was written.
+    # and print, or a loaded machine times out before anything was written:
+    # 3s did not, with every CPU busy running the suite in parallel.
     cmd = _script(tmp_path, "echo 'waiting for registry' >&2; exec sleep 60")
     with pytest.raises(DockerError) as exc:
-        _run(cmd, capture=capture, timeout=3)
+        _run(cmd, capture=capture, timeout=10)
     message = str(exc.value)
-    assert "timed out after 3s" in message
+    assert "timed out after 10s" in message
     assert "waiting for registry" in message
 
 

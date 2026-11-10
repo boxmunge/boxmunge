@@ -72,5 +72,55 @@ grep -q "title=boxmunge upgrade failed msg=The platform stash failed, so the upg
     || fail "version is $(cat "$BOXMUNGE_ROOT/config/version")"
 drop_root
 
+# A stash create that succeeds but does not say which stash it made leaves
+# the rollback nothing it can trust: the upgrade stops there too.
+new_root a
+echo "1.4.0" > "$BOXMUNGE_ROOT/config/version"
+mock_server a 'if [[ "$1 $2" == "stash create" ]]; then echo "done"; exit 0; fi
+[[ "$1" != --version ]] || echo "boxmunge 1.4.0"; exit 0'
+rm "$BOXMUNGE_ROOT/env-a/bin/python"
+stub "$BOXMUNGE_ROOT/env-a/bin/python" '[[ "$1" != "-" ]] || cat >/dev/null; exit 0'
+run_shim target 1.5.0
+expect 1 "stash create did not name the stash it made" "an unnamed stash stops the upgrade"
+[[ "$(readlink "$BOXMUNGE_ROOT/env-active")" == *env-a && ! -e "$BOXMUNGE_ROOT/env-b" ]] \
+    && pass "an unnamed stash: the proven slot stays live" || fail "an unnamed stash: live=$(readlink "$BOXMUNGE_ROOT/env-active")"
+drop_root
+
+# The upgrade records the stash it made with its size and sha256, or by name
+# alone when it holds link members (a release before 0.10.2 made it), which
+# the new release's apply rewrites away.
+for kind in plain links; do
+    new_root a
+    echo "1.4.0" > "$BOXMUNGE_ROOT/config/version"
+    if [[ "$kind" == links ]]; then
+        mock_server a 'if [[ "$1 $2" == "stash create" ]]; then
+    n=boxmunge-stash-2026-06-01T120000.tar.gz
+    python3 -c "import io, tarfile, sys
+with tarfile.open(sys.argv[1], \"w:gz\") as t:
+    i = tarfile.TarInfo(\"projects/app/manifest.yml\"); i.type = tarfile.SYMTYPE; i.linkname = \"repo/manifest.yml\"; t.addfile(i)" "$BOXMUNGE_ROOT/stashes/$n"
+    echo "Stash created: $n"; exit 0
+fi
+[[ "$1" != --version ]] || echo "boxmunge 1.4.0"; exit 0'
+    else
+        mock_server a '[[ "$1" != --version ]] || echo "boxmunge 1.4.0"; exit 0'
+    fi
+    rm "$BOXMUNGE_ROOT/env-a/bin/python"
+    stub "$BOXMUNGE_ROOT/env-a/bin/python" '[[ "$1" != "-" ]] || cat >/dev/null; exit 0'
+    run_shim target 1.5.0
+    expect 0 "probation started" "an upgrade whose stash is $kind completes"
+    read -r v name size sha < "$BOXMUNGE_ROOT/upgrade-root/upgrade-stash"
+    stash="$BOXMUNGE_ROOT/stashes/$name"
+    if [[ "$kind" == plain ]]; then
+        want="$("$REAL_PYTHON3" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$stash")"
+        [[ "$v" == 1.5.0 && -f "$stash" && "$size" == "$(wc -c < "$stash" | tr -d ' ')" && "$sha" == "$want" ]] \
+            && pass "the stash is recorded with its size and sha256" || fail "record: $v $name $size $sha"
+    else
+        [[ "$v" == 1.5.0 && -f "$stash" && -z "${size:-}" && -z "${sha:-}" ]] \
+            && pass "a stash with link members is recorded by name alone" || fail "record: $v $name ${size:-} ${sha:-}"
+        [[ "$OUT" == *"link members"* ]] && pass "and the shim says why" || fail "out: $OUT"
+    fi
+    drop_root
+done
+
 rm -rf "$FIXTURE" "$RELEASE"
 finish

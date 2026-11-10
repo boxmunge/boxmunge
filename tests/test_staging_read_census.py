@@ -84,7 +84,8 @@ def _restore(box, seen):
 def _redeploy(box, seen):
     from boxmunge.commands.deploy import run_deploy
     with staging_docker_off():
-        assert run_deploy("myapp", box.paths) == 0     # its pre-deploy backup fails: a WARN
+        # its pre-deploy backup fails: a WARN
+        assert run_deploy("myapp", box.paths, redeploy=True) == 0
     _dumped(seen)
 
 
@@ -94,7 +95,7 @@ def _rollback(box, seen):
     place_bundle(box.paths, timestamp=V3, files=PROD)
     snapshot = box.paths.project_backups("myapp") / "myapp-p1.tar.gz.age"
 
-    def backup(project, paths, kind=None, manifest=None):
+    def backup(project, paths, kind=None, manifest=None, compose_file=None):
         assert "POISON" not in str(manifest)
         snapshot.parent.mkdir(parents=True, exist_ok=True)
         snapshot.write_text("snapshot")
@@ -112,7 +113,11 @@ def _pause_resume(box, seen):
     from boxmunge.commands.resume_cmd import resume_locked
     with staging_docker_off(), patch("boxmunge.commands.pause_cmd.caddy_reload"), \
             patch("boxmunge.commands.resume_cmd.caddy_reload"):
-        assert pause_locked("myapp", box.paths, reason=None) == 0
+        # The pause's snapshot dumps with production's command (refused at the
+        # spawn, so the pause refuses); without one it pauses.
+        assert pause_locked("myapp", box.paths, reason=None) == 1
+        _dumped(seen)
+        assert pause_locked("myapp", box.paths, reason=None, no_snapshot=True) == 0
         assert resume_locked("myapp", box.paths, True)[0] == 0
     assert "stop" in seen.docker
 
@@ -135,15 +140,19 @@ def _container_update(box, seen):
 
 
 def _scan_and_quarantine(box, seen, monkeypatch):
+    from datetime import datetime, timezone
+
     from boxmunge.commands import security_scan_core
-    from boxmunge.cve.kev import load_kev
+    from boxmunge.cve.kev import KevCatalog
     from boxmunge.lifecycle import is_quarantined
     from tests.test_commands.cve_helpers import CRIT, scan_result
     monkeypatch.setattr(security_scan_core, "scan_image",
                         lambda ref, timeout: scan_result(ref, [CRIT]))
+    # KEV-listed: the default (balanced) posture quarantines only on KEV.
+    kev = KevCatalog(frozenset({CRIT.cve_id}), datetime.now(timezone.utc), datetime.now(timezone.utc), 'test')
     with staging_docker_off(), patch("boxmunge.cve.quarantine.caddy_reload"):
         security_scan_core.scan_one_project_locked(
-            box.paths, "myapp", in_grace=False, kev=load_kev(box.paths))
+            box.paths, "myapp", in_grace=False, kev=kev)
     assert is_quarantined("myapp", box.paths)
     assert "stop" in seen.docker
 
@@ -151,8 +160,10 @@ def _scan_and_quarantine(box, seen, monkeypatch):
 def _security_resume(box, seen, monkeypatch):
     from boxmunge.commands import security_resume, security_scan_core
     from tests.test_commands.cve_helpers import scan_result, seed_quarantine
+    from tests.test_commands.cve_helpers import fresh_kev
     seed_quarantine(box.paths, "myapp")
     monkeypatch.setattr(security_scan_core, "scan_image", lambda ref, timeout: scan_result(ref))
+    fresh_kev(monkeypatch)  # resume refuses a lift no usable KEV catalog backs
     with staging_docker_off(), patch("boxmunge.cve.quarantine.caddy_reload"):
         assert security_resume.security_resume_locked(box.paths, "myapp") == 0
     assert box.ran

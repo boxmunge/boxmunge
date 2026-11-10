@@ -14,6 +14,7 @@ from typing import Any
 from boxmunge.cve.kev import load_kev
 from boxmunge.cve.policy import Disposition
 from boxmunge.cve.scan_state import read_scan_state
+from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.log import log_error
 from boxmunge.paths import BoxPaths
 
@@ -81,8 +82,10 @@ def current_quarantine_cves(
     )
 
 
-def all_currently_quarantining_cves(paths: BoxPaths) -> list[str]:
-    """Union of QUARANTINE-disposition CVE ids across every project on the box.
+def all_currently_quarantining_cves(paths: BoxPaths) -> tuple[list[str], list[str]]:
+    """Union of QUARANTINE-disposition CVE ids across every project on the
+    box, and the projects left out because their state cannot be read
+    (each reported on stderr and in the log).
 
     Used by `--current --host` to suppress every CVE currently blocking any
     project in a single operation. Deduped by CVE id (a CVE quarantining
@@ -91,12 +94,21 @@ def all_currently_quarantining_cves(paths: BoxPaths) -> list[str]:
     ordering for consistent operator UX.
     """
     if not paths.projects.exists():
-        return []
+        return [], []
     seen: dict[str, dict[str, Any]] = {}
+    left_out: list[str] = []
     for proj_dir in sorted(paths.projects.iterdir()):
         if not proj_dir.is_dir() or not (proj_dir / "manifest.yml").exists():
             continue
-        for f in current_quarantine_cves(paths, proj_dir.name):
+        try:
+            findings = current_quarantine_cves(paths, proj_dir.name)
+        except PROJECT_INPUT_ERRORS as e:
+            report_project_failure("cve-suppress", proj_dir.name, e, paths)
+            print(f"  {proj_dir.name}'s quarantine-level findings, if any, are left "
+                  f"out of this suppression.", file=sys.stderr)
+            left_out.append(proj_dir.name)
+            continue
+        for f in findings:
             cve = f["cve_id"]
             existing = seen.get(cve)
             sev_new = f.get("effective_severity") or ""
@@ -116,7 +128,7 @@ def all_currently_quarantining_cves(paths: BoxPaths) -> list[str]:
                 f.get("cve_id", ""),
             ),
         )
-    ]
+    ], left_out
 
 
 def drop_kev_listed(
@@ -126,17 +138,21 @@ def drop_kev_listed(
 
     A suppression never hides a KEV-listed CVE (audit B-07), so writing one
     would record a review that has no effect. A named CVE is refused; a
-    --current batch skips the KEV entries and suppresses the rest.
+    --current batch skips the KEV entries and suppresses the rest. The
+    cached IDs decide even when the catalog is stale (CVE-04): staleness
+    only stops new KEV quarantines, and once the catalog is fresh again the
+    suppression would not apply.
     """
     kev = load_kev(paths)
-    today = utc_today()
-    listed = [c for c in cve_ids if kev.is_known_exploited(c, today=today)]
+    stale = kev.stale_reason(utc_today())
+    listed = [c for c in cve_ids if c in kev.cve_ids]
     for cve in listed:
         print(
             f"{'ERROR' if positional else 'NOTE'}: {cve} is on the CISA Known "
-            f"Exploited Vulnerabilities catalog. Suppressions do not apply to "
-            f"KEV-listed CVEs; fix or rebuild the image instead."
-            + ("" if positional else " Skipping it."),
+            f"Exploited Vulnerabilities catalog"
+            + (f" (the cached catalog is stale: {stale})" if stale else "")
+            + ". Suppressions do not apply to KEV-listed CVEs; fix or rebuild the image "
+              "instead." + ("" if positional else " Skipping it."),
             file=sys.stderr,
         )
         log_error(

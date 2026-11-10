@@ -30,6 +30,7 @@ BASE_ARGS: dict[str, list[str]] = {
     "pause": ["myapp"],
     "project-add": ["myapp"],
     "project-delete": ["myapp"],
+    "project-forget": ["myapp"],
     "promote": ["myapp"],
     "prod-deploy": ["myapp"],
     "recover": ["myapp"],

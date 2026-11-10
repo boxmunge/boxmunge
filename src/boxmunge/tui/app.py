@@ -38,28 +38,14 @@ class BoxmungeApp(App):
         """Run an action in the background with notification."""
 
         async def _do_action() -> None:
-            from boxmunge.commands.backup_cmd import run_backup
-            from boxmunge.commands.deploy import run_deploy
-            from boxmunge.commands.rollback import run_rollback
+            from boxmunge.tui.actions import run_action
 
-            actions = {
-                "deploy": lambda: run_deploy(project_name, self.paths),
-                "backup": lambda: run_backup(project_name, self.paths),
-                "rollback": lambda: run_rollback(project_name, self.paths, yes=True),
-            }
-
-            handler = actions.get(action)
-            if handler:
-                self.notify(f"Running {action} for {project_name}...")
-                result = await asyncio.to_thread(handler)
-                if result == 0:
-                    self.notify(f"{action} completed for {project_name}", severity="information")
-                else:
-                    self.notify(f"{action} failed for {project_name}", severity="error")
-
-                # Refresh dashboard
-                for screen in self.screen_stack:
-                    if isinstance(screen, DashboardScreen):
-                        screen.action_refresh()
+            self.notify(f"Running {action} for {project_name}...")
+            outcome = await asyncio.to_thread(run_action, action, project_name, self.paths)
+            self.notify(outcome.message, severity="information" if outcome.ok else "error",
+                        timeout=5 if outcome.ok else 30)
+            for screen in self.screen_stack:
+                if isinstance(screen, DashboardScreen):
+                    screen.action_refresh()
 
         self.run_worker(_do_action(), exclusive=True)

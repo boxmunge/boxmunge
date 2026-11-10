@@ -53,6 +53,11 @@ SUMMARY = obj({
         "projects": arr(obj({"project": STRING, "cves": arr(STRING)})),
         "error": NULLABLE_STRING,
     }),
+    # Where the CISA KEV catalog came from; stale_reason is null when fresh.
+    "kev": obj({
+        "source": NULLABLE_STRING, "released_at": NULLABLE_TIMESTAMP,
+        "fetched_at": NULLABLE_TIMESTAMP, "entries": INTEGER, "stale_reason": NULLABLE_STRING,
+    }),
     # Projects left out of the counts because a file could not be read; a
     # null project is a box-wide file (host suppressions, the project
     # registry), which the error names.
@@ -106,6 +111,9 @@ def _security_summary(params: dict[str, Any], ctx: ActionContext) -> dict[str, A
             entry["since"], f"{ctx.paths.project_quarantine_state(entry['project'])} "
                             f"quarantined_at")
     summary["last_fleet_scan"] = utc_timestamp(summary["last_fleet_scan"], "the latest scan state")
+    for key in ("released_at", "fetched_at"):
+        summary["kev"][key] = utc_timestamp(summary["kev"][key],
+                                            f"{ctx.paths.kev_catalog} {key}")
     grace = summary["grace"]
     if grace is not None:
         for key in ("installed_at", "expires_at"):
@@ -196,7 +204,7 @@ def _machine(finding: dict[str, Any], key: str, read: Any) -> str | None:
 ACTIONS = (
     Action(
         name="security.summary", tier=Tier.OBSERVE,
-        summary="Fleet CVE view: postures, quarantines, at-risk projects, suppressions.",
+        summary="Fleet CVE view: postures, quarantines, at-risk projects, suppressions, KEV catalog.",
         params=NO_PARAMS, result=SUMMARY, handler=_security_summary,
         cli="security", mcp=True,
     ),

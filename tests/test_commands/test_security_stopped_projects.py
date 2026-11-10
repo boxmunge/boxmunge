@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from boxmunge.commands import security_resume, security_scan_core
+from tests.test_commands.cve_helpers import render_site
+from boxmunge.commands import quarantine_lift, security_resume, security_scan_core
 from boxmunge.commands.security_resume import cmd_security_resume
 from boxmunge.commands.security_scan_core import scan_one_project
 from boxmunge.cve.kev import KevCatalog
@@ -19,12 +20,15 @@ from boxmunge.cve.scan_state import BASIS_CONTAINERS, BASIS_STARTUP_IMAGES, read
 from boxmunge.docker_containers import LocalImage
 from boxmunge.pause import write_paused_state
 from boxmunge.state import write_state
-from tests.test_commands.cve_helpers import Docker, make_box, scan_result, seed_quarantine
+from tests.test_commands.cve_helpers import (
+    Docker, fresh_kev, make_box, scan_result, seed_quarantine,
+)
 
 _RUNNING = "sha256:" + "1" * 64
 _PULLED = "sha256:" + "2" * 64
 _BUILT = "sha256:" + "3" * 64
-_KEV = KevCatalog(cve_ids=frozenset(), fetched_at=datetime.now(timezone.utc))
+_KEV = KevCatalog(cve_ids=frozenset(), fetched_at=datetime.now(timezone.utc),
+                       released_at=datetime.now(timezone.utc), source="test")
 
 
 @pytest.fixture
@@ -114,12 +118,13 @@ def test_missing_startup_image_makes_the_scan_incomplete(box, fake_containers):
 @pytest.fixture
 def resume(monkeypatch):
     lifted: list[str] = []
+    fresh_kev(monkeypatch)
     monkeypatch.setattr(security_resume, "refresh_db", lambda: None)
-    monkeypatch.setattr(security_resume, "prepare_caddy_config", lambda p, m: None)
-    monkeypatch.setattr(security_resume, "prepare_compose_override",
+    monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)
+    monkeypatch.setattr(quarantine_lift, "prepare_compose_override",
                         lambda p, m, component=None: None)
-    monkeypatch.setattr(security_resume, "run_smoke", lambda p, paths_: (True, "ok"))
-    monkeypatch.setattr(security_resume, "lift_quarantine",
+    monkeypatch.setattr(quarantine_lift, "run_smoke", lambda p, paths_: (True, "ok"))
+    monkeypatch.setattr(quarantine_lift, "lift_quarantine",
                         lambda *a, **k: lifted.append("lift"))
     return lifted
 

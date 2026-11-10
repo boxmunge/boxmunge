@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from boxmunge.fileutil import atomic_write_text
+from boxmunge.fs_nofollow import read_text_nofollow
 
 
 def write_state(path: Path, data: dict[str, Any]) -> None:
@@ -31,13 +32,11 @@ def read_state(path: Path, default: dict[str, Any] | None = None) -> dict[str, A
     if default is None:
         default = {}
 
-    if not path.exists():
-        return dict(default)
-
     try:
-        with open(path) as f:
-            data = json.load(f)
-    except (OSError, ValueError) as e:  # ValueError covers JSONDecodeError
+        data = json.loads(read_text_nofollow(path))
+    except FileNotFoundError:
+        return dict(default)
+    except (OSError, ValueError) as e:  # covers JSONDecodeError and UnicodeDecodeError
         raise StateError(f"Cannot read state file {path}: {e}") from e
     if not isinstance(data, dict):
         raise StateError(f"State file {path} is not a JSON object")

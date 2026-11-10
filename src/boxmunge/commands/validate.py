@@ -27,7 +27,8 @@ def _gather_validation(
     if paths.is_project_pre_registered(project_name):
         errors.append(
             f"Project '{project_name}' is pre-registered (secrets set) but "
-            f"not yet deployed. Deploy first with: boxmunge deploy {project_name}"
+            f"not yet deployed. Upload its first bundle, then deploy it with: "
+            f"boxmunge prod-deploy {project_name}"
         )
         return errors, warnings
 
@@ -55,23 +56,32 @@ def _gather_validation(
     if not compose_path.exists():
         warnings.append(f"Compose file missing: {compose_path.name}")
     else:
-        warnings.extend(_undeclared_service_warnings(
-            project_name, split_user_entries(manifest), compose_path))
+        compose_errors, compose_warnings = _compose_findings(
+            project_name, split_user_entries(manifest), compose_path)
+        errors.extend(compose_errors)
+        warnings.extend(compose_warnings)
 
     return errors, warnings
 
 
-def _undeclared_service_warnings(project_name: str, manifest: dict, compose_path) -> list[str]:
-    """Warn for each compose service the manifest does not declare: it runs
-    without a read-only root filesystem (same warning as deploy and stage)."""
+def _compose_findings(project_name: str, manifest: dict,
+                      compose_path) -> tuple[list[str], list[str]]:
+    """(errors, warnings) about compose.yml: a `pull_policy` deploy refuses
+    (compose_service_rules.pull_policy_problem), and each service the
+    manifest does not declare, which runs without a read-only root
+    filesystem (same warning as deploy and stage)."""
     from boxmunge.compose import ComposeError, load_user_compose
+    from boxmunge.compose_service_rules import pull_policy_problem
     from boxmunge.security_warn import undeclared_service_warning, undeclared_services
 
     try:
         user_compose = load_user_compose(compose_path, project_name)
     except ComposeError as e:
-        return [f"Cannot resolve compose.yml: {e}"]
-    return [
+        return [], [f"Cannot resolve compose.yml: {e}"]
+    services = user_compose.get("services") or {}
+    errors = [p for name, svc in services.items() if isinstance(svc, dict)
+              if (p := pull_policy_problem(name, svc))]
+    return errors, [
         undeclared_service_warning(project_name, svc).removeprefix("[WARNING] ")
         for svc in undeclared_services(manifest, user_compose)
     ]

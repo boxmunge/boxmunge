@@ -1,13 +1,13 @@
-#!/usr/bin/env bash
-# Restore script for __PROJECT_NAME__
+#!/bin/sh
+# Restore script for __PROJECT_NAME__ (optional)
 #
-# Read backup data from stdin. boxmunge handles decryption and
-# extraction before piping to this script.
-#
-# Example: PostgreSQL restore
-# docker compose exec -T db psql -v ON_ERROR_STOP=1 --single-transaction -U "${POSTGRES_USER:-app}" appdb
-
-set -euo pipefail
+# backup.restore_command runs inside the backup.service container through
+# `sh -c` and reads the backup on stdin (boxmunge decrypts it first). It
+# usually calls the client directly, for example:
+#   restore_command: "psql -v ON_ERROR_STOP=1 --single-transaction -U $POSTGRES_USER $POSTGRES_DB"
+# A restore must replace the data and fail rather than half-apply. A script
+# must be inside that container (copy it in with the image's Dockerfile).
+set -eu
 
 echo "ERROR: restore.sh not configured" >&2
 exit 1

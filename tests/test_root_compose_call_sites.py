@@ -139,8 +139,9 @@ def test_the_scan_finds_the_checked_call_sites() -> None:
     sites = sorted({rel for rel, tree in _modules() if rel != GUARD
                     for _ in _calls(tree, names)})
     assert sites == [
-        "commands/data_cmd.py", "commands/deploy.py", "commands/recover_cmd.py", "commands/restore.py",
-        "commands/resume_cmd.py", "commands/rollback.py", "commands/security_resume.py",
+        "backup_offline.py", "commands/data_cmd.py", "commands/deploy.py", "commands/quarantine_lift.py",
+        "commands/recover_cmd.py", "commands/restore.py",
+        "commands/resume_cmd.py", "commands/rollback.py", "commands/upgrade_offline.py",
         "commands/upgrade_steps.py", "container_update.py", "cve/quarantine.py",
         "legacy_stage_ops.py", "production_stopped.py", "staging_bringup.py", "staging_data.py",
         "userns/bringup.py",
@@ -249,12 +250,12 @@ def test_resume_refuses_before_pulling_or_releasing_restart_policies(tampered) -
 
 
 def test_security_resume_refuses_before_restoring_routing(tampered) -> None:
-    from boxmunge.commands import security_resume
+    from boxmunge.commands import quarantine_lift, security_resume
     from boxmunge.cve.quarantine import is_quarantined
     from boxmunge.state import write_state
     paths = tampered[0]
     write_state(paths.project_quarantine_state(NAME), {"cve_id": "CVE-2099-0001"})
-    with patch.object(security_resume, "prepare_caddy_config") as caddy:
+    with patch.object(quarantine_lift, "prepare_caddy_config") as caddy:
         assert security_resume._resume_lift(paths, NAME) == 1
     caddy.assert_not_called()
     assert is_quarantined(NAME, paths)

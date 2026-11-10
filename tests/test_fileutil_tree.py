@@ -171,7 +171,8 @@ def test_chown_tree_deploy_never_descends_a_nested_link(tmp_path, monkeypatch) -
     os.symlink(outside, tree / "d" / "link")
     rec = _Swap(monkeypatch)
     fs_nofollow.chown_tree_deploy(tree)
-    assert rec.inodes == _inodes(tree)
+    # The link itself is left alone too: owning it grants nothing.
+    assert rec.inodes == _inodes(tree) - {os.lstat(tree / "d" / "link").st_ino}
     assert not rec.inodes & _inodes(outside)
 
 
@@ -210,3 +211,17 @@ def test_chown_tree_deploy_is_silent_when_not_root(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(fs_nofollow, "running_as_root", lambda: False)
     fs_nofollow.chown_tree_deploy(tmp_path / "d")
     assert rec.inodes == set()
+
+
+def test_chown_tree_deploy_leaves_links_and_non_regular_files_alone(tmp_path, monkeypatch, caplog) -> None:
+    tree = tmp_path / "t"
+    tree.mkdir()
+    (tree / "f").write_text("x")
+    os.symlink("f", tree / "link")
+    os.mkfifo(tree / "pipe")
+    rec = _Swap(monkeypatch)
+    fs_nofollow.chown_tree_deploy(tree)
+    assert os.lstat(tree / "f").st_ino in rec.inodes
+    assert os.lstat(tree / "link").st_ino not in rec.inodes
+    assert os.lstat(tree / "pipe").st_ino not in rec.inodes
+    assert "not a regular file or directory" in caplog.text

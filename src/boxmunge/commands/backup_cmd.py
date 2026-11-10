@@ -8,7 +8,7 @@ from pathlib import Path
 import boxmunge.backup as _backup
 from boxmunge.backup_source import backup_source
 from boxmunge.backup import (
-    SNAPSHOT_RETENTION, BackupError, BackupKind, backup_filename, prune_backups,
+    SNAPSHOT_RETENTION, BackupError, BackupKind, backup_filename,
     resolve_backup_service,
 )
 from boxmunge.backup_dump import execute_dump, remove_stale_dumps
@@ -18,10 +18,12 @@ from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import ManifestError
+from boxmunge.manifest_fields import retention_problem
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.release import ReleaseStateError
+from boxmunge.snapshot_pairings import prune_unpaired
 
 # Total wall-clock budget for retrying lock-held projects in run_backup_all.
 # Bounded so a stuck deploy doesn't keep nightly backup running forever.
@@ -61,6 +63,25 @@ def list_snapshots(paths: BoxPaths, project_name: str) -> list[Path]:
     )
 
 
+def take_snapshot(
+    project_name: str, paths: BoxPaths, kind: BackupKind, manifest: dict | None = None,
+    compose_file: Path | None = None, *, offline: bool = False,
+) -> tuple[int, str | None]:
+    """backup_locked, and the name of the snapshot it wrote. The name is
+    None when it wrote none, whose rc is 0 too: type none, a skip (a
+    quarantined project, or backup_source's). Never the newest older
+    snapshot, which holds older data. Caller holds the project lock."""
+    before = {p.name for p in list_snapshots(paths, project_name)}
+    if offline:
+        rc = backup_locked(project_name, paths, kind=kind, manifest=manifest,
+                           compose_file=compose_file, offline=True)
+    else:
+        rc = backup_locked(project_name, paths, kind=kind, manifest=manifest,
+                           compose_file=compose_file)
+    new = [p.name for p in list_snapshots(paths, project_name) if p.name not in before]
+    return rc, (new[0] if rc == 0 and new else None)
+
+
 def run_backup(
     project_name: str, paths: BoxPaths, kind: BackupKind = BackupKind.MANUAL,
 ) -> int:
@@ -79,6 +100,7 @@ def backup_locked(
     kind: BackupKind = BackupKind.MANUAL,
     manifest: dict | None = None,
     compose_file: Path | None = None,
+    offline: bool = False,
 ) -> int:
     """The backup core. Caller holds the project lock; never takes it.
 
@@ -98,12 +120,17 @@ def backup_locked(
     cleanly with rc=0 (cron-driven backup-all should not fail just
     because a project is offline for security reasons; volume-empty
     warnings would be noise). Different rc shapes preserved by reason.
+
+    ``offline`` (data chown, over a stopped backup service) dumps in a
+    one-off container of the service instead (backup_offline): the data is
+    at rest, so a pause or a quarantine does not stop it.
     """
     block = is_blocked(project_name, paths)
-    if block and block.reason in (BlockReason.PAUSED, BlockReason.MIGRATING):
+    if block and block.reason is BlockReason.MIGRATING or (
+            block and block.reason is BlockReason.PAUSED and not offline):
         print(f"ERROR: {block.refuse_message}", file=sys.stderr)
         return 1
-    if block and block.reason is BlockReason.QUARANTINED:
+    if block and block.reason is BlockReason.QUARANTINED and not offline:
         # Backups of stopped services are pointless and would emit
         # confusing "volume empty" warnings — skip cleanly with a
         # structured log entry, returning 0.
@@ -123,7 +150,8 @@ def backup_locked(
 
     if paths.is_project_pre_registered(project_name):
         print(f"ERROR: Project '{project_name}' is pre-registered (secrets set) but "
-              f"not yet deployed. Deploy first with: boxmunge deploy {project_name}", file=sys.stderr)
+              f"not yet deployed. Upload its first bundle, then deploy it with: "
+              f"boxmunge prod-deploy {project_name}", file=sys.stderr)
         return 1
 
     if manifest is None:
@@ -161,9 +189,9 @@ def backup_locked(
         return 1
     retention = (backup_conf.get("retention", 7) if kind is BackupKind.NIGHTLY
                  else SNAPSHOT_RETENTION[kind])
-    if type(retention) is not int or retention < 1:
-        print(f"ERROR: backup.retention must be a whole number of at least 1, "
-              f"got {retention!r}", file=sys.stderr)
+    problem = retention_problem(retention)
+    if problem:
+        print(f"ERROR: {problem}", file=sys.stderr)
         return 1
     key_path = paths.backup_key
 
@@ -172,7 +200,7 @@ def backup_locked(
         return 1
 
     return _run_backup_inner(
-        project_name, paths, dump_command, service, kind, retention, compose_file,
+        project_name, paths, dump_command, service, kind, retention, compose_file, offline,
     )
 
 
@@ -184,12 +212,14 @@ def _run_backup_inner(
     kind: BackupKind,
     retention: int,
     compose_file: Path | None = None,
+    offline: bool = False,
 ) -> int:
     print(f"{project_name}: starting {kind.value} backup (service: {service})...")
     sweep_stale_dumps(paths, project_name)
 
     try:
-        raw_path = execute_dump(paths, project_name, dump_command, service, compose_file)
+        raw_path = execute_dump(paths, project_name, dump_command, service, compose_file,
+                                offline=offline)
     except BackupError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         log_error("backup", f"Backup dump failed: {e}", paths, project=project_name)
@@ -205,7 +235,7 @@ def _run_backup_inner(
     finally:
         raw_path.unlink(missing_ok=True)
 
-    pruned = prune_backups(paths.project_backups(project_name), project_name, kind, retention)
+    pruned = prune_unpaired(paths, project_name, kind, retention)
     if pruned:
         print(f"  Pruned {len(pruned)} old {kind.value} backup(s)")
 

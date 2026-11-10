@@ -9,14 +9,17 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from boxmunge.commands import security_actions, security_resume, security_scan_core
+from tests.test_commands.cve_helpers import render_site
+from boxmunge.commands import quarantine_lift, security_actions, security_resume, security_scan_core
 from boxmunge.commands.security_actions import cmd_security_scan
 from boxmunge.commands.security_resume import cmd_security_resume
 from boxmunge.commands.security_scan_inputs import identify_images
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.deployed_inventory import load_deployed_inventory
 from boxmunge.docker_containers import LocalImage
-from tests.test_commands.cve_helpers import Docker, Pushover, make_box, scan_result, seed_quarantine
+from tests.test_commands.cve_helpers import (
+    Docker, Pushover, fresh_kev, make_box, scan_result, seed_quarantine,
+)
 
 _WEB_ID = "sha256:" + "1" * 64
 _NEW_ID = "sha256:" + "2" * 64
@@ -119,7 +122,7 @@ def build_only_box(tmp_path, monkeypatch, fake_containers):
     paths = make_box(tmp_path, images={})
     compose_path = paths.project_dir("demo") / "compose.yml"
     compose = yaml.safe_load(compose_path.read_text())
-    compose["services"]["db"] = {"image": "postgres:16-alpine"}
+    compose["services"]["db"] = {"image": "postgres:16-alpine", "read_only": True}
     compose_path.write_text(yaml.safe_dump(compose))
     from tests.deploy_helpers import mark_deployed
     mark_deployed(paths, "demo")
@@ -149,10 +152,11 @@ def test_resume_lifts_a_build_only_project(build_only_box, monkeypatch, fake_con
     """Quarantined, so the re-scan checks what the lift starts: the build tag."""
     fake_containers.images["demo-web"] = LocalImage(image_id=_WEB_ID, repo_digests=())
     seed_quarantine(build_only_box)
+    fresh_kev(monkeypatch)
     Docker(monkeypatch)
-    monkeypatch.setattr(security_resume, "prepare_caddy_config", lambda p, m: None)
-    monkeypatch.setattr(security_resume, "prepare_compose_override",
+    monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)
+    monkeypatch.setattr(quarantine_lift, "prepare_compose_override",
                         lambda p, m, component=None: None)
-    monkeypatch.setattr(security_resume, "run_smoke", lambda p, paths_: (True, "ok"))
+    monkeypatch.setattr(quarantine_lift, "run_smoke", lambda p, paths_: (True, "ok"))
     assert cmd_security_resume(["demo"], build_only_box) == 0
     assert not is_quarantined("demo", build_only_box)

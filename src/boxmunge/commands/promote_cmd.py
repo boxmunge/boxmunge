@@ -31,7 +31,9 @@ from boxmunge.git_slot import GitRefError, is_full_sha, require_regular_control_
 from boxmunge.intake import IntakeError, check_installable, report_refusal, validate_release_tree
 from boxmunge.log import log_error, log_operation
 from boxmunge.probation import clear_probation_if_active
-from boxmunge.release_txn import InstallTxn, close_txn, load_txn, options_text
+from boxmunge.release_txn import (
+    InstallTxn, close_txn, load_txn, options_text, rollback_refused,
+)
 from boxmunge.release import live_ref
 from boxmunge.staged_release import (
     SlotError, StagedRelease, has_slot, load_slot, promoted_debris, release_dir, slot_dir,
@@ -61,18 +63,24 @@ class _Promotion:
     resuming: bool  # the open install is this slot's promote
 
 
-def run_promote(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
+def run_promote(project: str, paths: BoxPaths, dry_run: bool = False,
+                pull: bool = True) -> int:
     """promote: take the project lock and promote staging to production."""
     try:
         with project_lock(project, paths):
-            return promote_locked(project, paths, dry_run)
+            return promote_locked(project, paths, dry_run, pull)
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 
 
-def promote_locked(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
-    """The promote core. Caller holds the project lock; never takes it."""
+def promote_locked(project: str, paths: BoxPaths, dry_run: bool = False,
+                   pull: bool = True) -> int:
+    """The promote core. Caller holds the project lock; never takes it.
+    `pull`: build with --pull. A pulled base does not move the box's local
+    tag, so without it the build would use the base the box had before the
+    stage, not the one the stage pulled; with it, an unchanged base is a
+    cached build of what the stage tested."""
     found = _eligibility(project, paths, dry_run)
     if isinstance(found, int):
         return found
@@ -87,7 +95,7 @@ def promote_locked(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
     if isinstance(manifest, int):
         return manifest
     try:
-        rc = _deploy(project, paths, found.meta, manifest)
+        rc = _deploy(project, paths, found.meta, manifest, pull)
     except _RetireFailed as e:
         return _report_retire_failed(project, paths, found.meta.ref, e)
     if rc != 0:
@@ -215,7 +223,7 @@ def _require_commit(paths: BoxPaths, project: str, sha: str) -> None:
 
 
 def _deploy(project: str, paths: BoxPaths, meta: StagedRelease,
-            manifest: dict[str, Any]) -> int:
+            manifest: dict[str, Any], pull: bool) -> int:
     """Step 3: the same install core as a deploy of that kind, over the
     slot's release (a git slot: its SHA, proved apart from staging with
     the slot's own clone)."""
@@ -231,10 +239,10 @@ def _deploy(project: str, paths: BoxPaths, meta: StagedRelease,
     if meta.kind == "git":
         return deploy_git_locked(project, paths, GitDeploy(
             sha=meta.ref, source="staged", staged_id=meta.id, component=COMPONENT,
-            candidate=release, on_installed=installed, on_switched=switched))
+            pull=pull, candidate=release, on_installed=installed, on_switched=switched))
     return deploy_tree_locked(project, paths, TreeDeploy(
         tree=release, ref=meta.ref, source="staged", staged_id=meta.id, manifest=manifest,
-        component=COMPONENT, on_installed=installed, on_switched=switched))
+        component=COMPONENT, pull=pull, on_installed=installed, on_switched=switched))
 
 
 def _retire(project: str, paths: BoxPaths, rc: int) -> None:
@@ -274,7 +282,7 @@ def _options_now(project: str, paths: BoxPaths, ref: str, slot_readable: bool) -
     if not slot_readable:
         return _unreadable_advice(project, txn)
     return (f"The install of {txn.ref} stays open at {txn.phase}: "
-            f"{options_text(project, txn, quarantined=is_quarantined(project, paths))}")
+            f"{options_text(project, txn, rollback_refused=rollback_refused(paths, project))}")
 
 
 def _report_failed(project: str, paths: BoxPaths, meta: StagedRelease, rc: int) -> int:
@@ -367,41 +375,10 @@ def report_failed_after_switch(project: str, paths: BoxPaths, staged_ref: str) -
 
 
 def cmd_promote(args: list[str]) -> None:
+    from boxmunge.commands.argv import parse_args, require_project_name
     from boxmunge.paths import BoxPaths
-    if not args:
-        print("Usage: boxmunge promote <project> [--dry-run]", file=sys.stderr)
-        sys.exit(2)
-
-    known_flags = {"--dry-run"}
-    unknown = [a for a in args if a.startswith("--") and a not in known_flags]
-    if unknown:
-        print(
-            f"ERROR: unknown argument(s): {' '.join(unknown)}",
-            file=sys.stderr,
-        )
-        print("Usage: boxmunge promote <project> [--dry-run]", file=sys.stderr)
-        sys.exit(2)
-
-    dry_run = "--dry-run" in args
-    positional = [a for a in args if not a.startswith("--")]
-    if not positional:
-        print("Usage: boxmunge promote <project> [--dry-run]", file=sys.stderr)
-        sys.exit(2)
-    if len(positional) > 1:
-        print(
-            f"ERROR: unknown argument(s): {' '.join(positional[1:])}",
-            file=sys.stderr,
-        )
-        print("Usage: boxmunge promote <project> [--dry-run]", file=sys.stderr)
-        sys.exit(2)
-    project = positional[0]
-
-    from boxmunge.paths import validate_project_name
-    try:
-        validate_project_name(project)
-    except ValueError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        sys.exit(2)
-
-    paths = BoxPaths()
-    sys.exit(run_promote(project, paths, dry_run=dry_run))
+    parsed = parse_args("promote", args, flags={"--dry-run", "--no-pull"},
+                        min_positional=1, max_positional=1)
+    project = require_project_name("promote", parsed.positional[0])
+    sys.exit(run_promote(project, BoxPaths(), dry_run=parsed.has("--dry-run"),
+                         pull=not parsed.has("--no-pull")))

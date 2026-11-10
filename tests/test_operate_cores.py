@@ -20,6 +20,7 @@ import boxmunge.commands.deploy as deploy
 import boxmunge.commands.pause_cmd as pause_cmd
 import boxmunge.commands.project_delete_cmd as project_delete_cmd
 import boxmunge.commands.promote_cmd as promote_cmd
+import boxmunge.commands.quarantine_lift as quarantine_lift
 import boxmunge.commands.recover_cmd as recover_cmd
 import boxmunge.commands.restore as restore
 import boxmunge.commands.resume_cmd as resume_cmd
@@ -30,6 +31,7 @@ import boxmunge.commands.stage_cmd as stage_cmd
 import boxmunge.commands.unstage_cmd as unstage_cmd
 import boxmunge.commands.upgrade_steps as upgrade_steps
 import boxmunge.container_update as container_update
+from tests.test_commands.cve_helpers import render_site
 from boxmunge import fileutil
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.pause import is_paused, write_paused_state
@@ -38,7 +40,7 @@ from boxmunge.staged_release import load_slot
 from boxmunge.state import write_state
 
 from tests.bundle_helpers import place_bundle
-from tests.test_commands.cve_helpers import make_box, scan_result, seed_quarantine
+from tests.test_commands.cve_helpers import fresh_kev, make_box, scan_result, seed_quarantine
 from tests.test_commands.test_restore_cmd import _setup_project
 from tests.stage_helpers import V1, V2, staging_docker_off as _docker
 from tests.test_lifecycle_locks import _cu_target, _setup
@@ -171,13 +173,14 @@ def test_project_delete_core(tmp_path, lock_attempts) -> None:
 def test_security_resume_core(tmp_path, monkeypatch, lock_attempts) -> None:
     paths = make_box(tmp_path, services=("web",))
     seed_quarantine(paths)
+    fresh_kev(monkeypatch)
     monkeypatch.setattr(security_scan_core, "scan_image", lambda ref, timeout: scan_result(ref))
-    monkeypatch.setattr(security_resume, "prepare_caddy_config", lambda p, m: None)
-    monkeypatch.setattr(security_resume, "prepare_compose_override",
+    monkeypatch.setattr(quarantine_lift, "prepare_caddy_config", render_site)
+    monkeypatch.setattr(quarantine_lift, "prepare_compose_override",
                         lambda p, m, component=None: None)
-    monkeypatch.setattr(security_resume, "run_smoke", lambda p, paths_: (True, "ok"))
+    monkeypatch.setattr(quarantine_lift, "run_smoke", lambda p, paths_: (True, "ok"))
     lifted = MagicMock()
-    monkeypatch.setattr(security_resume, "lift_quarantine", lifted)
+    monkeypatch.setattr(quarantine_lift, "lift_quarantine", lifted)
     assert security_resume.security_resume_locked(paths, "demo") == 0
     lifted.assert_called_once()
     assert is_quarantined("demo", paths)  # the stubbed lift clears nothing

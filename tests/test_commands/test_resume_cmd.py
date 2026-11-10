@@ -1,7 +1,12 @@
 """Tests for boxmunge resume."""
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 import yaml
+
+from boxmunge.bind_sources import BindSourceError
+from boxmunge.compose import ComposeError
 
 from boxmunge.paths import BoxPaths
 from tests.deploy_helpers import mark_deployed
@@ -39,6 +44,43 @@ def _setup_paused(tmp_path: Path, *, with_image_service: bool = True,
 
 
 class TestRunResume:
+    @patch("boxmunge.commands.resume_cmd.prepare_compose_override")
+    @patch("boxmunge.commands.resume_cmd.check_start")
+    @patch("boxmunge.commands.resume_cmd.prepare_caddy_config")
+    @patch("boxmunge.compose_guard.compose_up")
+    @patch("boxmunge.commands.resume_cmd.caddy_reload")
+    @patch("boxmunge.commands.resume_cmd.run_smoke")
+    def test_regenerates_the_overlay_before_checking_and_starting(
+            self, mock_smoke, _reload, mock_up, _caddy, mock_check, mock_override, tmp_path):
+        """The checks and `up` see the overlay that will run, never the one
+        the project was paused on (an upgrade may have changed its mounts)."""
+        mock_smoke.return_value = (True, "ok")
+        order = []
+        mock_override.side_effect = lambda *a, **k: order.append("overlay")
+        mock_check.side_effect = lambda *a, **k: order.append("check")
+        mock_up.side_effect = lambda *a, **k: order.append("up")
+        from boxmunge.commands.resume_cmd import run_resume
+        paths, name = _setup_paused(tmp_path)
+        assert run_resume(name, paths, yes=True, skip_security_checks=True) == 0
+        assert order == ["overlay", "check", "up"]
+
+    @pytest.mark.parametrize("error", [
+        ComposeError("cannot read the users record"),
+        BindSourceError("cannot read state/deploy/myapp.binds.json"),
+    ])
+    @patch("boxmunge.commands.resume_cmd.prepare_compose_override")
+    @patch("boxmunge.compose_guard.compose_up")
+    def test_an_overlay_that_cannot_be_regenerated_starts_nothing(
+            self, mock_up, mock_override, error, tmp_path, capsys):
+        from boxmunge.commands.resume_cmd import run_resume
+        from boxmunge.pause import is_paused
+        mock_override.side_effect = error
+        paths, name = _setup_paused(tmp_path)
+        assert run_resume(name, paths, yes=True, skip_security_checks=True) == 1
+        assert "cannot regenerate the compose overlay" in capsys.readouterr().err
+        mock_up.assert_not_called()
+        assert is_paused(name, paths)
+
     @patch("boxmunge.commands.resume_cmd.prepare_compose_override")
     @patch("boxmunge.commands.resume_cmd.prepare_caddy_config")
     @patch("boxmunge.commands.resume_cmd.compose_pull")

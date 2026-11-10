@@ -30,6 +30,8 @@ def stopped(paths, fake_containers):
     mark_deployed(paths, P)
     slot = slot_dir(paths, P)
     (slot / "release").mkdir(parents=True)
+    for name in ("compose.staging-base.yml", "compose.boxmunge-staging.yml"):
+        (slot / name).write_text("services:\n  web:\n    image: nginx\n")  # as stage writes
     meta = new_meta("bundle", "shop-v2", None)
     write_meta(slot, meta)
     fake_containers.run(P, "web", "sha256:1", running=False)
@@ -205,7 +207,7 @@ def test_an_unreadable_slot_on_clear_is_alerted(paths, stopped) -> None:
     (slot_dir(paths, P) / "meta.json").write_text("{not json")
     sent: list[tuple] = []
     with patch("boxmunge.compose_guard.compose_up"), \
-            patch("boxmunge.compose_guard.notify",
+            patch("boxmunge.compose_up_steps.notify",
                   lambda *a, **k: sent.append((a[1], a[2], k["priority"]))):
         compose_up_checked(paths, P, component="check-all", compose_files=PROD_FILES)
     assert len(sent) == 1 and "meta.json" in sent[0][1] and sent[0][2] == 1

@@ -40,7 +40,10 @@ from boxmunge import restart_hold
 from boxmunge.compose_guard import compose_up_checked
 from boxmunge.docker import DockerError, caddy_reload, compose_stop
 from boxmunge.fileutil import atomic_write_text
-from boxmunge.pause import hand_over_restart_policies, render_maintenance_caddy_config
+from boxmunge.fs_nofollow import mkdir_p_deploy, read_text_nofollow
+from boxmunge.pause import (
+    hand_over_restart_policies, is_paused, render_maintenance_caddy_config,
+)
 from boxmunge.paths import BoxPaths
 
 _LOGGER = logging.getLogger("boxmunge")
@@ -99,7 +102,7 @@ def read_quarantine_state(
     if not path.exists():
         return None
     try:
-        state = json.loads(path.read_text())
+        state = json.loads(read_text_nofollow(path))
     except (OSError, json.JSONDecodeError) as e:
         raise QuarantineError(f"Cannot read quarantine state {path}: {e}") from e
     if not isinstance(state, dict):
@@ -110,7 +113,7 @@ def read_quarantine_state(
 def _write_record(project_name: str, paths: BoxPaths, data: dict[str, Any]) -> None:
     state_path = paths.project_quarantine_state(project_name)
     try:
-        state_path.parent.mkdir(parents=True, exist_ok=True)
+        mkdir_p_deploy(state_path.parent)
         atomic_write_text(state_path, json.dumps(data, indent=2) + "\n")
     except OSError as e:
         raise QuarantineError(
@@ -156,6 +159,31 @@ def quarantine_action_complete(project_name: str, paths: BoxPaths) -> bool:
     """
     state = read_quarantine_state(project_name, paths)
     return bool(state and state.get("action_complete") is True)
+
+
+def mark_quarantine_incomplete(project_name: str, paths: BoxPaths) -> None:
+    """Record that the action no longer holds (a lift half undid it), so
+    the next scan re-asserts it and nothing reads it as complete."""
+    state = read_quarantine_state(project_name, paths)
+    if state is None:
+        raise QuarantineError(f"cannot mark the quarantine of {project_name!r}: no record")
+    _write_record(project_name, paths, {**state, "action_complete": False})
+
+
+# Quarantine record field: {CVE: when its KEV withdrawal was recorded} for
+# each withdrawal whose hold this quarantine has announced
+# (commands/kev_withdrawal). The hold itself follows the withdrawals file.
+KEV_WITHDRAWAL_HOLD = "held_for_kev_withdrawal"
+
+
+def hold_for_kev_withdrawal(
+    project_name: str, paths: BoxPaths, announced: dict[str, str],
+) -> None:
+    """Record which KEV withdrawal holds this quarantine has announced."""
+    state = read_quarantine_state(project_name, paths)
+    if state is None:
+        raise QuarantineError(f"cannot hold the quarantine of {project_name!r}: no record")
+    _write_record(project_name, paths, {**state, KEV_WITHDRAWAL_HOLD: announced})
 
 
 def clear_quarantine_state(project_name: str, paths: BoxPaths) -> None:
@@ -369,7 +397,8 @@ def lift_quarantine(
 
     ``project_caddy_site_content=None`` lifts the quarantine but leaves the
     project down: the maintenance page stays and nothing starts. Used when
-    the project is also paused — pause is lifted only by `resume` (B-20).
+    the project is also paused — pause is lifted only by `resume` (B-20) —
+    or the health monitor stopped it (commands/quarantine_lift.start_hold).
 
     The caller is responsible for regenerating the normal Caddyfile
     fragment (the resume command does this via existing helpers) and
@@ -398,13 +427,18 @@ def lift_quarantine(
     state = read_quarantine_state(project_name, paths) or {}
 
     if project_caddy_site_content is None:
-        # Paused as well: keep the maintenance page, the stop and the held
-        # restart policies; the pause record takes over the originals so
-        # `resume` gives them back.
-        hand_over_restart_policies(project_name, paths, state.get("restart_policies") or {})
+        # Left down: keep the maintenance page and the stop. A pause takes
+        # the held originals over, so `resume` gives them back. The health
+        # monitor's stop holds none (it removes the containers): one that is
+        # left gets its own policy back, as after any monitor stop.
+        if is_paused(project_name, paths):
+            hand_over_restart_policies(project_name, paths,
+                                       state.get("restart_policies") or {})
+        else:
+            _restore_restart_policies(project_name, state)
         clear_quarantine_state(project_name, paths)
         _LOGGER.info(
-            "quarantine: %s lifted; project stays paused", project_name,
+            "quarantine: %s lifted; project stays down", project_name,
             extra=_extra(project=project_name),
         )
         return
@@ -433,10 +467,9 @@ def lift_quarantine(
     # 3. Restart containers, with their own restart policies back.
     _restore_restart_policies(project_name, state, restore)
     try:
-        # Pinned: only the local images that were scanned, never a pull or
-        # a build (`pull_policy`) of something that was not.
+        # Only the local images that were scanned: no start pulls or builds.
         compose_up_checked(paths, project_name, component=component,
-                           compose_files=compose_files, build=False, pinned=True, txn=txn)
+                           compose_files=compose_files, txn=txn)
     except DockerError as e:
         raise QuarantineError(
             f"Failed to restart containers for {project_name!r}: {e}",

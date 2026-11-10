@@ -413,6 +413,7 @@ def container_running(container_name: str) -> bool:
 # The labels Compose puts on every container and image it makes.
 COMPOSE_PROJECT_LABEL = "com.docker.compose.project"
 COMPOSE_SERVICE_LABEL = "com.docker.compose.service"
+COMPOSE_ONEOFF_LABEL = "com.docker.compose.oneoff"
 
 
 def compose_project_filter(project_name: str) -> list[str]:

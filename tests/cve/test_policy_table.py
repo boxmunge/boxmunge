@@ -30,6 +30,7 @@ Q = Disposition.QUARANTINE
 X = Disposition.IGNORED_FIXED
 SU = Disposition.SUPPRESSED
 SR = Disposition.STILL_RUNNING_AT_RISK
+AF = Disposition.AWAITING_FIX
 
 
 def _f(
@@ -51,6 +52,7 @@ _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
     # B-01: KEV is the floor a fix that is not running does not escape,
     # except at the lowered posture (relaxed), which alerts every scan.
     ("fix-available+kev", _f(fix="2"), {"kev": True}, {R: X, B: Q, S: Q, P: Q}),
+    ("unfixable+kev", _f(), {"kev": True}, {R: Q, B: Q, S: Q, P: Q}),
     ("fix-available-high", _f(fix="2"), {}, {R: X, B: X, S: X, P: X}),
     ("suppressed", _f(), {"sup": _SUP}, {R: SU, B: SU, S: SU, P: SU}),
     ("suppressed+kev", _f(), {"kev": True, "sup": _SUP}, {R: Q, B: Q, S: Q, P: Q}),
@@ -62,7 +64,13 @@ _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
     ("fix-available+kev+ddq", _f(fix="2"), {"kev": True, "ddq": True},
      {R: SR, B: SR, S: SR, P: SR}),
     ("unknown-severity", _f(sev=Severity.UNKNOWN, vendor={}), {}, {R: I, B: I, S: I, P: I}),
-    ("high-avn-affected", _f(), {}, {R: I, B: Q, S: Q, P: Q}),
+    # KEV never depends on severity: an unrated KEV CVE quarantines everywhere.
+    ("unknown-severity+kev", _f(sev=Severity.UNKNOWN, vendor={}), {"kev": True},
+     {R: Q, B: Q, S: Q, P: Q}),
+    # Balanced quarantines only on KEV: an unfixable distro-High AV:N finding
+    # is alerted (AWAITING_FIX); strict's >= Medium gate takes it down.
+    ("high-avn-affected", _f(), {}, {R: I, B: AF, S: Q, P: Q}),
+    ("critical-avn-affected", _f(sev=Severity.CRITICAL), {}, {R: I, B: AF, S: Q, P: Q}),
     ("medium-avn-affected", _f(sev=Severity.MEDIUM), {}, {R: I, B: I, S: Q, P: Q}),
     ("low-avn-affected", _f(sev=Severity.LOW), {}, {R: I, B: I, S: I, P: I}),
     ("high-avl-affected", _f(av=AV.LOCAL), {}, {R: I, B: I, S: I, P: Q}),
@@ -71,10 +79,10 @@ _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
      {R: I, B: I, S: I, P: Q}),
     ("high-under-investigation", _f(status=VS.UNDER_INVESTIGATION), {},
      {R: I, B: I, S: I, P: Q}),
-    ("high-end-of-life", _f(status=VS.END_OF_LIFE), {}, {R: I, B: Q, S: Q, P: Q}),
+    ("high-end-of-life", _f(status=VS.END_OF_LIFE), {}, {R: I, B: AF, S: Q, P: Q}),
     # A missing/unknown distro Status is not a distro de-prioritisation, so
     # it falls through to the threshold (fail-closed). CVE_POLICY.md step 11.
-    ("high-status-unknown", _f(status=VS.UNKNOWN), {}, {R: I, B: Q, S: Q, P: Q}),
+    ("high-status-unknown", _f(status=VS.UNKNOWN), {}, {R: I, B: AF, S: Q, P: Q}),
     ("nvd-high-no-distro-verdict", _f(vendor={"nvd": Severity.HIGH}), {},
      {R: I, B: I, S: I, P: Q}),
     ("nvd-critical-debian-low",
@@ -97,13 +105,18 @@ _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
      {}, {R: I, B: I, S: Q, P: Q}),
     ("all-sources-low", _f(sev=Severity.LOW, vendor={"debian": Severity.LOW, "nvd": Severity.LOW}),
      {}, {R: I, B: I, S: I, P: I}),
-    ("medium-penalty-1", _f(sev=Severity.MEDIUM), {"pen": 1}, {R: I, B: Q, S: Q, P: Q}),
+    ("medium-penalty-1", _f(sev=Severity.MEDIUM), {"pen": 1}, {R: I, B: AF, S: Q, P: Q}),
     ("perl-base-python-project", _f(pkg="perl-base"), {}, {R: I, B: I, S: I, P: Q}),
     ("perl-base-kev", _f(pkg="perl-base"), {"kev": True}, {R: Q, B: Q, S: Q, P: Q}),
     ("python3-empty-inferred-runtimes", _f(pkg="python3.11"),
      {"runtimes": frozenset()}, {R: I, B: I, S: I, P: Q}),
-    ("libperl-stays-relevant", _f(pkg="libperl5.36"), {}, {R: I, B: Q, S: Q, P: Q}),
-    ("high-ddq", _f(), {"ddq": True}, {R: I, B: SR, S: SR, P: SR}),
+    ("libperl-stays-relevant", _f(pkg="libperl5.36"), {}, {R: I, B: AF, S: Q, P: Q}),
+    # Balanced has no severity quarantine to opt out of.
+    ("high-ddq", _f(), {"ddq": True}, {R: I, B: AF, S: SR, P: SR}),
+    ("medium-avl-affected", _f(sev=Severity.MEDIUM, av=AV.LOCAL), {},
+     {R: I, B: I, S: I, P: Q}),
+    ("medium-will-not-fix", _f(sev=Severity.MEDIUM, status=VS.FIX_DEFERRED), {},
+     {R: I, B: I, S: I, P: Q}),
 ]
 
 # Cells where the code currently disagrees with CVE_POLICY.md, keyed by
@@ -137,6 +150,18 @@ def _cells():
 
 def test_table_covers_every_posture_for_every_row() -> None:
     assert all(set(expected) == set(Posture) for _, _, _, expected in _ROWS)
+
+
+def test_balanced_quarantines_on_exactly_the_kev_rows() -> None:
+    """Balanced accepts downtime only for an actively exploited CVE."""
+    quarantining = {row_id for row_id, _, kwargs, expected in _ROWS
+                    if expected[B] is Q}
+    kev_rows = {row_id for row_id, _, kwargs, _ in _ROWS
+                if kwargs.get("kev") and not kwargs.get("ddq")}
+    assert quarantining == kev_rows
+    for row_id, finding, kwargs, _ in _ROWS:
+        got = _evaluate(finding, B, **kwargs)
+        assert (got is Q) == (row_id in kev_rows), row_id
 
 
 @pytest.mark.parametrize(("finding", "posture", "kwargs", "want"), list(_cells()))

@@ -7,6 +7,7 @@ from contextlib import redirect_stdout
 import pytest
 import yaml
 
+from tests.test_commands.cve_helpers import render_site
 from boxmunge.commands.security_cmd import cmd_security
 from boxmunge.commands.security_suppress_targets import utc_today
 from boxmunge.manifest import CURRENT_SCHEMA_VERSION
@@ -162,15 +163,13 @@ def _make_paths(tmp_path):
     return paths
 
 
-def test_security_text_missing_schema_version_fails_loud(monkeypatch, tmp_path, capsys) -> None:
-    """Audit I-2c: a manifest missing schema_version must NOT silently default
-    to 1 — operators get a clear error on stderr and exit 1."""
+def _unversioned(tmp_path, monkeypatch):
+    """A bundle manifest with no schema_version, as deploy writes it."""
     paths = _make_paths(tmp_path)
     proj = paths.projects / "demo"
     proj.mkdir(parents=True)
     (paths.state / "projects.txt").write_text("demo\n")
-    manifest = {
-        # schema_version intentionally omitted
+    (proj / "manifest.yml").write_text(yaml.safe_dump({
         "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
         "source": "bundle",
         "project": "demo",
@@ -178,53 +177,26 @@ def test_security_text_missing_schema_version_fails_loud(monkeypatch, tmp_path, 
         "services": {
             "web": {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh"},
         },
-    }
-    (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
+    }))
     monkeypatch.setattr("boxmunge.commands.security_cmd._paths", lambda: paths)
-    # Bypass load_manifest's own schema validation so we can exercise the
-    # security_cmd fail-loud path directly with a hand-edited manifest.
-    monkeypatch.setattr(
-        "boxmunge.commands.security_cmd.load_manifest",
-        lambda path: manifest,
-    )
 
-    with pytest.raises(SystemExit) as exc:
+
+def test_security_text_reads_absent_schema_version_as_1(monkeypatch, tmp_path) -> None:
+    """Absent schema_version means 1 (agent-help conventions); the view shows
+    the manifest migrated to the current schema, as every reader sees it."""
+    _unversioned(tmp_path, monkeypatch)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
         cmd_security(["demo"])
-    assert exc.value.code == 1
-    captured = capsys.readouterr()
-    assert "schema_version" in captured.err
-    assert "ERROR" in captured.err
+    assert f"(schema_version: {CURRENT_SCHEMA_VERSION}," in buf.getvalue()
 
 
-def test_security_json_missing_schema_version_fails_loud(monkeypatch, tmp_path, capsys) -> None:
-    """Same fail-loud guarantee for the --json code path."""
-    paths = _make_paths(tmp_path)
-    proj = paths.projects / "demo"
-    proj.mkdir(parents=True)
-    (paths.state / "projects.txt").write_text("demo\n")
-    manifest = {
-        # schema_version intentionally omitted
-        "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
-        "source": "bundle",
-        "project": "demo",
-        "hosts": ["demo.example.com"],
-        "services": {
-            "web": {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh"},
-        },
-    }
-    (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
-    monkeypatch.setattr("boxmunge.commands.security_cmd._paths", lambda: paths)
-    monkeypatch.setattr(
-        "boxmunge.commands.security_cmd.load_manifest",
-        lambda path: manifest,
-    )
-
-    with pytest.raises(SystemExit) as exc:
+def test_security_json_reads_absent_schema_version_as_1(monkeypatch, tmp_path) -> None:
+    _unversioned(tmp_path, monkeypatch)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
         cmd_security(["demo", "--json"])
-    assert exc.value.code == 1
-    captured = capsys.readouterr()
-    assert "schema_version" in captured.err
-    assert "ERROR" in captured.err
+    assert json.loads(buf.getvalue())["schema_version"] == CURRENT_SCHEMA_VERSION
 
 
 def test_security_json_off_services(monkeypatch, tmp_path) -> None:
@@ -1321,6 +1293,9 @@ def _scan_paths(tmp_path, *, in_grace: bool = False):
     long-standing quarantine/alert behaviour matches the pre-grace tests).
     Pass ``in_grace=True`` to write an active grace marker for the
     grace-specific tests.
+
+    The posture is strict: these tests quarantine on plain (non-KEV)
+    findings, which balanced only alerts on.
     """
     paths = _make_paths(tmp_path)
     proj = paths.projects / "demo"
@@ -1334,6 +1309,7 @@ def _scan_paths(tmp_path, *, in_grace: bool = False):
         "services": {
             "web": {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh", "image": "myapp:1.0"},
         },
+        "security": {"posture": "strict"},
     }
     (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
     (proj / "compose.yml").write_text(yaml.safe_dump({
@@ -2567,16 +2543,18 @@ def test_resume_lift_section_holds_project_lock(monkeypatch, tmp_path) -> None:
     # Pre-render the caddy site to avoid prepare_caddy_config errors.
     paths.project_caddy_site("demo").parent.mkdir(parents=True, exist_ok=True)
     paths.project_caddy_site("demo").write_text("dummy")
+    from tests.test_commands.cve_helpers import fresh_kev
+    fresh_kev(monkeypatch)
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.prepare_caddy_config",
-        lambda p, m: None,
+        "boxmunge.commands.quarantine_lift.prepare_caddy_config",
+        render_site,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.prepare_compose_override",
+        "boxmunge.commands.quarantine_lift.prepare_compose_override",
         lambda p, m, component=None: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.run_smoke",
+        "boxmunge.commands.quarantine_lift.run_smoke",
         lambda p, paths_: (True, "ok"),
     )
     lock_holds: list = []
@@ -2593,7 +2571,7 @@ def test_resume_lift_section_holds_project_lock(monkeypatch, tmp_path) -> None:
         finally:
             _os.close(fd)
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.lift_quarantine",
+        "boxmunge.commands.quarantine_lift.lift_quarantine",
         assert_lock_held,
     )
     rc = cmd_security_resume(["demo"], paths)
@@ -2708,19 +2686,19 @@ def _wire_resume_lift_stubs(monkeypatch) -> None:
     """Stub out the lift_quarantine + caddy/compose/smoke primitives so the
     resume flow can run end-to-end without touching docker."""
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.lift_quarantine",
+        "boxmunge.commands.quarantine_lift.lift_quarantine",
         lambda *a, **k: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.prepare_caddy_config",
-        lambda p, m: None,
+        "boxmunge.commands.quarantine_lift.prepare_caddy_config",
+        render_site,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.prepare_compose_override",
+        "boxmunge.commands.quarantine_lift.prepare_compose_override",
         lambda p, m, component=None: None,
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_resume.run_smoke",
+        "boxmunge.commands.quarantine_lift.run_smoke",
         lambda p, paths_: (True, "ok"),
     )
 
@@ -2738,6 +2716,8 @@ def test_resume_audit_only_does_not_write_scan_state(
     _wire_resume_lift_stubs(monkeypatch)
 
     write_calls: list = []
+    from tests.test_commands.cve_helpers import fresh_kev
+    fresh_kev(monkeypatch)
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.write_scan_state",
         lambda *a, **k: write_calls.append((a, k)),
@@ -2765,6 +2745,8 @@ def test_resume_audit_only_does_not_emit_scan_alerts(
     _wire_resume_lift_stubs(monkeypatch)
 
     emit_calls: list = []
+    from tests.test_commands.cve_helpers import fresh_kev
+    fresh_kev(monkeypatch)
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.emit_scan_alerts",
         lambda **kwargs: emit_calls.append(kwargs),
@@ -3086,6 +3068,7 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
     kev = KevCatalog(
         cve_ids=frozenset({"CVE-2023-45853"}),
         fetched_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        released_at=datetime(2026, 7, 1, tzinfo=timezone.utc), source="test",
     )
 
     # Pin the scan's notion of "today" to the catalog's fetch date so the KEV
@@ -3126,9 +3109,10 @@ def test_fleet_scan_fires_priority1_kev_stale_alert(
     stale_kev = KevCatalog(
         cve_ids=frozenset(),
         fetched_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        released_at=datetime(2020, 1, 1, tzinfo=timezone.utc), source="test",
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.load_kev",
+        "boxmunge.commands.security_kev.load_kev",
         lambda paths: stale_kev,
     )
 
@@ -3155,6 +3139,9 @@ def test_fleet_scan_fires_priority1_kev_stale_alert(
         return len(alerts)
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.send_alerts", fake_send_alerts,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_kev.send_alerts", fake_send_alerts,
     )
 
     rc = cmd_security_scan([], paths)

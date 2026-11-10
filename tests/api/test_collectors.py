@@ -93,7 +93,6 @@ def test_load_project_security_reads_posture_and_state(paths) -> None:
 
 @pytest.mark.parametrize("manifest_text,message", [
     (None, "Manifest not found"),
-    ("project: shop\n", "missing schema_version"),
 ])
 def test_load_project_security_errors_carry_the_cli_message(paths, manifest_text, message) -> None:
     (paths.projects / "shop").mkdir()
@@ -110,7 +109,7 @@ def test_fleet_summary_has_its_full_shape_on_an_empty_box(paths) -> None:
         "projects_count", "posture_distribution", "quarantined", "at_risk_running",
         "active_suppressions_count", "active_suppressions_projects",
         "active_suppressions_host", "host_suppressions", "last_fleet_scan",
-        "grace", "held_by_breaker",
+        "grace", "held_by_breaker", "kev",
     }
 
 

@@ -253,7 +253,7 @@ class TestRunCheckPreRegistered:
         assert result == 1
         captured = capsys.readouterr()
         assert "pre-registered" in captured.err
-        assert "boxmunge deploy myapp" in captured.err
+        assert "boxmunge prod-deploy myapp" in captured.err
 
 
 class TestRunCheckSurfacesProfileOff:
@@ -398,11 +398,11 @@ class TestCheckAllReadOnly:
         m2["project"] = "badapp"
         self._write_project(paths, "badapp", m2)
 
-        # Stub run_check so we don't depend on real smoke execution.
-        def _fake_run_check(name: str, paths: BoxPaths, verbose: bool = True) -> int:
-            return 2 if name == "badapp" else 0
+        # Stub the check so we don't depend on real smoke execution.
+        def _fake_run_check(name: str, paths: BoxPaths, verbose: bool = True) -> tuple:
+            return (2, "down") if name == "badapp" else (0, "")
 
-        monkeypatch.setattr(check_mod, "run_check", _fake_run_check)
+        monkeypatch.setattr(check_mod, "check_with_reason", _fake_run_check)
 
         result = run_check_all(paths, read_only=True)
         assert result == 2
@@ -445,16 +445,16 @@ class TestCheckAllSkipsQuarantined:
         paths.project_quarantine_state("myapp").write_text("{}")
 
         run_calls: list[str] = []
-        def _fake_run_check(name: str, paths: BoxPaths, verbose: bool = True) -> int:
+        def _fake_run_check(name: str, paths: BoxPaths, verbose: bool = True) -> tuple:
             run_calls.append(name)
-            return 0
+            return 0, ""
 
-        monkeypatch.setattr(check_mod, "run_check", _fake_run_check)
+        monkeypatch.setattr(check_mod, "check_with_reason", _fake_run_check)
 
         with patch("boxmunge.commands.check.update_health_state") as mock_update:
             rc = run_check_all(paths, read_only=False)
 
-        # run_check MUST NOT have run for the quarantined project.
+        # The check MUST NOT have run for the quarantined project.
         assert run_calls == []
         # update_health_state MUST NOT have been invoked — quarantined
         # projects don't transition health state.
@@ -476,8 +476,8 @@ class TestCheckAllSkipsQuarantined:
         paths.project_quarantine_state("myapp").write_text("{}")
 
         monkeypatch.setattr(
-            check_mod, "run_check",
-            lambda *a, **kw: 0,
+            check_mod, "check_with_reason",
+            lambda *a, **kw: (0, ""),
         )
 
         with patch("boxmunge.commands.check.log_operation") as mock_log:
@@ -526,8 +526,8 @@ class TestCheckAllSkipsLockedProject:
 
         run_calls: list[str] = []
         monkeypatch.setattr(
-            check_mod, "run_check",
-            lambda name, paths, verbose=True: run_calls.append(name) or 0,
+            check_mod, "check_with_reason",
+            lambda name, paths, verbose=True: run_calls.append(name) or (0, ""),
         )
 
         # Simulate a concurrent lifecycle op holding the lock.
@@ -549,7 +549,7 @@ class TestCheckAllSkipsLockedProject:
         from boxmunge.fileutil import project_lock
 
         self._write_project(paths, "myapp")
-        monkeypatch.setattr(check_mod, "run_check", lambda *a, **kw: 0)
+        monkeypatch.setattr(check_mod, "check_with_reason", lambda *a, **kw: (0, ""))
 
         with project_lock("myapp", paths):
             with patch("boxmunge.commands.check.log_operation") as mock_log:
@@ -570,7 +570,7 @@ class TestCheckAllSkipsLockedProject:
         from boxmunge.commands.check import run_check_all
 
         self._write_project(paths, "myapp")
-        monkeypatch.setattr(check_mod, "run_check", lambda *a, **kw: 0)
+        monkeypatch.setattr(check_mod, "check_with_reason", lambda *a, **kw: (0, ""))
 
         with patch("boxmunge.commands.check.update_health_state") as mock_update:
             run_check_all(paths, read_only=False)

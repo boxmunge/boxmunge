@@ -24,10 +24,16 @@ from boxmunge_cli.version import parse_version
 
 # Oldest boxmunge-server this client works with: the release whose command
 # surface (stage/prod-deploy/promote flags, status --json, logs options,
-# handshake schema_version) the client was built and tested against. The one
-# exception is prod-deploy --abandon, which is newer: older servers reject it
-# with "unknown argument", and it is not worth refusing every command for.
+# handshake schema_version) the client was built and tested against. Newer
+# flags are not worth refusing every command for: prod-deploy --abandon is
+# left to older servers to reject ("unknown argument"; it uploads nothing),
+# and the flags in FLAG_SINCE are refused here, before a bundle is uploaded.
 MIN_SERVER_VERSION = "0.10.0"
+# Flags newer than MIN_SERVER_VERSION -> the first server release that takes them.
+FLAG_SINCE = {"--no-pull": "0.11.4"}
+# Server behaviours newer than MIN_SERVER_VERSION that a command relies on ->
+# the first server release that has them.
+FEATURE_SINCE = {"'secrets set' with the value on stdin": "0.11.5"}
 
 
 class HandshakeError(Exception):
@@ -112,3 +118,24 @@ def check_server_compatibility(config: dict[str, Any],
             f"schema_version {info.schema_version}."
         )
     return info
+
+
+def require_server_flags(info: ServerInfo, flags: list[str] | tuple[str, ...]) -> None:
+    """Refuse a flag the server is too old to accept (FLAG_SINCE)."""
+    for flag in flags:
+        since = FLAG_SINCE.get(flag)
+        if since and parse_version(info.server_version) < parse_version(since):
+            raise HandshakeError(
+                f"{flag} needs boxmunge-server {since} or newer; the server runs "
+                f"{info.server_version}. Upgrade the server (run 'upgrade' on it), or "
+                f"run the command without {flag}.")
+
+
+def require_server_feature(info: ServerInfo, feature: str) -> None:
+    """Refuse a command whose behaviour the server is too old for (FEATURE_SINCE)."""
+    since = FEATURE_SINCE[feature]
+    if parse_version(info.server_version) < parse_version(since):
+        raise HandshakeError(
+            f"{feature} needs boxmunge-server {since} or newer; the server runs "
+            f"{info.server_version}. Nothing was sent. Upgrade the server "
+            f"(boxmunge remote upgrade), then run the command again.")

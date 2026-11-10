@@ -21,18 +21,20 @@ LOCK_HELD=0
 
 printable() { local s="${1:0:80}"; printf '%s' "${s//[^[:alnum:]._+-]/?}"; }
 
+# These four refuse corrupt or planted state, often under the health timer,
+# which discards the shim's stderr: die_logged, so `boxmunge log` shows why.
 require_slot() {  # require_slot <value> <where>
     [[ "$1" == "a" || "$1" == "b" ]] \
-        || die "Invalid slot '$(printable "$1")' in $2 (expected a or b); refusing to continue"
+        || die_logged "Invalid slot '$(printable "$1")' in $2 (expected a or b); refusing to continue"
 }
 
 require_semver() {  # require_semver <value> <where>
     [[ "$1" =~ $SEMVER_RE ]] \
-        || die "Invalid version '$(printable "$1")' in $2 (expected semver like 0.3.5 or 0.3.5-rc.1)"
+        || die_logged "Invalid version '$(printable "$1")' in $2 (expected semver like 0.3.5 or 0.3.5-rc.1)"
 }
 
 refuse_symlink() {
-    [[ ! -L "$1" ]] || die "$1 is a symlink; refusing to use it as root. Remove it and re-run."
+    [[ ! -L "$1" ]] || die_logged "$1 is a symlink; refusing to use it as root. Remove it and re-run."
 }
 
 # read_untrusted <file>: print a deploy-writable file. A FIFO would block a
@@ -55,8 +57,8 @@ with os.fdopen(fd, "rb") as f:
 PYRU
     case "$rc" in
         0) ;;
-        3) die "$1 is a symlink, FIFO or other non-regular file; refusing to read it as root. Remove it and re-run." ;;
-        *) die "Cannot read $1; inspect it and repair or remove it" ;;
+        3) die_logged "$1 is a symlink, FIFO or other non-regular file; refusing to read it as root. Remove it and re-run." ;;
+        *) die_logged "Cannot read $1; inspect it and repair or remove it" ;;
     esac
 }
 
@@ -64,6 +66,21 @@ PYRU
 # (GNU mv would move <src> INTO <dest> if <dest> were a link to a directory.)
 replace_file() {
     python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$1" "$2"
+}
+
+# write_root_file <file> <line>: replace a file in root-only upgrade-root/
+# (created if missing) by rename, so a reader never sees half of it. A temp a
+# run killed before its rename left (every caller holds upgrade.lock, so none
+# is in use) is swept first, and a failed write removes its own. No trap: it
+# would replace the shim's EXIT trap (cleanup_download), and SIGKILL skips one.
+write_root_file() {
+    local tmp prefix
+    refuse_symlink "$UPGRADE_ROOT_DIR"
+    [[ -d "$UPGRADE_ROOT_DIR" ]] || mkdir -m 0700 "$UPGRADE_ROOT_DIR"
+    prefix="$UPGRADE_ROOT_DIR/.$(basename "$1")"
+    rm -f "$prefix".*
+    tmp="$(mktemp "$prefix.XXXXXX")"
+    { printf '%s\n' "$2" > "$tmp" && replace_file "$tmp" "$1"; } || { rm -f "$tmp"; die_logged "Cannot write $1"; }
 }
 
 # load_active_slot: set ACTIVE_SLOT from the root-owned env-active symlink and

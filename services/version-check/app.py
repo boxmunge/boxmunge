@@ -7,36 +7,56 @@ Serves:
 3. GET  /v1/failures?version=X           — query failure summary for a version
 4. POST /v1/circuit-breaker/trip?version=X   — suppress a broken release (auth required)
 5. POST /v1/circuit-breaker/reset?version=X  — re-enable a release (auth required)
-6. GET  /v1/admin/version-checks?last=N  — daily check counts by version (auth required)
-7. GET  /                                — static landing page
+6. GET  /v1/admin/version-checks?last=N  — daily check counts by version (Bearer
+                                            STATS_SECRET)
+7. GET  /v1/admin/stats?last=N           — the same as an HTML page, plus the network
+                                            prefixes that checked and recent failure
+                                            reports (passkey session)
+8. /v1/admin/register, /v1/admin/login   — passkey registration and sign-in (passkey_routes)
+9. GET  /healthz                         — liveness; counts nothing (smoke and health checks)
+10. GET /                                — static landing page
 
 Abuse limits (F-12): the client address is taken from the X-Forwarded-For
 header set by the boxmunge Caddy proxy (one trusted hop), every request is
-rate-limited per client, request bodies are capped, and check counts are
-buffered in memory and flushed periodically rather than written per request.
-Failure reports are accepted only for listed releases and count once per
-reporter (IPv4 address or IPv6 /64) per version per six hours; see
-failure_store. The database schema changes only through db_schema migrations,
+rate-limited per client (per network once the client table is full; see
+request_limits.RequestLimiter), request bodies are capped, and check counts
+are buffered in memory and flushed periodically rather than written per
+request. Every limit is per gunicorn worker. Failure reports are accepted
+only for listed releases; repeats are not stored, and auto-trip (off by
+default; see _auto_trip_threshold) counts each reporter (IPv4 /24 or IPv6
+/48) once per version per six hours; see failure_store. The database schema changes only through db_schema migrations,
 run once before gunicorn starts.
+
+Privacy: the database holds a client's network prefix (prefix_store), never
+its address. The address is held in memory for rate limiting and written
+to the request logs (gunicorn's access log here, Caddy's in front).
+Stored rows expire on a schedule (retention).
 
 Source: https://github.com/boxmunge/boxmunge/tree/main/services/version-check
 """
 
-import hmac
 import os
-import sqlite3
+import re
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, request, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+import admin_auth
+import db
 import failure_store
+import passkey_routes
+import prefix_store
+import retention
 from db_schema import require_current
 from release_catalog import (
     VERSION_RE, apply_holds, check_response, find_blocked, load_releases, select_offers,
 )
-from request_limits import CheckCounter, RateLimiter, client_key, utc_today
+import stats_page
+import webauthn_store
+from request_limits import CheckCounter, RequestLimiter, utc_today
 
 SERVICE_DIR = Path(__file__).parent
 RELEASES_PATH = SERVICE_DIR / "releases.json"
@@ -64,16 +84,23 @@ TRUSTED_PROXY_HOPS = 1
 # this leaves ample room for many boxes behind one NAT.
 RATE_LIMIT_REQUESTS = 60
 RATE_LIMIT_WINDOW_SECONDS = 60
-# Bounded limiter memory; beyond this many clients in one window, new
-# clients are refused until the window rolls over.
+# Bounded limiter memory. Beyond this many clients in one window, a new
+# client is limited by its network (IPv4 /24, IPv6 /48) instead, with this
+# allowance per network; beyond this many networks too, it is refused until
+# the window rolls over (request_limits.RequestLimiter).
 RATE_LIMIT_MAX_CLIENTS = 100_000
+RATE_LIMIT_NETWORK_REQUESTS = 600
 # Failure reports are ~200 bytes; nothing here needs a large body.
 MAX_REQUEST_BYTES = 4096
 CHECK_FLUSH_SECONDS = 60
 CHECK_MAX_PENDING = 1000
-# Versions not in releases.json are counted under one bucket, so arbitrary
-# caller input cannot grow the version_checks table.
-UNLISTED_VERSION = "unlisted"
+# Failure-report free text. Boxes send e.g. "system_upgrade_failed: install_sh_exit_100".
+DETAIL_MAX = 200
+PRINTABLE_ASCII = re.compile(r"[ -~]*\Z")
+# The 0.10.x shim sends `boxmunge-server --version` output as installed_from.
+LEGACY_FROM_PREFIX = re.compile(r"^boxmunge\s+")
+STATS_FAILURES_SHOWN = 100
+PREFIXES_SHOWN = 500
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +108,7 @@ UNLISTED_VERSION = "unlisted"
 # ---------------------------------------------------------------------------
 
 def _is_circuit_broken(db_path, version):
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     try:
         row = conn.execute(
             "SELECT tripped FROM circuit_breaker WHERE version = ? AND tripped = 1",
@@ -93,7 +120,7 @@ def _is_circuit_broken(db_path, version):
 
 def _trip_circuit_breaker(db_path, version, tripped_by):
     now = datetime.now(timezone.utc).isoformat()
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     try:
         conn.execute(
             """INSERT INTO circuit_breaker (version, tripped, tripped_by, tripped_at)
@@ -106,7 +133,7 @@ def _trip_circuit_breaker(db_path, version, tripped_by):
 
 
 def _reset_circuit_breaker(db_path, version):
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     try:
         conn.execute("UPDATE circuit_breaker SET tripped = 0 WHERE version = ?", (version,))
         conn.commit()
@@ -117,9 +144,17 @@ def _reset_circuit_breaker(db_path, version):
 def _auto_trip_threshold() -> int:
     """CIRCUIT_BREAKER_AUTO_THRESHOLD: distinct reporters in 6 hours that trip a version.
 
-    0 (the default) disables auto-trip. Anything that is not a non-negative
-    integer stops the service from starting, rather than silently leaving
-    auto-trip off.
+    0 (the default) disables auto-trip. Keep it off. Failure reports are
+    unauthenticated: anyone with N cheap addresses in N networks (N /24s,
+    or N IPv6 /48s) can send them, so with auto-trip on, N POSTs hold the
+    newest security release back from every box until the maintainer resets
+    the breaker. A reporter is the network prefix of the connection only.
+    Nothing a box puts in the body, a box ID least of all (it is whatever
+    the sender writes), may ever count towards the threshold. Enabling it
+    prints that warning to the service log at every start.
+
+    Anything that is not a non-negative integer stops the service from
+    starting, rather than silently leaving auto-trip off.
     """
     raw = os.environ.get("CIRCUIT_BREAKER_AUTO_THRESHOLD", "0")
     try:
@@ -129,6 +164,12 @@ def _auto_trip_threshold() -> int:
     if threshold < 0:
         raise ValueError(
             f"CIRCUIT_BREAKER_AUTO_THRESHOLD must be a non-negative integer, got {raw!r}")
+    if threshold:
+        print(f"WARNING: CIRCUIT_BREAKER_AUTO_THRESHOLD={threshold}: failure reports from "
+              f"{threshold} networks hold a release from every box. Reports are "
+              "unauthenticated, so anyone with that many addresses can withhold a "
+              "security release fleet-wide. Unset it (0) unless you accept that.",
+              file=sys.stderr)
     return threshold
 
 
@@ -145,30 +186,10 @@ def _check_cb_auth(app_config):
     if not secret:
         return False
     auth = request.headers.get("Authorization", "")
-    return hmac.compare_digest(auth, f"Bearer {secret}")
+    return admin_auth.eq(auth, f"Bearer {secret}")
 
 
-def _check_stats_auth(app_config):
-    """Authorize the admin/version-checks endpoint.
-
-    Accepts EITHER `Authorization: Bearer <secret>` OR `?token=<secret>`.
-    URL token is the convenience path for simple poll bots; Bearer is
-    preferred (URLs end up in proxy logs).
-
-    Uses STATS_SECRET, NOT CB_SECRET — different blast radius. A leaked
-    stats token is read-only over check counts; a leaked CB token can
-    suppress security releases fleetwide.
-    """
-    secret = app_config.get("STATS_SECRET") or os.environ.get("STATS_SECRET", "")
-    if not secret:
-        return False
-    bearer = request.headers.get("Authorization", "")
-    if hmac.compare_digest(bearer, f"Bearer {secret}"):
-        return True
-    return hmac.compare_digest(request.args.get("token", ""), secret)
-
-
-def _query_version_checks(db_path: Path, days: int) -> dict:
+def _query_version_checks(db_path: Path, days: int, listed: set[str]) -> dict:
     """Aggregate the version_checks table for the last `days` days.
 
     Returns:
@@ -176,7 +197,7 @@ def _query_version_checks(db_path: Path, days: int) -> dict:
         "since": "YYYY-MM-DD",   # earliest day in window (inclusive)
         "until": "YYYY-MM-DD",   # latest day in window (today, inclusive)
         "days": N,
-        "totals":  [ {"version": "X", "count": N}, ... ],   # sorted by count desc
+        "totals":  [ {"version": "X", "count": N, "listed": bool}, ... ],   # count desc
         "by_date": [ {"date": "...", "version": "X", "count": N}, ... ]
       }
     """
@@ -185,7 +206,7 @@ def _query_version_checks(db_path: Path, days: int) -> dict:
     since_iso = since.isoformat()
     until_iso = until.isoformat()
 
-    conn = sqlite3.connect(db_path)
+    conn = db.connect(db_path)
     try:
         rows = conn.execute(
             "SELECT date, version, count FROM version_checks "
@@ -206,7 +227,7 @@ def _query_version_checks(db_path: Path, days: int) -> dict:
         "since": since_iso,
         "until": until_iso,
         "days": days,
-        "totals": [{"version": v, "count": c} for v, c in totals_rows],
+        "totals": [{"version": v, "count": c, "listed": v in listed} for v, c in totals_rows],
         "by_date": [{"date": d, "version": v, "count": c} for d, v, c in rows],
     }
 
@@ -243,6 +264,7 @@ def create_app() -> Flask:
     app = Flask(__name__, static_folder="static")
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=TRUSTED_PROXY_HOPS)
     app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BYTES
+    app.config.update(passkey_routes.relying_party(os.environ.get("ADMIN_RP_ID", "boxmunge.dev")))
 
     # The pre-start step (db_schema.py, run by the image's CMD) migrates.
     require_current(DB_PATH)
@@ -251,35 +273,64 @@ def create_app() -> Flask:
     releases = load_releases(RELEASES_PATH)
     listed_versions = {r["version"] for r in releases}
     auto_trip_threshold = _auto_trip_threshold()
-    limiter = RateLimiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SECONDS,
-                          RATE_LIMIT_MAX_CLIENTS)
-    counter = CheckCounter(DB_PATH, CHECK_FLUSH_SECONDS, CHECK_MAX_PENDING)
+    limiter = RequestLimiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_NETWORK_REQUESTS,
+                             RATE_LIMIT_WINDOW_SECONDS, RATE_LIMIT_MAX_CLIENTS,
+                             prefix_store.network_prefix)
+    counter = CheckCounter(DB_PATH, CHECK_FLUSH_SECONDS, CHECK_MAX_PENDING,
+                           always_count=frozenset(listed_versions))
     app.extensions["check_counter"] = counter
-    sweeper = failure_store.Sweeper(DB_PATH, failure_store.SWEEP_INTERVAL)
+    prefixes = prefix_store.PrefixLog(DB_PATH, CHECK_FLUSH_SECONDS, CHECK_MAX_PENDING,
+                                      frozenset(listed_versions))
+    app.extensions["prefix_log"] = prefixes
+    sweeper = retention.Sweeper(DB_PATH, retention.SWEEP_INTERVAL,
+                                flushes=(counter.flush, prefixes.flush))
     sweeper.start()
-    app.extensions["failure_sweeper"] = sweeper
+    app.extensions["retention_sweeper"] = sweeper
+
+    app.extensions[admin_auth.SESSION_KEY] = webauthn_store.session_key(DB_PATH)
+    app.extensions[admin_auth.GUESSES] = admin_auth.guess_limiter()
+    app.register_blueprint(passkey_routes.create_blueprint(DB_PATH))
+
+    @app.errorhandler(admin_auth.AdminNotConfigured)
+    def admin_not_configured(exc):
+        return jsonify({"error": str(exc)}), 503
+
+    @app.errorhandler(admin_auth.TooManyGuesses)
+    def too_many_guesses(exc):
+        return jsonify({"error": str(exc)}), 429
 
     @app.before_request
     def rate_limit():
-        if not limiter.allow(client_key(request.remote_addr)):
+        if not limiter.allow(request.remote_addr):
             response = jsonify({"error": "rate limited"})
             response.status_code = 429
             response.headers["Retry-After"] = str(RATE_LIMIT_WINDOW_SECONDS)
             return response
         return None
 
+    @app.route("/healthz")
+    def healthz():
+        """Liveness for the smoke script and platform health check; counts nothing."""
+        response = jsonify({"status": "ok"})
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
     @app.route("/v1/check")
     def check():
         version = _version_arg("v")
         if version is None:
             return jsonify({"error": "missing or malformed version parameter (want X.Y.Z)"}), 400
+        prefix = prefix_store.network_prefix(request.remote_addr)
 
         offers, held = apply_holds(
             select_offers(releases, version),
             lambda v: _is_circuit_broken(DB_PATH, v),
         )
         result = check_response(offers, held, find_blocked(releases, version))
-        counter.record(version if version in listed_versions else UNLISTED_VERSION)
+        # The real version, listed or not (a dev build, a dropped release): it is
+        # valid X.Y.Z, and the counter caps distinct versions per day.
+        counter.record(version)
+        prefixes.record(prefix, version)
 
         response = jsonify(result)
         response.headers["Cache-Control"] = "no-cache"
@@ -307,12 +358,22 @@ def create_app() -> Flask:
         installed_from = body.get("installed_from", "")
         if not isinstance(installed_from, str) or len(installed_from) > 64:
             return jsonify({"error": "installed_from must be a string of at most 64 characters"}), 400
+        detail = body.get("detail")
+        if detail is not None and (not isinstance(detail, str) or len(detail) > DETAIL_MAX
+                                   or not PRINTABLE_ASCII.match(detail)):
+            return jsonify({"error": f"detail must be printable ASCII of at most "
+                                     f"{DETAIL_MAX} characters"}), 400
+        installed_from = LEGACY_FROM_PREFIX.sub("", installed_from)
+        if installed_from != "unknown" and not VERSION_RE.match(installed_from):
+            return jsonify({"error": "installed_from must be X.Y.Z or \"unknown\" "
+                                     "(optionally prefixed \"boxmunge \")"}), 400
         now = datetime.now(timezone.utc)
-        # A repeat from the same reporter is accepted but not stored: the
-        # box needs no different answer, and storing it would let one host
-        # count several times towards the auto-trip threshold.
+        # A repeat of a report the same network already sent is accepted but
+        # not stored: the box needs no different answer. Auto-trip counts
+        # networks, not reports (failure_store).
         if failure_store.record_failure(DB_PATH, version, installed_from, stage,
-                                        client_key(request.remote_addr), now):
+                                        prefix_store.network_prefix(request.remote_addr), now,
+                                        detail or None):
             _maybe_auto_trip(DB_PATH, version, auto_trip_threshold, now)
         return "", 204
 
@@ -349,16 +410,34 @@ def create_app() -> Flask:
 
         Counts are /v1/check hits, NOT unique boxes — a single box checks
         ~4x/day per its auto-update timer, plus manual upgrades. Versions
-        not in releases.json are counted as "unlisted". Use this as a "is
+        not in releases.json are counted under their own version (marked
+        listed: false); the "unlisted" row only collects the overflow beyond the
+        per-day cap on distinct versions. Use this as a "is
         anyone running boxmunge?" signal, not for precise install counts.
         Counts buffered in other gunicorn workers appear after their next
         flush (at most CHECK_FLUSH_SECONDS later).
         """
-        if not _check_stats_auth(app.config):
+        # Bearer STATS_SECRET only: the passkey session cookie does not open
+        # this. A leaked STATS_SECRET is read-only over check counts; CB_SECRET
+        # (which can suppress releases fleetwide) is separate.
+        if not admin_auth.bearer_authorized():
             return jsonify({"error": "unauthorized"}), 401
         counter.flush()
         days = _parse_last_param(request.args.get("last"))
-        return jsonify(_query_version_checks(DB_PATH, days))
+        return jsonify(_query_version_checks(DB_PATH, days, listed_versions))
+
+    @app.route("/v1/admin/stats")
+    @admin_auth.require_session
+    def admin_stats():
+        """HTML for a signed-in browser: daily checks per version, the network
+        prefixes that checked, and recent failure reports."""
+        counter.flush()
+        prefixes.flush()
+        stats = _query_version_checks(DB_PATH, _parse_last_param(request.args.get("last")),
+                                      listed_versions)
+        return admin_auth.html_response(stats_page.render(
+            stats, prefix_store.by_prefix(DB_PATH, PREFIXES_SHOWN),
+            failure_store.recent_failures(DB_PATH, STATS_FAILURES_SHOWN)))
 
     @app.route("/")
     def index():

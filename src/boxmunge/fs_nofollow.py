@@ -25,19 +25,20 @@ def running_as_root() -> bool:
     return os.getuid() == 0
 
 
-def _deploy_owner() -> tuple[int, int] | None:
-    """deploy's (uid, gid) when running as root and deploy exists, else None.
-
-    KeyError means no deploy user (bootstrap not done yet, or a dev/test
-    machine), where there is nothing to hand ownership to.
-    """
-    if not running_as_root():
-        return None
+def deploy_ids() -> tuple[int, int] | None:
+    """deploy's (uid, gid), or None when there is no deploy user (bootstrap
+    not done yet, or a dev/test machine). Whoever asks."""
     try:
         pw = pwd.getpwnam("deploy")
     except KeyError:
         return None
     return pw.pw_uid, pw.pw_gid
+
+
+def _deploy_owner() -> tuple[int, int] | None:
+    """deploy's (uid, gid) when running as root and deploy exists, else None:
+    with no deploy user there is nothing to hand ownership to."""
+    return deploy_ids() if running_as_root() else None
 
 
 def _warn_chown(what: str, e: OSError) -> None:
@@ -106,11 +107,30 @@ def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
     return fd
 
 
-def read_text_nofollow(path: Path) -> str:
-    """A UTF-8 file's text, read without following a link (see
-    open_regular_nofollow). Raises OSError (or UnicodeDecodeError)."""
-    with os.fdopen(open_regular_nofollow(path, os.O_RDONLY), encoding="utf-8") as f:
-        return f.read()
+# Far above any state record, compose file or catalog boxmunge writes or
+# reads (the KEV catalog, the largest, is a few MB), and far below what
+# would make a root reader exhaust memory on a file deploy grew.
+READ_LIMIT_BYTES = 64 * 1024 * 1024
+
+
+def read_bytes_nofollow(path: Path, *, limit: int = READ_LIMIT_BYTES) -> bytes:
+    """A file's bytes, read without following a link (see
+    open_regular_nofollow) and refused past ``limit`` bytes. The one way
+    root reads a file by name in a directory deploy can write (state/,
+    a project's tree). Raises OSError; a missing file raises
+    FileNotFoundError, as Path.read_bytes does."""
+    with os.fdopen(open_regular_nofollow(path, os.O_RDONLY), "rb") as f:
+        data = f.read(limit + 1)
+    if len(data) > limit:
+        raise OSError(f"{path} is larger than {limit} bytes; refusing to read it. "
+                      "Remove it so it can be recreated.")
+    return data
+
+
+def read_text_nofollow(path: Path, *, limit: int = READ_LIMIT_BYTES) -> str:
+    """read_bytes_nofollow, as UTF-8 text. Raises OSError or
+    UnicodeDecodeError."""
+    return read_bytes_nofollow(path, limit=limit).decode("utf-8")
 
 
 def chmod_nofollow(path: Path, mode: int | None = None, add: int = 0) -> None:
@@ -186,10 +206,7 @@ def chown_tree_deploy(path: Path) -> None:
     directory without following a link. Same best-effort rules as
     ``_chown_deploy``.
     """
-    if not running_as_root():
-        return
-    owner = _deploy_owner()
-    if owner is None:
+    if not running_as_root() or _deploy_owner() is None:
         return
     try:
         top = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
@@ -200,18 +217,70 @@ def chown_tree_deploy(path: Path) -> None:
             _warn_chown(str(path), e)
         return
     try:
-        try:
-            os.fchown(top, *owner)
-        except OSError as e:
-            _warn_chown(str(path), e)
-        for root, dirs, files, dirfd in os.fwalk(".", dir_fd=top, follow_symlinks=False):
-            for name in dirs + files:
-                try:
-                    os.chown(name, *owner, dir_fd=dirfd, follow_symlinks=False)
-                except OSError as e:
-                    _warn_chown(os.path.join(str(path), root, name), e)
+        chown_open_tree_deploy(top, str(path))
     finally:
         os.close(top)
+
+
+def chown_open_tree_deploy(top: int, label: str, *, only_uid: int | None = None) -> None:
+    """chown_tree_deploy for a directory the caller opened without following
+    a link (``label`` names it in warnings): the descriptor itself, then
+    everything under it, reached only through directory descriptors.
+
+    A file with other links is skipped with a warning, always: its inode may
+    be shared with a file outside the tree, which deploy must not gain. With
+    ``only_uid``, only entries owned by that uid are re-owned, so what a
+    container user or deploy made is not touched.
+    """
+    owner = _deploy_owner()
+    if owner is None:
+        return
+    try:
+        if only_uid is None or os.fstat(top).st_uid == only_uid:
+            os.fchown(top, *owner)
+    except OSError as e:
+        _warn_chown(label, e)
+    for root, dirs, files, dirfd in os.fwalk(".", dir_fd=top, follow_symlinks=False):
+        for name in dirs + files:
+            where = os.path.join(label, root, name)
+            try:
+                _chown_entry(name, dirfd, where, owner, only_uid)
+            except OSError as e:
+                _warn_chown(where, e)
+
+
+def _chown_entry(name: str, dirfd: int, where: str, owner: tuple[int, int],
+                 only_uid: int | None) -> None:
+    """Re-own one entry through a descriptor opened on it without following a
+    link, so the checks and the chown are about the same inode however the
+    name is swapped meanwhile. A link is left alone (owning it grants nothing,
+    and a chown by name could be raced). Only regular files and directories
+    are re-owned; the open neither blocks on a FIFO nor takes a terminal."""
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY
+                     | os.O_CLOEXEC, dir_fd=dirfd)
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            return
+        raise
+    try:
+        st = os.fstat(fd)
+        if not (stat.S_ISREG(st.st_mode) or stat.S_ISDIR(st.st_mode)):
+            logging.getLogger("boxmunge").warning(
+                "not re-owning %s: not a regular file or directory (mode %o)",
+                where, st.st_mode)
+            return
+        if not stat.S_ISDIR(st.st_mode) and st.st_nlink > 1:
+            # Its inode may be shared with a file outside the tree. Already
+            # deploy's (a `git clone --local` of a stage) is nothing to report.
+            if st.st_uid != owner[0]:
+                logging.getLogger("boxmunge").warning(
+                    "not re-owning %s: it has %d links", where, st.st_nlink)
+            return
+        if only_uid is None or st.st_uid == only_uid:
+            os.fchown(fd, *owner)
+    finally:
+        os.close(fd)
 
 
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC

@@ -21,7 +21,7 @@ live_intact() {  # live_intact <description>: env-a still runs and is live
 
 for standby in absent half-built inflight; do
     new_root a
-    mock_server a 'if [[ "$1" == "health" ]]; then exit 2; fi; exit 0'
+    mock_server a 'if [[ "$1" == "health" ]]; then exec health-report 2; fi; exit 0'
     case "$standby" in
         absent) rm -r "$BOXMUNGE_ROOT/env-b" ;;
         half-built) rm "$BOXMUNGE_ROOT/env-b/bin/boxmunge-server" ;;
@@ -30,11 +30,11 @@ for standby in absent half-built inflight; do
     write_probation "9.9.9" "b" "$SOON"
     for fire in 1 2; do
         run_shim check-probation
-        expect 1 "is not a working venv a rollback could use" "$standby standby: check-probation fire $fire refuses"
+        expect 1 "9.9.9 failed its probation health check, but cannot be rolled back" "$standby standby: check-probation fire $fire refuses the rollback"
         live_intact "$standby standby, fire $fire"
     done
     run_shim target 9.9.10
-    expect 1 "is not a working venv a rollback could use" "$standby standby: an upgrade is refused too"
+    expect 1 "its rollback target, slot b, is not a working venv" "$standby standby: an upgrade is deferred"
     live_intact "$standby standby, upgrade"
     drop_root
 done

@@ -9,7 +9,13 @@ way `security resume` scans: audit-only, failing closed (a failed image
 scan, a budget skip or an image that cannot be identified refuses), with
 the cached KEV catalog, under the release's own manifest and compose
 (its posture and hardening) and the project's suppressions (server-side
-state no release carries). A quarantine-level finding refuses the release.
+state no release carries). A quarantine-level finding refuses the release,
+and so does any CVE in it that a KEV refresh withdrew (kev_withdrawal):
+the operator accepts that with `security resume`. A production release is
+also judged against the KEV catalog the way `security resume` is
+(cve.lift_rule): on a stale catalog that lists a CVE still in its images,
+or with no usable catalog, it is refused; otherwise the lift alert names
+what could not be checked.
 
 A production release that clears starts as any deploy does, and once its
 smoke test passes the quarantine is lifted (cve.quarantine.lift_quarantine).
@@ -24,10 +30,13 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from boxmunge import docker_containers
 from boxmunge.commands.deploy_images import candidate_name
+from boxmunge.commands.kev_acceptance import accept_at_gate, gate_exits
+from boxmunge.commands.kev_withdrawal import gate_hold
 from boxmunge.commands.security_scan_core import ProjectScan, audit_targets
 from boxmunge.commands.security_scan_inputs import (
     ProjectHardening, ProjectMeta, ProjectScanError, ScanTarget, hardening_profile,
@@ -35,7 +44,8 @@ from boxmunge.commands.security_scan_inputs import (
 )
 from boxmunge.compose_images import built_image_name
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
-from boxmunge.cve.kev import load_kev
+from boxmunge.cve.kev import KevCatalog, load_kev
+from boxmunge.cve.lift_rule import ACCEPT_FLAG, KevLiftCheck, check_kev_for_lift
 from boxmunge.cve.policy_explain import HARDENING_UPCOMING_FIX, hardening_cause
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.quarantine import (
@@ -49,7 +59,9 @@ from boxmunge.cve.security_policy import relaxations
 from boxmunge.docker_run import DockerError
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
+from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
+from boxmunge.release_policies import ReleasePolicyError, release_policies
 from boxmunge.release_target import (
     DeployRefused, ReleaseTarget, production_target, resolved_services,
 )
@@ -71,7 +83,9 @@ class Clearance:
     the quarantine it lifts, {service: (name started under, image ID)}, the
     hardening profile it was judged with (a hook must not change it), the
     policy it was judged under and the one the quarantine recorded (None:
-    unknown), and the findings it leaves running at risk."""
+    unknown), the findings it leaves running at risk, what a stale KEV
+    catalog left unchecked (cve.lift_rule) and what prod-deploy's
+    --accept-stale-kev accepted (kev_acceptance)."""
     project: str
     compose_project: str
     cve_id: str
@@ -80,6 +94,8 @@ class Clearance:
     policy: dict[str, Any]
     quarantined_under: dict[str, Any] | None
     at_risk: tuple[str, ...]
+    kev_gap: str | None = None  # cleared on a stale KEV catalog: what was not checked
+    kev_accepted: str | None = None  # the no-usable-catalog refusal the operator accepted
 
     def relaxed(self) -> list[str]:
         """What the release loosened against the policy at quarantine time."""
@@ -119,6 +135,8 @@ def production_now(paths: BoxPaths, project: str) -> str:
     """Where production stands when a deploy stops before its start."""
     if is_quarantined(project, paths):
         return "production stays CVE-quarantined behind its maintenance page"
+    if is_paused(project, paths):
+        return "production stays paused behind its maintenance page, awaiting a deploy"
     return "production runs its previous containers"
 
 
@@ -140,7 +158,7 @@ def _profile(target: ReleaseTarget, meta: ProjectMeta) -> ProjectHardening:
 
 
 def _scan(paths: BoxPaths, target: ReleaseTarget, meta: ProjectMeta,
-          starts: dict[str, StartImage], unnamed: dict[str, str],
+          starts: dict[str, StartImage], unnamed: dict[str, str], kev: KevCatalog,
           ) -> tuple[ProjectScan, dict[str, str], list[ScanTarget], ProjectHardening]:
     """The audit-only scan, {service: image ID} of what it scanned, the
     scan's targets and the hardening profile it was judged with."""
@@ -163,7 +181,7 @@ def _scan(paths: BoxPaths, target: ReleaseTarget, meta: ProjectMeta,
     once = list({t.image_ref: t for t in targets}.values())
     scan = audit_targets(
         paths, project, meta=meta, profile=profile, supps=supps,
-        targets=once, unidentified=unidentified, kev=load_kev(paths),
+        targets=once, unidentified=unidentified, kev=kev,
         basis=BASIS_STARTUP_IMAGES)
     return scan, ids, targets, profile
 
@@ -221,7 +239,8 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
     try:
         starts, unnamed = start_images(target)
         meta = project_meta(project, manifest, [])
-        scan, ids, scan_targets, profile = _scan(paths, target, meta, starts, unnamed)
+        kev = load_kev(paths)
+        scan, ids, scan_targets, profile = _scan(paths, target, meta, starts, unnamed, kev)
         before = record.get("policy")
         if before is None and previous is not None:
             before = project_meta(project, previous, []).policy()
@@ -248,6 +267,18 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
             f"suppress one that does not apply (`boxmunge security suppress <CVE> --project "
             f"{project} --until <YYYY-MM-DD> --reason <text>`; a CISA KEV finding cannot "
             f"be suppressed) and deploy again."])
+    # Staging lifts nothing; the promote is judged again.
+    held = None if target.staging else gate_hold(paths, project, scan.decisions)
+    if held:
+        raise QuarantineRefused(held)
+    kev_check = KevLiftCheck() if target.staging else check_kev_for_lift(
+        cve, scan.decisions, kev, datetime.now(timezone.utc).date())
+    accepted = None if target.staging else accept_at_gate(project, kev_check, paths)
+    if kev_check.refusal is not None and accepted is None:
+        raise QuarantineRefused([
+            f"The scan is clear, but {kev_check.refusal}.",
+            f"The quarantine stays in place and nothing was started in {where}.",
+            *gate_exits(project, kev_check, paths)])
     upcoming = _upcoming_lines(scan, services)
     if upcoming and profile.upcoming is not None:
         print(f"  WARNING: from 0.12 this release would still be quarantined for "
@@ -260,7 +291,8 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
     return Clearance(
         project, target.compose_project, cve,
         {n: (starts[n].final_ref, ids[n]) for n in starts}, profile, meta.policy(), before,
-        tuple(_finding_lines(scan, services, Disposition.STILL_RUNNING_AT_RISK)))
+        tuple(_finding_lines(scan, services, Disposition.STILL_RUNNING_AT_RISK)),
+        kev_check.gap, accepted)
 
 
 def require_unchanged(paths: BoxPaths, clearance: Clearance) -> None:
@@ -331,35 +363,15 @@ def _verify_running(paths: BoxPaths, clearance: Clearance, component: str, *,
     return services
 
 
-_CONDITIONS = {"none": "no", "any": "always", "on-failure": "on-failure"}
-
-
-def _policy(svc: dict[str, Any]) -> str:
-    """The restart policy compose gives a container of ``svc``."""
-    if svc.get("restart"):
-        return str(svc["restart"])
-    rule = (svc.get("deploy") or {}).get("restart_policy") or {}
-    condition = rule.get("condition")
-    if not condition:
-        return "no"
-    if condition not in _CONDITIONS:
-        raise QuarantineError(f"deploy.restart_policy.condition {condition!r} is not one "
-                              f"of {', '.join(_CONDITIONS)}")
-    attempts = rule.get("max_attempts")
-    return f"on-failure:{attempts}" if condition == "on-failure" and attempts else \
-        _CONDITIONS[condition]
-
-
 def _release_policies(paths: BoxPaths, project: str,
                       services: dict[str, str]) -> dict[str, str]:
-    """{container: its release's own restart policy}: what compose gives a
-    container it creates, so a held one the deploy did not recreate gets the
-    same, never a policy saved from an earlier release."""
-    _model, model = resolved_services(production_target(paths, project))
-    gone = sorted({svc for svc in services.values() if svc not in model})
-    if gone:
-        raise QuarantineError(f"services {', '.join(gone)} are no longer in the release")
-    return {name: _policy(model[svc]) for name, svc in services.items()}
+    """{container: its release's own restart policy} (release_policies), so
+    a held one the deploy did not recreate gets the same, never a policy
+    saved from an earlier release. Raises QuarantineError."""
+    try:
+        return release_policies(paths, project, services)
+    except ReleasePolicyError as e:
+        raise QuarantineError(str(e)) from e
 
 
 def keep_quarantined(paths: BoxPaths, project: str) -> None:
@@ -411,6 +423,12 @@ def _lift_report(clearance: Clearance, ref: str) -> tuple[str, dict[str, Any]]:
         text += (" Policy at quarantine time unknown: a relaxation of the security policy "
                  "cannot be ruled out.")
         detail["policy_baseline"] = "unknown"
+    if clearance.kev_accepted is not None:
+        text += f" Lifted with {ACCEPT_FLAG}, although {clearance.kev_accepted}."
+        detail["kev_accepted"] = clearance.kev_accepted
+    if clearance.kev_gap is not None:
+        text += f" Lifted although {clearance.kev_gap}."
+        detail["kev_gap"] = clearance.kev_gap
     return text[0].upper() + text[1:], detail
 
 
@@ -459,13 +477,18 @@ def lift_after_deploy(paths: BoxPaths, project: str, ref: str, clearance: Cleara
     message, detail = _lift_report(clearance, ref)
     relaxed = bool(clearance.relaxed())
     unknown = detail.get("policy_baseline") == "unknown"
-    # Both cases are higher priority: a relaxation, or one that cannot be ruled out.
+    accepted = clearance.kev_accepted is not None
+    gap = accepted or clearance.kev_gap is not None
+    # Higher priority: a relaxation, one that cannot be ruled out, or a stale KEV catalog.
     caveat = (" by relaxing the security policy" if relaxed
-              else " (policy at quarantine time unknown)" if unknown else "")
+              else " (policy at quarantine time unknown)" if unknown
+              else f" with {ACCEPT_FLAG}" if accepted
+              else " on a stale KEV catalog" if gap else "")
     print(f"  {message}")
     log_operation(component, f"CVE quarantine ({clearance.cve_id}) lifted by deploying {ref}"
                   + caveat, paths, project=project, detail=detail)
     notify(paths, f"{project}: quarantine lifted by deploying {ref}" + caveat,
            f"{project}: {message}",
-           component=component, project=project, priority=1 if relaxed or unknown else 0)
+           component=component, project=project,
+           priority=1 if relaxed or unknown or gap else 0)
     return 0

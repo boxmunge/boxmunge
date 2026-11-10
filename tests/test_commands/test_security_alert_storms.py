@@ -50,7 +50,7 @@ def _scan_returns(monkeypatch, findings) -> None:
 def test_mixed_dispositions_alert_once_across_daily_scans(tmp_path, monkeypatch, stubs):
     """Audit B-13: libperl relevant (QUARANTINE), perl-base gated
     (INFORMATIONAL) for the same CVE. Day 1 alerts; days 2 and 3 do not."""
-    paths = make_box(tmp_path, security={"runtimes": ["python"]})
+    paths = make_box(tmp_path, security={"posture": "strict", "runtimes": ["python"]})
     pushover = Pushover(monkeypatch, paths)
     _scan_returns(monkeypatch, [finding("CVE-2026-57433", pkg="libperl5.36"),
                                 finding("CVE-2026-57433", pkg="perl-base")])

@@ -22,7 +22,7 @@ _CVE = CRIT.cve_id
 
 
 def _kev(*ids: str) -> KevCatalog:
-    return KevCatalog(frozenset(ids), datetime.now(timezone.utc))
+    return KevCatalog(frozenset(ids), datetime.now(timezone.utc), datetime.now(timezone.utc), 'test')
 
 
 def _suppress(paths, cve: str = _CVE) -> None:
@@ -77,10 +77,11 @@ def test_kev_listed_flag_round_trips_through_scan_state(box, monkeypatch):
     assert prior[0].findings[0].kev_listed is True
 
 
-def _seed_kev_cache(paths, *ids: str) -> None:
+def _seed_kev_cache(paths, *ids: str, age_days: int = 0) -> None:
+    when = (datetime.now(timezone.utc) - timedelta(days=age_days)).isoformat()
     paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
     paths.kev_catalog.write_text(kev_module.json.dumps({
-        "fetched_at": datetime.now(timezone.utc).isoformat(), "cve_ids": list(ids),
+        "fetched_at": when, "source": "test", "released_at": when, "cve_ids": list(ids),
     }))
 
 
@@ -97,6 +98,18 @@ def test_suppress_refuses_a_kev_listed_cve(box, capsys):
     assert not (box.project_dir("demo") / "security" / "suppressions.yml").exists()
 
 
+def test_suppress_refuses_a_cve_on_a_stale_cached_catalog(box, capsys):
+    """CVE-04: staleness turns the KEV gate off for new quarantines, but the
+    cached IDs still say the CVE is listed; once the catalog is fresh the
+    suppression would not apply, so it is refused now."""
+    _seed_kev_cache(box, _CVE, age_days=30)
+    assert cmd_security_suppress(_suppress_args(_CVE), box) == 1
+    err = capsys.readouterr().err
+    assert "Suppressions do not apply to KEV-listed CVEs" in err
+    assert "the cached catalog is stale" in err
+    assert not (box.project_dir("demo") / "security" / "suppressions.yml").exists()
+
+
 def test_suppress_current_skips_kev_listed_and_suppresses_the_rest(
     box, monkeypatch, capsys,
 ):
@@ -109,7 +122,7 @@ def test_suppress_current_skips_kev_listed_and_suppresses_the_rest(
     other = finding("CVE-2026-0002")
     decision = evaluate_project(
         "demo", scan_result("demo-web:1", [CRIT, other]),
-        posture=Posture.BALANCED,
+        posture=Posture.STRICT,
         hardening_profile=HardeningProfile(True, True, False, False),
         dangerously_disable_quarantine=False, suppressions=(),
         today=utc_today(), kev_lookup=lambda c: c == _CVE,
@@ -160,9 +173,10 @@ def test_fleet_view_lists_at_risk_only_with_findings(tmp_path, monkeypatch, caps
     from boxmunge.commands.security_cmd import cmd_security
     from tests.test_commands.cve_helpers import write_project
 
-    paths = make_box(tmp_path, projects=("exposed",),
-                     security={"dangerously_disable_quarantine": True})
-    write_project(paths, "quiet", security={"dangerously_disable_quarantine": True})
+    # Strict: a non-KEV finding quarantines there, so opting out leaves it at risk.
+    opted_out = {"posture": "strict", "dangerously_disable_quarantine": True}
+    paths = make_box(tmp_path, projects=("exposed",), security=opted_out)
+    write_project(paths, "quiet", security=opted_out)
     (paths.state / "projects.txt").write_text("exposed\nquiet\n")
     monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
     monkeypatch.setattr(

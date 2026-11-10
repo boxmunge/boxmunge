@@ -16,7 +16,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from boxmunge.cve._alerting_types import Alert, Hit
-from boxmunge.cve.policy import FindingDisposition
+from boxmunge.cve.policy import Disposition, FindingDisposition
+from boxmunge.cve.policy_types import BALANCED_KEV_ONLY_SINCE
 from boxmunge.cve.scanner import Severity
 from boxmunge.cve.suppressions import Suppression
 
@@ -156,21 +157,48 @@ def format_kev_at_risk_alert(project: str, hits: Sequence[Hit]) -> Alert:
 
 
 def format_fixable_alert(project: str, hits: Sequence[Hit]) -> Alert:
-    """Findings over the quarantine gate whose fix the image is not running.
+    """Findings over the posture's gate whose fix the image is not running —
+    including a balanced finding that was awaiting a fix when the fix lands.
     Not quarantined (the fix is the remedy), never silent. Priority 0."""
     hits = _ordered(hits)
     n = len(hits)
     title = (f"[boxmunge:{project}] {n} fixable CVE finding{'s' if n != 1 else ''} "
-             f"over the quarantine gate — rebuild to apply the fix")
+             f"over the posture's gate — rebuild to apply the fix")
     body = "\n".join([
         f"Project: {project}",
         "A fix exists for each of these, but the running image predates it:",
         *_listing(hits),
         "",
-        "boxmunge does not rebuild images. Rebuild (pull the base image) and",
-        "redeploy to pick up the fixes.",
+        "boxmunge does not rebuild images on its own. A `build:` service is",
+        "rebuilt on its base image's current digest by its next stage and",
+        f"promote, or prod-deploy (`prod-deploy {project} --redeploy` when",
+        "nothing new was uploaded). Otherwise bump the image tag or digest (a",
+        "FROM pinned by digest is never refreshed), or, for a package your",
+        "Dockerfile installs, set compose `build: {no_cache: true}`, then",
+        "redeploy. See CVE_POLICY.md, \"Base images and the build cache\" and",
+        "\"Shipping a fix the upstream image does not have yet\".",
     ])
     return Alert(kind="fix_available", title=title, body=body, priority=0)
+
+
+def format_awaiting_fix_alert(project: str, hits: Sequence[Hit]) -> Alert:
+    """Findings at balanced's alert-only gate: no fix yet, not known to be
+    exploited. The site stays up. Alerted once per finding; priority 0, since
+    nothing needs doing tonight."""
+    hits = _ordered(hits)
+    n = len(hits)
+    title = (f"[boxmunge:{project}] {n} CVE finding{'s' if n != 1 else ''} with no "
+             f"fix yet — site stays up, nothing to do now")
+    body = "\n".join([
+        f"Project: {project} — still running.",
+        *_listing(hits),
+        "",
+        hits[0].disposition.explanation,
+        "",
+        "You will not be alerted again for these until that changes.",
+        f"Details: boxmunge security {project}",
+    ])
+    return Alert(kind="awaiting_fix", title=title, body=body, priority=0)
 
 
 def format_hardening_upcoming_alert(project: str, hits: Sequence[Hit]) -> Alert:
@@ -181,7 +209,7 @@ def format_hardening_upcoming_alert(project: str, hits: Sequence[Hit]) -> Alert:
     title = (f"[boxmunge:{project}] {n} CVE finding{'s' if n != 1 else ''} will "
              f"quarantine from 0.12 (warning only)")
     body = "\n".join([
-        f"Project: {project} — still running; nothing is quarantined for this in 0.11.0.",
+        f"Project: {project} — still running; nothing is quarantined for this in 0.11.",
         *_listing(hits),
         "",
         hits[0].disposition.explanation,
@@ -227,3 +255,68 @@ def format_suppression_expired_alert(
         "      --until <date> --reason <text>",
     ]
     return Alert(kind="suppression_expired", title=title, body="\n".join(lines), priority=1)
+
+
+def lift_reason(cve_id: str, hits: Sequence[Hit]) -> str:
+    """Why the quarantine ``cve_id`` took no longer holds, from this scan's
+    hits for it (any package)."""
+    if not hits:
+        return f"{cve_id} is no longer found in the project's images."
+    fd = _ordered(hits)[0].disposition
+    if fd.disposition is Disposition.AWAITING_FIX:
+        return (f"The posture rules changed in boxmunge {BALANCED_KEV_ONLY_SINCE}: "
+                f"balanced quarantines only on actively exploited (CISA KEV) "
+                f"findings, and {cve_id} is not on the KEV catalog. {fd.explanation}")
+    if fd.disposition is Disposition.SUPPRESSED:
+        return f"{cve_id} is suppressed. {fd.explanation}"
+    return f"{cve_id} no longer quarantines. {fd.explanation}"
+
+
+def format_quarantine_lifted_alert(
+    project: str, cve_id: str, reason: str, *,
+    held: str | None, smoke: tuple[bool, str] | None,
+) -> Alert:
+    """A scan found nothing quarantine-level and lifted the quarantine.
+    Sent once (the record is gone after); priority 1 only when the smoke
+    test failed after the restart. ``held``: why the lift left the project
+    down (quarantine_lift.start_hold)."""
+    if held is not None:
+        state, tail = "quarantine lifted, still down", [f"It stays down: {held}."]
+    elif smoke is not None and not smoke[0]:
+        state, tail = ("back up, smoke test FAILED", [f"Smoke test: {smoke[1]}"])
+    else:
+        state, tail = "back online", ["Smoke test: OK"]
+    title = f"[boxmunge:{project}] Quarantine lifted — {state} ({cve_id})"
+    body = "\n".join([
+        f"Project: {project}",
+        f"Quarantined for {cve_id}; this scan found nothing quarantine-level in any",
+        "image the project starts, so the quarantine was lifted automatically.",
+        "",
+        reason,
+        "",
+        *tail,
+        f"Details: boxmunge security {project}",
+    ])
+    failed = smoke is not None and not smoke[0]
+    return Alert(kind="quarantine_lifted", title=title, body=body, priority=1 if failed else 0)
+
+
+def format_kev_withdrawal_hold_alert(project: str, cve_id: str, source: str) -> Alert:
+    """This scan would have lifted the quarantine because a KEV refresh
+    withdrew its CVE. One source can do that, so the lift waits for the
+    operator. Priority 1: the site stays down until then."""
+    return Alert(
+        kind="kev_withdrawal_held",
+        title=f"[boxmunge:{project}] Quarantine kept — CISA KEV withdrew {cve_id}",
+        body="\n".join([
+            f"Project: {project}",
+            f"Quarantined for {cve_id}. The KEV catalog from {source} no longer",
+            "lists it, so nothing else keeps the project quarantined. The images",
+            "still contain it, and a single source can drop an entry, so scans and",
+            "deploys keep the quarantine. Check CISA's KEV page; if the withdrawal",
+            "is real, accept it with:",
+            f"  boxmunge security resume {project}",
+            f"Details: boxmunge security {project}",
+        ]),
+        priority=1,
+    )

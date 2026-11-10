@@ -1,83 +1,86 @@
 # Dependabot config for boxmunge's reproducible-release pipeline.
 #
 # Ecosystems covered (each must stay covered — see tests/test_release_pinning.py):
-#   - pip:           hash-pinned requirements files at repo root + cli/
+#   - pip:           hash-pinned requirements files at repo root, cli/ and
+#                    services/version-check/
 #   - github-actions: SHA-pinned actions in workflow files
 #   - docker:        digest-pinned base images in every Dockerfile
 #
 # Dependabot is the ONLY path that updates these pins. Manual edits are
 # allowed but should be rare and flagged in code review.
+#
+# To keep the noise down, each ecosystem is one entry: its minor and patch
+# updates arrive as one grouped pull request a week, and each major as a pull
+# request of its own. A release waits out a cooldown before it is proposed (a
+# compromised upload is usually caught and yanked within days); majors wait
+# longer where the ecosystem supports it (pip only: Dependabot ignores
+# semver-*-days for github-actions and docker). Security updates skip the
+# cooldown.
+#
+# Not covered: the per-architecture age and rclone pins in system/Dockerfile
+# and the cosign pins in bootstrap/cosign.sh are bumped by hand, from
+# upstream's signed checksums (see the comments there).
 
 version: 2
 updates:
-  # Python deps in the server package
+  # Python deps: the server package (/), the public version-check service,
+  # and the CLI package (which keeps its own Python floor).
   - package-ecosystem: pip
-    directory: "/"
+    directories:
+      - "/"
+      - "/services/version-check"
+      - "/cli"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+      semver-major-days: 30
+    groups:
+      pip-minor-and-patch:
+        update-types: [minor, patch]
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - python
+    labels: [dependencies, python]
 
-  # Python deps of the public version-check service
-  - package-ecosystem: pip
-    directory: "/services/version-check"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - python
-
-  # Python deps in the CLI package
-  - package-ecosystem: pip
-    directory: "/cli"
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - python
-
-  # GitHub Actions (SHA pins in workflow files)
+  # GitHub Actions (SHA pins in workflow files, each with a `# vX.Y.Z` comment)
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Its v4 installs cosign v3, which signs to a new bundle format by
+      # default. Releases are signed as .sig/.cert for the cosign v2 the boxes
+      # verify with (bootstrap/cosign.sh), so that move is made by hand, with
+      # the boxes' verifier in step.
+      - dependency-name: sigstore/cosign-installer
+        update-types: [version-update:semver-major]
     open-pull-requests-limit: 5
-    labels:
-      - dependencies
-      - github-actions
+    labels: [dependencies, github-actions]
 
   # Container base images (digest pins in Dockerfiles)
   - package-ecosystem: docker
-    directory: "/system"
+    directories:
+      - "/system"
+      - "/canary"
+      - "/services/version-check"
+      - "/sample-project/frontend"
+      - "/sample-project/backend"
+      - "/tests/integration/fixture_project"
     schedule:
       interval: weekly
-    labels: [dependencies, docker]
-  - package-ecosystem: docker
-    directory: "/canary"
-    schedule:
-      interval: weekly
-    labels: [dependencies, docker]
-  - package-ecosystem: docker
-    directory: "/services/version-check"
-    schedule:
-      interval: weekly
-    labels: [dependencies, docker]
-  - package-ecosystem: docker
-    directory: "/sample-project/frontend"
-    schedule:
-      interval: weekly
-    labels: [dependencies, docker]
-  - package-ecosystem: docker
-    directory: "/sample-project/backend"
-    schedule:
-      interval: weekly
-    labels: [dependencies, docker]
-  - package-ecosystem: docker
-    directory: "/tests/integration/fixture_project"
-    schedule:
-      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      images-minor-and-patch:
+        update-types: [minor, patch]
+    ignore:
+      # Images run the Python the boxes run, Debian 13's 3.13; a newer
+      # Python moves with the server's requires-python, by hand.
+      - dependency-name: python
+        versions: [">=3.14"]
+    open-pull-requests-limit: 5
     labels: [dependencies, docker]

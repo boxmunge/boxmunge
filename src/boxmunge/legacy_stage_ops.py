@@ -24,7 +24,9 @@ from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.upgrade_steps import (
     compose_refusal, require_manifest, write_maintenance_page,
 )
-from boxmunge.compose import prepare_compose_override
+from boxmunge.commands.deploy_images import record_release_users
+from boxmunge.commands.release_config import decide_release_users, promote_candidates
+from boxmunge.compose import ComposeError, prepare_compose_override
 from boxmunge.compose_guard import check_start, compose_up_checked
 from boxmunge.data_dirs import log_kept, set_aside_announcer
 from boxmunge import docker_containers
@@ -47,6 +49,7 @@ from boxmunge.manifest import load_manifest, load_manifest_as_written
 from boxmunge.notify import notify
 from boxmunge.release import install_release, live_code_entries, mark_live, previous_meta_text
 from boxmunge.staging_cleanup import remove_retired_staging_data
+from boxmunge.release_target import DeployRefused, production_target
 from boxmunge.state import read_state
 from boxmunge.upgrade_exclusions import migrate_one
 from boxmunge.upgrade_state import read_probation
@@ -225,7 +228,7 @@ def _snapshot_production(paths: BoxPaths, project: str) -> str | None:
     """A new pre-deploy snapshot of the untouched production, with the
     manifest and compose file of the release its containers run (backup_source)."""
     from boxmunge.backup_source import backup_source
-    from boxmunge.commands.backup_cmd import backup_locked, list_snapshots
+    from boxmunge.commands.backup_cmd import take_snapshot
     source = backup_source(paths, project)
     if source.manifest is None:
         raise LegacyStageError(f"production cannot be backed up: {source.skip}")
@@ -236,17 +239,16 @@ def _snapshot_production(paths: BoxPaths, project: str) -> str | None:
         raise LegacyStageError(
             f"{project} is {block.reason.value}, so no pre-deploy snapshot of production can "
             f"be taken, and resuming it is refused while the stage is in place; use --discard")
-    before = {p.name for p in list_snapshots(paths, project)}
     print("  Taking pre-deploy snapshot...")
-    if backup_locked(project, paths, kind=BackupKind.PREDEPLOY, manifest=source.manifest,
-                     compose_file=source.compose_file) != 0:
+    rc, name = take_snapshot(project, paths, BackupKind.PREDEPLOY, source.manifest,
+                             source.compose_file)
+    if rc != 0:
         raise LegacyStageError("the pre-deploy snapshot failed (see above); without it a "
                                "rollback could not restore production's data")
-    new = [p.name for p in list_snapshots(paths, project) if p.name not in before]
-    if not new:
+    if name is None:
         raise LegacyStageError("the backup made no new pre-deploy snapshot; without one a "
                                "rollback could not restore production's data")
-    return new[0]
+    return name
 
 
 def _pairing_snapshot(paths: BoxPaths, project: str, ev: Evidence) -> str | None:
@@ -326,6 +328,26 @@ def drop_stage_record(paths: BoxPaths, project: str) -> None:
     discard_dir(releases / f"prestage{DISCARDED}")  # a crash inside the discard above
 
 
+def _build_release(paths: BoxPaths, project: str, manifest: dict) -> dict:
+    """Build the release now in the project directory under candidate names,
+    decide and check its users, and give its images their names, as a
+    deploy does (rollback's restore_rolled_back_data). Production's
+    containers may run the other release's images: the staged release's
+    when 0.10.1 started production from its files (--discard
+    --confirm-recreated), or production's own, which --keep-staged
+    replaces. No start builds, so without this the start would run them
+    over this release's files. Returns the users decided."""
+    try:
+        # A release 0.10.1 deployed predates users being decided.
+        users = decide_release_users(project, paths, manifest, COMPONENT,
+                                     pull=False, carry_record=True).users
+        promote_candidates(paths, project)
+    except (DeployRefused, DockerError, ComposeError) as e:
+        raise LegacyStageError(f"building and checking this release's images failed: {e}. "
+                               f"Fix the cause and run this again") from e
+    return users
+
+
 def finish_apply(paths: BoxPaths, project: str) -> None:
     """Step 7: what the upgrade apply skipped (the manifest migration and the
     configs), then production recreated on this release's overlay as a
@@ -347,7 +369,10 @@ def finish_apply(paths: BoxPaths, project: str) -> None:
     if refusal is not None:
         raise LegacyStageError(f"compose.yml is refused: {refusal}. Fix it and run this "
                                f"again, or deploy a fixed release")
-    prepare_compose_override(paths, manifest, component=COMPONENT)
+    users = _build_release(paths, project, manifest)
+    prepare_compose_override(paths, manifest, component=COMPONENT, users=users or None)
+    record_release_users(paths, production_target(paths, project), manifest, users,
+                         component=COMPONENT)
     block = is_blocked(project, paths)
     held = (f"it is {block.reason.value}" if block else
             "the health monitor stopped it; `recover` starts it"

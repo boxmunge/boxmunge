@@ -93,7 +93,7 @@ def test_validator_resolves_the_base_from_the_slot(paths, tmp_path, monkeypatch)
 def test_reference_walk_reads_relative_files_from_the_project_directory(tmp_path) -> None:
     """Compose reads a relative env_file from the project directory (the
     staged release), so that is the file the own-file rules protect."""
-    from boxmunge.compose_resolve import walk_references
+    from boxmunge.compose_references import walk_references
     release = tmp_path / "release"
     release.mkdir()
     base = tmp_path / "compose.staging-base.yml"

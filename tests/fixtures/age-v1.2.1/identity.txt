@@ -1,0 +1,4 @@
+# TEST ONLY: a throwaway identity for tests/integration/test_age_compat.py, made by age-keygen v1.2.1.
+# created: 2026-11-09T16:42:37Z
+# public key: age1hxp0w0m7dvsjnr9fqpvztweegzmz8kmht4wm778tzuh8hwnkhc3q32yqk5
+AGE-SECRET-KEY-1YLTZFRCH3PZWM8EQWGQRKP64LAG2A3CZJCWULVRPT2EK65ZYPDMQN52JKS

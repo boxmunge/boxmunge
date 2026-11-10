@@ -29,6 +29,6 @@ def test_evidence_of_health_is_ok(monkeypatch):
 
 def test_health_report_uses_the_evidence_check():
     from boxmunge.commands import health_cmd
-    source = inspect.getsource(health_cmd.collect_health)
+    source = inspect.getsource(health_cmd._checks)
     assert "check_os_updates" in source
     assert "check_unattended_upgrades" not in source

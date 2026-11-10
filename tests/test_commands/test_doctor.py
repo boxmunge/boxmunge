@@ -103,7 +103,11 @@ class TestDoctorMcp:
         monkeypatch.setitem(sys.modules, "mcp", None)
         line = self._mcp_line(paths, capsys)
         assert line["status"] == "FAIL"
-        assert "boxmunge-install.sh" in line["detail"]
+        # The shim's repair-deps, which works during probation, not a re-run
+        # of the installer.
+        assert "upgrade --repair-deps" in line["detail"]
+        assert "boxmunge-upgrade repair-deps" in line["detail"]
+        assert "boxmunge-install.sh" not in line["detail"]
 
     def test_installed_mcp_passes(self, paths: BoxPaths, monkeypatch, capsys) -> None:
         monkeypatch.setattr("boxmunge.commands.mcp_serve_cmd.mcp_import_error", lambda: None)

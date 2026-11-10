@@ -2,14 +2,19 @@
 # tests/shim/lib.sh — shared helpers for the upgrade-shim shell tests.
 #
 # Source this from a test script. It provides PASS/FAIL counters, assertions,
-# a throwaway BOXMUNGE_ROOT with a mock venv, and stand-ins for flock(1) and
-# timeout(1) on hosts that lack them (macOS), so the locking and probation
-# paths run everywhere. The stand-ins only exist when the real tool is
-# missing; on Debian the real util-linux and coreutils binaries are used.
+# a throwaway BOXMUNGE_ROOT with a mock venv, and stand-ins for flock(1),
+# sha256sum(1) and timeout(1) on hosts that lack them (macOS), so the locking,
+# checksum and probation paths run everywhere. The stand-ins only exist when
+# the real tool is missing; on Debian the real util-linux and coreutils
+# binaries are used.
 
 SHIM_TEST_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SHIM_TEST_LIB_DIR/../.." && pwd)"
 SHIM="${SHIM_UNDER_TEST:-$REPO_DIR/scripts/boxmunge-upgrade}"
+
+# The shim's report_failure runs a real python that would POST to the
+# production version-check service; point it at a closed local port instead.
+export BOXMUNGE_VERSION_CHECK_URL="http://127.0.0.1:9"
 
 PASS=0
 FAIL=0
@@ -76,6 +81,10 @@ except BlockingIOError:
     sys.exit(1)' "$2"
 EOF
 fi
+if ! command -v sha256sum >/dev/null 2>&1; then
+    # Same output, and the same `-c` check of "<hash>  <file>" lines.
+    printf '#!/usr/bin/env bash\nexec shasum -a 256 "$@"\n' > "$FAKEBIN/sha256sum"
+fi
 if ! command -v timeout >/dev/null 2>&1; then
     # timeout [--kill-after=N] <secs> cmd...
     cat > "$FAKEBIN/timeout" <<'EOF'
@@ -85,6 +94,20 @@ shift
 exec "$@"
 EOF
 fi
+# health-report <exit> [<error check>...]: what a mock boxmunge-server prints
+# for `health --json` and exits with: a valid report whose checks mean <exit>
+# (0 ok, 1 a warning, 2 an error in each named check, caddy by default).
+cat > "$FAKEBIN/health-report" <<'EOF'
+#!/usr/bin/env bash
+rc="$1"; shift
+checks='{"name": "docker", "status": "ok", "detail": ""}'
+[[ "$rc" -lt 1 ]] || checks="$checks, {\"name\": \"alerts\", \"status\": \"warn\", \"detail\": \"no pushover\"}"
+if [[ "$rc" -ge 2 ]]; then
+    for name in "${@:-caddy}"; do checks="$checks, {\"name\": \"$name\", \"status\": \"error\", \"detail\": \"down\"}"; done
+fi
+echo "{\"healthy\": $([[ "$rc" -eq 0 ]] && echo true || echo false), \"exit_code\": $rc, \"checks\": [$checks]}"
+exit "$rc"
+EOF
 REAL_VISUDO=""
 if command -v visudo >/dev/null 2>&1; then
     REAL_VISUDO="$(command -v visudo)"
@@ -124,15 +147,57 @@ new_root() {
     for s in a b; do
         mkdir -p "$BOXMUNGE_ROOT/env-$s/bin"
         mock_server "$s" 'exit 0'
-        ln -s "$(command -v python3)" "$BOXMUNGE_ROOT/env-$s/bin/python"
+        mock_python "$s"
     done
     echo "$slot" > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
     ln -s "$BOXMUNGE_ROOT/env-$slot" "$BOXMUNGE_ROOT/env-active"
+    # The stash a rollback restores when no upgrade recorded one.
+    mkdir -m 0770 "$BOXMUNGE_ROOT/stashes"
+    : > "$BOXMUNGE_ROOT/stashes/$OLD_STASH"
+    chmod 0600 "$BOXMUNGE_ROOT/stashes/$OLD_STASH"
+}
+
+# OLD_STASH: the stash new_root leaves in stashes/.
+OLD_STASH="boxmunge-stash-2026-01-01T000000.tar.gz"
+
+# STASH_CREATE: what `stash create` does in a mock boxmunge-server whose body
+# does not handle it itself: make an (empty) stash and name it, as the real one
+# does, since the shim records the stash an upgrade made.
+# shellcheck disable=SC2016  # a mock body: literal bash
+STASH_CREATE='if [[ "$1 ${2:-}" == "stash create" ]]; then
+    n="boxmunge-stash-$(date -u +%Y-%m-%dT%H%M%S).tar.gz"
+    mkdir -p "$BOXMUNGE_ROOT/stashes"; : > "$BOXMUNGE_ROOT/stashes/$n"; echo "Stash created: $n"; exit 0
+fi'
+
+# HEALTHY: what `health --json` does in a mock boxmunge-server whose body does
+# not handle health itself: a valid report of a healthy box.
+# shellcheck disable=SC2016  # a mock body: literal bash
+HEALTHY='if [[ "$1" == health ]]; then exec health-report 0; fi'
+
+# mock_python <slot>: env-<slot>/bin/python is the system python3, except
+# that the rollback's stash restore (restore_stash_copy, which names the
+# archive in BM_STASH) is recorded in $BOXMUNGE_ROOT/calls as
+# "<slot> stash restore <archive name>" and only says it restored it.
+REAL_PYTHON3_FOR_VENV="$(command -v python3)"
+mock_python() {
+    # shellcheck disable=SC2016  # the script's own lines: literal bash
+    printf '%s\n' '#!/usr/bin/env bash' \
+        'if [[ -n "${BM_STASH:-}" ]]; then' \
+        "    echo \"$1 stash restore \${BM_STASH##*/}\" >> \"\$BOXMUNGE_ROOT/calls\"" \
+        '    echo "Restored from: ${BM_STASH##*/}"; exit 0' \
+        'fi' \
+        "exec $(printf %q "$REAL_PYTHON3_FOR_VENV") \"\$@\"" > "$BOXMUNGE_ROOT/env-$1/bin/python"
+    chmod +x "$BOXMUNGE_ROOT/env-$1/bin/python"
 }
 
 # mock_server <slot> <bash body>: install env-<slot>/bin/boxmunge-server.
 mock_server() {
-    printf '#!/usr/bin/env bash\n%s\n' "$2" > "$BOXMUNGE_ROOT/env-$1/bin/boxmunge-server"
+    local body="$2"
+    [[ "$body" == *"stash create"* ]] || body="$STASH_CREATE
+$body"
+    [[ "$body" == *health* ]] || body="$HEALTHY
+$body"
+    printf '#!/usr/bin/env bash\n%s\n' "$body" > "$BOXMUNGE_ROOT/env-$1/bin/boxmunge-server"
     chmod +x "$BOXMUNGE_ROOT/env-$1/bin/boxmunge-server"
 }
 

@@ -1,20 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
-"""F-06: on-box installs (install.sh, the upgrade shim's venv build) take
-Python dependencies only from the signed bundle's hash-pinned requirements."""
+"""F-06: on-box installs (install.sh and its bootstrap/venv-deps.sh, the
+upgrade shim's venv build) take Python dependencies only from the signed
+bundle's hash-pinned requirements."""
 from __future__ import annotations
 
+import importlib.util
 import re
 from pathlib import Path
 
 import pytest
 
 REPO = Path(__file__).resolve().parents[1]
-ONBOX_SCRIPTS = [REPO / "install.sh", REPO / "scripts" / "boxmunge-upgrade"]
 
 
-def _pip_install_commands(path: Path) -> list[str]:
+def _built_shim() -> str:
+    """The shim as releases ship it, its libraries inlined (scripts/build-shim.py)."""
+    spec = importlib.util.spec_from_file_location("build_shim", REPO / "scripts" / "build-shim.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.build(REPO / "scripts" / "boxmunge-upgrade")
+
+
+ONBOX_SCRIPTS = {
+    "install.sh": lambda: (REPO / "install.sh").read_text(),
+    "venv-deps.sh": lambda: (REPO / "bootstrap" / "venv-deps.sh").read_text(),
+    "boxmunge-upgrade": _built_shim,
+}
+# The two that install a venv's dependencies: install.sh's helper and the shim.
+VENV_BUILDERS = ["venv-deps.sh", "boxmunge-upgrade"]
+
+
+def _pip_install_commands(text: str) -> list[str]:
     """Each `pip install` command, with backslash continuations joined."""
-    joined = re.sub(r"\\\n\s*", " ", path.read_text())
+    joined = re.sub(r"\\\n\s*", " ", text)
     return [
         line.strip() for line in joined.splitlines()
         if re.search(r"/pip\"? install", line) and not line.lstrip().startswith("#")
@@ -27,29 +45,30 @@ def _bundle_top_files() -> set[str]:
     return set(m.group(1).split())
 
 
-@pytest.mark.parametrize("script", ONBOX_SCRIPTS, ids=lambda p: p.name)
-def test_every_pip_install_is_hash_pinned_or_no_deps(script: Path) -> None:
-    commands = _pip_install_commands(script)
-    assert commands, f"no pip install found in {script.name}"
+@pytest.mark.parametrize("script", ONBOX_SCRIPTS)
+def test_every_pip_install_is_hash_pinned_or_no_deps(script: str) -> None:
+    commands = _pip_install_commands(ONBOX_SCRIPTS[script]())
+    assert commands, f"no pip install found in {script}"
     for cmd in commands:
         pinned = "--require-hashes" in cmd
         own_package = "--no-deps" in cmd and "--no-build-isolation" in cmd
-        assert pinned or own_package, f"{script.name}: unpinned install: {cmd}"
-        assert "--upgrade pip" not in cmd, f"{script.name}: unpinned pip self-upgrade: {cmd}"
+        assert pinned or own_package, f"{script}: unpinned install: {cmd}"
+        assert "--upgrade pip" not in cmd, f"{script}: unpinned pip self-upgrade: {cmd}"
 
 
-@pytest.mark.parametrize("script", ONBOX_SCRIPTS, ids=lambda p: p.name)
-def test_requirements_used_on_box_ship_in_the_bundle(script: Path) -> None:
-    used = set(re.findall(r"(requirements[\w-]*\.txt)", script.read_text()))
-    assert used, f"{script.name} installs from no requirements file"
+@pytest.mark.parametrize("script", VENV_BUILDERS)
+def test_requirements_used_on_box_ship_in_the_bundle(script: str) -> None:
+    used = set(re.findall(r"(requirements[\w-]*\.txt)", ONBOX_SCRIPTS[script]()))
+    assert used, f"{script} installs from no requirements file"
     missing = used - _bundle_top_files()
-    assert not missing, f"{script.name} uses {missing}, not in BUNDLE_TOP_FILES"
+    assert not missing, f"{script} uses {missing}, not in BUNDLE_TOP_FILES"
 
 
 def test_shim_keeps_install_sh_out_of_the_venvs() -> None:
     """install.sh run by the shim must not install into env-active, which is
-    still the previous release (the rollback target) at that point."""
-    shim = (REPO / "scripts" / "boxmunge-upgrade").read_text()
+    still the previous release (the rollback target) at that point; it
+    completes the standby instead (tests/test_venv_deps.py)."""
+    shim = (REPO / "scripts" / "boxmunge-upgrade.d" / "system.sh").read_text()
     assert 'bash "$new_install_sh" --upgrade-shim' in shim
     install = (REPO / "install.sh").read_text()
     assert 'if [[ "${FROM_UPGRADE_SHIM}" -eq 0 ]]; then' in install
@@ -60,10 +79,10 @@ def test_shim_keeps_install_sh_out_of_the_venvs() -> None:
 ONBOX_REQUIREMENTS = ["requirements-build.txt", "requirements-tui.txt", "requirements-mcp.txt"]
 
 
-@pytest.mark.parametrize("script", ONBOX_SCRIPTS, ids=lambda p: p.name)
-def test_every_onbox_venv_gets_the_mcp_requirements(script: Path) -> None:
-    used = set(re.findall(r"(requirements[\w-]*\.txt)", script.read_text()))
-    assert set(ONBOX_REQUIREMENTS) <= used, f"{script.name} installs only {sorted(used)}"
+@pytest.mark.parametrize("script", VENV_BUILDERS)
+def test_every_onbox_venv_gets_the_mcp_requirements(script: str) -> None:
+    used = set(re.findall(r"(requirements[\w-]*\.txt)", ONBOX_SCRIPTS[script]()))
+    assert set(ONBOX_REQUIREMENTS) <= used, f"{script} installs only {sorted(used)}"
 
 
 def _pins(path: Path) -> dict[str, tuple[str, frozenset[str]]]:

@@ -20,6 +20,7 @@ hides uid and file-ownership bugs (audit C-12). CI on Linux is the
 authoritative run of this tier.
 """
 
+import re
 import shutil
 import subprocess
 import tempfile
@@ -39,7 +40,8 @@ from tests.deploy_helpers import mark_deployed
 pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("system_container")]
 
 # The system image's own base, so it is already present once the image built.
-_ALPINE = "alpine:3.21@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d"
+_ALPINE = re.search(r"^FROM (\S+)$", (Path(__file__).resolve().parents[2] / "system" / "Dockerfile")
+                    .read_text(), re.M).group(1)
 _HOST_TOOLS = {"age", "age-keygen", "rclone"}
 _FILTER_FLAGS = {"--include"}  # their values are rclone patterns, not paths
 

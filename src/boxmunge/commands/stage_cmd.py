@@ -64,7 +64,7 @@ def _sha256(path: Path) -> str:
 
 def _eligible(project: str, paths: BoxPaths) -> bool:
     """Step 1, under the lock: not blocked, registered, no open install."""
-    if refuse_if_blocked(project, paths, ships_fix=True) \
+    if refuse_if_blocked(project, paths, ships_fix=True, staging=True) \
             or refuse_if_legacy_stage(paths, project):
         return False
     if not is_registered(project, paths):
@@ -228,10 +228,11 @@ def _retire_previous(project: str, paths: BoxPaths) -> bool:
 
 
 def stage_locked(project: str, paths: BoxPaths, ref: str | None = None,
-                 dry_run: bool = False) -> int:
+                 dry_run: bool = False, pull: bool = True) -> int:
     """The stage core. Caller holds the project lock; never takes it. A dry
     run changes nothing, so it leaves crash debris and a stopped production
-    for the real stage (or the health tick) to clear."""
+    for the real stage (or the health tick) to clear. `pull`: build with
+    --pull, so the stage tests the base images' current digests."""
     if not _eligible(project, paths):
         return 1
     if not dry_run and not _clear_leftovers(project, paths):
@@ -246,7 +247,8 @@ def stage_locked(project: str, paths: BoxPaths, ref: str | None = None,
     # From the swap on, any failure tears the whole stage down (D16).
     ready: StagedRelease | None = None
     try:
-        rc = bring_up_staging(paths, project, manifest) if _swap(project, paths) else 1
+        rc = (bring_up_staging(paths, project, manifest, pull=pull)
+              if _swap(project, paths) else 1)
         if rc == 0:
             ready = _mark_ready(project, paths)
             rc = 0 if ready else 1
@@ -306,11 +308,11 @@ def _announce(project: str, paths: BoxPaths, meta: StagedRelease, manifest: dict
 
 
 def run_stage(project_name: str, paths: BoxPaths, ref: str | None = None,
-              dry_run: bool = False) -> int:
+              dry_run: bool = False, pull: bool = True) -> int:
     """stage: take the project lock and stage. Returns 0 on success, 1 on failure."""
     try:
         with project_lock(project_name, paths):
-            return stage_locked(project_name, paths, ref, dry_run)
+            return stage_locked(project_name, paths, ref, dry_run, pull)
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
@@ -320,9 +322,9 @@ def cmd_stage(args: list[str]) -> None:
     from boxmunge.commands.argv import parse_args, require_project_name
     from boxmunge.paths import BoxPaths
     parsed = parse_args(
-        "stage", args, flags={"--dry-run"}, options={"--ref"},
+        "stage", args, flags={"--dry-run", "--no-pull"}, options={"--ref"},
         min_positional=1, max_positional=1,
     )
     project = require_project_name("stage", parsed.positional[0])
     sys.exit(run_stage(project, BoxPaths(), ref=parsed.get("--ref"),
-                       dry_run=parsed.has("--dry-run")))
+                       dry_run=parsed.has("--dry-run"), pull=not parsed.has("--no-pull")))

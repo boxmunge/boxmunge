@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import yaml
 
-from boxmunge.commands.health_cmd import check_project_containers
+from boxmunge.health_checks.projects import check_project_containers
 from boxmunge.health_checks.security import check_security_profiles
 from boxmunge.paths import BoxPaths
 from boxmunge.pause import write_paused_state

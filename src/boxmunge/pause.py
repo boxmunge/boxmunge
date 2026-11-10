@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from boxmunge import restart_hold
+from boxmunge.docker import compose_stop
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state
@@ -24,11 +25,15 @@ def is_paused(project_name: str, paths: BoxPaths) -> bool:
 
 def write_paused_state(
     project_name: str, paths: BoxPaths, reason: str | None = None,
+    snapshot: dict[str, Any] | None = None,
 ) -> None:
     """Mark the project as paused. Records UTC timestamp; reason optional.
 
     The record says ``action_complete: false`` until mark_pause_complete:
     the maintenance page, the stop and the restart-policy hold all landed.
+    ``snapshot`` is the one the pause took before its stop, kept here so the
+    run that finishes an incomplete pause can still pair it
+    (commands/pause_snapshot).
     """
     data: dict[str, Any] = {
         "paused_at": datetime.now(timezone.utc).isoformat(),
@@ -36,6 +41,8 @@ def write_paused_state(
     }
     if reason is not None:
         data["reason"] = reason
+    if snapshot is not None:
+        data["snapshot"] = snapshot
     paths.project_paused_state(project_name).parent.mkdir(
         parents=True, exist_ok=True,
     )
@@ -69,8 +76,31 @@ def pause_incomplete(project_name: str, paths: BoxPaths) -> bool:
     return is_paused(project_name, paths) and not pause_action_complete(project_name, paths)
 
 
+def record_pause_snapshot(project_name: str, paths: BoxPaths, snapshot: dict[str, Any]) -> None:
+    """The snapshot a run finishing the pause took in place of the first."""
+    _update_paused_state(project_name, paths, snapshot=snapshot)
+
+
 def mark_pause_complete(project_name: str, paths: BoxPaths) -> None:
     _update_paused_state(project_name, paths, action_complete=True)
+
+
+def mark_pause_incomplete(project_name: str, paths: BoxPaths) -> None:
+    """A step of keeping it paused failed: `pause` finishes it."""
+    _update_paused_state(project_name, paths, action_complete=False)
+
+
+def awaiting_deploy(project_name: str, paths: BoxPaths) -> bool:
+    """True if `resume --no-start` handed the pause to the next deploy: the
+    project stays paused for everything else (maintenance page, stopped
+    containers, held restart policies, timers skip it), but a deploy or
+    promote may start it, and the pause ends once that start has run."""
+    state = read_paused_state(project_name, paths)
+    return state is not None and state.get("awaiting_deploy") is True
+
+
+def mark_awaiting_deploy(project_name: str, paths: BoxPaths) -> None:
+    _update_paused_state(project_name, paths, awaiting_deploy=True)
 
 
 def hold_restart_policies(project_name: str, paths: BoxPaths) -> None:
@@ -84,6 +114,17 @@ def hold_restart_policies(project_name: str, paths: BoxPaths) -> None:
         project_name, state.get("restart_policies") or {},
         lambda saved: _update_paused_state(project_name, paths, restart_policies=saved),
     )
+
+
+def stop_again(project_name: str, paths: BoxPaths) -> None:
+    """A start that failed part-way on a paused project (resume, or the deploy
+    a pause was handed to): stop what it started and hold the restart
+    policies again, so the project is paused as before. Raises DockerError."""
+    files = ["compose.yml"] + (["compose.boxmunge.yml"]
+                               if paths.project_compose_override(project_name).exists() else [])
+    compose_stop(paths.project_dir(project_name), compose_files=files,
+                 project_name=project_name)
+    hold_restart_policies(project_name, paths)
 
 
 def release_restart_policies(project_name: str, paths: BoxPaths) -> None:

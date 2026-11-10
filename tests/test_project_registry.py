@@ -155,7 +155,7 @@ def test_nightly_scan_targets_only_deployed_projects(paths: BoxPaths) -> None:
     add_project("live", paths)
     (paths.project_dir("live")).mkdir(parents=True)
     (paths.project_dir("live") / "manifest.yml").write_text("project: live\n")
-    assert _parse_scan_targets([], paths) == (["live"], ())
+    assert _parse_scan_targets([], paths) == (["live"], (), ["pending"])
 
 
 class TestDamagedRegistry:

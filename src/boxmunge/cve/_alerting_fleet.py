@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 
 from boxmunge.cve._alerting_types import Alert
+from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, KevCatalog
 from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
 from boxmunge.cve.suppressions import Suppression
 
@@ -18,35 +19,110 @@ _MAX_LINES = 20
 
 
 def format_kev_stale_alert(
-    fetched_at: datetime | None, *, stale: bool = True, rejected: str | None = None,
+    kev: KevCatalog, *, stale_reason: str | None, tried: Sequence[str],
 ) -> Alert:
-    """The CISA KEV catalog is stale/missing, or this run's refresh was
-    rejected by the sanity floor.
+    """The CISA KEV catalog is stale/missing, or this run's refresh failed
+    in a way that needs the operator (a rejected catalog, a bad config).
 
-    Priority 1 because a degraded KEV feed silently disables the lowest
-    tier's only quarantine trigger — the operator must know the
-    exploitation-signal protection is at risk.
+    ``stale_reason`` says which freshness condition fired (None if the
+    cached catalog is still fresh); ``tried`` is one line per source this
+    run tried, with its error or that it answered.
+
+    Priority 1 because a degraded KEV feed silently disables the only
+    quarantine trigger of relaxed and balanced (the default) — the operator
+    must know the exploitation-signal protection is at risk.
     """
-    when = fetched_at.isoformat() if fetched_at else "never fetched"
-    if stale:
+    if stale_reason is not None:
         title = "CISA KEV feed stale — exploitation defense degraded"
-        state = "The cached CISA Known Exploited Vulnerabilities catalog is stale or missing."
+        lines = ["The cached CISA Known Exploited Vulnerabilities catalog is stale "
+                 "or missing.", f"Why: {stale_reason}."]
     else:
         title = "CISA KEV refresh rejected — previous catalog kept"
-        state = (
-            "The cached CISA Known Exploited Vulnerabilities catalog is still "
-            "fresh, but it will go stale if the feed stays broken."
-        )
-    lines = [state, f"Last good fetch: {when}"]
-    if rejected:
-        lines.append(f"This run's refresh was rejected: {rejected}.")
+        lines = ["The cached CISA Known Exploited Vulnerabilities catalog is still "
+                 "fresh, but it will go stale if the sources stay broken."]
+    lines.append(
+        f"Cached catalog: released {_iso(kev.released_at, 'unknown')}, last fetched "
+        f"{_iso(kev.fetched_at, 'never fetched')}, from {kev.source or 'no source'} "
+        f"({len(kev.cve_ids)} CVEs).")
+    if tried:
+        lines.append("Sources tried this run, in order:")
+        lines += [f"- {line}" for line in tried]
     lines += [
         "",
         "KEV-based quarantine is fail-safe (sites stay up), so actively-"
         "exploited CVEs will NOT be auto-quarantined once the catalog is "
-        "stale. Check egress to cisa.gov and the cve-scan log.",
+        "stale. Under posture relaxed and balanced (the default) KEV is the "
+        "only quarantine trigger: until the catalog is fresh again, nothing "
+        "can quarantine those projects. Check egress to the sources above "
+        "(kev.sources in boxmunge.yml sets them) and the cve-scan log.",
     ]
     return Alert(kind="kev_stale", title=title, body="\n".join(lines), priority=1)
+
+
+def format_kev_withdrawn_alert(source: str | None, withdrawn: Sequence[str]) -> Alert:
+    """The refreshed KEV catalog no longer lists a few CVEs the cached one
+    did. Accepted (CISA does withdraw the odd entry). Normal priority: a
+    quarantine held for one of them is kept with its own P1, and more
+    withdrawals than that are rejected with a P1 instead."""
+    n = len(withdrawn)
+    return Alert(
+        kind="kev_withdrawn",
+        title=f"CISA KEV no longer lists {n} CVE{'s' if n != 1 else ''}",
+        body="\n".join([
+            f"The KEV catalog from {source} no longer lists:",
+            *(f"- {cve}" for cve in withdrawn),
+            "",
+            "They no longer count as actively exploited. A quarantine held for one "
+            "of them is not lifted automatically while its images still contain it: "
+            "scans and deploys keep it, a priority-1 alert names the project, and "
+            "`boxmunge security resume <project>` accepts the withdrawal. Check "
+            "CISA's KEV page if this is unexpected.",
+        ]),
+        priority=0,
+    )
+
+
+def format_kev_sources_disagree_alert(
+    source: str | None, lines: Sequence[str], *, overridden: Sequence[str] = (),
+) -> Alert:
+    """An earlier source in kev.sources served an older catalog lacking CVEs
+    the cached one lists, and a later source's catalog was cached instead
+    (kev_refresh, CVE-03). Normal priority while that is a source catching
+    up; priority 1 once it has ``overridden`` the first source (or CISA's
+    feed) on repeated runs or against an old cache: then the later source,
+    not the operator's first choice, decides what counts as exploited."""
+    cisa = KEV_DEFAULT_SOURCES[0]
+    if overridden:
+        title = f"CISA KEV first source overridden by {source}"
+    else:
+        title = "CISA KEV sources disagree — newer catalog kept"
+    if cisa in overridden or any(line.startswith(f"{cisa}:") for line in lines):
+        advice = (f"CISA's own feed is the source passed over, so check what {source} "
+                  f"serves: a copy of CISA's catalog does not list CVEs CISA does not.")
+    else:
+        advice = ("If the earlier source is a mirror you run, check that it syncs; if this "
+                  f"repeats once it has caught up, check what {source} serves.")
+    lead = (f"{', '.join(overridden)} has been passed over for {source} on more than one "
+            f"run since it last served a catalog that was used (or against an old cache):"
+            if overridden else
+            "A source ranked earlier in kev.sources served an older KEV catalog that "
+            "lacks CVEs the cached one lists:")
+    return Alert(
+        kind="kev_sources_disagree",
+        title=title,
+        body="\n".join([
+            lead,
+            *(f"- {line}" for line in lines),
+            "",
+            f"The catalog from {source} was cached instead, so those CVEs still count as "
+            f"actively exploited. {advice}",
+        ]),
+        priority=1 if overridden else 0,
+    )
+
+
+def _iso(value: datetime | None, missing: str) -> str:
+    return value.isoformat() if value else missing
 
 
 def format_scan_failure_alert(problems: dict[str, list[str]]) -> Alert:
@@ -76,6 +152,39 @@ def format_scan_failure_alert(problems: dict[str, list[str]]) -> Alert:
         "re-run `boxmunge security scan`.",
     ]
     return Alert(kind="scan_failed", title=title, body="\n".join(lines), priority=1)
+
+
+def format_scan_unrecorded_alert(
+    problems: Mapping[str, str], last_recorded: Mapping[str, str | None],
+    unreadable: Mapping[str, str],
+) -> Alert:
+    """Projects whose scan ran and was acted on, but whose result could not
+    be written.
+
+    ``problems`` maps project -> the error (it names the remedy);
+    ``last_recorded`` maps it to when its last recorded result was made, or
+    None; ``unreadable`` maps those whose recorded result cannot be read to
+    why. The run's quarantines and alerts happened; what is lost is the
+    record, so the project's view and freshness check show the older result
+    until a write succeeds. Priority 1: a scan that cannot be recorded
+    keeps failing, and the freshness check will report it stale.
+    """
+    n = len(problems)
+    title = f"CVE scan result not recorded — {n} project{'s' if n != 1 else ''}"
+    lines = [f"- {project}: {problems[project]}" for project in sorted(problems)]
+    lines.append("")
+    lines.append("This run's scan was completed and acted on (quarantines, alerts), "
+                 "but its result was not recorded.")
+    for project in sorted(problems):
+        when = last_recorded.get(project)
+        if project in unreadable:
+            lines.append(f"- {project}: the recorded result is unreadable "
+                         f"({unreadable[project]}); the scan overwrites it once it can be written")
+            continue
+        lines.append(f"- {project}: " + (f"the last recorded result (at {when}) is still "
+                     f"what `security {project}` shows" if when else "no result is "
+                     f"recorded, so it shows as never scanned"))
+    return Alert(kind="scan_unrecorded", title=title, body="\n".join(lines), priority=1)
 
 
 def format_breaker_held_alert(
@@ -173,6 +282,20 @@ def _format_finding_summary(fd: FindingDisposition) -> str:
     return f"{cve} ({eff}, no upstream fix)"
 
 
+def _enforcement_scope(postures: set[str]) -> list[str]:
+    """What will be quarantined after grace, for the postures in use."""
+    kev_only = {"relaxed", "balanced"}
+    lines = []
+    if postures & kev_only:
+        lines.append("projects on posture relaxed or balanced (the default) are "
+                     "quarantined automatically only for an actively exploited "
+                     "(CISA KEV) CVE; other findings are alerted.")
+    if postures - kev_only:
+        lines.append("projects on posture strict or paranoid are also quarantined "
+                     "for an unpatched CVE over the posture's severity threshold.")
+    return lines
+
+
 def format_grace_heads_up_alert(
     *,
     expires_at: datetime,
@@ -236,15 +359,11 @@ def format_grace_heads_up_alert(
         "%Y-%m-%d %H:%M",
     )
 
-    lines: list[str] = []
-    lines.append(
-        "boxmunge v0.6.0 introduces CVE policy. After a 24-hour grace "
-        "window, projects",
-    )
-    lines.append(
-        "with unpatched high-severity CVEs will be quarantined "
-        "automatically.",
-    )
+    lines: list[str] = [
+        "boxmunge v0.6.0 introduces CVE policy. After a 24-hour grace window,",
+        *_enforcement_scope({posture_by_project.get(n, "balanced")
+                             for n in decisions_by_project}),
+    ]
     lines.append("")
     lines.append(f"First scan results across {n_projects} projects:")
     lines.append("")

@@ -34,6 +34,13 @@ slot_works() {
     [[ -x "$server" ]] && "$server" --version >/dev/null 2>&1
 }
 
+# slot_version <slot>: the X.Y.Z release the slot runs (`--version` prints
+# "boxmunge X.Y.Z[+build]"), or nothing when it cannot say.
+slot_version() {
+    "$BOXMUNGE_ROOT/env-$1/bin/boxmunge-server" --version 2>/dev/null \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true
+}
+
 # rollback_target_ok <slot>: a working venv that is not a half-finished upgrade.
 rollback_target_ok() { slot_works "$1" && [[ ! -e "$(inflight_marker "$1")" ]]; }
 
@@ -44,9 +51,9 @@ remove_slot() {
     local slot="$1"
     require_slot "$slot" "slot removal"
     [[ "$slot" != "$ACTIVE_SLOT" && "$(readlink "$BOXMUNGE_ROOT/env-active" 2>/dev/null)" != "$BOXMUNGE_ROOT/env-$slot" ]] \
-        || die "Refusing to remove env-$slot: it is the live slot"
+        || die_logged "Refusing to remove env-$slot: it is the live slot"
     slot_works "$ACTIVE_SLOT" \
-        || die "Refusing to remove env-$slot: the live slot env-$ACTIVE_SLOT is not a working venv; inspect both as supervisor"
+        || die_logged "Refusing to remove env-$slot: the live slot env-$ACTIVE_SLOT is not a working venv; inspect both as supervisor"
     rm -rf "${BOXMUNGE_ROOT:?}/env-$slot"
 }
 
@@ -66,27 +73,196 @@ swap_to() {
     log "Swapped active to slot $slot"
 }
 
+# report_failure <version> <from_version> <stage> [detail]: best-effort report
+# to the fleet service. Never fails the upgrade, but says on stderr when the
+# report could not be sent (the python side prints the reason).
 report_failure() {
-    local version="$1" from_version="$2" stage="$3"
-    BM_VERSION="$version" BM_FROM_VERSION="$from_version" BM_STAGE="$stage" "$(active_venv)/bin/python" -c "
-import os
+    local version="$1" from_version="$2" stage="$3" detail="${4:-}"
+    BM_VERSION="$version" BM_FROM_VERSION="$from_version" BM_STAGE="$stage" BM_DETAIL="$detail" "$(active_venv)/bin/python" -c "
+import inspect, os
 from boxmunge.report_failure import report_failure
-report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.environ['BM_STAGE'])
-" 2>/dev/null || true
+# The active venv is the release being left: one older than this shim has no detail parameter.
+extra = {'detail': os.environ['BM_DETAIL']} if 'detail' in inspect.signature(report_failure).parameters else {}
+report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.environ['BM_STAGE'], **extra)
+" || { log "WARNING: the upgrade failure report could not be sent"; } || :
 }
 
-send_notification() {
-    local title="$1" message="$2" priority="${3:-0}"
-    BM_TITLE="$title" BM_MESSAGE="$message" BM_PRIORITY="$priority" "$(active_venv)/bin/python" -c "
-import os
+# notify_via <python> <title> <message> [priority]: send a Pushover alert
+# through that venv's python. Returns 0 when sent, 3 when Pushover is not
+# configured, anything else when it could not be sent.
+notify_via() {
+    local python="$1" title="$2" message="$3" priority="${4:-0}"
+    BM_TITLE="$title" BM_MESSAGE="$message" BM_PRIORITY="$priority" "$python" -c "
+import os, sys
 from boxmunge.config import load_config
 from boxmunge.pushover import send_notification
 from boxmunge.paths import BoxPaths
 config = load_config(BoxPaths())
 po = config.get('pushover', {})
-send_notification(po.get('user_key',''), po.get('app_token',''), os.environ['BM_TITLE'], os.environ['BM_MESSAGE'],
-                  int(os.environ['BM_PRIORITY']))
-" 2>/dev/null || true
+if not (po.get('user_key') and po.get('app_token')):
+    sys.exit(3)
+sys.exit(0 if send_notification(po['user_key'], po['app_token'], os.environ['BM_TITLE'], os.environ['BM_MESSAGE'],
+                                int(os.environ['BM_PRIORITY'])) else 1)
+" 2>/dev/null
+}
+
+# send_notification <title> <message> [priority]: best effort through the live
+# slot's python: no upgrade step fails on an alert, but one that could not be
+# sent is said on stderr. rollback_impossible needs to know, and uses
+# notify_via.
+send_notification() {
+    local rc=0
+    notify_via "$(active_venv)/bin/python" "$@" || rc=$?
+    [[ "$rc" -eq 0 || "$rc" -eq 3 ]] || log "WARN: alert not delivered (exit $rc): $1"
+}
+
+# ---------------------------------------------------------------------------
+# The rollback's stash. stashes/ is deploy-writable (root:deploy 0770): deploy
+# can add, rename and replace entries there, though not write the 0600 stash
+# root makes. So a rollback neither takes the newest-named stash there nor
+# opens one by name. The upgrade records the stash it made, with the version
+# it installs, in root-only upgrade-root/upgrade-stash; the rollback copies
+# exactly that archive into root-only upgrade-root/rollback-stash/, opened
+# without following a link and only if it is a plain file root owns with the
+# recorded size and sha256 (so another root-made stash renamed onto the name
+# is refused), and has the previous release restore the copy (restore_stash
+# takes an archive path since 0.10.0). A stash with link members (made by a
+# release before 0.10.2) is recorded by name alone: the new release's apply
+# rewrites it without them (D18), changing its hash. An upgrade run by a shim
+# before this one recorded nothing: its rollback takes the newest-named
+# stash, as that shim would, under the same checks.
+#
+# upgrade-stash: "<version> <name> [<size> <sha256>]"
+# ---------------------------------------------------------------------------
+STASH_RECORD_FILE="$UPGRADE_ROOT_DIR/upgrade-stash"
+STASH_COPY_DIR="$UPGRADE_ROOT_DIR/rollback-stash"
+STASH_NAME_RE='^boxmunge-stash-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}\.tar\.gz$'
+
+# stash_facts <stash>: print "<size> <sha256>" of the stash just made, or
+# "links" when it holds link members; on failure print why and return 1.
+stash_facts() {
+    BM_STASH="$1" python3 - <<'PYREC'
+import hashlib, os, stat, sys, tarfile
+src = os.environ["BM_STASH"]
+try:
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+except OSError as e:
+    print(f"{src}, the stash just made, cannot be opened: {e.strerror}")
+    sys.exit(1)
+with os.fdopen(fd, "rb") as f:
+    st = os.fstat(f.fileno())
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_nlink != 1:
+        print(f"{src}, the stash just made, is not a plain file of root's")
+        sys.exit(1)
+    digest = hashlib.sha256()
+    while chunk := f.read(1 << 20):
+        digest.update(chunk)
+    f.seek(0)
+    try:
+        with tarfile.open(fileobj=f, mode="r:gz") as tar:
+            links = any(m.issym() for m in tar)
+    except (tarfile.TarError, OSError, EOFError):
+        links = False  # nothing the apply's rewrite would touch
+print("links" if links else f"{st.st_size} {digest.hexdigest()}")
+PYREC
+}
+
+# record_stash <version> <stash create output>: record the stash `stash
+# create` said it made; on failure print why and return 1.
+record_stash() {
+    local name facts
+    name="$(printf '%s\n' "$2" | sed -n 's/^Stash created: //p' | tail -n 1)"
+    [[ "$name" =~ $STASH_NAME_RE ]] \
+        || { echo "stash create did not name the stash it made (no 'Stash created: <name>' line): $2"; return 1; }
+    facts="$(stash_facts "$BOXMUNGE_ROOT/stashes/$name")" || { echo "$facts"; return 1; }
+    if [[ "$facts" == links ]]; then
+        log "The stash $name has link members (an older release made it); the upgrade rewrites it without them, so it is recorded by name alone"
+        write_root_file "$STASH_RECORD_FILE" "$1 $name"
+    else
+        write_root_file "$STASH_RECORD_FILE" "$1 $name $facts"
+    fi
+}
+
+# copy_rollback_stash <new_version>: copy the stash the rollback of
+# <new_version> restores into STASH_COPY_DIR and print the copy's path; on
+# failure print why and return 1.
+copy_rollback_stash() {
+    local recorded="" name="" size="" sha="" r_version r_name r_size r_sha r_extra
+    local hash_re='^([0-9]+ [0-9a-f]{64})?$'
+    refuse_symlink "$STASH_RECORD_FILE"
+    refuse_symlink "$STASH_COPY_DIR"
+    [[ ! -e "$STASH_RECORD_FILE" ]] || recorded="$(cat "$STASH_RECORD_FILE")"
+    if [[ -n "$recorded" ]]; then
+        read -r r_version r_name r_size r_sha r_extra <<< "$recorded"
+        if [[ ! "$r_name" =~ $STASH_NAME_RE || -n "${r_extra:-}" || ! "${r_size:+$r_size $r_sha}" =~ $hash_re ]]; then
+            echo "$STASH_RECORD_FILE is malformed ('$(printable "$recorded")'); restore the stash this upgrade made by hand as supervisor: sudo boxmunge-server stash restore --latest; sudo boxmunge-server upgrade --apply"
+            return 1
+        elif [[ "$r_version" == "$1" ]]; then
+            name="$r_name" size="${r_size:-}" sha="${r_sha:-}"
+        else
+            log "WARN: $STASH_RECORD_FILE ('$(printable "$recorded")') is not the stash of the upgrade to $1; taking the newest-named stash"
+        fi
+    fi
+    BM_STASHES="$BOXMUNGE_ROOT/stashes" BM_NAME="$name" BM_SIZE="$size" BM_SHA="$sha" BM_DEST="$STASH_COPY_DIR" python3 - <<'PYSTASH'
+import errno, fnmatch, hashlib, os, stat, sys, tempfile
+stashes, name, dest = os.environ["BM_STASHES"], os.environ["BM_NAME"], os.environ["BM_DEST"]
+want = (int(os.environ["BM_SIZE"]), os.environ["BM_SHA"]) if os.environ["BM_SHA"] else None
+fix = (" (stashes/ is deploy-writable: it was removed, planted or replaced). Put the right stash back"
+       " or remove the wrong one, then, as supervisor, run: sudo boxmunge-server stash restore --latest;"
+       " sudo boxmunge-server upgrade --apply")
+
+def refuse(why):
+    print(why + fix)
+    sys.exit(1)
+
+if not name:
+    names = sorted(n for n in os.listdir(stashes) if fnmatch.fnmatch(n, "boxmunge-stash-*.tar.gz"))
+    if not names:
+        refuse(f"no stash in {stashes} to restore")
+    name = names[-1]
+    print(f"WARN: no stash recorded for this upgrade; restoring the newest-named, {name}", file=sys.stderr)
+src = os.path.join(stashes, name)
+try:
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+except OSError as e:
+    refuse(f"{src} {'is a symlink' if e.errno == errno.ELOOP else 'cannot be opened: ' + e.strerror}")
+with os.fdopen(fd, "rb") as f:
+    st = os.fstat(f.fileno())
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_nlink != 1:
+        refuse(f"{src} is not a plain file of root's")
+    os.makedirs(dest, mode=0o700, exist_ok=True)
+    for old in os.listdir(dest):
+        os.unlink(os.path.join(dest, old))
+    out_fd, tmp = tempfile.mkstemp(dir=dest, prefix=".copy.")
+    digest = hashlib.sha256()
+    with os.fdopen(out_fd, "wb") as out:
+        while chunk := f.read(1 << 20):
+            digest.update(chunk)
+            out.write(chunk)
+        out.flush()
+        os.fsync(out.fileno())
+    if want and (os.path.getsize(tmp), digest.hexdigest()) != want:
+        os.unlink(tmp)
+        refuse(f"{src} is not the stash this upgrade made (its size or sha256 differs from the record)")
+copy = os.path.join(dest, name)
+os.replace(tmp, copy)
+print(copy)
+PYSTASH
+}
+
+# restore_stash_copy <archive>: the previous (now live) release restores
+# <archive>; prints what it says.
+restore_stash_copy() {
+    BM_STASH="$1" "$(active_venv)/bin/python" -c "
+import os, sys
+from pathlib import Path
+from boxmunge.paths import BoxPaths
+from boxmunge.stash import StashError, restore_stash
+try:
+    print('Restored from:', restore_stash(BoxPaths(), Path(os.environ['BM_STASH'])).name)
+except (OSError, StashError) as e:
+    sys.exit(f'ERROR: {e}')
+"
 }
 
 # rollback_partial <new_version> <from_version> <stage> <prev_slot> <step> <exit> <output>
@@ -103,7 +279,7 @@ rollback_partial() {
     bm_log error upgrade "rollback partial — manual intervention required" \
         "{\"version\": \"$new_version\", \"stage\": \"$stage\", \"step\": \"$step\", \"exit\": $rc}"
     add_blocklist "$new_version" "${stage}_partial_rollback"
-    [[ "$stage" == interrupted ]] || report_failure "$new_version" "$from_version" "apply_partial_rollback"
+    [[ "$stage" == interrupted ]] || report_failure "$new_version" "$from_version" "apply_partial_rollback" "rollback_step_failed: ${step} exit ${rc}"
     # Truncate output in the alert body — Pushover messages are length-limited.
     send_notification "boxmunge ROLLBACK PARTIAL" \
         "ROLLBACK PARTIAL — manual intervention required.
@@ -116,8 +292,8 @@ Output (truncated): ${output:0:500}"
     exit 2
 }
 
-# do_rollback <new_version> <from_version> <stage> <prev_slot>: return to
-# <prev_slot>. The rollback-inflight marker is on disk before the swap, so a
+# do_rollback <new_version> <from_version> <stage> <prev_slot> [detail]: return
+# to <prev_slot>; [detail] says why, for complete_rollback. The rollback-inflight marker is on disk before the swap, so a
 # crash anywhere from here on is finished by the next check-probation.
 #
 # An interruption (stage "interrupted": a power cut or kill) is rarely the
@@ -126,13 +302,13 @@ Output (truncated): ${output:0:500}"
 # hangs or is killed cannot loop. The count is decided here, kept in the
 # marker, and recorded only once the rollback has succeeded.
 do_rollback() {
-    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" count=0
+    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" detail="${5:-}" count=0
     rollback_target_ok "$prev_slot" \
-        || die "Cannot roll back $new_version: env-$prev_slot is not a working venv, or is itself a half-finished upgrade; inspect it as supervisor"
+        || die_logged "Cannot roll back $new_version: env-$prev_slot is not a working venv, or is itself a half-finished upgrade; inspect it as supervisor"
     [[ "$stage" != interrupted ]] || count=$(( $(interruptions "$new_version") + 1 ))
     printf '%s\n%s\n%s\n' "$new_version" "$stage" "$count" > "$(rollback_marker "$prev_slot")"
     sync
-    complete_rollback "$new_version" "$from_version" "$stage" "$prev_slot" "$count"
+    complete_rollback "$new_version" "$from_version" "$stage" "$prev_slot" "$count" "$detail"
 }
 
 # legacy_caddy_log_note <version>: what the active (previous) release costs CrowdSec. A
@@ -166,12 +342,14 @@ teardown_before_rollback() {
     send_notification "boxmunge rollback: staged releases not torn down" "$msg" 1
 }
 
-# complete_rollback <new_version> <from_version> <stage> <prev_slot> <count>:
-# everything after the marker. Safe to run again after a crash part-way: the
+# complete_rollback <new_version> <from_version> <stage> <prev_slot> <count> [detail]:
+# everything after the marker. [detail] (why, when the stage alone does not
+# say) goes into the log once swapped, since before that the logging venv may
+# be the broken one, and with the failure report; a resumed rollback has none. Safe to run again after a crash part-way: the
 # swap is skipped once done, the stash restore and re-apply are idempotent,
 # and the interruption count is set, not incremented.
 complete_rollback() {
-    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" count="$5"
+    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" count="$5" detail="${6:-}"
     log "ROLLBACK: $new_version failed at stage=$stage, reverting to slot $prev_slot"
     bm_log warn upgrade "rollback initiated" "{\"version\": \"$new_version\", \"from_version\": \"$from_version\", \"stage\": \"$stage\"}"
 
@@ -182,15 +360,24 @@ complete_rollback() {
         teardown_before_rollback
     fi
     [[ "$ACTIVE_SLOT" == "$prev_slot" ]] || swap_to "$prev_slot"
+    if [[ -n "$detail" ]]; then
+        log "ROLLBACK reason: $detail"
+        bm_log warn upgrade "rolling back $new_version: $detail" "{\"version\": \"$new_version\", \"stage\": \"$stage\"}"
+    fi
     # Any probation ended with this rollback. Left behind, it would name the
     # now-live slot as previous_slot.
     rm -f "$PROBATION_FILE"
+    clear_probation_markers
 
-    # 1. Stash restore returns config + state to the pre-upgrade snapshot.
-    local output rc=0
-    output="$("$(active_venv)/bin/boxmunge-server" stash restore --latest 2>&1)" || rc=$?
+    # 1. Stash restore returns config + state to the pre-upgrade snapshot: a
+    #    root-only copy of the stash this upgrade made (copy_rollback_stash).
+    local output rc=0 archive
+    archive="$(copy_rollback_stash "$new_version")" || rollback_partial "$new_version" "$from_version" "$stage" \
+        "$prev_slot" "stash restore" 1 "$archive"
+    output="$(restore_stash_copy "$archive" 2>&1)" || rc=$?
     [[ "$rc" -eq 0 ]] || rollback_partial "$new_version" "$from_version" "$stage" "$prev_slot" \
         "stash restore" "$rc" "$output"
+    log "$output"
 
     # 2. Re-apply with the previous release's code. The stash holds inputs
     #    (manifests, compose, secrets), not generated output: the overlays and
@@ -215,6 +402,7 @@ complete_rollback() {
     # (restarting every project) all over again. A crash right here loses
     # one interruption from the count: at worst one extra retry.
     rm -f "$(rollback_marker "$prev_slot")"
+    rm -rf "$STASH_RECORD_FILE" "$STASH_COPY_DIR"
     [[ "$stage" != interrupted ]] || interruptions "$new_version" "$count"
     if [[ "$stage" == interrupted ]]; then
         # Not reported to the fleet service: a power cut must not count
@@ -228,7 +416,7 @@ complete_rollback() {
         send_notification "boxmunge ROLLBACK" "Rolled back $new_version: the upgrade was interrupted ($outcome).$note"
     else
         add_blocklist "$new_version" "$stage"
-        report_failure "$new_version" "$from_version" "$stage"
+        report_failure "$new_version" "$from_version" "$stage" "$detail"
         send_notification "boxmunge ROLLBACK" "Rolled back $new_version (stage: $stage).$note"
     fi
 

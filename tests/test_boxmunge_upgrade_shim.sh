@@ -237,26 +237,8 @@ else
     FAIL=$((FAIL + 1))
 fi
 
-# install.sh must contain the fingerprint write block (state/installer.sha256)
-# and the shim must contain the matching read+compare block. Without both,
-# the self-update mechanism breaks silently.
-if grep -q "state/installer.sha256" "$INSTALL_SH"; then
-    echo "PASS: install.sh writes state/installer.sha256"
-    PASS=$((PASS + 1))
-else
-    echo "FAIL: install.sh missing state/installer.sha256 fingerprint write"
-    FAIL=$((FAIL + 1))
-fi
-if grep -q "state/installer.sha256" "$SHIM" \
-   && grep -q "system upgrade" "$SHIM"; then
-    echo "PASS: shim references state/installer.sha256 + system-upgrade flow"
-    PASS=$((PASS + 1))
-else
-    echo "FAIL: shim missing install.sh self-update (3c) wiring"
-    FAIL=$((FAIL + 1))
-fi
-
-# The fingerprint itself is exercised by tests/test_installer_fingerprint.py.
+# The fingerprint is exercised by tests/test_installer_fingerprint.py (computation)
+# and tests/shim/test_installer_fingerprint.sh (where it is kept, and how it is read).
 
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

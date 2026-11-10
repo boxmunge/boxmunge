@@ -15,17 +15,19 @@ doctor               verify host health
 health               run platform-wide health checks
 
 inbox                list uploaded bundles
-inbox clean          remove old bundles
+inbox clean [p]      remove uploaded bundles (asks unless --yes)
 stage <project>      stage alongside production for verification
 promote <project>    promote staging to production
 unstage <project>    tear down staging without promoting
 prod-deploy <p>      deploy directly to production
+prod-deploy <p> --redeploy  deploy the installed release again (no new upload)
 rollback <p>         restore previous deployment
 pause <project>      take offline with maintenance page
 resume <project>     bring back online (pulls latest images first)
+recover <project>    restart a project the health monitor stopped (same build)
 project-delete <p>   destructive removal (containers + files + registry)
 data adopt <p> <svc>:<path> <name>  copy an anonymous volume into a named one
-data chown <p> <svc> <uid>:<gid>    give a service's data to its new user
+data chown <p> <svc> <uid>:<gid>    snapshot, then give a service's data to its new user
 
 diff <project>       preview changes before deploying
 add-git-project      register a git-based project
@@ -39,6 +41,12 @@ logs <project>       tail container/host logs
 backup <project>     run encrypted backup
 restore <project>    restore from a backup snapshot
 validate <project>   validate project config
+test-restore <p>     check the latest backup decrypts
+self-test            exercise deploy, backup and restore on a canary project
+
+security [<project>] container security and CVE state
+security scan [<p>]  run a CVE scan now
+upgrade              upgrade the boxmunge platform
 ```
 
 ---
@@ -69,3 +77,7 @@ Access documentation via `agent-help`:
 | Choosing a base image | `agent-help images` |
 | Project conventions | `agent-help conventions` |
 | Agent rules | `agent-help rules` |
+| The `writable:` manifest block | `agent-help writable` |
+| Container security model | `agent-help security` |
+| CVE policy reference | `agent-help cve` |
+| Responding to a CVE alert | `agent-help cve-incident` |

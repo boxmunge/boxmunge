@@ -1,5 +1,9 @@
 VERSION := $(shell python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-BUNDLE  := dist/boxmunge-$(VERSION).tar.gz
+# DIST: where the bundle is built (tests build into a temporary directory,
+# so parallel runs never share a staging tree).
+DIST    ?= dist
+STAGE   := $(DIST)/.stage
+BUNDLE  := $(DIST)/boxmunge-$(VERSION).tar.gz
 
 # ---------------------------------------------------------------------------
 # Bundle manifest — single source of truth for what ships in a release.
@@ -26,7 +30,7 @@ BUNDLE_STAGED_DIRS  := $(BUNDLE_DIRS) $(foreach pair,$(BUNDLE_RENAMED_DIRS),$(wo
 BUNDLE_SRC_DIRS     := $(BUNDLE_DIRS) $(foreach pair,$(BUNDLE_RENAMED_DIRS),$(word 1,$(subst =, ,$(pair))))
 BUNDLE_DEPS         := $(shell find $(BUNDLE_SRC_DIRS) -type f 2>/dev/null) $(BUNDLE_TOP_FILES)
 
-.PHONY: bundle installer test test-cli test-integration test-all lint clean
+.PHONY: bundle installer test test-serial test-cli test-integration test-all lint clean
 
 bundle: $(BUNDLE)
 
@@ -34,36 +38,41 @@ installer: $(BUNDLE)
 	@./scripts/build-installer.sh
 
 $(BUNDLE): $(BUNDLE_DEPS)
-	@mkdir -p dist/.stage/boxmunge
-	cp $(BUNDLE_TOP_FILES) dist/.stage/boxmunge/
-	cp -r $(BUNDLE_DIRS) dist/.stage/boxmunge/
+	@mkdir -p $(STAGE)/boxmunge
+	cp $(BUNDLE_TOP_FILES) $(STAGE)/boxmunge/
+	cp -r $(BUNDLE_DIRS) $(STAGE)/boxmunge/
 	@for pair in $(BUNDLE_RENAMED_DIRS); do \
 	    src="$${pair%%=*}"; dest="$${pair##*=}"; \
-	    cp -r "$$src" "dist/.stage/boxmunge/$$dest"; \
+	    cp -r "$$src" "$(STAGE)/boxmunge/$$dest"; \
 	done
-	@find dist/.stage -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
-	@find dist/.stage -name '*.pyc' -delete 2>/dev/null || true
-	@find dist/.stage -name '*.egg-info' -type d -exec rm -rf {} + 2>/dev/null || true
+	@find $(STAGE) -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+	@find $(STAGE) -name '*.pyc' -delete 2>/dev/null || true
+	@find $(STAGE) -name '*.egg-info' -type d -exec rm -rf {} + 2>/dev/null || true
 	@# Ship the upgrade shim as one self-contained file: every installer of it,
 	@# older releases' shims included, copies only scripts/boxmunge-upgrade.
-	python3 scripts/build-shim.py scripts/boxmunge-upgrade dist/.stage/boxmunge/scripts/boxmunge-upgrade
-	rm -rf dist/.stage/boxmunge/scripts/boxmunge-upgrade.d
+	python3 scripts/build-shim.py scripts/boxmunge-upgrade $(STAGE)/boxmunge/scripts/boxmunge-upgrade
+	rm -rf $(STAGE)/boxmunge/scripts/boxmunge-upgrade.d
 	@for d in $(BUNDLE_STAGED_DIRS); do \
-	    if [ ! -d "dist/.stage/boxmunge/$$d" ]; then \
+	    if [ ! -d "$(STAGE)/boxmunge/$$d" ]; then \
 	        echo "ERROR: bundle staging missing declared dir: $$d" >&2; exit 1; \
 	    fi; \
 	done
 	@for f in $(BUNDLE_TOP_FILES); do \
-	    if [ ! -f "dist/.stage/boxmunge/$$f" ]; then \
+	    if [ ! -f "$(STAGE)/boxmunge/$$f" ]; then \
 	        echo "ERROR: bundle staging missing declared file: $$f" >&2; exit 1; \
 	    fi; \
 	done
-	python3 scripts/build-bundle.py $@ dist/.stage boxmunge
-	rm -rf dist/.stage
+	python3 scripts/build-bundle.py $@ $(STAGE) boxmunge
+	rm -rf $(STAGE)
 	@echo "Built $@ ($$(du -h $@ | cut -f1))"
 	@echo "Bundle contains: $(BUNDLE_STAGED_DIRS) $(BUNDLE_TOP_FILES)"
 
+# Parallel (pytest-xdist, one worker per CPU; PYTEST_XDIST_AUTO_NUM_WORKERS
+# caps it on a shared machine). `make test-serial` for a debugger or pdb.
 test:
+	python3 -m pytest tests/ -q -n auto --ignore=tests/integration --ignore=tests/vm -m 'not integration'
+
+test-serial:
 	python3 -m pytest tests/ -v --ignore=tests/integration --ignore=tests/vm -m 'not integration'
 
 test-cli:

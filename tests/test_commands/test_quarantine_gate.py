@@ -44,6 +44,8 @@ class Box:
         self.services = {"web": {"image": candidate_name("demo", "web")},
                          "db": {"image": "postgres:16"}, "cache": {"image": "redis:7"}}
         monkeypatch.setattr(gate, "resolved_services", lambda target: ({}, self.services))
+        monkeypatch.setattr("boxmunge.release_policies.resolved_services",
+                            lambda target: ({}, self.services))
         monkeypatch.setattr(gate.docker_containers, "local_image", self.images.get)
         # compose-only services (the manifest names none) count as read-only only when
         # compose.yml says so
@@ -52,6 +54,7 @@ class Box:
                                                           for n in self.services}})
         monkeypatch.setattr(gate, "refresh_db", lambda: None)
         monkeypatch.setattr("boxmunge.commands.security_scan_core.scan_image", self._scan)
+        self.kev()  # fresh: a stale catalog keeps a balanced quarantine (cve.lift_rule)
 
     def _scan(self, ref, timeout=None):
         self.scanned.append(ref)
@@ -62,7 +65,8 @@ class Box:
     def kev(self, *cves: str) -> None:
         self.paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
         self.paths.kev_catalog.write_text(json.dumps({
-            "fetched_at": datetime.now(timezone.utc).isoformat(), "cve_ids": list(cves)}))
+            "fetched_at": datetime.now(timezone.utc).isoformat(), "source": "test",
+            "released_at": datetime.now(timezone.utc).isoformat(), "cve_ids": list(cves)}))
 
     def clear(self, manifest=MANIFEST):
         return gate.clear_release(self.paths, production_target(self.paths, "demo"), manifest)
@@ -87,14 +91,23 @@ def test_clean_release_is_cleared_with_the_names_it_starts_under(box) -> None:
                                           "sha256:" + "c" * 64])
 
 
+STRICT = {**MANIFEST, "security": {"posture": "strict"}}
+
+
 def test_quarantine_level_finding_refuses_naming_cve_package_and_image(box) -> None:
     box.findings["postgres@sha256:" + "b" * 64] = (finding("CVE-2026-1234"),)
     with pytest.raises(gate.QuarantineRefused) as e:
-        box.clear()
+        box.clear(STRICT)
     text = str(e.value)
     assert "CVE-2026-1234 (Critical) in openssl 1, service db (image postgres@sha256:" in text
     assert "no fixed version is published yet" in text
     assert "quarantine stays in place" in text and "nothing was started" in text
+
+
+def test_balanced_release_clears_a_non_kev_finding_with_no_fix(box) -> None:
+    """Balanced quarantines only on KEV: an unfixable Critical does not refuse."""
+    box.findings["postgres@sha256:" + "b" * 64] = (finding("CVE-2026-1234"),)
+    assert box.clear().cve_id == "CVE-2026-0001"
 
 
 def test_fixable_kev_finding_names_the_fix(box) -> None:
@@ -119,7 +132,10 @@ def test_kev_finding_refuses_whatever_the_release_posture(box) -> None:
 def test_the_release_manifest_sets_the_policy(box) -> None:
     """The deployed manifest has no opt-out; the release's does."""
     box.findings["postgres@sha256:" + "b" * 64] = (finding("CVE-2026-1234"),)
-    opted_out = {**MANIFEST, "security": {"dangerously_disable_quarantine": True}}
+    with pytest.raises(gate.QuarantineRefused):
+        box.clear(STRICT)
+    opted_out = {**MANIFEST, "security": {
+        "posture": "strict", "dangerously_disable_quarantine": True}}
     assert box.clear(opted_out).cve_id == "CVE-2026-0001"
 
 
@@ -242,8 +258,9 @@ def test_replace_release_starts_nothing_unscanned_while_quarantined(box, monkeyp
     refused rather than started."""
     from boxmunge.commands import deploy
     started = []
-    monkeypatch.setattr(deploy, "_start_and_verify", lambda *a: started.append(a) or 0)
-    assert deploy.replace_release("demo", box.paths, MANIFEST, "demo-r2", None) == 1
+    monkeypatch.setattr(deploy, "_start", lambda *a: started.append(a) or True)
+    with pytest.raises(deploy.NotStarted):
+        deploy.replace_release("demo", box.paths, MANIFEST, "demo-r2", None)
     assert "were not scanned; nothing was started" in capsys.readouterr().err
     assert started == []
 
@@ -265,7 +282,8 @@ def test_a_refused_switch_puts_the_maintenance_page_back(box, monkeypatch, capsy
                    staged_id=None, snapshot="")
     for phase in ("previous_kept", "installed"):
         txn = advance(box.paths, "demo", txn, phase)
-    req = deploy_tree.TreeDeploy(tree=None, ref="demo-r2", source="bundle", manifest=MANIFEST)
+    req = deploy_tree.TreeDeploy(tree=None, ref="demo-r2", source="bundle", manifest=MANIFEST,
+                                pull=False)
     assert deploy_tree.switch_and_close("demo", box.paths, req, txn,
                                         ReleaseDecision({}, clearance)) == 1
     err = capsys.readouterr().err
@@ -313,7 +331,8 @@ def test_a_malformed_recorded_policy_refuses(box) -> None:
 
 def test_findings_left_running_at_risk_are_kept_for_the_report(box) -> None:
     box.findings["postgres@sha256:" + "b" * 64] = (finding("CVE-2026-1234"),)
-    clearance = box.clear({**MANIFEST, "security": {"dangerously_disable_quarantine": True}})
+    clearance = box.clear({**MANIFEST, "security": {
+        "posture": "strict", "dangerously_disable_quarantine": True}})
     assert clearance.at_risk and "CVE-2026-1234" in clearance.at_risk[0]
     assert "service db" in clearance.at_risk[0]
     assert clearance.relaxed() == [] and clearance.quarantined_under is None

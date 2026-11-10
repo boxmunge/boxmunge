@@ -143,6 +143,7 @@ apt-get install -y -qq \
     age \
     rclone \
     jq
+bash "$(dirname "$0")/python-floor.sh"
 
 # ---------------------------------------------------------------------------
 # Step 3: Install Docker (official repo)
@@ -337,6 +338,16 @@ install -d -m 755 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" \
     "${BOXMUNGE_ROOT}/state/deploy" \
     "${BOXMUNGE_ROOT}/logs"
 
+# Written by the deploy shell and by root's timers. Created here, deploy's, so
+# whichever writes first never decides the owner (a root-made state/scans broke
+# `security scan` in the deploy shell). Keep in step with boxmunge.deploy_dirs.
+install -d -m 755 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" \
+    "${BOXMUNGE_ROOT}/state/scans" \
+    "${BOXMUNGE_ROOT}/state/kev" \
+    "${BOXMUNGE_ROOT}/state/start-refused" \
+    "${BOXMUNGE_ROOT}/state/project-alerts" \
+    "${BOXMUNGE_ROOT}/state/secrets-locks"
+
 install -d -m 755 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" "${BOXMUNGE_ROOT}/inbox"
 install -d -m 755 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" "${BOXMUNGE_ROOT}/inbox/.tmp"
 install -d -m 755 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" "${BOXMUNGE_ROOT}/inbox/.consumed"
@@ -401,9 +412,6 @@ logging:
   docker_max_size: "50m"
   docker_max_file: 5
 EOF
-if [ "$SELF_SIGNED_TLS" = "true" ]; then
-    echo "tls_mode: internal" >> "${BOXMUNGE_ROOT}/config/boxmunge.yml"
-fi
 userns_record "${USERNS_OFFSET}"
 chmod 640 "${BOXMUNGE_ROOT}/config/boxmunge.yml"
 chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/config/boxmunge.yml"

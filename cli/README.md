@@ -21,7 +21,7 @@ on your machine to verify the release it installs.
 ## Quickstart
 
 ```bash
-# 1. Turn a fresh Debian 13 (x86_64) VPS into a boxmunge server
+# 1. Turn a fresh Debian 13 VPS (x86_64 or arm64) into a boxmunge server
 boxmunge server-setup root@box.example.com --email you@example.com
 
 # 2. Scaffold a project (or run init in an existing one)
@@ -50,9 +50,9 @@ on the server's console), or be confirmed at the terminal. An IP target needs
 |---|---|
 | `init --server HOST [--host NAME]` | Write `.boxmunge` and scaffold a project |
 | `bundle [DIR] [--list] [--validate] [--json]` | Build `<project>-<timestamp>.tar.gz` |
-| `stage [--dry-run]` | Bundle, upload, stage |
-| `promote [--dry-run]` | Promote staging to production |
-| `prod-deploy [--dry-run] [--no-snapshot]` | Bundle, upload, deploy to production |
+| `stage [--dry-run] [--no-pull]` | Bundle, upload, stage |
+| `promote [--dry-run] [--no-pull]` | Promote staging to production |
+| `prod-deploy [--dry-run] [--no-snapshot] [--no-pull]` | Bundle, upload, deploy to production |
 | `prod-deploy --abandon` | Undo an interrupted install before its pre-deploy hook ran |
 | `rollback [--yes]` | Roll production back to the previous deploy |
 | `status [--json]` | The server's project dashboard |
@@ -66,6 +66,22 @@ on the server's console), or be confirmed at the terminal. An IP target needs
 Every command has `--help`. Errors go to stderr and start with `ERROR:`. Exit
 codes: 0 success, 1 failure, 2 usage error, 3 client and server incompatible,
 4 server unreachable; commands that run a server command exit with its code.
+
+`rollback` and the server commands that ask before acting (`remote pause`,
+`resume`, `recover`, `restore`, `inbox clean`, `project-delete`) show the
+server's plan and ask `Proceed? [y/N]` when run at a terminal (standard input
+is one; output may be piped, as in `boxmunge rollback | tee rollback.log`).
+Without a terminal (a script, CI) nobody can answer, so the command is refused before
+anything is sent unless `--yes` is given.
+
+`secrets set KEY` asks for the value without echo (or reads one line of stdin)
+and sends it on ssh's stdin, so it is in no shell history and in no command
+line: process listings on your machine and on the server do not show it.
+`secrets set KEY=VALUE` works too, but puts the value in your shell history and
+in the CLI's own process listing. The server stores the value in plain text in
+the project's `secrets.env` (readable by the deploy user and root), and the
+containers of every service the manifest declares get it in their environment.
+`secrets set` needs boxmunge-server 0.11.5 or newer.
 
 ## The scaffold
 
@@ -117,6 +133,12 @@ This needs OpenSSH 8.7 or newer on your machine. To upload by hand, use
 The client checks only the manifest's shape. The server validates the full
 manifest on `stage` and `prod-deploy` before it changes anything; add
 `--dry-run` to run that check without deploying.
+
+The server builds `build:` services on the current digest of each base
+image. `--no-pull` (on `stage`, `prod-deploy` and `promote`) builds from the
+base images in the server's local image store, for when a registry cannot be
+reached. The client refuses it, before uploading anything, when the server is
+older than 0.11.4.
 
 If a `prod-deploy` is interrupted or fails before the project's pre-deploy
 hook ran, `boxmunge prod-deploy --abandon` uploads nothing and runs

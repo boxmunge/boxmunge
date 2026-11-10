@@ -8,23 +8,23 @@ is `off`, so the operator sees the un-hardened surface during routine
 `cve-scan` warns when a project has not been scanned recently or its last
 scan did not cover every image: a project the nightly scan keeps missing
 is not protected by quarantine (audit B-11).
+
+`cve-hardening` warns about findings the 0.12 hardening penalty will
+quarantine, on the postures where severity can quarantine at all.
 """
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from boxmunge.commands.health_cmd import HealthCheck
-from boxmunge.cve.scan_state import read_scan_state
+from boxmunge.cve.policy import PolicyError, parse_posture, severity_gate_quarantines
+from boxmunge.cve.scan_state import SCAN_MAX_AGE, read_scan_state, scan_problem
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.project_registry import deployed_among, read_registry
 from boxmunge.state import StateError
 
-# The scan runs daily (03:00-03:30); 36h tolerates one late or missed run's
-# worth of jitter without crying wolf, and catches a second missed night.
-SCAN_MAX_AGE = timedelta(hours=36)
 from boxmunge.security_overlay import (
     services_with_off_profile,
     services_with_overrides,
@@ -87,26 +87,6 @@ def check_security_profiles(paths: BoxPaths) -> HealthCheck:
     )
 
 
-def _scan_problem(paths: BoxPaths, project: str, now: datetime) -> str | None:
-    path = paths.project_scan_state(project)
-    if not path.exists():
-        return f"{project}: never scanned"
-    try:
-        state = json.loads(path.read_text())
-        scanned_at = datetime.fromisoformat(state["scanned_at"])
-    except (OSError, ValueError, KeyError, TypeError) as e:
-        return f"{project}: scan state unreadable ({e})"
-    if scanned_at.tzinfo is None:
-        scanned_at = scanned_at.replace(tzinfo=timezone.utc)
-    age = now - scanned_at
-    if age > SCAN_MAX_AGE:
-        return f"{project}: last scanned {age.days}d {age.seconds // 3600}h ago"
-    unscanned = state.get("unscanned") or []
-    if unscanned:
-        return f"{project}: last scan incomplete ({'; '.join(unscanned)})"
-    return None
-
-
 def check_cve_scan_freshness(paths: BoxPaths, *, now: datetime | None = None) -> HealthCheck:
     """Warn when any deployed project's CVE scan is stale or incomplete."""
     now = now or datetime.now(timezone.utc)
@@ -116,7 +96,7 @@ def check_cve_scan_freshness(paths: BoxPaths, *, now: datetime | None = None) ->
         return HealthCheck(name="cve-scan", status="ok", detail="no projects deployed")
     # A bad registry line may be a project the scan cannot see.
     problems = [f"not a project name, so never scanned: {p}" for p in registry.problems]
-    problems += [p for p in (_scan_problem(paths, name, now) for name in projects) if p]
+    problems += [p for p in (scan_problem(paths.project_scan_state(name), name, now) for name in projects) if p]
     if problems:
         return HealthCheck(
             name="cve-scan", status="warn",
@@ -129,17 +109,35 @@ def check_cve_scan_freshness(paths: BoxPaths, *, now: datetime | None = None) ->
 
 
 
+def _severity_quarantines(paths: BoxPaths, name: str) -> bool:
+    """Whether the project's posture quarantines on severity (strict,
+    paranoid): only there can the hardening penalty decide a quarantine.
+    Raises ManifestError / PolicyError when the posture cannot be read."""
+    sec = load_manifest(paths.project_manifest(name)).get("security") or {}
+    return severity_gate_quarantines(parse_posture(sec.get("posture")))
+
+
 def check_cve_hardening_upcoming(paths: BoxPaths) -> HealthCheck:
     """Warn when a project has findings that quarantine from 0.12, not now.
 
     The hardening penalty counts a compose-only service without
     `read_only: true` (and a manifest `cap_add` / `no_new_privileges: false`);
-    0.11.0 only warns. These findings are not quarantined, so they are not
+    0.11 only warns. These findings are not quarantined, so they are not
     safe either: the fix is named in `boxmunge security <project>`.
+
+    Only strict and paranoid quarantine on severity. A project on balanced
+    or relaxed is never warned, even when a scan recorded before it moved
+    there (or before 0.11.2, when balanced still did) carries the flag.
     """
     registry = read_registry(paths)
     flagged: list[str] = []
     for name in deployed_among(registry.names, paths):
+        try:
+            if not _severity_quarantines(paths, name):
+                continue
+        except (ManifestError, PolicyError) as e:
+            flagged.append(f"{name}: posture unreadable ({e})")
+            continue
         try:
             state = read_scan_state(paths.project_scan_state(name))
         except StateError as e:
@@ -156,9 +154,11 @@ def check_cve_hardening_upcoming(paths: BoxPaths) -> HealthCheck:
     if flagged:
         return HealthCheck(
             name="cve-hardening", status="warn",
-            detail="will quarantine from 0.12 (not quarantined now); add `read_only: true` "
-                   "in compose.yml, declare the service in the manifest, or accept the risk "
-                   "with a `security` declaration; see `boxmunge security <project>` -- "
+            detail="will quarantine from 0.12 under posture strict or paranoid (not "
+                   "quarantined now); add `read_only: true` in compose.yml, declare the "
+                   "service in the manifest, or accept the risk (suppress the CVE after "
+                   "review, or choose `security.posture: balanced`, which quarantines only "
+                   "on actively exploited CVEs); see `boxmunge security <project>` -- "
                    + "; ".join(flagged),
         )
     return HealthCheck(name="cve-hardening", status="ok",

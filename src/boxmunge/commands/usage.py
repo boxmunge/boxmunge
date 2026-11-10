@@ -57,24 +57,41 @@ Usage: boxmunge add-git-project <name> <repo-url> [--ref REF]
 
 Register a git-backed project.""",
     "stage": """\
-Usage: boxmunge stage <project> [--ref REF] [--dry-run]
+Usage: boxmunge stage <project> [--ref REF] [--no-pull] [--dry-run]
 
-Deploy alongside production on the staging hostname for verification.""",
+Deploy alongside production on the staging hostname for verification.
+Build services are built on their base images' current registry digests;
+--no-pull builds from the base images in this box's local image store.""",
     "promote": """\
-Usage: boxmunge promote <project> [--dry-run]
+Usage: boxmunge promote <project> [--no-pull] [--dry-run]
 
-Promote the staged build to production.""",
+Promote the staged build to production. Build services are built again on
+their base images' current registry digests: normally the ones the stage
+pulled, so the build is cached. A base image that moved since the stage
+reaches production untested; stage again to test it. --no-pull builds from
+the base images in this box's local image store, which can be older than
+the stage's.""",
     "unstage": """\
 Usage: boxmunge unstage <project> [--dry-run]
 
 Tear down staging.""",
     "prod-deploy": """\
-Usage: boxmunge prod-deploy <project> [--ref REF] [--no-snapshot] [--dry-run]
+Usage: boxmunge prod-deploy <project> [--ref REF] [--no-snapshot] [--no-pull] [--dry-run]
+                                     [--accept-stale-kev]
+       boxmunge prod-deploy <project> --redeploy [--no-snapshot] [--no-pull] [--dry-run]
+                                     [--accept-stale-kev]
        boxmunge prod-deploy <project> --abandon
 
-Deploy directly to production (skips staging). --abandon undoes an install
-that stopped before its pre-deploy hook ran: the replaced release's files
-go back; containers and data are not touched.""",
+Deploy directly to production (skips staging). Build services are built on
+their base images' current registry digests; --no-pull builds from the base
+images in this box's local image store. With no new bundle in the inbox,
+prod-deploy refuses; --redeploy deploys the installed release again (as
+strictly checked as a new deploy).
+--abandon undoes an install that stopped before its pre-deploy hook ran:
+the replaced release's files go back; containers and data are not touched.
+--accept-stale-kev lets a CVE-quarantined project's fix through although
+there is no usable CISA KEV catalog; it is logged and alerted. It never
+overrides a stale catalog that lists a CVE still in the release's images.""",
     "install-txn": """\
 Usage: boxmunge install-txn <project> --drop
 
@@ -105,15 +122,20 @@ Usage: boxmunge rollback <project> [--yes]
 
 Restore the previous deployment. Does not support --dry-run.""",
     "pause": """\
-Usage: boxmunge pause <project> [--reason TEXT] [--yes]
+Usage: boxmunge pause <project> [--reason TEXT] [--no-snapshot] [--yes]
 
-Take a project offline behind a styled maintenance page. Does not support
---dry-run.""",
+Take a project offline behind a styled maintenance page. A data snapshot is
+taken first (the pre-deploy snapshot of a deploy that ends the pause);
+--no-snapshot pauses without one. Does not support --dry-run.""",
     "resume": """\
 Usage: boxmunge resume <project> [--skip-security-checks] [--yes]
+       boxmunge resume <project> --no-start
 
 Bring a paused project back online (pulls latest images first). Does not
-support --dry-run.""",
+support --dry-run. --no-start starts nothing: the project stays down behind
+its maintenance page until the next prod-deploy, promote or rollback starts it, which
+ends the pause (for a project resume refuses to start and only a deploy can
+repair).""",
     "recover": """\
 Usage: boxmunge recover <project> [--yes]
 
@@ -131,6 +153,14 @@ Register a project name in the allowlist.""",
 Usage: boxmunge project-list [--json]
 
 List registered project names.""",
+    "project-forget": """\
+Usage: boxmunge project-forget <project>
+
+Drop a registry entry whose project directory is gone (a removal that did
+not finish): the name leaves the registry and its leftover state files are
+deleted. Refused while the project directory or any container of the
+project exists; use project-delete then. Operator-only: run it as root, as
+boxmunge-server.""",
     "project-delete": """\
 Usage: boxmunge project-delete <project> [--yes] [--force]
 
@@ -139,7 +169,7 @@ confirmation unless --yes. If container teardown fails, nothing is deleted
 and the command exits 1; --force deletes anyway. Does not support --dry-run.""",
     "data": """\
 Usage: boxmunge data adopt <project> <service>:<path> <name>
-       boxmunge data chown <project> <service> <uid>:<gid>
+       boxmunge data chown <project> <service> <uid>:<gid> [--no-snapshot | --staging]
 
 adopt copies the service's anonymous volume at <path> into a new named volume
 <project>_<name> that the next deploy adopts. Stops the service's containers
@@ -149,21 +179,37 @@ writable.persistent entry instead, adopt as <project>_<entry name>). A deploy
 refused for this leaves its install open: prod-deploy <project> --abandon
 first. The anonymous volume is kept until you remove it.
 
-chown stops the service, gives its read-write binds and named volumes to
-<uid>:<gid>, and leaves it stopped until you deploy, which runs it as that
-user.""",
+chown first takes the project's backup snapshot (kind prechown) while the
+service still runs (when the backup service is stopped, the dump runs over
+its data at rest in a one-off container of its image, offline), then stops
+the service, gives its read-write binds and named volumes, and staging's
+copies of them, to <uid>:<gid>, records the user and regenerates the
+overlay, and leaves it stopped (its restart policy held) until you deploy,
+which runs it as that user. When the service is the backup service, that deploy
+uses the snapshot as its pre-deploy snapshot (its own dump could not run)
+while Docker shows the service has not run since, so its rollback restores
+the data from before the change; a rollback does not revert the ownership.
+A failed snapshot refuses and changes nothing. --no-snapshot goes on without
+one: a rollback of the next deploy then cannot restore data. A project with
+backup.type: none has no snapshot to take, and says so. --staging gives
+staging's copies alone to <uid>:<gid> (no snapshot; production unchanged),
+as a stage refused for their owner asks (a stage with staging.copy_data
+gives the stores it copies to the staged users itself).""",
     "inbox": """\
 Usage: boxmunge inbox [project] [--json]
        boxmunge inbox clean [project] [--yes]
 
 List uploaded bundles, or remove them from the inbox.""",
     "secrets": """\
-Usage: boxmunge secrets set (<project>|--host) KEY=VALUE
+Usage: boxmunge secrets set (<project>|--host) KEY
+       boxmunge secrets set (<project>|--host) KEY=VALUE
        boxmunge secrets get (<project>|--host) KEY
        boxmunge secrets list (<project>|--host)
        boxmunge secrets unset (<project>|--host) KEY
 
-Manage project or host secrets. Does not support --dry-run.""",
+Manage project or host secrets. Does not support --dry-run. 'set KEY' asks
+for the value without echo at a terminal, or reads it from stdin (one line),
+so it is in no command line; KEY=VALUE puts it in this command's argv.""",
     "check": """\
 Usage: boxmunge check <project> [--json]
 
@@ -190,12 +236,12 @@ from every project, unless --project, --tail N or --all (every match) says
 otherwise. DUR is e.g. 30m, 2h, 7d. --containers adds the project's
 container logs and needs --project.""",
     "logs": """\
-Usage: boxmunge logs <project> [service] [--tail N] [--follow]
+Usage: boxmunge logs <project> [service] [--staging] [--tail N] [--follow]
        boxmunge logs --host
        boxmunge logs --boxmunge
 
-Show container logs, host journal for boxmunge units, or the boxmunge
-service log.""",
+Show container logs (production's, or with --staging the staged
+release's), host journal for boxmunge units, or the boxmunge service log.""",
     "backup": """\
 Usage: boxmunge backup <project>
 
@@ -207,7 +253,8 @@ Back up every configured project.""",
     "backup-sync": """\
 Usage: boxmunge backup-sync [project]
 
-Sync encrypted backups to the off-box remote.""",
+Copy encrypted backups to the off-box remote (backup_remote in boxmunge.yml).
+Never deletes anything there.""",
     "restore": """\
 Usage: boxmunge restore <project> [snapshot] [--yes] [--no-safety-snapshot]
 
@@ -235,10 +282,13 @@ Usage: boxmunge security [--json]
        boxmunge security suppress <CVE>|--current (--project <name>|--host)
                                   --until <YYYY-MM-DD> --reason <text>
        boxmunge security unsuppress <CVE> (--project <name>|--host)
-       boxmunge security resume <project>
+       boxmunge security resume <project> [--accept-stale-kev]
 
 Container security and CVE policy: fleet or per-project view, scan,
 suppressions, and lifting a quarantine. --until is at most 90 days ahead.
+--accept-stale-kev lifts a quarantine although there is no usable CISA KEV
+catalog; it is logged and alerted. It never overrides a stale catalog that
+lists a CVE still in the images: deploy a release without it instead.
 Operator only (refused by the deploy shell): --host suppressions, and
 scan --apply-held, which applies quarantines the CVE circuit breaker held.""",
     "bundle": """\
@@ -248,9 +298,15 @@ Build a validated project bundle (normally run by the client).""",
     "upgrade": """\
 Usage: boxmunge upgrade [--dry-run | --apply] [--skip-self-test]
        boxmunge upgrade --target VERSION   (deploy shell only)
+       boxmunge upgrade --repair-deps      (deploy shell only)
 
-Upgrade the boxmunge platform. From the deploy shell, plain `upgrade` and
-`upgrade --target` go through the root upgrade shim.
+Upgrade the boxmunge platform. From the deploy shell, plain `upgrade`,
+`upgrade --target` and `upgrade --repair-deps` go through the root upgrade
+shim; there only those and --dry-run are accepted. --target refuses a version
+older than the installed one. --repair-deps installs the installed release's
+hash-pinned dependencies (MCP among them) into the live environment from its
+signed bundle; it works during probation. As root, run the shim itself:
+boxmunge-upgrade target VERSION, or boxmunge-upgrade repair-deps.
   --dry-run         Check migrations and config regeneration; change nothing
   --apply           Migrate/regenerate/restart only (called by the shim)
   --skip-self-test  Skip the post-upgrade self-test""",

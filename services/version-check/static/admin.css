@@ -1,0 +1,11 @@
+body{font:14px/1.4 system-ui,sans-serif;margin:1.5rem;color:#222;background:#fff}
+table{border-collapse:collapse;margin:.5rem 0 1.5rem}
+th,td{border:1px solid #ccc;padding:.25rem .6rem;text-align:right}
+th{background:#f3f3f3}td.l,th.l{text-align:left}
+.note{max-width:60rem;color:#555}
+form{display:flex;flex-wrap:wrap;gap:.5rem;align-items:end;max-width:40rem}
+label{display:flex;flex-direction:column;gap:.25rem;flex:1 1 20rem}
+input,button{font:inherit;padding:.4rem .6rem}
+#status{min-height:1.4em}#status.error{color:#b00020}
+@media (prefers-color-scheme:dark){body{background:#181818;color:#ddd}
+th{background:#262626}th,td{border-color:#444}.note{color:#aaa}#status.error{color:#ff7b7b}}

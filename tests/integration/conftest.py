@@ -6,6 +6,7 @@ import shutil
 import uuid
 import subprocess
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -38,13 +39,32 @@ skip_no_docker = pytest.mark.skipif(
 )
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _images_the_modules_name(request) -> None:
+    """Pull, before the first test, every registry image the selected modules
+    name (tests/integration/images.py): no module may rely on one an earlier
+    module pulled, since CI's shards change which modules run first."""
+    from tests.integration.images import ensure, named_by
+
+    modules = {item.path for item in request.session.items
+               if "userns" not in item.path.parts and "integration" in item.path.parts}
+    if not modules or not _docker_available():
+        return  # the tests skip themselves without Docker (or fail, in CI)
+    wanted: dict[str, str] = {}
+    for module in sorted(modules):
+        for ref in named_by(module):
+            wanted.setdefault(ref, module.name)
+    for ref, module in sorted(wanted.items()):
+        ensure({ref}, f"named by {module}")
+
+
 def _random_port() -> int:
     """Pick a random high port for test services."""
     return random.randint(19000, 29999)
 
 
 @pytest.fixture(scope="session")
-def integration_root(tmp_path_factory) -> Path:
+def integration_root(tmp_path_factory) -> Iterator[Path]:
     """Create a temporary boxmunge root for integration tests."""
     root = tmp_path_factory.mktemp("boxmunge-int")
     for subdir in [

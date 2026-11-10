@@ -27,6 +27,7 @@ Project lifecycle:
   unstage <project>       Tear down staging
   prod-deploy <project>   Deploy directly to production (skip staging)
   prod-deploy <p> --abandon  Put back the files of an install left open
+  prod-deploy <p> --redeploy Deploy the installed release again (no new upload)
   rollback <project>      Restore previous deployment
   pause <project>         Take offline with a styled maintenance page
   resume <project>        Bring back online (pulls latest images first)
@@ -37,26 +38,27 @@ Project lifecycle:
   project-delete <p>      Destructive: stop, remove files, deregister (with confirm)
   data adopt <p> <svc>:<path> <name>
                           Copy an anonymous volume into a named one deploy adopts
-  data chown <p> <svc> <uid>:<gid>
-                          Give a service's data to its new user (stays stopped
-                          until you deploy)
+  data chown <p> <svc> <uid>:<gid> [--no-snapshot | --staging]
+                          Snapshot, then give a service's data to its new user
+                          (stays stopped until you deploy)
 
 Inbox & secrets:
   inbox [project]         List uploaded bundles
   inbox clean [project]   Remove bundles from the inbox (asks unless --yes)
   secrets set <p> KEY=VAL Set a project secret
+  secrets set <p> KEY     Same, value from stdin or a no-echo prompt
   secrets set --host K=V  Set a host-level secret
   secrets list <p|--host> List secret keys
   secrets get <p|--host> K  Read a secret value
   secrets unset <p|--host> K  Remove a secret
 
 Project operations:
-  check <project>         Run health checks (docker + http + smoke)
+  check <project>         Run the project smoke test
   check-all [--read-only] Check all projects (--read-only skips state writes,
                           Pushover alerts, and compose_down on critical)
   validate <project>      Validate manifest, env, compose without deploying
   log [filters]           Query structured operational audit log (deploy/check/rollback)
-  logs <project> [svc]    Tail container logs (--follow, --tail N)
+  logs <project> [svc]    Tail container logs (--staging, --follow, --tail N)
   logs --host             Show host journalctl for boxmunge-* units
   logs --boxmunge         Tail the boxmunge service log
   backup <project>        Backup, encrypt, store locally
@@ -74,23 +76,37 @@ Container security & CVE policy:
   security suppress <CVE>         Add a CVE suppression with --until and --reason
   security suppress --current     Suppress all currently-quarantining CVEs
                                   for --project, or --host (across all projects)
-  security suppress --host        Host-scope suppression (applies to every project on this box)
-  security unsuppress <CVE>       Remove a suppression (--project NAME or --host)
+  security suppress --host        Suppress for every project on this box (operator)
+  security unsuppress <CVE>       Remove a suppression (--project NAME; --host: operator)
   security resume <project>       Lift a CVE quarantine (re-scans first)
   security scan --apply-held      Apply quarantines the circuit breaker held (operator)
 
 Platform updates:
   upgrade                 Upgrade boxmunge platform from latest release
-  upgrade --target VER    Upgrade to a specific newer version (e.g. 0.3.5)
+  upgrade --target VER    Upgrade to a specific version, never older (e.g. 0.3.5;
+                          deploy shell; as root: boxmunge-upgrade target VER)
+  upgrade --repair-deps   Install the installed release's missing hash-pinned
+                          dependencies (e.g. MCP), also during probation (deploy
+                          shell; as root: boxmunge-upgrade repair-deps)
   auto-update             Run the auto-update probation/promotion cycle
   mcp-serve               Run MCP server (stdio) for AI agent integration
 
 Operator only (as root, not in the deploy shell):
   container-update        Pull and recreate Caddy and project image: containers
   install-txn <p> --drop  Drop a stale install record
+  project-forget <p>      Drop a registry entry whose project directory is gone
   legacy-stage <p> ...    Resolve a release staged by boxmunge 0.10.1
+  bundle <dir>            Build a bundle on this machine (the client's
+                          'boxmunge bundle' is the usual way)
+  boxmunge-upgrade force-target VER
+                          Install VER despite the blocklist or downgrade refusal
+  boxmunge-upgrade clear-blocklist VER
+                          Take VER off the blocklist so it can install again
   boxmunge-upgrade userns-migrate [--check] | userns-rollback | userns-commit
                           Remap Docker's user namespaces (OPERATIONS.md)
+
+Internal (run by the upgrade shim, not by hand): stash, _discover-update,
+staging-teardown-all
 
 Options (run 'help <command>' to see exactly which a command accepts):
   -h, --help              Show a command's usage; never runs the command
@@ -120,13 +136,15 @@ Rules that prevent outages (building or changing a project):
   1. Base image: the smallest official image for your stack (-slim or
      distroless), pinned by digest. Never a full or generic distro image:
      every OS package is CVE surface, and a CVE in a package your app never
-     uses can still quarantine the site.          -> agent-help images
+     uses still alerts, and can quarantine the site. -> agent-help images
   2. Multi-stage builds: compilers, pip/npm caches and build headers stay in
      the builder stage, never in the runtime image.
   3. Root filesystems are read-only. Declare every path the app writes in
      the manifest's writable: block.              -> agent-help writable
      Services run non-root: a registry image without a non-root USER needs
      services.<svc>.security.user (image/root need a reason).
+     A user change over existing data: 'data chown <p> <svc> <uid>:<gid>'
+     (it snapshots the data first, then stops the service), then deploy.
   4. All ingress goes through Caddy. Do not publish ports: in compose.
   5. smoke.sh is POSIX sh and exits 0 only when the app really works.
                                                   -> agent-help conventions
@@ -140,12 +158,16 @@ Operating safely:
     prod-deploy, stage, promote, unstage and upgrade; other commands
     refuse it.
   - QUARANTINED or STILL_RUNNING_AT_RISK in any output: stop and follow
-    agent-help cve-incident.
+    agent-help cve-incident. AWAITING_FIX needs nothing: no fix yet, not
+    exploited, the site stays up.
+  - security.posture is what a project accepts CVE downtime for: balanced
+    (default) only an actively exploited (CISA KEV) CVE; strict and
+    paranoid also unexploited risk.               -> agent-help cve
 
 Deploying a bundle-based project (the recommended path):
   1. Build locally:  boxmunge bundle ./myproject
   2. Upload:         scp -O -P 922 <bundle>.tar.gz deploy@<host>:
-  3. Verify:         stage <project>    (check https://staging.<host>)
+  3. Verify:         stage <project>    (check https://staging.<project host>)
   4. Go live:        promote <project>
   Or skip staging:   prod-deploy <project>
 

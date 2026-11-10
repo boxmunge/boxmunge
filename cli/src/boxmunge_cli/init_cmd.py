@@ -138,8 +138,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p = subparsers.add_parser(
         "init", help="Create .boxmunge and scaffold a project",
         description="Write .boxmunge (server connection details) in the current "
-                    "directory and scaffold manifest.yml, compose.yml and "
-                    "boxmunge-scripts/smoke.sh if no manifest exists yet.")
+                    "directory and, if no manifest exists yet, scaffold a "
+                    "working starter project: manifest.yml, compose.yml, "
+                    "Dockerfile, app.py, requirements.txt, project.env and "
+                    "boxmunge-scripts/smoke.sh. Existing files are never "
+                    "overwritten.")
     p.add_argument("--server", required=True, metavar="HOST",
                    help="Server hostname or IP")
     p.add_argument("--port", type=_port, default=922,

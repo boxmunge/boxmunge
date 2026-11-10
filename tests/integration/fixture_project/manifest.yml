@@ -9,7 +9,6 @@ services:
     port: 8080
     routes:
       - path: /
-    health: /healthz
     smoke: boxmunge-scripts/smoke.sh
 backup:
   type: postgres

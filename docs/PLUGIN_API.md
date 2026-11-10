@@ -172,14 +172,14 @@ The catalog is the authority on parameters and result fields; this table is the 
 | Action | Parameters | Returns |
 |---|---|---|
 | `platform.info` | none | `api_version`, `server_version`, `build`, `min_client_version`, `schema_version`, `hostname` |
-| `status.get` | none | `projects`: one row per project: `status` (ok, failing, critical_stopped, unknown, quarantined, paused, pre_registered, error), `last_check`, `deployed_at`, `quarantine` (`cve_id`, `severity`, `explanation`, `quarantined_at`) and `error`, null where they do not apply |
+| `status.get` | none | `projects`: one row per project: `status` (ok, failing, critical_stopped, unknown, quarantined, paused, pause_incomplete, awaiting_deploy (paused, handed to the next deploy by `resume --no-start`), pre_registered, error), `last_check`, `deployed_at`, `quarantine` (`cve_id`, `severity`, `explanation`, `quarantined_at`) and `error`, null where they do not apply |
 | `projects.list` | none | `projects`: registered project names |
 | `health.get` | none | `healthy`, `exit_code`, `checks` (`name`, `status` ok/warn/error/skip, `detail`) |
 | `project.get` | `project` | `lifecycle` (running, paused, quarantined, monitor_stopped, pre_registered, registered), `health`, `deploy` with history, `staging` (`active`, and the staged release's `id`, `ref` and `state`: starting, ready or retired; null when nothing is staged), `paused`, `quarantine`, `install` (an install that has not finished: `id`, `source` bundle, staged, rollback or git, `ref`, and `phase`: committed, previous_kept, installed, data_restored, hook_started or switching, or abandoning / abandoned_code while `--abandon` puts the replaced release back; null when none is open), `legacy_stage` (a release staged by boxmunge 0.10.1 that the operator has not resolved: `kind` bundle, git or leftover, and `evidence`, whether production's containers are untouched by the stage or recreated from it: unknown when that cannot be read, null for a leftover; null when there is no such stage) |
 | `project.health` | `project` | Runs the smoke checks now: `exit_code`, `status`, `smoke` |
 | `project.logs` | `project`, `service`?, `tail`? (1-1000, default 100) | `lines` of container log output |
 | `oplog.query` | `project`?, `component`?, `level`?, `since`? (`30m`, `6h`, `7d`), `tail`? (default 50) | `entries` of the operational log; `detail` is compact JSON text or null |
-| `security.summary` | none | Fleet CVE view: posture counts, quarantined and at-risk projects, suppressions, breaker holds |
+| `security.summary` | none | Fleet CVE view: posture counts, quarantined and at-risk projects, suppressions, breaker holds, KEV catalog source and freshness |
 | `security.project` | `project` | `status` (normal, quarantined, at_risk_running), `findings` with dispositions, `quarantine`, `active_suppressions`, `off_services` |
 | `backups.list` | `project` | `snapshots`, newest first: `name`, `kind`, `taken_at`, `size` |
 | `inbox.list` | `project`? | `bundles` uploaded and not yet deployed |
@@ -228,7 +228,7 @@ actions.
 
 ## Dev mode: build without a server
 
-You need Python 3.10 or newer and a clone of this repository.
+You need Python 3.11 or newer and a clone of this repository.
 
 ```sh
 python3 -m venv .venv
@@ -240,7 +240,7 @@ python3 -m venv .venv
 ```
 
 The fixture is a realistic box: `shop` running with a deploy history and findings, `blog` paused,
-`billing` quarantined for a critical CVE, `wiki` failing its smoke check with a staged release,
+`billing` quarantined for an actively exploited CVE, `wiki` failing its smoke check with a staged release,
 `newapp` registered but never deployed, plus backups, inbox bundles, an operational log, a health
 report and finished jobs with events. Timestamps are relative to when you made it; make a new one
 for fresh data.

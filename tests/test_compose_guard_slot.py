@@ -41,6 +41,21 @@ def test_staging_up_runs_from_the_slot_and_records_staging(paths, slot) -> None:
     assert not paths.project_bind_record(P).exists()
 
 
+def test_a_staging_start_names_the_staged_releases_builds(paths, slot, monkeypatch) -> None:
+    """Staging's overlay names the staged release's build services; production's
+    overlay regeneration reads nothing of the slot, so staging's start does it."""
+    (slot / "compose.boxmunge-staging.yml").write_text(yaml.safe_dump({"services": {
+        "api": {"image": "boxmunge.invalid/myapp-staging/api"},
+        "web": {"read_only": True}}}))
+    asked: list = []
+    monkeypatch.setattr("boxmunge.built_images.name_running_builds",
+                        lambda cp, built: asked.append((cp, list(built))) or [])
+    with patch("boxmunge.compose_guard.compose_up"):
+        compose_up_checked(paths, P, component="stage", staging=True, record=True,
+                           deploying=True)
+    assert asked == [("myapp-staging", ["api"])]
+
+
 def test_staging_mounting_production_is_refused(paths, slot) -> None:
     base = slot / "compose.staging-base.yml"
     doc = yaml.safe_load(base.read_text())

@@ -148,6 +148,22 @@ def test_workflow_actions_are_sha_pinned(workflow: Path) -> None:
     )
 
 
+FULL_VERSION_COMMENT_RE = re.compile(r"@[0-9a-f]{40} # v\d+\.\d+\.\d+$")
+
+
+@pytest.mark.parametrize("workflow", WORKFLOWS, ids=lambda p: p.name)
+def test_workflow_action_pins_name_their_full_version(workflow: Path) -> None:
+    """`# v5` beside a v5.0.1 SHA is left alone when Dependabot moves the SHA
+    to v7.0.1, so the comment then names the wrong release. Dependabot keeps
+    a full `# vX.Y.Z` comment in step with the SHA."""
+    bad = [m for m in USES_RE.findall(workflow.read_text())
+           if not FULL_VERSION_COMMENT_RE.search(m)]
+    assert not bad, (
+        f"{workflow.name}: pin comments must be the tag's full version, "
+        f"`# vX.Y.Z` (git ls-remote --tags <repo> | grep <sha>): {bad}"
+    )
+
+
 def test_dependabot_covers_pinned_ecosystems() -> None:
     """Dependabot must be configured for every ecosystem we pin in this
     work: pip (requirements files), github-actions (release.yml), and
@@ -166,20 +182,43 @@ def test_dependabot_covers_pinned_ecosystems() -> None:
     assert not missing, f"dependabot.yml missing ecosystems: {sorted(missing)}"
 
 
+def _dependabot_updates() -> list[dict]:
+    import yaml as _yaml
+    return _yaml.safe_load((REPO / ".github" / "dependabot.yml").read_text())["updates"]
+
+
+def test_dependabot_has_one_entry_per_ecosystem() -> None:
+    """One entry per ecosystem (several `directories`) so its minor and patch
+    group is one weekly pull request, not one per directory."""
+    names = [u["package-ecosystem"] for u in _dependabot_updates()]
+    assert sorted(names) == sorted(set(names)), names
+
+
+@pytest.mark.parametrize("update", _dependabot_updates(), ids=lambda u: u["package-ecosystem"])
+def test_dependabot_waits_and_groups_minor_and_patch(update: dict) -> None:
+    """A release must age before it is proposed (a compromised upload is
+    usually caught and yanked within days), and minor and patch updates
+    arrive as one grouped pull request; majors stay separate."""
+    assert update["cooldown"]["default-days"] >= 7, update
+    groups = list(update["groups"].values())
+    assert [g["update-types"] for g in groups] == [["minor", "patch"]], update
+
+
 def test_system_dockerfile_verifies_external_binaries() -> None:
     """system/Dockerfile downloads age and rclone over the network. Each
-    download must verify SHA256 against a baked-in ARG before the binary
-    enters the build, defending against TLS-trust-only fetches."""
+    download must verify SHA256 against a baked-in ARG, one per supported
+    architecture, before the binary enters the build, defending against
+    TLS-trust-only fetches."""
     path = REPO / "system" / "Dockerfile"
     content = path.read_text()
-    assert re.search(r"^ARG AGE_SHA256=[0-9a-f]{64}\s*$", content, re.MULTILINE), \
-        "system/Dockerfile must declare ARG AGE_SHA256=<64-hex>"
-    assert re.search(r"^ARG RCLONE_SHA256=[0-9a-f]{64}\s*$", content, re.MULTILINE), \
-        "system/Dockerfile must declare ARG RCLONE_SHA256=<64-hex>"
-    assert "echo \"${AGE_SHA256}" in content or "${AGE_SHA256}  " in content, \
-        "system/Dockerfile must verify age tarball against AGE_SHA256"
-    assert "echo \"${RCLONE_SHA256}" in content or "${RCLONE_SHA256}  " in content, \
-        "system/Dockerfile must verify rclone zip against RCLONE_SHA256"
+    for tool in ("AGE", "RCLONE"):
+        for arch in ("AMD64", "ARM64"):
+            assert re.search(rf"^ARG {tool}_SHA256_{arch}=[0-9a-f]{{64}}\s*$", content, re.M), \
+                f"system/Dockerfile must declare ARG {tool}_SHA256_{arch}=<64-hex>"
+    assert 'echo "${age_sha256}  /tmp/age.tar.gz" | sha256sum -c -' in content, \
+        "system/Dockerfile must verify the age tarball against its pinned SHA256"
+    assert 'echo "${rclone_sha256}  /tmp/rclone.zip" | sha256sum -c -' in content, \
+        "system/Dockerfile must verify the rclone zip against its pinned SHA256"
 
 
 DOCKERFILES_REQUIRING_DIGEST_PIN = [

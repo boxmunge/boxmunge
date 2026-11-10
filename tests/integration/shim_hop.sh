@@ -7,8 +7,11 @@
 # does what it always did: installs the bundle's scripts/boxmunge-upgrade
 # over itself, then, if it is new enough, re-runs the bundle's install.sh.
 # install.sh here is a stand-in: `fail` exits like an apt outage, `ok` runs
-# the real install.sh's shim-install section. Then the installed shim must
-# work. Network, signing, pip and the venv are stubbed.
+# the real install.sh's steps that tell a shim's run from one by hand (with
+# or without --upgrade-shim) and act on it: the venv install, the
+# shim install and the version record. Then the installed shim must work.
+# Network, signing, pip and the venv are stubbed; pip records what it is asked
+# for.
 # shellcheck disable=SC2016  # stub bodies are literal bash
 set -uo pipefail
 MODE="$1" OLD="$2"
@@ -21,7 +24,7 @@ st /stub/bin/curl 'cp "/rel/$(basename "${@: -1}")" "$3"'
 st /stub/bin/cosign 'exit 0'
 st /stub/bin/visudo 'exit 0'
 st /stub/bin/sha256sum "if [[ \"\$1\" == -c ]]; then cat >/dev/null; exit 0; fi; exec $REALSHA \"\$@\""
-st /mockvenv/bin/pip 'exit 0'
+st /mockvenv/bin/pip 'echo "$0 $*" >> /tmp/pip.log; [[ "$1" != show ]] || echo "Version: 1.5.0"'
 # `upgrade --apply` runs while the old shim, which locks only the legacy
 # upgrade-state/upgrade.lock, is mid-upgrade and has installed the new shim:
 # the new shim must see that upgrade and stay out of it.
@@ -42,12 +45,18 @@ case "$2" in
 esac
 exit 0'
 
-# The release: the built bundle, with install.sh replaced by the stand-in.
+# The release: the built bundle, numbered 1.5.0, with install.sh replaced by
+# the stand-in.
 cp -R /bundle/boxmunge /rel/boxmunge
+sed -i 's/^version = ".*"$/version = "1.5.0"/' /rel/boxmunge/pyproject.toml
 case "$MODE" in
     fail) printf '#!/usr/bin/env bash\necho "apt-get update failed (simulated)"; exit 100\n' > /rel/boxmunge/install.sh ;;
     ok) { printf '#!/usr/bin/env bash\nset -e\nSCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\nBOXMUNGE_ROOT=/opt/boxmunge\n'
+          sed -n '/^FROM_UPGRADE_SHIM=0$/,/^fi$/p' /bundle/boxmunge/install.sh
+          grep -F 'bootstrap/run-by-old-shim.sh")"' /bundle/boxmunge/install.sh
+          sed -n '/^if \[\[ "${FROM_UPGRADE_SHIM}" -eq 0 \]\]; then$/,/^fi$/p' /bundle/boxmunge/install.sh
           sed -n '/^# Install the boxmunge-upgrade shim/,/bin\/boxmunge-upgrade.d"$/p' /bundle/boxmunge/install.sh
+          sed -n '/^INSTALLED_VERSION=/,/^fi$/p' /bundle/boxmunge/install.sh
         } > /rel/boxmunge/install.sh ;;
     *) echo "usage: shim_hop.sh <fail|ok> <old-shim>" >&2; exit 2 ;;
 esac
@@ -74,6 +83,11 @@ echo "SHIM_IS_BUNDLED=$(cmp -s "$R/bin/boxmunge-upgrade" /bundle/boxmunge/script
 echo "LIVE=$(readlink "$R/env-active")"
 echo "PROBATION=$([[ -f "$R/upgrade-state/probation.json" ]] && echo yes || echo no)"
 echo "LEFTOVER_LIBS=$([[ -e "$R/bin/boxmunge-upgrade.d" ]] && echo yes || echo no)"
+# Which venvs' pip got the hash-pinned requirements-mcp.txt.
+mcp="$(grep -- '--require-hashes' /tmp/pip.log 2>/dev/null | grep -- '/requirements-mcp.txt' | cut -d' ' -f1 | sort -u | tr '\n' ',')"
+echo "MCP_INSTALLED_BY=${mcp:-none}"
+echo "ENV_A_PIP_CALLS=$(grep -cE '^/opt/boxmunge/env-(a|active)/bin/pip install' /tmp/pip.log 2>/dev/null || true)"
+echo "VERSION=$(cat "$R/config/version")"
 for c in "check-probation" "run 1.5.1 https://example.com/x" "target 1.5.1"; do
     rc=0
     # shellcheck disable=SC2086  # word-split the subcommand on purpose

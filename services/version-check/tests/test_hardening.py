@@ -56,16 +56,16 @@ class TestForwardedClientAddress:
         client = make_app().test_client()
         client.post("/v1/report-failure", json=_report(), environ_base=PROXY,
                     headers={"X-Forwarded-For": "198.51.100.9"})
-        assert _failure_addrs(tmp_path / "checks.db") == ["198.51.100.9"]
+        assert _failure_addrs(tmp_path / "checks.db") == ["198.51.100.0/24"]
 
     def test_dedupe_is_per_client_not_per_proxy(self, make_app, tmp_path):
         """Behind the proxy every request used to share one address, so one
         report per version per hour was accepted fleet-wide."""
         client = make_app().test_client()
-        for addr in ("198.51.100.1", "198.51.100.2", "198.51.100.2"):
+        for addr in ("198.51.100.1", "198.51.101.1", "198.51.101.2"):
             client.post("/v1/report-failure", json=_report(), environ_base=PROXY,
                         headers={"X-Forwarded-For": addr})
-        assert _failure_addrs(tmp_path / "checks.db") == ["198.51.100.1", "198.51.100.2"]
+        assert _failure_addrs(tmp_path / "checks.db") == ["198.51.100.0/24", "198.51.101.0/24"]
 
     def test_only_the_proxy_hop_is_trusted(self, make_app, tmp_path):
         """A client-supplied X-Forwarded-For prefix is ignored: only the
@@ -73,7 +73,7 @@ class TestForwardedClientAddress:
         client = make_app().test_client()
         client.post("/v1/report-failure", json=_report(), environ_base=PROXY,
                     headers={"X-Forwarded-For": "10.9.9.9, 198.51.100.9"})
-        assert _failure_addrs(tmp_path / "checks.db") == ["198.51.100.9"]
+        assert _failure_addrs(tmp_path / "checks.db") == ["198.51.100.0/24"]
 
 
 class TestRateLimit:
@@ -86,6 +86,22 @@ class TestRateLimit:
         other = client.get("/v1/check?v=0.2.0", environ_base=PROXY,
                            headers={"X-Forwarded-For": "198.51.100.2"})
         assert other.status_code == 200
+
+    def test_one_network_filling_the_client_table_does_not_shut_out_other_boxes(
+            self, make_app):
+        """VC-4: one /48 holds 65,536 /64 client keys. Once they fill the
+        client table, a box on another network must still get an answer, or
+        every box that has not checked yet gets 429 and installs nothing."""
+        client = make_app(RATE_LIMIT_MAX_CLIENTS=3, RATE_LIMIT_NETWORK_REQUESTS=2).test_client()
+
+        def check(addr):
+            return client.get("/v1/check?v=0.2.0", environ_base=PROXY,
+                              headers={"X-Forwarded-For": addr}).status_code
+
+        flood = [check(f"2001:db8:aa:{n:x}::1") for n in range(6)]
+        assert flood == [200, 200, 200, 200, 200, 429], flood
+        assert check("198.51.100.1") == 200
+        assert check("2001:db8:bb::1") == 200
 
     def test_limited_response_is_explicit(self, make_app):
         client = make_app(RATE_LIMIT_REQUESTS=1).test_client()
@@ -131,8 +147,8 @@ class TestBodyLimits:
 class TestStatsSeeBufferedCounts:
     def test_admin_stats_flush_pending_counts(self, make_app):
         app = make_app()
-        app.config["STATS_SECRET"] = "s"
+        app.config["STATS_SECRET"] = "s" * 32
         client = app.test_client()
         client.get("/v1/check?v=0.2.1")
-        data = client.get("/v1/admin/version-checks?token=s").get_json()
-        assert data["totals"] == [{"version": "0.2.1", "count": 1}]
+        data = client.get("/v1/admin/version-checks", headers={"Authorization": "Bearer " + "s" * 32}).get_json()
+        assert data["totals"] == [{"version": "0.2.1", "count": 1, "listed": True}]

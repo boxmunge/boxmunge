@@ -13,8 +13,9 @@
 ## Why it matters on boxmunge
 
 boxmunge scans every running image and can **quarantine** a project: the site goes to a maintenance
-page and its containers stop. Every OS package in your image is something that can be scanned,
-flagged, and acted on, whether or not your app ever uses it.
+page and its containers stop (under the default `balanced` posture only for an actively exploited
+CVE; under `strict`, for any serious unfixed one). Every OS package in your image is something that
+can be scanned, flagged, and acted on, whether or not your app ever uses it.
 
 A full `python:3.x` or `node:N` image ships hundreds of packages: compilers, Perl, image libraries,
 version-control tools. Each carries its own stream of CVEs. A real outage on boxmunge came from a
@@ -44,8 +45,9 @@ security triage: a CVE Debian rates as minor or not affecting the package does n
 down.
 
 Alpine images are small, but Alpine's vulnerability data carries no distro severity rating. Below
-the `paranoid` posture, most Alpine findings are therefore treated as informational. That means
-fewer quarantines, but also less protection for anything short of an actively exploited CVE. Alpine
+the `paranoid` posture, most Alpine findings are therefore treated as informational. Under `strict`
+that means fewer quarantines, and under `balanced` fewer no-fix-yet alerts: less protection for
+anything short of an actively exploited CVE. Alpine
 also uses musl rather than glibc, which some Python and Node packages handle poorly. Choose it
 deliberately, not by default.
 
@@ -81,7 +83,13 @@ Pinning means you choose when to take upstream fixes, so rebuild regularly. `con
 refreshes services that use a published `image:` (including ones from `include:` files or
 `${VAR:-image}`); with `strategy: rollback_to_previous` an unhealthy update is rolled back to the
 exact image that ran before. Services that
-`build:` from your Dockerfile only change when you rebuild and redeploy.
+`build:` from your Dockerfile only change when you rebuild and redeploy. `stage`, `prod-deploy` and
+`promote` rebuild them on the current digest of each `FROM` tag. A `FROM` pinned by digest stays
+exactly the image you pinned. A `FROM` naming an image only the box has (`docker load`, a hand
+build) cannot be pulled: set `build: {pull: false}` on that service. To build on
+another service of the project, name it as a context (`additional_contexts: {base: service:base}`,
+then `FROM base`) instead of by its image name. See CVE_POLICY.md, "Base images and the build
+cache".
 
 ## Also remember
 

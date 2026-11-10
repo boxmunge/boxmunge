@@ -29,12 +29,9 @@ services:
   backend:
     type: backend
     port: 8000
-    internal: true
     routes:
       - path: /api/*
-    health:
-      endpoint: /api/health
-      interval: 30s
+    smoke: boxmunge-scripts/smoke.sh
 backup:
   type: none
 deploy:
@@ -80,7 +77,6 @@ class TestLoadManifest:
         assert m["project"] == "myapp"
         assert m["hosts"] == ["myapp.example.com"]
         assert "frontend" in m["services"]
-        assert m["services"]["backend"]["internal"] is True
 
     def test_missing_file_raises(self, tmp_path: Path) -> None:
         with pytest.raises(ManifestError, match="not found"):
@@ -718,7 +714,7 @@ class TestWritableManifestIntegration:
             "writable": {"external": True},
         }
         m["services"]["worker"] = {
-            "port": 9000, "routes": [{"path": "/w"}], "internal": True,
+            "port": 9000, "routes": [{"path": "/w"}],
             "smoke": "z.sh",
             # no writable block — DEFAULT
         }

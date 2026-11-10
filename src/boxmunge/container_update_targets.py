@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Container auto-update targets and their persisted per-target state.
 
-Target discovery (Caddy plus opt-in user projects) and the state file each
+Target discovery (Caddy plus every user project, unless its manifest sets
+``container_updates.enabled: false``) and the state file each
 target's run writes under ``state/container-updates/``. The update flow
 itself lives in ``boxmunge.container_update``.
 """
@@ -14,13 +15,11 @@ from typing import TYPE_CHECKING, Any
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.manifest import load_manifest
+from boxmunge.fs_nofollow import read_text_nofollow
 
 if TYPE_CHECKING:
     from pathlib import Path
     from boxmunge.paths import BoxPaths
-
-
-VALID_STRATEGIES = {"leave_broken", "rollback_to_previous"}
 
 
 @dataclass
@@ -110,17 +109,24 @@ def build_targets(paths: "BoxPaths", config: dict[str, Any]) -> list[UpdateTarge
     return targets
 
 
+class TargetStateError(ValueError):
+    """A container-update target's state record cannot be read."""
+
+
 def read_target_state(paths: "BoxPaths", name: str) -> dict[str, Any] | None:
-    """Read state file. None if missing. Raises on corrupt JSON."""
-    import logging
+    """The target's state record, or None when there is none. Raises
+    TargetStateError, naming the file, when it cannot be read: a link, a
+    FIFO or other non-regular file (refused, not followed), text that is
+    not UTF-8, or corrupt JSON. container-update marks that target failed
+    with the reason."""
     state_path = paths.container_update_target_state(name)
-    if not state_path.exists():
-        return None
     try:
-        return json.loads(state_path.read_text())
-    except json.JSONDecodeError as e:
-        logging.getLogger("boxmunge").error("Corrupt JSON in %s: %s", state_path, e)
-        raise
+        return json.loads(read_text_nofollow(state_path))
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
+        raise TargetStateError(f"cannot read {state_path}: {e}. Remove it; the next "
+                               f"container-update run records it again") from e
 
 
 def write_target_state(paths: "BoxPaths", name: str, state: dict[str, Any]) -> None:

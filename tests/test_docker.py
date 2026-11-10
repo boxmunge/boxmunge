@@ -263,6 +263,7 @@ class TestCaddyLockContentionLogging:
 # Captured at import, before tests/conftest.py swaps in its no-Docker stub.
 import boxmunge.built_images as _built_images  # noqa: E402
 untag_old_built_names = _built_images.untag_old_built_names
+name_running_builds = _built_images.name_running_builds
 
 
 class TestUntagOldBuiltNames:
@@ -387,3 +388,62 @@ class TestUntagOldBuiltNames:
             return subprocess.CompletedProcess(cmd, 1, "", "permission denied\n")
         with pytest.raises(DockerError, match="permission denied"):
             self._untag(run)
+
+
+class TestNameRunningBuilds:
+    """The image a build service's containers run gets the service's platform
+    name when that name names nothing: by the containers' own image ID, so
+    only what a deploy built is ever named."""
+
+    def _name(self, monkeypatch, containers: str, present: set[str]):
+        import subprocess
+        calls: list[list[str]] = []
+
+        def run(cmd, **_kw):
+            calls.append(cmd)
+            out = ""
+            if cmd[:2] == ["docker", "ps"]:
+                out = "c1 c2 c3\n" if containers else ""
+            elif cmd[:3] == ["docker", "container", "inspect"]:
+                out = containers
+            return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+        from boxmunge.docker_containers import LocalImage
+        monkeypatch.setattr("boxmunge.docker_containers.local_image",
+                            lambda ref: LocalImage(ref, ()) if ref in present else None)
+        with patch("boxmunge.built_images._run", side_effect=run):
+            named = name_running_builds("myapp", {"web", "worker"})
+        return named, [c for c in calls if c[:2] == ["docker", "tag"]]
+
+    def test_a_nameless_image_a_build_container_runs_gets_its_platform_name(self, monkeypatch):
+        containers = ("sha256:aaa\tmyapp-custom\tmyapp\tweb\n"
+                      "sha256:ppp\talpine:3.20\tmyapp\tcache\n"     # an image service
+                      "sha256:ooo\tother-web\tother\tweb\n")       # another project
+        named, tags = self._name(monkeypatch, containers, {"sha256:aaa", "sha256:ppp",
+                                                           "sha256:ooo"})
+        assert named == ["boxmunge.invalid/myapp/web"]
+        assert tags == [["docker", "tag", "sha256:aaa", "boxmunge.invalid/myapp/web"]]
+
+    def test_a_platform_name_that_names_an_image_is_left_alone(self, monkeypatch):
+        containers = "sha256:aaa\tmyapp-custom\tmyapp\tweb\n"
+        named, tags = self._name(monkeypatch, containers,
+                                 {"sha256:aaa", "boxmunge.invalid/myapp/web"})
+        assert (named, tags) == ([], [])
+
+    def test_an_image_the_store_no_longer_has_is_not_named(self, monkeypatch):
+        containers = "sha256:aaa\tboxmunge.invalid/myapp/web\tmyapp\tweb\n"
+        assert self._name(monkeypatch, containers, set()) == ([], [])
+
+    def test_replicas_on_different_images_fail_naming_them(self, monkeypatch):
+        from boxmunge.docker_run import DockerError
+        containers = ("sha256:aaa\tmyapp-web\tmyapp\tweb\t\t/myapp-web-1\n"
+                      "sha256:bbb\tmyapp-web\tmyapp\tweb\t\t/myapp-web-2\n")
+        with pytest.raises(DockerError, match=r"myapp-web-1 on sha256:aaa; myapp-web-2 on "
+                                              r"sha256:bbb.*docker rm"):
+            self._name(monkeypatch, containers, {"sha256:aaa", "sha256:bbb"})
+
+    def test_a_leftover_one_off_on_another_image_is_not_counted(self, monkeypatch):
+        """`compose run` left it; `up` neither runs nor starts it."""
+        containers = ("sha256:aaa\tmyapp-web\tmyapp\tweb\t\t/myapp-web-1\n"
+                      "sha256:old\tmyapp-web\tmyapp\tweb\tTrue\t/myapp-web-run-1f2e\n")
+        named, tags = self._name(monkeypatch, containers, {"sha256:aaa", "sha256:old"})
+        assert tags == [["docker", "tag", "sha256:aaa", "boxmunge.invalid/myapp/web"]]

@@ -1,11 +1,10 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+# Run by boxmunge inside the backend container after every deploy and by the
+# health monitor. Exit 0 when healthy, 1 when degraded.
+set -u
 
-# Check backend health
-status=$(curl -sf -o /dev/null -w "%{http_code}" http://sample-backend:9090/api/health 2>/dev/null || true)
-if [[ "$status" != "200" ]]; then
-    echo "Backend health returned $status" >&2
-    exit 1
+if wget -q -O /dev/null -T 5 http://127.0.0.1:9090/api/health 2>/dev/null; then
+    exit 0
 fi
-
-exit 0
+echo "smoke: backend did not answer at /api/health" >&2
+exit 1

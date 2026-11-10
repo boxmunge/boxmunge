@@ -12,7 +12,7 @@ Run these commands in order:
 
 1. `help` -- see all available commands (`help <command>` shows one command's usage; it never runs the command)
 2. `status` -- check the current state of all projects
-3. `agent-help <topic>` -- read documentation (architecture, operations, conventions, rules)
+3. `agent-help <topic>` -- read documentation (images, conventions, writable, rules, operations, security, cve, cve-incident, architecture)
 
 **Before you write or change a Dockerfile, read `agent-help images`.** Use the smallest official
 image for your stack, pinned by digest, with a multi-stage build. Every OS package in the image can
@@ -31,21 +31,21 @@ These operations are safe to run without human confirmation:
 | Promote staging to production | `promote <project>` |
 | Abandon staging | `unstage <project>` |
 | Deploy directly to production | `prod-deploy <project>` |
+| Deploy the installed release again (no new upload; rebuilds on current base images) | `prod-deploy <project> --redeploy` |
 | Register a git-based project | `add-git-project <name> <repo-url>` |
-| Preview changes before deploying | `diff <project>` |
+| Preview changes before deploying (against the newest bundle in the inbox) | `diff <project>` |
 | Set a project secret | `secrets set <project> KEY=value` |
 | Set a host-level secret | `secrets set --host KEY=value` |
 | List secrets | `secrets list <project>` |
 | Check server/project health | `status` or `check <project>` |
-| Tail container logs | `logs <project>` |
+| Tail container logs | `logs <project>` (staging: `logs <project> --staging`) |
 | Query ops audit log | `log --tail 50` |
 | Validate a project config | `validate <project>` |
 | Run a backup | `backup <project>` |
 | Run diagnostics | `doctor` |
-| Clean up old bundles | `inbox clean` |
 | Read documentation | `agent-help <topic>` |
-| Pause a project (planned maintenance) | `pause <project>` |
-| Resume a paused project (pulls latest images) | `resume <project>` |
+| Resume a paused project (pulls latest images) | `resume <project> --yes` (it asks first; without a terminal it needs `--yes`) |
+| Restart a project the health monitor stopped (same build) | `recover <project> --yes` (it asks first; without a terminal it needs `--yes`) |
 | Show effective container security posture | `security <project> [--json]` |
 | Audit overall platform health | `health` |
 | Show server boxmunge version | `version` |
@@ -53,7 +53,7 @@ These operations are safe to run without human confirmation:
 | Health-check every project | `check-all` (state-mutating; use `check-all --read-only` for pure introspection) |
 | Compatibility info for client handshake | `handshake` |
 
-Several commands accept a `--json` flag for machine-readable output, useful when an agent needs to parse rather than render: `check --json`, `validate --json`, `inbox --json`, `project-list --json`, plus `status --json`, `health --json`, `security <project> --json`, and `log --json`.
+Several commands accept a `--json` flag for machine-readable output, useful when an agent needs to parse rather than render: `check --json`, `validate --json`, `inbox --json`, `project-list --json`, plus `status --json`, `doctor --json`, `health --json`, `self-test --json`, `security [<project>] --json`, and `log --json`.
 
 ### Deploying a project (standard workflow)
 
@@ -75,11 +75,14 @@ secrets set myapp SECRET_KEY=supersecretvalue
 secrets list myapp
 ```
 
-Host-level secrets (shared across all projects):
+Host-level secrets (injected into every project's containers):
 
 ```
-secrets set --host PUSHOVER_TOKEN=abc123
+secrets set --host SMTP_PASSWORD=supersecretvalue
 ```
+
+To put staging behind HTTP basic auth, set the project secrets `STAGING_AUTH_USER` and
+`STAGING_AUTH_PASS` before `stage`. Like every project secret, they also reach the containers.
 
 ---
 
@@ -90,10 +93,15 @@ These commands prompt for confirmation before executing. Use `--yes` only when y
 - `rollback <project>` -- puts back the previous release's code and its pre-deploy data snapshot (refuses, with the reason, if either is unavailable)
 - `restore <project>` -- restores from a backup
 - `project-delete <project>` -- destructively deletes a project (containers, files including local backups, registry entry); off-site backup copies are kept
-- `pause <project>` -- takes the site offline with a maintenance page
-- `resume <project> --skip-security-checks` -- DANGEROUS: brings up potentially vulnerable images without pulling fresh
+- `pause <project>` -- takes the site offline with a maintenance page, after a data snapshot (the deploy that ends the pause rolls back to it); `pause <project> --no-snapshot` for an emergency pause, giving up that data rollback
+- `resume <project>` -- brings it back online; with `--skip-security-checks` (DANGEROUS) it starts potentially vulnerable images without pulling fresh ones
+- `resume <project> --no-start` -- starts nothing: hands the pause to the next `prod-deploy`/`promote` (or `rollback`), which ends it once its containers start. Use it when `resume` refuses and names it (only a deploy can repair what it found)
+- `recover <project>` -- restarts a project the health monitor stopped
+- `inbox clean [project]` -- removes every uploaded bundle (of that project)
 
 Do not pass `--yes` reflexively. Confirm the target project and the effect before proceeding.
+
+The prompt needs a terminal. Over `ssh deploy@<host> <command>` without `-t` there is none, so these commands refuse before changing anything and ask for `--yes`; they print what they would do first, so read that, then run the same command again with `--yes` added.
 
 ### Flags are strict
 
@@ -116,6 +124,9 @@ The restricted shell does not allow:
 - Running commands as root (`sudo`)
 - Accessing documentation files directly (use `agent-help <topic>` instead)
 - Any command that is not a boxmunge subcommand
+- The operator-only commands and forms: `container-update`, `install-txn`, `legacy-stage`,
+  host-scope suppressions (`security suppress --host`, `security unsuppress --host`) and
+  `security scan --apply-held`
 
 If a task requires any of the above, it requires the **supervisor** user. Note this in your response and let the human operator handle it.
 
@@ -158,7 +169,7 @@ If a task requires any of the above, it requires the **supervisor** user. Note t
 ### Updating an existing project
 
 1. `inbox` -- confirm new bundle arrived (or use git)
-2. `diff <project>` -- preview changes
+2. `diff <project>` -- preview changes (bundle projects)
 3. `stage <project>` -- stage the update
 4. Verify the staging site at `https://staging.<host>` (stage prints it)
 5. `promote <project>` -- promote to production

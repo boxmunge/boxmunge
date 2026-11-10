@@ -1,8 +1,8 @@
 [project]
 name = "boxmunge-server"
-version = "0.11.0"
+version = "0.11.4"
 description = "Minimalist, agent-friendly VPS hosting framework"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "PyYAML>=6.0",
     "bcrypt>=4.0",
@@ -33,6 +33,8 @@ markers = [
     "integration: integration tests requiring Docker",
     "userns_dind: needs a daemon the test can remap and restart (the privileged dind CI job)",
     "decides_users: runs deploy's image build, user decision and storage steps (unit tier stubs them otherwise)",
+    "runs_long: takes tens of seconds; collected first, so a parallel (-n) run starts it early instead of finishing on it",
+    "shard_by_test: CI's --shard places each test of this module on its own, not the module whole (tests/shard.py)",
 ]
 testpaths = ["tests"]
 pythonpath = ["src"]

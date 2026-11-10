@@ -29,7 +29,8 @@ def finding(
     cve: str = "CVE-2026-0001", *, sev: Severity = Severity.CRITICAL,
     pkg: str = "openssl", fix: str | None = None,
 ) -> Finding:
-    """A distro-acknowledged, network-reachable finding (quarantines ≥ High)."""
+    """A distro-acknowledged, network-reachable finding (quarantines ≥ Medium
+    under strict; under balanced only a KEV listing quarantines)."""
     return Finding(
         cve_id=cve, severity=sev, package=pkg, installed_version="1",
         fixed_version=fix, title="", primary_url=None,
@@ -39,6 +40,20 @@ def finding(
 
 
 CRIT = finding()
+
+# Strict: a non-KEV finding ≥ Medium quarantines. Balanced quarantines only
+# on CISA KEV; tests of balanced pass {"posture": "balanced"}.
+STRICT = {"posture": "strict"}
+
+
+def fresh_kev(monkeypatch, *cves: str):
+    """A fresh KEV catalog listing ``cves`` for `security resume`, which
+    refuses a lift no usable catalog backs (cve.lift_rule)."""
+    from boxmunge.cve.kev import KevCatalog
+    now = datetime.now(timezone.utc)
+    kev = KevCatalog(frozenset(cves), now, now, "https://kev.example/feed.json")
+    monkeypatch.setattr("boxmunge.commands.security_resume.load_kev", lambda paths: kev)
+    return kev
 
 
 def scan_result(ref: str, findings=()) -> ScanResult:
@@ -53,7 +68,13 @@ def write_project(
 
     ``images`` maps service → compose image; a service missing from it is
     build-only. Default: every service declares ``<name>-<svc>:1``.
+
+    ``security`` defaults to STRICT: these tests drive the quarantine
+    machinery with plain (non-KEV) findings, which balanced only alerts on.
+    Strict requires a read-only root, so each service declares one.
     """
+    if security is None:
+        security = STRICT
     images = images if images is not None else {s: f"{name}-{s}:1" for s in services}
     proj = paths.projects / name
     proj.mkdir(parents=True)
@@ -63,11 +84,11 @@ def write_project(
         "services": {s: {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh"}
                      for s in services},
     }
-    if security is not None:
-        manifest["security"] = security
+    manifest["security"] = security
     (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
     compose_services = {
-        s: ({"image": images[s]} if s in images else {"build": "."}) for s in services
+        s: {**({"image": images[s]} if s in images else {"build": "."}), "read_only": True}
+        for s in services
     }
     (proj / "compose.yml").write_text(yaml.safe_dump({"services": compose_services}))
     mark_deployed(paths, name)
@@ -153,6 +174,10 @@ class Docker:
         for name in ("caddy_reload", "compose_stop"):
             monkeypatch.setattr(f"boxmunge.cve.quarantine.{name}", self._recorder(name))
         monkeypatch.setattr("boxmunge.compose_guard.compose_up", self._recorder("compose_up"))
+        # The smoke test a lift runs is a `docker exec`.
+        self.smoke: tuple[bool, str] = (True, "ok")
+        monkeypatch.setattr("boxmunge.commands.quarantine_lift.run_smoke",
+                            lambda project, paths: self.smoke)
         monkeypatch.setattr("boxmunge.restart_hold.project_restart_policies",
                             lambda *, project_name: {
                                 n: p for n, p in self.policies.items()
@@ -171,3 +196,10 @@ class Docker:
                 self.fail[name] -= 1
                 raise DockerError(f"{name} timed out")
         return call
+
+
+def render_site(paths: BoxPaths, manifest: dict) -> None:
+    """Stand-in for caddy.prepare_caddy_config: writes the project's site."""
+    site = paths.project_caddy_site(manifest["project"])
+    site.parent.mkdir(parents=True, exist_ok=True)
+    site.write_text(f"{manifest['project']}.example.com {{}}\n")

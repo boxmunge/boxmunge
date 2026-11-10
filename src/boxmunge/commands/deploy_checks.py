@@ -190,13 +190,21 @@ def _owner_uid(target: ReleaseTarget, model: dict[str, Any], m: Mount,
 
 
 def _change_problem(target: ReleaseTarget, name: str, new: ServiceUser, before: str | None,
-                    after: str, data: list[Mount]) -> str:
+                    after: str, data: list[Mount], rerun: str | None) -> str:
     where = ", ".join(str(m.source or m.target) for m in data)
     was = f"ran as {before} and now resolves" if before else "resolves"
     head = (f"service {name} {was} to {after} ({describe(new)}), and keeps data in "
             f"{where} that {'the old user' if before else 'another user'} owns. Its files "
             f"would be unwritable.")
     ids = new.nonroot_ids()
+    if rerun is not None:
+        # A release put back (a rollback) says who it runs as; only its data
+        # can change, back to that user.
+        chown = (f"`boxmunge data chown {target.project} {name} {ids[0]}:{ids[1]}`" if ids
+                 else f"`boxmunge data chown {target.project} {name} <uid>:<gid>` with "
+                      f"{after}'s ids")
+        return (f"{head} The release being put back runs it as {after}: give the data back "
+                f"to it with {chown}, then run `{rerun}` again")
     if ids:
         return (f"{head} Either keep the old user (declare `security.user` with it, or "
                 f"`security.user: image` with a reason when the image runs as it), or run "
@@ -210,10 +218,12 @@ def _change_problem(target: ReleaseTarget, name: str, new: ServiceUser, before: 
 
 def user_change_problems(paths: BoxPaths, target: ReleaseTarget, model: dict[str, Any],
                          services: dict[str, dict], users: dict[str, ServiceUser],
-                         offset: int) -> list[str]:
+                         offset: int, *, rerun: str | None = None) -> list[str]:
     """A service whose user changes over data the old user owns; with no
     earlier user to compare (a first deploy, or containers removed), a
-    numeric user over data someone else owns."""
+    numeric user over data someone else owns. `rerun`: the command that
+    puts an older release back (a rollback), which the remedy names in
+    place of a deploy."""
     recorded = read_users(paths, target.project, staging=target.staging)
     running = docker_containers.container_users(target.compose_project)
     problems = []
@@ -231,8 +241,90 @@ def user_change_problems(paths: BoxPaths, target: ReleaseTarget, model: dict[str
             owners = [_owner_uid(target, model, m, offset) for m in data]
             if all(uid in (None, int(after)) for uid in owners):
                 continue
-        problems.append(_change_problem(target, name, new, before, after, data))
+        problems.append(_change_problem(target, name, new, before, after, data, rerun))
     return problems
+
+
+@dataclass(frozen=True)
+class StagingStores:
+    """What the stage knows of staging's stores besides their owners: the
+    ones the data copy filled, and which data chown --staging re-owns for
+    each service (its copies of production's mounts of that service)."""
+    copied: frozenset[str] = frozenset()                  # store_id()s
+    rechownable: frozenset[tuple[str, str]] = frozenset()  # (service, store_id())
+
+
+def store_id(kind: str, source: str) -> str:
+    """A store as the staging checks compare them: a volume by its compose
+    key, a bind by its host path."""
+    return f"volume:{source}" if kind == "volume" else f"bind:{os.path.normpath(source)}"
+
+
+def _covers(outer: str, inner: str) -> bool:
+    return outer == inner or (outer.startswith("bind:") and inner.startswith(outer + "/"))
+
+
+def staging_owner_problems(target: ReleaseTarget, model: dict[str, Any],
+                           services: dict[str, dict], users: dict[str, ServiceUser],
+                           offset: int, stores: StagingStores = StagingStores()) -> list[str]:
+    """Staging's stores as its start will find them (after the data copy,
+    whose stores go to their users: staging_copy_owner): a numeric non-root
+    user over a store another uid owns. Staging keeps its stores between
+    stages and records nothing of who owns them, so the owner itself is
+    checked, whatever staging last ran as."""
+    problems = []
+    for name, new in sorted(users.items()):
+        after = new.runs_as()
+        data = persistent(service_mounts(services.get(name) or {}))
+        if not data or not (after.isascii() and after.isdigit()):
+            continue
+        wrong = [m for m in data
+                 if _owner_uid(target, model, m, offset) not in (None, int(after))]
+        for m in wrong:
+            problems.append(_staging_owner_problem(target, model, services, users, name, m,
+                                                   stores))
+    return problems
+
+
+def _cowriters(services: dict[str, dict], users: dict[str, ServiceUser], name: str,
+               sid: str) -> list[str]:
+    found = []
+    for other, svc in sorted(services.items()):
+        if other != name and any(
+                _covers(o, sid) or _covers(sid, o)
+                for o in (store_id(m.kind, str(m.source))
+                          for m in persistent(service_mounts(svc)))):
+            found.append(f"{other} ({describe(users[other])})" if other in users else other)
+    return found
+
+
+def _staging_owner_problem(target: ReleaseTarget, model: dict[str, Any],
+                           services: dict[str, dict], users: dict[str, ServiceUser],
+                           name: str, m: Mount, stores: StagingStores) -> str:
+    sid = store_id(m.kind, str(m.source))
+    volume = volume_name(model, target.compose_project, str(m.source))
+    where = str(m.source) if m.kind == "bind" else f"volume {volume}"
+    head = (f"service {name} runs as {users[name].runs_as()} in staging "
+            f"({describe(users[name])}), but ")
+    if any(_covers(c, sid) or _covers(sid, c) for c in stores.copied):
+        others = _cowriters(services, users, name, sid)
+        return (f"{head}staging's copy of production's data in {where} belongs to another "
+                f"user: the stage copied it but did not give it to {name}'s user, because "
+                f"{', '.join(others) or 'another service'} write{'s' if len(others) < 2 else ''}"
+                f" it too. Run the services that write it as one user (security.user in "
+                f"manifest.yml), then stage again")
+    remove = f"rm -rf {m.source}" if m.kind == "bind" else f"docker volume rm {volume}"
+    discard = (f"`boxmunge unstage {target.project}` (which keeps it), then as the "
+               f"supervisor: {remove}; then stage again")
+    text = (f"{head}staging's own data in {where} belongs to another user (the stage did "
+            f"not copy it from production), so its files would be unwritable. ")
+    if not any(svc == name and _covers(r, sid) for svc, r in stores.rechownable):
+        return f"{text}Discard it: {discard}"
+    ids = users[name].owner_ids()
+    spec = f"{ids[0]}:{ids[1]}" if ids else f"{users[name].runs_as()}:<gid>"
+    return (f"{text}Keep it, giving it to that user with `boxmunge data chown "
+            f"{target.project} {name} {spec} --staging` (production is not changed), then "
+            f"stage again; or discard it: {discard}")
 
 
 def unreadable_entries(source: str) -> list[str]:
@@ -275,8 +367,10 @@ def readability_problems(services: dict[str, dict]) -> list[str]:
 
 def release_problems(paths: BoxPaths, target: ReleaseTarget, model: dict[str, Any],
                      services: dict[str, dict], facts: dict[str, ImageFacts],
-                     users: dict[str, ServiceUser], offset: int) -> tuple[list[str], list[str]]:
-    """(refusals, warnings) for a release about to start."""
+                     users: dict[str, ServiceUser], offset: int, *,
+                     rerun: str | None = None) -> tuple[list[str], list[str]]:
+    """(refusals, warnings) for a release about to start. `rerun`: see
+    user_change_problems."""
     label = f"{target.compose_project}-check"
 
     def fresh(key: str) -> bool:
@@ -294,7 +388,8 @@ def release_problems(paths: BoxPaths, target: ReleaseTarget, model: dict[str, An
         warnings += [f"{a} (until then it will block userns-migrate)" for a in anonymous]
     if not target.staging:
         refusals += replacement_problems(target, model, services)
-        refusals += user_change_problems(paths, target, model, services, users, offset)
+        refusals += user_change_problems(paths, target, model, services, users, offset,
+                                         rerun=rerun)
     return refusals, warnings
 
 

@@ -102,18 +102,26 @@ def test_an_interrupted_hook_takes_everything_it_started_with_it(paths: BoxPaths
     script.write_text("#!/bin/sh\nsleep 300 &\necho $! > child.pid\nwait\n")
     script.chmod(0o755)
 
+    # One Ctrl-C, once the hook has started its child (whenever that is on a
+    # busy machine), polled every 50ms; a hook that never starts one fails.
+    pid_file = project_dir / "child.pid"
+    give_up = time.monotonic() + 60
+
     def interrupt(*_):
-        raise KeyboardInterrupt
+        started = pid_file.exists() and pid_file.read_text().endswith("\n")
+        if started or time.monotonic() > give_up:
+            signal.setitimer(signal.ITIMER_REAL, 0)  # none during the cleanup
+            raise KeyboardInterrupt if started else TimeoutError("the hook never started its child")
     previous = signal.signal(signal.SIGALRM, interrupt)
     try:
-        signal.setitimer(signal.ITIMER_REAL, 1.0)
+        signal.setitimer(signal.ITIMER_REAL, 0.05, 0.05)
         with pytest.raises(KeyboardInterrupt):
             run_pre_deploy_hook("demo", paths, {"deploy": {"pre_deploy": "./slow.sh"}})
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
-    child = int((project_dir / "child.pid").read_text())
-    deadline = time.monotonic() + 5
+    child = int(pid_file.read_text())
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:
             os.kill(child, 0)

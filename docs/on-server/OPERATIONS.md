@@ -20,10 +20,11 @@ The standard workflow for deploying a project from a bundle.
 2. Upload the bundle to the server:
 
    ```
-   scp -O -P 922 myapp.tar.gz deploy@<host>:
+   scp -O -P 922 myapp-<timestamp>.tar.gz deploy@<host>:
    ```
 
-   Bundles land in the inbox automatically.
+   `bundle` names the file `<project>-<timestamp>.tar.gz`; 922 is the default SSH port (use the
+   one chosen at install). Bundles land in the inbox automatically.
 
 3. Verify the bundle arrived:
 
@@ -92,14 +93,14 @@ Deploy a specific git ref:
 prod-deploy myapp --ref v1.2.3
 ```
 
-`prod-deploy` and `stage` fetch `origin`, then resolve the ref (`--ref`, else the manifest's `ref`)
-once, to a full commit SHA: a branch is origin's branch as just fetched (never a stale local
-one), a tag is a tag, and a commit is named by all 40 characters. An abbreviated SHA, and a name
-that is both a branch and a tag of origin, are refused (give the full SHA). The deploy then checks
-that commit out detached in `repo/`; there is no `git pull`. Deploy state records the full SHA. A
-deploy runs in the same install transaction as a bundle deploy (see "An interrupted or failed
-install"), and its pre-deploy snapshot is taken with the running release's manifest before
-anything is checked out.
+`prod-deploy` and `stage` fetch `origin`, then resolve the ref (`--ref`, else the manifest's `ref`,
+else `main`) once, to a full commit SHA: a branch is origin's branch as just fetched (never a stale
+local one), a tag is a tag, and a commit is named by all 40 characters. An abbreviated SHA, and a
+name that is both a branch and a tag of origin, are refused (give the full SHA). The deploy then
+checks that commit out detached in `repo/`; there is no `git pull`. Deploy state records the full
+SHA. A deploy runs in the same install transaction as a bundle deploy (see "An interrupted or failed
+install"), and its pre-deploy snapshot is taken with the running release's manifest before anything
+is checked out.
 
 `stage` of a git project checks the resolved commit out in a clone of its own in the slot
 (`.releases/staged/release/repo/`), beside copies of the project directory's other release files
@@ -263,7 +264,7 @@ or `repo/`, is refused. So is an absolute `dockerfile` in the project when the c
 use paths relative to the release. `stage` also checks what each build input resolves to (with
 `${VAR}` filled in) and refuses one in the project dir outside the staged release.
 
-Two behaviour changes in this release:
+Two behaviour changes in 0.11.0:
 
 - staging's copy of a nested data mount moved: `./data/db` used to become `./data/db-staging`
   (inside production's `data/`), and now becomes `./data-staging/db`. The old copies are not used
@@ -364,7 +365,7 @@ Staging is useful for:
 Upload a new bundle and stage or deploy:
 
 ```
-scp -O -P 922 myapp-v2.tar.gz deploy@<host>:
+scp -O -P 922 myapp-<timestamp>.tar.gz deploy@<host>:
 stage myapp
 promote myapp
 ```
@@ -379,9 +380,34 @@ prod-deploy myapp
 Promoting, or deploying, recreates production's containers through Compose: expect a restart's
 worth of downtime. A `stage` with `staging.copy_data` stops production for the copy.
 
-A release that stops bind-mounting a data directory (say `./uploads`) does not delete it: the
-deploy keeps it and prints `WARNING: uploads/ holds data but this release's compose.yml does not
-mount it`. Once neither the running release nor the rollback target needs that data, delete it on
+`stage`, `prod-deploy` and `promote` build `build:` services on the current digest of each base
+image (`FROM`). A base image that has not changed is not downloaded again, and the build cache
+holds. A base image that cannot be read from its registry (unreachable, rate-limited, credentials
+refused, or no such image) fails the build before anything starts. `--no-pull` builds from the
+base images in the box's local image store (`docker image ls`). A base a pulling build fetched is
+not put there, so `--no-pull` still needs the registry for a base the store does not have. A
+service whose `FROM` names an image only this box has sets `build: {pull: false}` in
+`compose.yml`. `promote` checks the registry too: if a base image moved between `stage` and
+`promote`, production gets a base that staging never ran, so stage again to test it first.
+`rollback` builds from the local image store (CVE_POLICY.md, "Base images and the build cache").
+
+A `stage` takes its bundle out of the inbox, as a deploy does. A `prod-deploy` that finds no new
+bundle refuses and says what to run: `promote` for a staged release, or upload the bundle again.
+To deploy the installed release again on purpose (for example, to rebuild it on fixed base
+images), run:
+
+```
+prod-deploy myapp --redeploy
+```
+
+A redeploy checks the release as strictly as a new deploy: a release that this boxmunge's rules
+refuse (one deployed by an older version, say) has to be fixed and uploaded again. `--redeploy`
+does not take a bundle waiting in the inbox (it says so), and an install left open is finished
+first.
+
+A release that stops bind-mounting a data directory (say `./uploads`) does not delete it: the deploy
+keeps it and prints `WARNING: uploads/ holds data but this release's compose.yml does not mount it
+read-write`. Once neither the running release nor the rollback target needs that data, delete it on
 the server as root (`rm -rf /opt/boxmunge/projects/myapp/uploads`, and its `uploads-staging` copy if
 there is one). Until then, a bundle that ships an `uploads/` of its own is refused.
 
@@ -395,7 +421,10 @@ Before deploying, preview what would change:
 diff myapp
 ```
 
-This shows differences between the current production state and the pending bundle or git ref, without making any changes.
+This compares the project directory's files with the newest bundle in the inbox (or the one
+`--ref` names: a bundle name or a prefix of its timestamp), and says whether the Caddy config and
+Compose overlay would change, without making any changes. It works on bundle projects only: for a
+git project it reports that the inbox holds no bundle.
 
 ---
 
@@ -413,6 +442,14 @@ secrets unset myapp OLD_KEY
 ```
 
 Project secrets are stored in `secrets.env` and injected into the project's containers.
+
+`secrets set myapp KEY` (no `=`) takes the value from stdin instead: at a terminal it asks
+without echo, otherwise it reads all of stdin, less one trailing newline (a second line is
+refused, not dropped; empty stdin is refused, so an empty value is sent as an empty line).
+The value is then in no command line, so `ps` on the box does not show it, and nor does
+the deploy shell's command string. `KEY=VALUE` puts the value in the command line of the
+`boxmunge-server` process while it runs. The client's `boxmunge secrets set` always sends
+the value on stdin. Either way it is stored in plain text in `secrets.env`.
 
 Keys must be environment-variable names (letters, digits and underscores, not starting
 with a digit). Values may contain spaces, tabs, `=` and any printable text, but not
@@ -473,13 +510,13 @@ for plain `scp`, is disabled for the deploy user because sftp-server cannot be c
 `prod-deploy` and `stage` take the project's newest bundle, or the one named with `--ref` (the full
 bundle name, or a prefix of its timestamp that matches exactly one bundle). A bundle belongs to a
 project only when its name is exactly `<project>-<timestamp>.tar.gz`, so deploying `foo` never picks
-up a `foo-bar` bundle. Once a bundle is deployed it moves to `inbox/.consumed/`, together with that
-project's older bundles. A bundle that fails validation stays in the inbox.
+up a `foo-bar` bundle. Once a bundle is deployed or staged it moves to `inbox/.consumed/`, together
+with that project's older bundles. A bundle that fails validation stays in the inbox.
 
-List bundles in the inbox:
+List bundles in the inbox, or one project's (`--json` for machine-readable output):
 
 ```
-inbox
+inbox [<project>] [--json]
 ```
 
 Remove every bundle in the inbox, or one project's, including ones not deployed yet (it asks first
@@ -493,7 +530,9 @@ inbox clean [<project>] [--yes]
 
 ## Checking Health
 
-Run all health checks for one project (Docker container health, HTTP endpoint, smoke test):
+Run one project's smoke tests, inside each running container of every service with a `smoke`
+script (it also prints the services whose security profile is off or overridden). It writes no
+health state; `--json` prints the result as JSON:
 
 ```
 check myapp
@@ -534,14 +573,14 @@ the normal threshold alert fires with the cause. `check-all` also reports an unr
 config (`boxmunge.yml`), since alerts cannot be sent without it, and still runs the checks.
 
 The project registry, `state/projects.txt`, holds one project name per line. Every line is checked
-as a project name when it is read. A line that is not one (`../etc`, a reserved name such as
-`caddy` or `<x>-staging`) is reported as `projects.txt:<line>` with the reason. The nightly
-`security scan` still scans every valid project, then alerts on the bad line and exits 1;
-`security`, `health` and `doctor` name it too. Every valid project keeps working: deploys, stages
-and the other per-project commands only ask whether their own name is registered, and
-`project-add`/`project-delete` keep the bad line as it is when they rewrite the file. Listings
-(`project-list`, `projects.list`) fail naming the line rather than list the registry with it left
-out. Correct or delete the line as root.
+as a project name when it is read. A line that is not one (`../etc`, a reserved name such as `caddy`
+or `<x>-staging`) is reported as `projects.txt:<line>` with the reason. The nightly `security scan`
+still scans every valid project, then alerts on the bad line and exits 1; `security`, `health` and
+`doctor` name it too. Every valid project keeps working: deploys, stages and the other per-project
+commands only ask whether their own name is registered, and `project-add`, `project-delete` and
+`project-forget` keep the bad line as it is when they rewrite the file. Listings (`project-list`,
+`projects.list`) fail naming the line rather than list the registry with it left out. Correct or
+delete the line as root.
 
 An alert counts as sent only when Pushover accepts it. If it is not delivered, the health check logs why (an `error` entry when the config cannot be read or the Pushover request fails, a `warn` entry when Pushover is not configured) and tries again on the next 5-minute tick until it gets through. Without Pushover keys the `warn` entry is written at most once a day, because the retry would otherwise repeat it every tick; `health` reports the missing keys as the `alerts` warning for as long as they are missing. The same applies to the critical alert for a stopped project and to the RECOVERED notice. Find these entries with `log --component health`.
 
@@ -561,7 +600,7 @@ View logs for a specific service within a project:
 logs myapp backend
 ```
 
-Show more lines (default is typically 100):
+Show more lines (default 100):
 
 ```
 logs myapp --tail 500
@@ -571,6 +610,19 @@ Live-tail logs (stream new output, press Ctrl-C to stop):
 
 ```
 logs myapp --follow
+```
+
+Read the staged release's containers instead of production's (with any of the options above):
+
+```
+logs myapp --staging
+logs myapp backend --staging --follow
+```
+
+View the last 100 journal lines of the boxmunge systemd units (timers and services):
+
+```
+logs --host
 ```
 
 View the boxmunge operational audit log:
@@ -653,13 +705,15 @@ Every snapshot is named `<project>-<UTC timestamp>-<kind>.tar.gz.age`, for examp
 | Kind | Taken by | Local copies kept |
 |---|---|---|
 | `nightly` | `backup-all` (the 02:00 timer) | `backup.retention` in the manifest (default 7) |
-| `predeploy` | `prod-deploy`'s pre-deploy snapshot (`deploy.snapshot_before_deploy`) | 5 |
+| `predeploy` | the pre-deploy snapshot of `prod-deploy` and `promote` (`deploy.snapshot_before_deploy`) | 5 |
 | `premigrate` | `userns-migrate`, before its downtime (not for a paused project) | 2 |
+| `prechown` | `data chown`, before it stops the service; when that is the backup service and it has not run since, the next deploy uses it as its pre-deploy snapshot | 3 |
+| `prepause` | `pause`, before it stops the project (unless `--no-snapshot`); while the backup service has not run since, the deploy that ends the pause (`resume --no-start`) uses it as its pre-deploy snapshot | 3 |
 | `preupdate` | the container-update timer, only when a pulled image changed and the project is about to be recreated | 3 |
 | `prerestore` | `restore`, a safety snapshot of the data about to be replaced (unless `--no-safety-snapshot`) | 3 |
 | `manual` | `backup <project>`, the MCP `backup` tool, the console, `self-test` | 5 |
 
-After each backup, the oldest snapshots of that kind beyond its count are deleted. Archives from before kinds existed (`<project>-<timestamp>.tar.gz.age`) count as `nightly` and age out as new nightly backups arrive. Other files in `backups/` are never touched. `backup.retention` must be a whole number of at least 1; anything else fails the backup before it dumps.
+After each backup, the oldest snapshots of that kind beyond its count are deleted, except a snapshot something is paired with: the one the kept previous release's rollback restores, an open install's, and the one `pause` or `data chown` recorded for the next deploy. Those stay however many newer ones arrive, so a run of failed deploy attempts cannot evict the snapshot `rollback` needs. Those records are `.releases/previous.json`, `.releases/install.json` and the `pending_snapshot` entry in `state/deploy/<project>.json`. If one of them is malformed or unreadable (corrupt JSON, not UTF-8, a link or other non-regular file), no snapshot of that project is pruned: each backup still succeeds but logs a WARN naming the record, so the nightly run warns every night and that kind's snapshots accumulate until the record is fixed or removed. The next backup after that prunes as usual. Archives from before kinds existed (`<project>-<timestamp>.tar.gz.age`) count as `nightly` and age out as new nightly backups arrive. Other files in `backups/` are never touched. `backup.retention` must be a whole number of at least 1. `validate`, `stage`, `promote` and `prod-deploy` refuse anything else; a project that already has a bad value keeps running through an upgrade (it is a warning there), but its backups fail before they dump until it is fixed.
 
 ### Off-site copies
 
@@ -684,7 +738,8 @@ age and rclone run only inside the `boxmunge-system` container. If it is not run
 sudo docker compose -f /opt/boxmunge/system/compose.yml up -d --build
 ```
 
-Restore from the most recent backup:
+Restore from the most recent backup (it names the snapshot and asks first; `--yes` skips the
+prompt):
 
 ```
 restore myapp
@@ -726,7 +781,9 @@ and runs the smoke test that clears the stop.
 
 Safety snapshots are kept separately: the three newest `prerestore` snapshots per project.
 
-Verify that a backup restores successfully (non-destructive):
+Check that the newest snapshot decrypts and is not empty (nothing is restored and the
+`restore_command` is not run, so this does not prove an end-to-end restore; see "Proving
+Backup/Restore Works"):
 
 ```
 test-restore myapp
@@ -765,12 +822,24 @@ Rollback refuses, with the reason, instead of doing half a rollback:
 - after a first deploy, or once a rollback has used the previous release (there is no older release
   to go back to; deploy a known-good bundle instead);
 - when the project has backups configured but no snapshot was taken before the last deploy (the
-  backup failed or `--no-snapshot` was used), or that snapshot is no longer in `backups/`;
+  backup failed, or wrote none, as a CVE-quarantined project's backup does; `--no-snapshot` was
+  used; or the manifest sets `deploy.snapshot_before_deploy: false`), or that snapshot is no longer
+  in `backups/`;
+- while the project is paused or CVE-quarantined (`resume` or `security resume` it first);
 - while an install is open whose pre-deploy hook has not run yet: nothing reached production's
   containers or data, so `prod-deploy <project> --abandon` puts the old files back instead (see
   "An interrupted or failed install").
 
 A project with `backup.type: none` rolls back its code only.
+
+Rollback rebuilds the previous release's `build:` services without `--pull`, so it works when the
+registry cannot be reached, provided each base image is in the box's local image store
+(`docker image ls`; a base that only a pulling build fetched is not, and still needs its
+registry). The rebuild uses that local base, which can be older than the base the release ran on
+before. Run `prod-deploy <project> --redeploy` afterwards to rebuild the rolled-back release on
+current base images (a git project: `prod-deploy <project> --ref <commit>`). The redeploy checks
+the release as strictly as a new deploy, where the rollback kept the recorded decisions a release
+from an older boxmunge does not make, so such a release can be refused.
 
 A rollback records each step, so a rerun after a crash carries on where it
 stopped. One window remains: if the machine crashes in the seconds after the
@@ -816,9 +885,11 @@ While an install is open the health check runs no smoke and takes no critical
 action (the install may already have replaced the smoke scripts): `check-all`
 reports the project as `WARNING (install open: ...)`, naming these options.
 
-A failure once the containers were started (compose, Caddy or the smoke test)
-closes the install as before: production may run the new release, and
-`rollback` returns to the old one.
+A start refused or failed before `docker compose up` ran (a start check, an image missing from
+the local image store, preparing the storage) changes no container: production still runs the old
+release, the deploy state still names it, and the install stays open at `switching` with these
+options. A failure once `compose up` has run (compose, Caddy or the smoke test) closes the install:
+production may run the new release, and `rollback` returns to the old one.
 
 While an install is open, backups use the manifest and compose file of the
 release the containers still run, and are skipped with an alert when that is
@@ -830,7 +901,8 @@ If the record no longer matches the files (after a platform rollback, or a hand
 edit), it is reported as stale and nothing is resumed automatically: check that
 production is what `.releases/live.json` says (for a git project, what `repo/` has checked out), then, as root, run
 `boxmunge-server install-txn <project> --drop`. It refuses a record that still
-matches the files; use one of the options above for that.
+matches the files; use one of the options above for that. A record that cannot be read at
+all is dropped the same way.
 
 ---
 
@@ -840,11 +912,16 @@ matches the files; use one of the options above for that.
 project-delete myapp
 ```
 
-This removes the production and staging containers, the project directory (including its local
-backups), the Caddy site configs, and every piece of per-project state: health, deploy, pause and
-quarantine markers, CVE scan state, staging state, and container-update state. It then removes the
-name from the allowlist. A project later created with the same name starts clean, not paused or
-quarantined.
+It lists what will go and asks first (`--yes` skips the prompt). In order, it removes the production
+and staging containers and the images boxmunge built for them, the Caddy site configs (then reloads
+Caddy), every piece of per-project state (health, deploy, pause and quarantine markers, CVE scan
+state, staging state, container-update state and alert records), and the project directory
+(including its local backups). It then removes the name from the allowlist. A project later created
+with the same name starts clean of that state, not paused or quarantined. Off-site copies made by
+`backup-sync` are kept, and so are the project's named Docker volumes: a project later created with
+the same name and volume names mounts them again, so remove them with `docker volume rm` (as the
+supervisor user) when their data is not wanted. If the Caddy reload fails, the delete still finishes
+but exits 1: the project's routes stay live until the next successful reload.
 
 The containers are removed first. If that fails, `project-delete` stops with an error and deletes
 nothing, so the compose files are still there for a retry. Fix the cause (usually Docker) and run it
@@ -864,6 +941,11 @@ is fixed. The helper is not used while any container of the project or its stagi
 (including `compose run` containers and ones a forced delete left behind): the delete then fails,
 naming them, until you remove them with `docker rm -f`.
 
+A name still registered after its project directory is gone (`doctor` and `health` warn about
+it) is cleared by running `project-delete` again, or by the supervisor with
+`sudo boxmunge-server project-forget myapp`, which drops the entry and the leftover state files
+but keeps the project's Docker volumes (see "Host doctor reports problems").
+
 ## Service Users After an Upgrade
 
 Projects deployed before boxmunge decided who each service runs as keep running as their images
@@ -875,10 +957,50 @@ for `root` and `image`); the refusal prints the lines to add. Run
 `boxmunge doctor` first: it lists every such service on the box, so you can add them all before
 deploying. A `build:` service with no `USER` moves to 10001:10001 at that deploy; if it keeps data
 the old user owns, the deploy is refused until `data chown <project> <service> 10001:10001` (or a
-`security.user` that keeps the old user). `data chown` stops the service and leaves it stopped:
-deploy straight after. A refused deploy of a new bundle leaves its install open (see
+`security.user` that keeps the old user). `data chown` first takes the project's backup snapshot
+(`prechown`) while the service still runs; if that backup fails it refuses and changes nothing
+(fix the backup, or add `--no-snapshot` to go on without one: a rollback of the next deploy then
+cannot restore data), and a project with `backup.type: none` skips it, saying so. When the
+backup service is not running (the project is CVE-quarantined, paused or stopped by the health
+monitor, or the service is stopped), its data is at rest, and the dump runs in a one-off
+container of the image the service's stopped container runs, as its user, over its mounts, with
+no network, no ports, no stdin and none of its `post_start`/`pre_stop` hooks, only for the dump
+(`sh` is its entrypoint, so the service itself never starts); the output says so. A dump that
+needs its service running (`pg_dump`) cannot run that way: the refusal then names the state's own
+way out first (an open install's own options, `security resume`, `resume`, `recover`, or a deploy
+that starts the service), and `--no-snapshot` only last. Then it stops the service, gives its read-write
+binds and named volumes, and staging's own copies of them (`<entry>-staging`, the
+`<project>-staging` volumes), to the new user, records the user and regenerates the compose
+overlay with it, so whatever starts the service next runs it as the new user. It leaves the
+service stopped, with its restart policy held at "no" (as a pause holds a project's) until
+boxmunge starts it again, so a reboot does not bring it back first; that start gives it its
+release's own policy. Deploy straight after. While
+staging has a container of the service, `data chown` refuses and names `unstage <project>` (it
+keeps the copies). A stage with `staging.copy_data` gives each store it copies to the user the
+staged release runs its service as, so staging tries a new user before production's data changes
+hands. A stage refuses a service whose user does not own the rest of staging's data (stores the
+copy did not fill outlive stages): `data chown <project> <service> <uid>:<gid> --staging` keeps
+that data, giving staging's copies alone to that user and changing nothing of production's; or
+`unstage <project>` (which keeps them) and remove them as the refusal says, then stage again. A start that would run the overlay or a container as it was before the users
+record changed (the overlay could not be regenerated, or an install was open) is refused, naming
+`prod-deploy`. When the stopped service is the backup
+service, that deploy's own dump has nothing to run in, so its pre-deploy step uses the `prechown`
+snapshot instead, saying so and how old it is, and a rollback of that deploy restores the data as
+it was before the ownership change. A rollback does not revert the ownership: the data stays
+owned by the new user, while the restored release runs as its own manifest says (as the recorded
+user when it says nothing), so one that ran as another non-root user may not be able to write it.
+The deploy uses the snapshot only while Docker shows the service has not run since: if a
+container of it runs, has started since (a `docker start`, `recover`), or was removed (other
+than by the health monitor's critical stop, which notes the containers it removes) or recreated,
+the deploy says so, drops it and takes its own snapshot
+(warning, as for any failed backup, when the service is stopped). A second `data chown` before
+the deploy keeps the first snapshot on the same terms. It is not kept for the deploy when another
+service mounts the same data read-write, since that service can change it meanwhile; nor when
+another service is the backup service: that one keeps running and the deploy takes its own
+snapshot as usual. A refused deploy of a new bundle leaves its install open (see
 [An interrupted or failed install](#an-interrupted-or-failed-install)); `data chown` works on the
-release it installed, and `prod-deploy <project>` then finishes it.
+release it installed, and `prod-deploy <project>` then finishes it, pairing its rollback with the
+snapshot that install took before the chown.
 
 ## Naming an Anonymous Volume
 
@@ -914,9 +1036,10 @@ again.
 Every command that changes a project holds that project's lock while it works: `prod-deploy`,
 `stage`, `promote`, `unstage`, `rollback`, `restore`, `backup`, `pause`, `resume`, `recover`,
 `project-delete`, `data adopt`, `data chown`, `prod-deploy --abandon`, `security resume`, and, run
-as root, `legacy-stage` and `install-txn --drop`, the daily `container-update` (for the whole
-backup, pull, recreate, and rollback sequence), the CVE scan, and the 5-minute health check. Only one of them runs against a project at a
-time.
+as root, `legacy-stage`, `install-txn --drop` and `project-forget`, the daily `container-update`
+(for the whole backup, pull, recreate, and rollback sequence), the CVE scan, the platform upgrade
+(each project's manifest migration and its restart), and the 5-minute health check. Only one of them
+runs against a project at a time.
 
 If another operation holds the lock, an operator command fails at once and changes nothing:
 
@@ -954,10 +1077,19 @@ Use pause for planned maintenance, post-incident triage, or while you reconfigur
 boxmunge pause myapp --reason "rolling key rotation"
 ```
 
+Before it stops anything, `pause` takes a data snapshot of the running project (kind `prepause`): a
+deploy that ends the pause (see `resume --no-start` below) cannot dump stopped containers, so it
+uses that snapshot as its pre-deploy snapshot and its rollback can restore the data. If the
+snapshot fails, `pause` refuses and changes nothing; `pause myapp --no-snapshot` pauses without
+one, giving up that data rollback. Use `--no-snapshot` for an emergency pause, when the site must
+go down now and a dump would take too long or cannot run. A CVE-quarantined or monitor-stopped
+project has nothing running to dump, so `pause` takes no snapshot there and says so.
+
 Containers are stopped via `docker compose stop`, so state is preserved on disk and resume is fast. While paused:
 
 - Health checks, scheduled backups, and container-update sweeps skip the project
-- `prod-deploy`, `stage`, and `promote` refuse to run against it
+- `prod-deploy`, `stage`, and `promote` refuse to run against it, naming `resume` (after `resume
+  --no-start`, below, they are accepted)
 - `backup-sync` continues (it only copies; existing off-box snapshots are never removed)
 - Platform upgrades keep it paused: the maintenance page stays in place and the containers stay stopped
 - A Docker restart or reboot keeps it stopped: pause sets each container's restart policy to `no` (saving the original), and `resume` restores the originals before starting the containers
@@ -967,15 +1099,62 @@ marked complete once the maintenance page is live, the containers are stopped an
 policies are held. If a step fails (Caddy cannot reload, `docker compose stop` errors), `pause`
 exits 1 with `ERROR: Pausing 'myapp' is incomplete: ...`: the project counts as paused, but may
 still be serving or running. Fix the cause and run `pause myapp` again to finish it (an incomplete
-pause is the one case where pausing a paused project is accepted), or `resume myapp`. Until then
+pause is the one case where pausing a paused project is accepted), or `resume myapp`. The pause
+record names its `prepause` snapshot, so the run that finishes it still pairs that snapshot with
+the deploy that ends the pause, as long as Docker shows the backup service has not run since. If
+the service is still running (the stop failed), it takes a new snapshot instead; if it ran and
+stopped again, the first snapshot stays in `backups/` for a manual restore and nothing is paired,
+which it says. Until then
 `status` shows it as `PAUSED (incomplete)`, `health` warns about it under `lifecycle`, and
 `container-update` logs that it may still be serving on images it does not update while paused.
+
+`pause` is refused while an install is open (`.releases/install.json`, see "An interrupted or
+failed install"): its ways out are a deploy, a rollback or `--abandon`, and a pause would refuse
+the first two. The refusal names them; pause once the install is finished. A project paused over an
+open install by an earlier boxmunge is refused by `resume` too (only the install may start
+production); `resume myapp --no-start` (below) hands the pause to the install's own rerun or to a
+fix-forward deploy.
 
 To bring it back:
 
 ```
 boxmunge resume myapp
 ```
+
+A project whose stopped containers were created before the current mount rules (boxmunge 0.10.x
+accepted a read-write mount of the project directory, `.:/app`) cannot simply be started again,
+and a deploy is refused while it is paused, so `resume` recreates its containers from the deployed
+files instead (it says so). It still refuses files that changed since the deploy.
+
+### When only a deploy can fix it: `resume --no-start`
+
+`resume` refuses to start a release whose files are not the ones deployed: a compose file or
+manifest edited in place, a mount the deploy did not record, a file this boxmunge's validator now
+rejects, a missing bind-source record, an image no longer in the local store, an open install.
+The fix is a deploy, which a pause refuses, so each of those refusals names the way out:
+
+```
+boxmunge resume myapp --no-start    # starts nothing
+boxmunge prod-deploy myapp --redeploy   # or prod-deploy after an upload, or promote;
+                                        # ends the pause once its containers start
+```
+
+`--no-start` hands the pause to the next deploy. Until that deploy starts the containers, the
+project stays paused for everything else: the maintenance page stays up, the containers stay
+stopped with their restart policies held (a reboot does not start them), health checks, backups,
+container updates and upgrade restarts skip it, and `status` shows `PAUSED (awaiting deploy)`
+(`health` warns about it under `lifecycle`). `prod-deploy` and `promote` are accepted (`stage` too,
+which leaves the pause to the promote). The deploy uses the pause's snapshot as its pre-deploy
+snapshot, keeps the maintenance page while it prepares, and once `docker compose up` has started
+the containers gives them their restart policies back and ends the pause. A deploy that stops
+before that leaves it paused and awaiting a deploy; one whose `compose up` fails part-way stops
+what it started again and keeps the pause. A CVE-quarantined project that is also paused takes
+the same way: its deploy is scanned first, and a clean one also lifts the quarantine. `rollback`
+is accepted too (not for a quarantined project): it restores the paired data with the project left
+stopped, and its start ends the pause. So a deploy that fails after `--no-start` can be rolled back
+to the previous release with the data the pause's snapshot saved. `resume myapp` still works if the
+cause goes away. `--no-start` also takes a pause that did not finish while an install is open (`pause` itself
+is refused then).
 
 `resume` pulls the latest images by default. This is a deliberate safety guarantee: a project that was paused for hours or days should not come back on stale, potentially vulnerable images.
 
@@ -1103,9 +1282,10 @@ does not page every run); the refusal is logged every time:
 - **"has a release staged by boxmunge 0.10.1"** — the project directory
   may hold that stage's files, so production is not recreated from them
   (upgrade restarts, container updates and `security resume` wait with
-  this alert; `recover`, `resume`, `restore` and `data adopt` refuse on
-  the terminal without one). Running containers keep running. Resolve it with `boxmunge-server legacy-stage <project>`; the
-  next run picks it up. This alert does not mean tampering.
+  this alert; `recover`, `resume`, `restore`, `data adopt` and `data chown`
+  refuse on the terminal without one). Running containers keep running.
+  Resolve it with `boxmunge-server legacy-stage <project>`; the next run
+  picks it up. This alert does not mean tampering.
 - **"an install of <ref> ... is open at phase <phase>"** — a deploy or
   rollback stopped part-way, so the project directory may hold a
   half-installed release. The alert names the options for that phase; see
@@ -1120,7 +1300,11 @@ does not page every run); the refusal is logged every time:
   boxmunge reads (compose, manifest, `.env`, the overlay, an include or
   env/label file) is not what deploy recorded. A tampered manifest
   (`security.profile: off`) or compose is caught here even when it still
-  validates. Redeploy to run the new content.
+  validates. Redeploy to run the new content (for a staged copy, stage
+  again).
+- **"control file ... is newly tracked"** — this boxmunge reads a file
+  the project's record does not cover yet (for example the `.env` of an
+  included file's directory). Redeploy (or stage again) to record it.
 - **"redeploy to replace it"** — the project's running containers mount
   the project directory, or a file boxmunge reads, read-write (a project
   deployed before this rule). A plain restart would re-run the compromised
@@ -1220,6 +1404,32 @@ Pick one: declare in manifest, restructure the conflict away, or switch the serv
 
 ---
 
+### "the local image store no longer has the image" a container was created from
+
+`check`, `security scan`, `container-update` or `resume` fails with this for a project on a
+box that uses Docker's containerd image store. A build replaced the image the container's
+name points at while the container kept running: Docker names a build by its image index,
+which a new provenance attestation changes even when every layer came from cache, and
+Compose, which compares the image's platform manifest, left the container as it was. Then
+nothing named the old index, so Docker dropped it. Before 0.11.3 every upgrade restart did
+this, because it rebuilt each project's `build:` services; a `docker compose build` by hand
+does it too.
+
+The project's next start recreates a running container like this from the image its name
+points at (the same image, which is why Compose left it): `prod-deploy <project> --redeploy`
+(a git project: `prod-deploy <project> --ref <its deployed commit>`), or the next upgrade's
+restart. The start logs a warning naming the container. A stopped one is not
+recreated; the **supervisor** removes it (`docker rm <container>`) and the next start
+creates it again.
+
+An image that is still there but has no name left (an upgrade from 0.10 to 0.11.0–0.11.2
+took the old name off an image a container still ran) is named again,
+`boxmunge.invalid/<project>/<service>`, by the next overlay regeneration or start, before
+anything is started: by its container's own image ID, so only the image that container's
+deploy built is ever named.
+
+---
+
 ### Smoke script fails after upgrade with "permission denied" on `ping` or `traceroute`
 
 v0.5 hardening drops `NET_RAW` from every container by default — so `ping`, `traceroute`, and a handful of HTTP probe libraries that fall back to ICMP will fail with `Operation not permitted`. Most apps do not need `NET_RAW`; if your smoke script genuinely does, opt back in by adding to the project manifest:
@@ -1248,10 +1458,10 @@ check myapp
 validate myapp
 ```
 
-If the config looks stale, redeploy to regenerate:
+If the config looks stale, redeploy the installed release to regenerate it:
 
 ```
-prod-deploy myapp
+prod-deploy myapp --redeploy
 ```
 
 If deeper Caddy investigation is needed (container logs, config file inspection), this requires the **supervisor** user.
@@ -1262,7 +1472,7 @@ If deeper Caddy investigation is needed (container logs, config file inspection)
 
 This state means the smoke test exited with code 2 -- a critical failure that caused boxmunge to stop the project containers. The project will not restart automatically.
 
-The stop is sticky. Later 5-minute health checks do not run smoke against the stopped project, do not change its recorded failure reason, and do not send more alerts. The daily `container-update` skips it rather than recreating it, and a platform upgrade does not restart it either (the upgrade output lists it under `Not restarted (stopped by the health monitor ...)`). `check-all` reports it as `CRITICAL (stopped by the health monitor ...)`, and `health` lists it under `lifecycle` as `monitor-stopped`. The stop stays in place until you run `recover`, or until a later deploy, rollback, or resume starts the project successfully.
+The stop is sticky. Later 5-minute health checks do not run smoke against the stopped project, do not change its recorded failure reason, and do not send more alerts. The daily `container-update` skips it rather than recreating it, and a platform upgrade does not restart it either (the upgrade output lists it under `Not restarted (stopped by the health monitor ...)`). `check-all` reports it as `CRITICAL (stopped by the health monitor ...)`, and `health` lists it under `lifecycle` as `monitor-stopped`. The stop stays in place until you run `recover`, or until a later deploy, rollback, or resume starts the project successfully. A CVE quarantine lifted from it (by the scan or by `security resume`) leaves it stopped: `recover` brings it back.
 
 Check the dashboard to confirm the state:
 
@@ -1282,7 +1492,7 @@ Once you have identified and fixed the underlying issue, restart the same build 
 recover myapp
 ```
 
-Or, if the fix needs new code, redeploy:
+Or, if the fix needs new code, upload the fixed bundle and deploy it:
 
 ```
 prod-deploy myapp
@@ -1298,9 +1508,33 @@ Run doctor to see the current list of issues:
 doctor
 ```
 
-Each item in the output is labelled OK, WARN, or FAIL with a description. Address each FAIL, then each WARN, then re-run `doctor`.
+Each item in the output is labelled PASS, WARN, or FAIL with a description; `doctor` exits 1 when
+any item is FAIL. Address each FAIL, then each WARN, then re-run `doctor`.
 
 Issues requiring system-level investigation or repair (systemd timers, file permissions, Caddy container state) require the **supervisor** user.
+
+**"Deploy can write <directory>" FAIL** (for example `state/scans`). A box installed before v0.9.3
+can have directories root made that the deploy shell writes (`state/scans`, `state/health`,
+`state/deploy`, the other per-project state directories, `projects/<name>/security`), so a command
+in the deploy shell fails there: `security scan` with "Permission denied". The upgrade creates and
+re-owns them (and what root made inside them); until it runs, doctor prints the fix
+(`sudo chown -R deploy:deploy <directory>`), to run as the supervisor.
+
+**"MCP package installed" FAIL.** The live environment lacks the `mcp` package, so agents cannot
+reach the box over MCP; usually an upgrade run by an older release's shim (see "Agent Access via
+MCP"). Run `upgrade --repair-deps` from the deploy shell (as the supervisor:
+`sudo /opt/boxmunge/bin/boxmunge-upgrade repair-deps`), also during probation, then re-run
+`doctor`. If it fails, it says why: a failed download or verification changes nothing; after a
+pip failure (network, disk space), fix the cause and run it again.
+
+**"Project <name> registered" WARN.** The project was deployed (it still has deploy, scan or
+health state) but `projects/<name>/` is gone: a removal that did not finish. `health` warns the same
+under `registry`. A name added and never deployed is not warned about (`health` lists it as
+awaiting its first deploy). Drop the entry as the supervisor with
+`sudo boxmunge-server project-forget <name>`, which removes the entry and the project's leftover
+state files and keeps its Docker volumes. It is refused while the directory or any container of the
+project (or its staging) exists; `project-delete` is the way to remove a project that is still
+there.
 
 ---
 
@@ -1366,34 +1600,69 @@ health
 health --json
 ```
 
-Exit codes: 0 = healthy, 1 = warnings, 2 = issues requiring attention. `health` is not run on a
-schedule; run it after any change to the box and whenever an alert arrives. A check that cannot run
-(for example one that needs root, run from the deploy shell) reports `SKIP`, which does not affect
-the exit code. The MCP `health` tool runs the same checks.
+Exit codes: 0 = healthy, 1 = warnings, 2 = issues requiring attention. Run it after any change to
+the box and whenever an alert arrives. A check that cannot run (for example one that needs root,
+run from the deploy shell) reports `SKIP`, which does not affect the exit code. The MCP `health`
+tool runs the same checks.
+
+Outside an upgrade nothing runs `health` on a schedule: the 5-minute health timer runs `check-all`
+(the per-project checks and alerts). A platform upgrade runs `health --json` as root: once with
+the previous release just before it starts (180-second budget), once right after it switches to
+the new release (60 seconds), then on every health-timer fire for the 6-hour probation that
+follows (`boxmunge-upgrade check-probation`, 180 seconds). An error in a check that did not fail
+before the upgrade rolls the platform back to the previous release and blocklists the new one, so
+auto-update does not retry it (`sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist <version>`
+forgets it). An error that was already there before the upgrade is logged but does not roll back
+(rolling back would not fix it); if `health` gave no report before the upgrade, every error
+counts. Warnings keep the release. The output must be a valid report: a `health` that crashes
+before it (a module that cannot be imported, say), prints something else, or exits with a code
+its checks do not mean gives no verdict, and two probation runs in a row without one roll back.
+One that runs past its budget is retried on the next fire; six in a row (half an hour) roll back,
+unless `health` also ran past its budget before the upgrade.
 
 | Check | Warns (or errors) when | What to do |
 |---|---|---|
-| `docker`, `caddy`, `system-container` | Docker, the Caddy container or the boxmunge-system container is not running (error) | `doctor`, then the supervisor user restarts the component |
+| `docker`, `caddy`, `system-container` | Docker, the Caddy container or the boxmunge-system container is missing or not running, or Caddy is restarting, on two probes 5 seconds apart (error; a container being recreated, as container-update does to Caddy, passes the second probe); Caddy runs but is starting or unhealthy, or a probe timed out or failed for another reason (warning) | `doctor`, then the supervisor user restarts the component |
+| `system-container` | boxmunge-system runs an image built from an older definition than `/opt/boxmunge/system` (an upgrade's rebuild failed, so it still has the previous Alpine, age and rclone; warning, backups still work) | fix what stopped the build (the upgrade's output says), then the supervisor user runs `sudo docker compose -f /opt/boxmunge/system/compose.yml up -d --build`; the next upgrade also retries it |
 | `permissions`, `age-key` | the backup key or host secrets have the wrong mode, or the backup key is missing or invalid | fix as the supervisor user |
-| `project-containers`, `lifecycle` | a deployed project has no running containers, or is quarantined or stopped by the health monitor | `check <project>`, `logs <project>`, `recover <project>` |
-| `config-drift` | a project's Caddy site config differs from what its manifest generates | redeploy the project |
-| `recent-errors` | more than 10 errors in the log in the last 24 hours | `log --level error --since 24h --all` |
+| `project-containers`, `lifecycle` | a deployed project has no running containers, or is quarantined or stopped by the health monitor, or its state cannot be read (warning; the detail names the file and the fix) | `check <project>`, `logs <project>`, `recover <project>` |
+| `config-drift` | a project's Caddy site config differs from what its manifest generates, or its manifest cannot be read | redeploy the project; `validate <project>` names a manifest problem |
+| `recent-errors` | more than 10 errors in the log in the last 24 hours, or torn lines in the log that may have been errors | `log --level error --since 24h --all` (`log --since 24h` lists torn lines) |
 | `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
-| `platform-updates` | a security or break-fix release cannot be installed automatically | see [Upgrading the Platform](#upgrading-the-platform) |
+| `platform-updates` | a security or break-fix release cannot be installed automatically, or the version-check service has given no usable answer for 48 hours | see [Upgrading the Platform](#upgrading-the-platform) |
+| `upgrade-probation` | a platform upgrade's probation expired more than 30 minutes ago and the health timer has not promoted it, or `probation.json` cannot be read | the supervisor user runs `sudo /opt/boxmunge/bin/boxmunge-upgrade check-probation` to see why; `sudo rm /opt/boxmunge/upgrade-state/probation.json` accepts the release, as does `backup <project>` from the deploy shell when it can read the file |
 | `docker-userns` | Docker does not remap user namespaces yet, remaps them with another identity, or a source cannot be read on a box boxmunge has not remapped (warning; deploys go on); or the record or `daemon.json` claims boxmunge's remap and a source disagrees, or a remapped box's `caddy/Caddyfile` is not a world-readable regular file (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
 | `security-profiles` | a service runs with `profile: off` | review the reason in its manifest |
 | `service-users` | a deployed project's services have no recorded user yet (its next deploy decides them, and refuses an undeclared root registry image) | `doctor` lists the lines to add; see [Service Users After an Upgrade](#service-users-after-an-upgrade) |
-| `sshd-hardening`, `sshd-deploy-env` | `00-boxmunge.conf` is missing or changed, or a later sshd setting widens what deploy accepts (error; `sshd-deploy-env` needs root) | the supervisor user re-runs the installer, or removes the widening setting |
+| `registry` | a registered project's directory is gone but its deploy, scan or health state is not (a removal that did not finish); a name never deployed is ok | the supervisor user runs `sudo boxmunge-server project-forget <project>` |
+| `sshd-hardening`, `sshd-deploy-env` | `00-boxmunge.conf` is missing or changed, or `sshd -T` shows a later setting widening what deploy accepts (error; `sshd-deploy-env` needs root); `sshd -T` itself fails or times out (warning) | the supervisor user re-runs the installer, or removes the widening setting; `sudo sshd -t` names a config error |
 | `operational-log` | the active log file's first line is not a log entry, which stops all logging | move the file aside (see [Reading Logs](#reading-logs)) |
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
-| `cve-hardening` | a finding will quarantine from 0.12 because a compose-only service lacks `read_only: true` (or the manifest adds `cap_add` / `no_new_privileges: false`); not quarantined now | add `read_only: true` in compose.yml, declare the service in the manifest, or accept with a `security` declaration; `security <project>` names it |
+| `cve-hardening` | under posture `strict` or `paranoid`, a finding will quarantine from 0.12 because a compose-only service lacks `read_only: true` (or the manifest adds `cap_add` / `no_new_privileges: false`); not quarantined now | add `read_only: true` in compose.yml, or declare the service in the manifest; to accept the risk instead, suppress the CVE after review or choose `security.posture: balanced` (KEV-only quarantine); `security <project>` names it |
 | `ufw`, `crowdsec`, `aide`, `auditd`, `sysctl` | a host hardening component is off or misconfigured | `doctor`, then the supervisor user |
 | `auto-updates` | OS security updates are not being fetched or installed | see [OS security updates](#os-security-updates) |
 | `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, container-update, cve-scan) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
 
-Every new check warns rather than errors. `health` exiting 2 during the probation after a platform
-upgrade rolls the upgrade back, so only a broken platform reports an error.
+Because exit 2 during probation rolls the upgrade back, only two things report an error. One is a
+platform component a probe saw broken: Docker not running (`docker info` fails) or its CLI
+missing, Caddy missing, stopped, restarting or from another compose project, the system container
+missing or wrong (a missing, stopped or restarting container only if a second probe 5 seconds later
+agrees), the backup key missing or unreadable, sshd's drop-in changed or widened, the
+firewall off or not installed, or the userns remap inconsistent. The other is a defect in the
+release's own code: a check whose module cannot be imported, or that hits a missing name or module
+attribute or a syntax error, is an error naming what is broken, so the release is rolled back.
+Everything else warns:
+
+- a project whose files cannot be read (its manifest, a torn quarantine or pause marker, a
+  directory named `<x>-staging` from before 0.10.1) is named under `lifecycle`,
+  `project-containers` or `config-drift` with the cause and the fix, and the rest of the report
+  still runs;
+- a probe that does not answer in time (`docker info`, `docker inspect`, `ufw status`, `sshd -T`,
+  `docker compose ps`) warns, naming the command: a busy host is not a broken platform. So does
+  `ufw status` failing (often a held xtables lock), since it says nothing about the firewall;
+- any other exception from a check (bad data it did not expect, say) warns with the exception and
+  is logged (`log --component health`) instead of crashing the report.
 
 ### User-namespace remapping
 
@@ -1578,6 +1847,9 @@ The boxmunge CLI uses these conventions across mutating commands
 - `0` — success
 - `1` — generic operational failure (image pull, smoke test, Caddy reload, etc.)
 - `2` — usage error (unknown flag, missing argument) or critical health (`check`)
+- `3` — compose hardening rejection (validate_user_compose found a
+  policy-violating key in the project's `compose.yml`; the deploy/stage/
+  promote/resume aborted before touching containers)
 
 Every command rejects a flag it does not implement with exit 2, `ERROR:` and its usage on
 stderr, and runs nothing. That includes `--dry-run`: only `prod-deploy`, `stage`, `promote`,
@@ -1585,9 +1857,6 @@ stderr, and runs nothing. That includes `--dry-run`: only `prod-deploy`, `stage`
 `project-delete`, `rollback`, `restore`, `pause`, `secrets set`) refuses it instead of acting.
 `check-all` accepts only `--read-only`; a typo such as `--raed-only` is an error, not a run of
 the mutator. `-h` or `--help` on any command prints its usage, exits 0, and never runs it.
-- `3` — compose hardening rejection (validate_user_compose found a
-  policy-violating key in the project's `compose.yml`; the deploy/stage/
-  promote/resume aborted before touching containers)
 
 Exit code 3 is reserved for hardening rejections so an operator can
 distinguish a security-policy failure ("fix your compose.yml") from a
@@ -1663,10 +1932,38 @@ that fails is rolled back and blocklisted on this box. The auto-update log
 entry names the class that was applied (`log --component auto-update`).
 
 Releases are discovered through the version-check service at boxmunge.dev.
-If it is unreachable or answers in an unexpected shape, auto-update falls
-back to the GitHub releases list, applying the same rules to the markers in
-each release's title or notes (`[security]`, `[breakfix]`, `[breaking]`), and
-logs a warning.
+Its answer also names any release its circuit breaker holds (withdrawn as
+broken). A held release is never installed automatically, and auto-update
+logs the hold. A plain `upgrade` never installs one either, a held feature
+release included: it takes the newest release that is not held, or refuses,
+naming `upgrade --target <version>`, which still installs it deliberately.
+
+If the service cannot be reached at all (DNS, connection or timeout
+failure), auto-update falls back to the GitHub releases list, applying the
+same rules to the markers in each release's title or notes (`[security]`,
+`[breakfix]`, `[breaking]`), and logs a warning. A release whose GitHub
+title carries `[held]` is held there exactly as the circuit breaker holds it
+(only the maintainer can edit a release title; `[held]` in the notes counts
+for nothing). If the service answers but the answer cannot be used (an HTTP
+error such as its rate limit's 429, a redirect to somewhere unreachable, or
+an unexpected shape), nothing is installed and the check fails with the
+reason: the maintainer marks a hold on GitHub by hand after tripping the
+breaker, so GitHub's answer could still install a release the service
+holds. The next run (every 6 hours) tries again. A security release can therefore wait while the service
+answers with errors; that is the price of never installing a release the
+maintainer has held. So it is never silent: once the service has gone 48
+hours without a usable answer, `health` reports `platform-updates` as
+`WARN`, naming the last error (state in
+`/opt/boxmunge/state/update-discovery.json`).
+
+A failed upgrade is also reported to the version-check service (see "What
+boxmunge sends home" below). Reporting is best-effort: if it cannot be sent
+the upgrade log says so and the upgrade outcome is unchanged.
+`BOXMUNGE_VERSION_CHECK_URL` points both calls at another service (the test
+suites use it to stay offline).
+(The version-check service's stats page is for its maintainer only: browsers sign in
+with a passkey, and scripts read the JSON counts with an `Authorization: Bearer` header.
+No secret ever travels in a URL, so none reaches the proxy's access log.)
 
 Pin to a specific release (for example to roll forward past a bad one):
 
@@ -1693,7 +1990,10 @@ How an upgrade is applied and undone:
 1. The new release is downloaded, its signature and checksum verified, and it is installed
    into the standby venv, built from scratch with every hash-pinned dependency the release
    ships (MCP included); the upgrade needs 250MB free under `/opt/boxmunge`.
-   `upgrade --dry-run` runs against it as a pre-flight. If pip cannot install the
+   `upgrade --dry-run` runs against it as a pre-flight. A failed download, signature, checksum
+   or dry run drops the standby and blocklists the version. A bundle that passes its checksum but
+   does not extract (a full disk where it is downloaded) drops the standby and sends a local
+   alert without blocklisting, so auto-update retries it. If pip cannot install the
    dependencies (a network blip, a full disk), the standby is dropped and a local alert sent.
    The first such failure of a version is not blocklisted or reported, so auto-update retries
    it; a second in a row blocklists it. A successful install and `clear-blocklist` reset the
@@ -1709,8 +2009,23 @@ How an upgrade is applied and undone:
 3. The venvs swap and `upgrade --apply` first rewrites the latest stash without the symlink
    members an older release wrote, so a rollback's `stash restore` cannot abort on them (a
    failure leaves the stash as it is, sends a high-priority alert and does not stop the
-   upgrade). It then migrates manifests and regenerates every project's Caddy site and compose
-   overlay, project by project under that project's lock, reloads Caddy and restarts projects.
+   upgrade). It creates any missing `state/` directory the deploy user writes, and gives
+   deploy any of those, or any `projects/<name>/security`, that root made (boxes installed
+   before v0.9.3); one it cannot re-own is printed as `FAIL` with the `chown` to run, and does
+   not stop the upgrade. It then migrates manifests and regenerates every project's Caddy site
+   and compose overlay, project by project under that project's lock, reloads Caddy and
+   restarts projects. A restart starts the images the project's last deploy built and
+   pulled: it never builds or pulls, so an upgrade cannot put an image on the box that no
+   deploy scanned or decided users for. When an upgrade from 0.10 renames a project's built
+   images to `boxmunge.invalid/<project>/<service>`, the image each container runs takes the
+   new name (logged as `named the images ...`) before the old one is removed, so the
+   restart starts that image. A project whose image is missing is not restarted (`start
+   refused: the image for <service> (<image>) is missing ... run prod-deploy <project>
+   --redeploy`): nothing of it is started or recreated, its running containers are left as
+   they are, and `prod-deploy <project> --redeploy` (a git project: `prod-deploy <project>
+   --ref <its deployed commit>`) builds and starts it. After an upgrade from 0.10 that is a
+   `build:` service that had no container, running or stopped, to take its image from, such
+   as a profiled one that only a restore starts, by name.
    Three kinds of project are left exactly as they are (not migrated, regenerated or
    restarted), reported as `LEFT AS IS` or `Skipped (busy)`, alerted, and do not fail the
    upgrade: one with a release staged by boxmunge 0.10.1 (one high-priority alert per project;
@@ -1732,9 +2047,26 @@ How an upgrade is applied and undone:
    operations that recreate containers (the daily container-update, for one) do not consult
    the upgrade's refusal.
    Paused, quarantined and health-monitor-stopped projects are not restarted either; each
-   stays offline until `resume`, `security resume` or `recover` brings it back.
-4. A health check runs, then a 6-hour probation. A critical health result during probation
-   rolls back.
+   stays offline until `resume`, `security resume` or `recover` brings it back. A paused or
+   quarantined project keeps its maintenance page, but the upgrade still regenerates its
+   compose overlay and records the bind sources it mounts, so `resume`, `security resume`
+   and the scan's automatic lift start it on its deployed files without a deploy (its stopped
+   containers are not checked here: nothing of it starts, and a paused project's containers
+   made before the current mount rules are recreated by `resume`). If its
+   overlay cannot be regenerated or recorded (an unreadable users record, say), it does not
+   fail the upgrade: it is listed as `REFUSED` and alerted with the others, keeps its previous
+   overlay and record, and stays offline. Once the cause is fixed, `resume` or `security
+   resume` brings it back, and for a `balanced` project whose finding no longer quarantines,
+   every scan retries the automatic lift on its own. A project last deployed by boxmunge
+   0.10.1 needs a redeploy (or the next upgrade) instead: its previous overlay names its
+   image by the old name, which the upgrade dropped, and its previous record lacks this
+   release's mounts, so the scan and the start checks refuse it.
+4. A health check runs, then a 6-hour probation. A health error during probation that was not
+   there before the upgrade rolls back (see [Verifying Platform Health](#verifying-platform-health)
+   for what counts). So does a live environment whose `boxmunge-server` no longer starts, once two
+   health-timer runs in a row (5 minutes apart) find it so, expired or not; a crash counts like
+   any other failure, and one that only times out needs four runs in a row. A health check that
+   cannot run at all has the live environment checked the same way.
 
 If the upgrade is interrupted (crash, power loss) after the venvs swap but before probation
 starts, the next health-timer run rolls back to the previous release and sends a "ROLLBACK"
@@ -1753,19 +2085,41 @@ teardown itself does not finish (it is stopped after 10 minutes), one high-prior
 those commands for every project still holding `.releases/staged/`. It never blocks the
 rollback, and the older release ignores what is left.
 
-A rollback swaps the venvs back, restores the stash, and re-runs `upgrade --apply` with the
-previous release, so its overlays and Caddy sites are regenerated and projects restarted on
+A rollback swaps the venvs back, restores the stash the upgrade made (never just the newest in
+`stashes/`), and re-runs `upgrade --apply` with the previous release, so its overlays and Caddy sites are regenerated and projects restarted on
 them. Pause and quarantine markers are not restored from the stash: a project you resumed after
-the upgrade stays resumed. If either the restore or the re-apply fails, you get a "ROLLBACK
+the upgrade stays resumed. Nor are the users records: a service you gave to a new user with
+`data chown` after the upgrade keeps running as that user. If either the restore or the re-apply fails, you get a "ROLLBACK
 PARTIAL" alert and the shim exits 2; inspect the box as `supervisor`.
 
 Probation ends early, promoting the upgrade, when you deploy, roll back, restore, or run
 `backup` yourself. Timer-driven work (the nightly `backup-all`, container-update's
 pre-update backup, self-test) does not end it, so container-update keeps waiting until
-probation is over.
+probation is over. If the deploy user cannot read `probation.json`, the command warns and
+carries on; the probation then ends when it expires, or when the supervisor user removes the
+file.
+
+The previous release does not have to be there for probation to end: at expiry the health
+timer promotes the release whether or not the previous venv still works. Only a rollback needs
+it. If a critical health result calls for a rollback and the previous venv is missing or broken,
+the shim refuses the rollback, logs an error (`log --component upgrade --level error`) and
+sends one alert, and the probation stays until it expires. The log entry and the alert each count
+as done only once they went out (through either environment's Python); until then every
+health-timer run retries whichever did not, and writes `ALERT NOT DELIVERED` to the system
+journal (`journalctl -t boxmunge-upgrade`). If
+the live environment no longer starts either, nothing can promote or roll back: reinstall the
+release on probation into the live environment by running its installer as root (`sudo bash
+boxmunge-install.sh`, from that release's GitHub page), and the next health-timer run carries
+on with the probation. That repairs its packages, not its interpreter: if the environment's own
+Python does not start (`/opt/boxmunge/env-active/bin/python -V` fails, for instance after the
+system `python3` it was built from was removed or replaced by a newer version), the installer
+cannot help until that interpreter is back: the `home` line of
+`/opt/boxmunge/env-active/pyvenv.cfg` names the directory it was in.
 
 No other upgrade starts during probation: the standby venv holds the previous release, the
-only rollback target. `upgrade --target` and `force-target` refuse with the time probation
+only rollback target. `upgrade --repair-deps` is not an upgrade and does run: it installs the
+live release's missing hash-pinned dependencies into the live venv only (see "Agent Access via
+MCP"). `upgrade --target` and `force-target` refuse with the time probation
 ends, without blocklisting anything; `upgrade` and auto-update report the deferral, exit 0
 and retry later. To override, an operator ends the probation first (accepting the release on
 probation) by removing `/opt/boxmunge/upgrade-state/probation.json`. A `probation.json` that
@@ -1783,6 +2137,69 @@ validator would refuse, as `<project>: would be refused by this release's compos
 The dry run writes nothing and sends no alert. The upgrade shim runs it as a pre-flight check
 against the new release before touching anything, so `upgrade --dry-run` run by hand
 reports against the installed release.
+
+### What boxmunge sends home
+
+The box contacts one boxmunge service, the version-check service at boxmunge.dev:
+
+- **Update checks**, every 6 hours from the `boxmunge-auto-update` timer and on a plain
+  `upgrade` (`upgrade --target` names its version and does not check): an HTTPS request
+  for `/v1/check?v=<installed version>`, with User-Agent `boxmunge/<installed version>`.
+  Nothing else: no hostname, machine ID or project names.
+- **Failure reports**, when an upgrade fails: the version it tried, the version it came
+  from, the step that failed and a short reason (for example
+  `system_upgrade_failed: install_sh_exit_100`). The service records the time it
+  received the report.
+
+Like any connection, both carry the box's IP address. The service stores the network
+prefix it came from (IPv4 /24, IPv6 /48; an IPv6 address that embeds an IPv4 address
+counts as that address's /24), never the full address: for a check, with the version
+reported and the date; for a failure report, with the report. A prefix is not anonymous:
+a /48 is often one household or company. Both are deleted after 90 days, overwritten in
+the database file, though encrypted backups of the service's database can hold copies
+until the backups expire, and backups from before the service switched to prefixes can
+hold full IP addresses (or IPv6 /64s) of failure reporters and admin sign-ins. It also
+keeps a daily count of checks per version. During the beta the maintainer uses the
+prefixes to see which networks still run an old release.
+
+Two request logs keep the full IP address of every request, for operations and abuse
+protection: the access log of the web server in front of the service and the service's
+own container log (gunicorn's access log). Both are rotated by size under Docker's log
+settings, at most five 50 MB files each. CrowdSec on that server reads the web server's
+log and is registered with CrowdSec's central API, so the addresses of requests that
+trigger its attack scenarios are shared with CrowdSec's community blocklist. The public
+statement is at <https://boxmunge.dev/#privacy>.
+
+The box's other outbound requests go to third parties, never to a boxmunge service:
+
+- public sources: GitHub releases, PyPI (hash-pinned dependencies at install and
+  upgrade), CISA's list of exploited vulnerabilities, OS and image registries;
+- Let's Encrypt (or another ACME authority), which Caddy contacts to issue and renew
+  each site's TLS certificate, naming the site's hostnames;
+- CrowdSec's central API: the Debian CrowdSec package registers the box with it at
+  install (check with `cscli capi status`), and a registered box shares with CrowdSec the
+  IP addresses of requests that trigger its attack scenarios, and receives its community
+  blocklist;
+- alert channels the operator set up (Pushover, webhooks).
+
+To send the version-check service nothing at all, set this in
+`/opt/boxmunge/config/boxmunge.yml` (as root):
+
+```yaml
+version_check:
+  enabled: false
+```
+
+The box then makes no update checks, neither to the service nor to GitHub instead,
+and sends no failure reports. The cost: it discovers no releases, so no security or
+break-fix release is installed automatically. Auto-update still runs (it keeps
+checking that OS security updates arrive) and logs that it skipped discovery;
+`health` reports `platform-updates` as `WARN` and `doctor` warns under "Update
+discovery", both saying that updates are not being discovered. A plain `upgrade`
+refuses with the same message. Watch <https://github.com/boxmunge/boxmunge/releases>
+and install a release with `upgrade --target X.Y.Z`, which asks nothing; it downloads
+the release from GitHub, like every upgrade. The value must be `true` or `false`.
+Set it back to `true` to discover releases again.
 
 ## Upgrading from 0.10.1 with a release staged
 
@@ -1858,7 +2275,9 @@ needs `--project` (it is refused without one).
 ## CVE Policy
 
 boxmunge enforces a CVE policy on every deployed image: a daily Trivy
-scan, a posture-based quarantine for findings that cross the threshold,
+scan, a posture-based quarantine (under the default `balanced`, only for
+actively exploited CVEs on CISA KEV, and then lifted by the scan once nothing
+exploited is left),
 and an operator-driven suppression workflow for findings reviewed and
 judged not exploitable.
 
@@ -1872,14 +2291,14 @@ Scan cadence:
   ```
   boxmunge security scan              # all projects
   boxmunge security scan myapp        # one project
-  # exit 0 clean, 2 quarantined/at-risk, 1 a project failed or was only
+  # exit 0 clean, 2 quarantined/at-risk/held by the circuit breaker, 1 a project failed or was only
   # partly scanned (also sent as one priority-1 alert per run)
   ```
 
 Inspect state:
 
 ```
-boxmunge security                    # fleet summary
+boxmunge security                    # fleet summary (incl. KEV catalog source and freshness)
 boxmunge security myapp              # per-project view
 boxmunge security --json             # machine-readable
 ```
@@ -1893,7 +2312,7 @@ boxmunge security suppress CVE-2026-1234 \
 ```
 
 If a project gets auto-quarantined, the maintenance page goes up and a
-critical Pushover alert fires. Investigate, then either wait for an
+priority-1 Pushover alert fires. Investigate, then either wait for an
 upstream fix or suppress, then:
 
 ```
@@ -1948,12 +2367,35 @@ The server's `mcp` package is part of every install. `install.sh` and every plat
 whose bundle lacks that file, or whose MCP install fails, stops at pre-flight with the current
 release still live, like any other dependency failure.
 
-If the package is missing anyway, `mcp-serve` exits 1 and `doctor` fails its "MCP package
-installed" check, both with the repair: as root, re-run the installer of the installed release
-(`sudo bash boxmunge-install.sh`, from that version's GitHub release). Do not `pip install` it
-by hand: that is unpinned, and the next upgrade builds a fresh environment without it. The
-first upgrade from 0.10.1 or earlier is run by that release's upgrade shim, which does not
-install MCP; the upgrade after it does, or re-run the installer to have it now.
+An upgrade is run by the box's current upgrade shim, which installs only the requirements files
+it knows; shims up to 0.10.1 do not know `requirements-mcp.txt`. From 0.11.3 on, the new release's
+own `install.sh`, which shims from 0.7.0 run before the venv swap, installs it into the new
+environment. A shim up to 0.10.0 runs `install.sh` without `--upgrade-shim`; `install.sh`
+recognises it by the upgrade lock it holds and still leaves the previous release, the rollback
+target, alone. If pip fails there (a network blip, a full disk), on the hop from 0.10.1 or from an
+older shim alike, `install.sh` exits 75 and the old shim blocklists the release as
+`system_upgrade_failed: install_sh_exit_75`, with the previous release still live. Fix the cause, then run
+`sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.3` (for the release concerned) and
+`upgrade` again. A box upgraded to 0.11.0, 0.11.1 or 0.11.2 by an older shim, or to any release by
+a 0.6.x shim (which never runs `install.sh`), comes up without MCP.
+
+If the package is missing, `mcp-serve` exits 1 and `doctor` fails its "MCP package installed"
+check, both with the repair: `upgrade --repair-deps` from the deploy shell, or as `supervisor`:
+
+```bash
+sudo /opt/boxmunge/bin/boxmunge-upgrade repair-deps
+```
+
+It downloads the installed release's bundle, verifies its signature and checksum as an upgrade
+does, and installs its hash-pinned dependencies into the live environment; nothing else changes.
+Like an upgrade, it needs 250MB free under `/opt/boxmunge`. If pip fails, it says whether the live
+environment still runs.
+It works during probation (the previous release kept for a rollback is not touched), and refuses
+while an interrupted upgrade or rollback is unfinished (the health timer finishes those within
+minutes). A box still on 0.11.0 to 0.11.2 has no `repair-deps`: its next upgrade, once probation
+ends, builds a fresh environment with MCP; to have it sooner, re-run that release's installer as
+root (`sudo bash boxmunge-install.sh`, from its GitHub release), which installs into the live
+environment only. Do not `pip install` it by hand: that is unpinned.
 
 Note: `boxmunge` on PyPI is the *client* CLI. The server package is
 `boxmunge-server` and is installed from GitHub releases, not PyPI.

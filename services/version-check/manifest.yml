@@ -9,7 +9,7 @@ services:
     port: 8147
     routes:
       - path: /
-    health: /v1/check?v=0.0.0
+    health: /healthz
     smoke: boxmunge-scripts/smoke.sh
     writable:
       persistent:
@@ -19,7 +19,9 @@ backup:
   type: volume
   # boxmunge captures the dump command's stdout into the encrypted snapshot,
   # then on restore pipes it back into stdin. The container only has
-  # check-data:/data mounted; there is no /backup mount.
-  dump_command: "cat /data/checks.db"
-  restore_command: "cat > /data/checks.db"
+  # check-data:/data mounted; there is no /backup mount. Never `cat` the
+  # file: a worker's open write transaction would tear the copy. backup_db
+  # copies through SQLite's backup API and checks a dump before restoring it.
+  dump_command: "python backup_db.py dump /data/checks.db"
+  restore_command: "python backup_db.py restore /data/checks.db"
   retention: 7

@@ -7,7 +7,10 @@ from pathlib import Path
 
 from boxmunge.log import log_error, log_warning
 from boxmunge.manifest import ManifestError, load_manifest
+from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
+from boxmunge.probation import clear_probation_if_active
+from boxmunge.pending_snapshot import KEY as PENDING_SNAPSHOT, age, pending_for_live
 from boxmunge.state import read_state, write_state
 
 
@@ -60,6 +63,9 @@ def record_deploy_state(
         "pre_deploy_snapshot": snapshot or "",
         "history": history,
     }
+    # This deploy paired (or chose not to pair) its rollback target with a
+    # snapshot; one data chown took for it is spent either way.
+    new_state.pop(PENDING_SNAPSHOT, None)
 
     write_state(state_path, new_state)
 
@@ -76,19 +82,37 @@ def take_pre_deploy_snapshot(
     """Back up project data before a new release starts. Returns its name.
 
     `manifest` is the manifest of the release whose data is being saved.
+    A snapshot data chown or pause took of this release, before it stopped
+    the backup service for this deploy, stands in for a new one while
+    Docker shows that service has not run since: the dump has nothing to
+    run in (pending_snapshot). A paused project's deploy (deploy_handover)
+    has no other: its containers are stopped.
     """
     if no_snapshot or not snapshot_wanted(manifest):
         return None
+    taken = pending_for_live(paths, project_name)
+    if taken is not None:
+        print(f"  Using the snapshot {taken['taken_by']} took before it stopped "
+              f"{taken['service']} ({age(taken)} ago; it has not run since) as the "
+              f"pre-deploy snapshot: {taken['name']}")
+        return taken["name"]
+    if is_paused(project_name, paths):
+        print(f"  No pre-deploy snapshot: {project_name} is paused, so its containers are "
+              f"stopped and no dump can run, and its pause recorded none this deploy can "
+              f"use. A rollback of this deploy will not be able to restore data.")
+        return None
     print("  Taking pre-deploy snapshot...")
     from boxmunge.backup import BackupKind
-    from boxmunge.commands.backup_cmd import backup_locked, list_snapshots
-    if backup_locked(project_name, paths, kind=BackupKind.PREDEPLOY,
-                     manifest=manifest) != 0:
+    from boxmunge.commands.backup_cmd import take_snapshot
+    rc, name = take_snapshot(project_name, paths, BackupKind.PREDEPLOY, manifest)
+    if rc != 0:
         print("  WARN: Pre-deploy backup failed — continuing deploy. "
               "A rollback of this deploy will not be able to restore data.")
         return None
-    snaps = list_snapshots(paths, project_name)
-    return snaps[0].name if snaps else None
+    if name is None:
+        print("  WARN: The backup wrote no pre-deploy snapshot (it said why above). "
+              "A rollback of this deploy will not be able to restore data.")
+    return name
 
 
 def snapshot_live_release(
@@ -164,3 +188,10 @@ def smoke_ok(
     log_error("deploy", f"Smoke test {smoke_result.status}: {smoke_result.message}",
               paths, project=project_name)
     return False
+
+
+def going_ahead(paths: BoxPaths, dry_run: bool) -> None:
+    """A deploy going ahead ends the upgrade's probation; a refusal or a
+    dry run does not."""
+    if not dry_run:
+        clear_probation_if_active(paths, "deploy")

@@ -170,7 +170,7 @@ def test_health_tick_never_checks_once_blocked(paths, marker) -> None:
     """A smoke run against a just-paused project would escalate and stop it."""
     _deployed(paths)
     run_check = MagicMock()
-    with patch.object(check, "run_check", run_check), _marker_at_lock(check, marker):
+    with patch.object(check, "check_with_reason", run_check), _marker_at_lock(check, marker):
         assert check._check_project(NAME, paths, read_only=False) == 0
     run_check.assert_not_called()
 

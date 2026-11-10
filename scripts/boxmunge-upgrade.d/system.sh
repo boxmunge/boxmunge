@@ -1,57 +1,20 @@
 # shellcheck shell=bash
-# system.sh — release signature check, deploy's sudo rule, on-box docs, and
-# the shim's own self-update.
+# system.sh — deploy's sudo rule, on-box docs, the shim's own self-update and
+# the system upgrade (the bundle's install.sh re-run).
 # Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
 # the shim that releases ship.
-
-# Cosign verification pins. The release workflow keyless-signs SHA256SUMS via
-# Sigstore's Fulcio + Rekor. We pin the OIDC issuer and the workflow identity
-# so a signature from any other workflow (or any other repo) is rejected.
-COSIGN_CERT_IDENTITY_REGEXP='^https://github\.com/boxmunge/boxmunge/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
-COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
-
-# verify_release_signature <download_dir>
-#
-# Verifies $download_dir/SHA256SUMS against $download_dir/SHA256SUMS.sig with
-# certificate $download_dir/SHA256SUMS.cert, pinning the certificate identity
-# to this repo's release workflow on a vX.Y.Z tag.
-#
-# Hard-requires cosign on PATH; aborts noisily if missing. Returns 0 on success
-# and non-zero on any failure (cosign missing, signature/cert files missing,
-# verification failed).
-verify_release_signature() {
-    local download_dir="${1:?usage: verify_release_signature <download_dir>}"
-    if ! command -v cosign >/dev/null 2>&1; then
-        log "ERROR: cosign required for upgrade verification but not installed."
-        log "       Re-run install.sh on this host, or install cosign manually."
-        return 1
-    fi
-    local sums="$download_dir/SHA256SUMS"
-    local sig="$download_dir/SHA256SUMS.sig"
-    local cert="$download_dir/SHA256SUMS.cert"
-    if [[ ! -f "$sig" || ! -f "$cert" ]]; then
-        log "ERROR: cosign signature/certificate not found in release artifacts"
-        log "       missing: $([[ -f "$sig" ]] || echo "SHA256SUMS.sig") $([[ -f "$cert" ]] || echo "SHA256SUMS.cert")"
-        return 1
-    fi
-    cosign verify-blob \
-        --certificate-identity-regexp "$COSIGN_CERT_IDENTITY_REGEXP" \
-        --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
-        --signature "$sig" \
-        --certificate "$cert" \
-        "$sums" >/dev/null 2>&1
-}
 
 # ---------------------------------------------------------------------------
 # deploy's sudo rule. Owned here so install.sh and every upgrade write the
 # same text; a box whose rule predates a tightening is fixed on its next
-# upgrade. `target *` cannot reach force-target or any other subcommand:
-# sudo matches the whole argument string against the pattern.
+# upgrade. sudo matches the whole argument string against each pattern, so
+# `target *` cannot reach force-target or any other subcommand, and `auto`
+# and `repair-deps` take no further words.
 # ---------------------------------------------------------------------------
 sudoers_rule() {
     cat <<EOF
 # Managed by boxmunge-upgrade install-sudoers; rewritten on every install and upgrade.
-deploy ALL=(root) NOPASSWD: $BIN_DIR/boxmunge-upgrade auto, $BIN_DIR/boxmunge-upgrade target *
+deploy ALL=(root) NOPASSWD: $BIN_DIR/boxmunge-upgrade auto, $BIN_DIR/boxmunge-upgrade target *, $BIN_DIR/boxmunge-upgrade repair-deps
 EOF
 }
 
@@ -173,4 +136,66 @@ self_update_shim() {
             bm_log error upgrade "wrapper self-update skipped: bash -n failed" "{\"name\": \"$name\"}"
         fi
     done
+}
+
+# ---------------------------------------------------------------------------
+# System upgrade: re-run the bundle's install.sh before the slot swap when it
+# differs from the one this box last ran, so new system pieces (apt packages,
+# systemd timers, install.sh-only migrations) are in place by the time the new
+# venv goes live. install.sh records a fingerprint of itself and the files it
+# installs from at the end of every successful run; the shim computes the same
+# over the new bundle (tests/test_installer_fingerprint.py).
+# ---------------------------------------------------------------------------
+
+# installer_fingerprint: print the fingerprint install.sh last recorded, or
+# nothing when there is none. It is in root-only upgrade-root/. Releases up to
+# 0.11.3 kept it in deploy-writable state/, which is never read: deploy could
+# put a link there (root would read the target into the logs), a FIFO (the
+# upgrade would block with the lock held) or the bundle's own hash (root
+# would skip install.sh). A box upgrading from one of those has none here
+# yet, so install.sh runs once, the safe default, and records it.
+installer_fingerprint() {
+    refuse_symlink "$UPGRADE_ROOT_DIR"
+    refuse_symlink "$INSTALLER_HASH_FILE"
+    [[ -e "$INSTALLER_HASH_FILE" ]] || return 0
+    read_untrusted "$INSTALLER_HASH_FILE"
+}
+
+# system_upgrade <bundle_dir> <version> <from_version>: install.sh is gated on
+# `bash -n` like the shim's self-update: a syntactically broken one must not
+# brick the box. If it fails, the upgrade fails before the swap (the version
+# is blocklisted, the previous venv stays live) and the operator diagnoses it.
+# Called with --upgrade-shim, install.sh also installs its bundle's
+# hash-pinned requirements into the standby (bootstrap/venv-deps.sh); after
+# the shim's own install pip has nothing to do. That is for older shims,
+# which install only the requirements files they know.
+system_upgrade() {
+    local bundle="$1" version="$2" from_version="$3"
+    local new_install_sh="$1/install.sh" new_hash current_hash sysup_exit=0
+    [[ -f "$new_install_sh" ]] || return 0
+    if ! bash -n "$new_install_sh" 2>/dev/null; then
+        bm_log error upgrade "system upgrade skipped: bash -n failed" "{\"version\": \"$version\"}"
+        preflight_fail "$version" "$from_version" "system_upgrade_failed: install_sh_syntax" \
+            "ERROR: bundled install.sh has syntax errors; refusing to run system upgrade" system_upgrade
+    fi
+    new_hash="$( (cd "$bundle" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' -o -path './system/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}')"
+    current_hash="$(installer_fingerprint)" || exit 1
+    if [[ "$new_hash" == "$current_hash" ]]; then
+        log "install.sh unchanged (${new_hash:0:8}); skipping system upgrade"
+        return 0
+    fi
+    if [[ -z "$current_hash" ]]; then
+        log "No installer fingerprint in $UPGRADE_ROOT_DIR (new=${new_hash:0:8}); running system upgrade..."
+    else
+        log "install.sh changed (current=$(printable "${current_hash:0:8}"), new=${new_hash:0:8}); running system upgrade..."
+    fi
+    bm_log info upgrade "system upgrade started" \
+        "{\"new_hash\": \"${new_hash:0:16}\", \"prev_hash\": \"$(printable "${current_hash:0:16}")\"}"
+    bash "$new_install_sh" --upgrade-shim || sysup_exit=$?
+    if [[ "$sysup_exit" -ne 0 ]]; then
+        bm_log error upgrade "system upgrade failed" "{\"exit_code\": $sysup_exit}"
+        preflight_fail "$version" "$from_version" "system_upgrade_failed: install_sh_exit_${sysup_exit}" \
+            "ERROR: install.sh failed (exit ${sysup_exit}); aborting upgrade before slot swap" system_upgrade
+    fi
+    bm_log info upgrade "system upgrade completed" "{\"hash\": \"${new_hash:0:16}\"}"
 }

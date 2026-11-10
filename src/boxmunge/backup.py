@@ -129,6 +129,8 @@ class BackupKind(enum.Enum):
     MANUAL = "manual"          # `backup <project>`, MCP, console, self-test
     PRERESTORE = "prerestore"  # restore's safety snapshot of the data it replaces
     PREMIGRATE = "premigrate"  # userns-migrate, before any downtime
+    PRECHOWN = "prechown"      # data chown, before it stops the service
+    PREPAUSE = "prepause"      # pause, before it stops the project
 
 
 # Snapshots kept per project for each kind other than NIGHTLY, whose count is
@@ -139,6 +141,8 @@ SNAPSHOT_RETENTION = {
     BackupKind.MANUAL: 5,
     BackupKind.PRERESTORE: 3,
     BackupKind.PREMIGRATE: 2,
+    BackupKind.PRECHOWN: 3,
+    BackupKind.PREPAUSE: 3,
 }
 
 _TIMESTAMP = r"\d{4}-\d{2}-\d{2}T\d{6}"
@@ -247,8 +251,10 @@ def decrypted_snapshot(snapshot_path: Path, paths: BoxPaths) -> Iterator[Path]:
 
 def prune_backups(
     backups_dir: Path, project_name: str, kind: BackupKind, retention: int,
+    *, keep: set[str] = frozenset(),
 ) -> list[Path]:
-    """Remove the oldest snapshots of one kind beyond ``retention``.
+    """Remove the oldest snapshots of one kind beyond ``retention``, never
+    one named in ``keep`` (a paired one: snapshot_pairings).
 
     Only files whose names parse as this project's snapshots of this kind are
     counted or removed; anything else in the directory is left alone.
@@ -262,7 +268,7 @@ def prune_backups(
         (parsed[0], f) for f in backups_dir.iterdir()
         if (parsed := parse_snapshot(f, project_name)) and parsed[1] is kind
     )
-    to_prune = [f for _, f in snapshots[:-retention]]
+    to_prune = [f for _, f in snapshots[:-retention] if f.name not in keep]
     for f in to_prune:
         f.unlink()
     return to_prune

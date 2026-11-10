@@ -12,6 +12,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # The definition (sha256 of Dockerfile then this file) the image is
+      # built from, written to .env by install.sh. `health` and `doctor` warn
+      # when the running image's label differs from the installed files.
+      labels:
+        boxmunge.system-definition: "${BOXMUNGE_SYSTEM_DEFINITION:-}"
     # Named so the data helper (boxmunge.data_helper) runs exactly this
     # locally built image; boxmunge.invalid never resolves to a registry.
     image: boxmunge.invalid/system/system

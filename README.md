@@ -30,7 +30,7 @@ That's the real promise — not just "easy hosting," but one less tool you have 
 
 ### 1. Set up your server
 
-You need a fresh Debian 13 VPS with a public IP. Download the latest self-extracting installer, copy it to the server, and run it as root with your hostname, contact email, and SSH public key:
+You need a fresh Debian 13 VPS (x86_64 or arm64) with a public IP. Download the latest self-extracting installer, copy it to the server, and run it as root with your hostname, contact email, and SSH public key:
 
 ```bash
 # Locally — fetch the installer and capture your SSH public key
@@ -125,7 +125,7 @@ SSH into the deploy user and run commands directly — no `boxmunge` prefix need
 | `stage <project>` | Deploy to staging for verification |
 | `promote <project>` | Promote staging to production |
 | `prod-deploy <project>` | Deploy straight to production |
-| `rollback <project>` | Restore pre-deploy snapshot and redeploy |
+| `rollback <project>` | Put back the previous release and its pre-deploy data snapshot |
 | `backup <project>` | Create encrypted backup |
 | `restore <project>` | Restore from backup |
 | `self-test` | Prove backup/restore pipeline actually works |

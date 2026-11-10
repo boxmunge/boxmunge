@@ -57,8 +57,8 @@ def test_build_refuses_a_loader_that_misses_a_library(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("needle", [
-    "python3 scripts/build-shim.py scripts/boxmunge-upgrade dist/.stage/boxmunge/scripts/boxmunge-upgrade",
-    "rm -rf dist/.stage/boxmunge/scripts/boxmunge-upgrade.d",
+    "python3 scripts/build-shim.py scripts/boxmunge-upgrade $(STAGE)/boxmunge/scripts/boxmunge-upgrade",
+    "rm -rf $(STAGE)/boxmunge/scripts/boxmunge-upgrade.d",
 ])
 def test_bundle_ships_the_built_shim(needle: str) -> None:
     assert needle in (REPO / "Makefile").read_text()
@@ -67,7 +67,7 @@ def test_bundle_ships_the_built_shim(needle: str) -> None:
 # The head of install.sh up to the first step that changes the system: the
 # guard must sit in it. Only that head is ever run here, so a broken guard
 # cannot let the rest of install.sh loose on the test machine.
-_FIRST_STEP = "\n# ---------------------------------------------------------------------------\n# Docker Compose version."
+_FIRST_STEP = "\n# Docker Compose 2.35.0 or newer (bootstrap/compose-version.sh)"
 
 
 def _install_head(tmp_path: Path, shim: Path) -> subprocess.CompletedProcess:
@@ -77,10 +77,17 @@ def _install_head(tmp_path: Path, shim: Path) -> subprocess.CompletedProcess:
     (root / "scripts").mkdir(parents=True)
     (root / "install.sh").write_text(install.split(_FIRST_STEP)[0] + "\necho HEAD-COMPLETED\n")
     shutil.copy(shim, root / "scripts" / "boxmunge-upgrade")
+    # The head sources the cosign pins for its architecture check, asks
+    # whether a shim from 0.10.0 or earlier runs it, and checks the Python floor.
+    (root / "bootstrap").mkdir()
+    for name in ("cosign.sh", "python-floor.sh", "run-by-old-shim.sh"):
+        shutil.copy(REPO / "bootstrap" / name, root / "bootstrap")
     fake = tmp_path / "fakebin"
     fake.mkdir()
-    (fake / "id").write_text("#!/bin/sh\necho 0\n")  # pass the root check
-    (fake / "id").chmod(0o755)
+    (fake / "python3").symlink_to(sys.executable)  # this suite's Python meets the floor
+    for name, out in (("id", "0"), ("dpkg", "amd64")):  # pass the root and arch checks
+        (fake / name).write_text(f"#!/bin/sh\necho {out}\n")
+        (fake / name).chmod(0o755)
     return subprocess.run(
         ["bash", str(root / "install.sh")], capture_output=True, text=True, check=False,
         env={"PATH": f"{fake}:/usr/bin:/bin"},

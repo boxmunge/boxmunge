@@ -1,10 +1,15 @@
 # boxmunge host configuration: a reference copy of the keys
 # /opt/boxmunge/config/boxmunge.yml accepts. bootstrap/init-host.sh writes
-# most of them at install; the rest (container_updates, auto_update) take
-# the defaults in src/boxmunge/config.py until set. Edited by hand, as root.
+# most of them at install; the rest (container_updates, auto_update,
+# version_check) take
+# the defaults in src/boxmunge/config.py until set, kev takes those in
+# src/boxmunge/cve/kev.py, and webhooks are off until set. Edited by hand,
+# as root.
 
 hostname: __HOSTNAME__
 ssh_port: 922
+# Required. Install also writes it into caddy/Caddyfile as the ACME contact;
+# changing it here does not change Caddy's.
 admin_email: __ADMIN_EMAIL__
 
 pushover:
@@ -46,3 +51,33 @@ container_updates:
 # breakfix must be true or false.
 auto_update:
   breakfix: true
+
+# The version-check service at boxmunge.dev: the box asks it for releases
+# (auto-update every 6 hours, and a plain `upgrade`) and reports failed
+# upgrades to it. enabled: false stops both, and the GitHub fallback too:
+# the box then discovers no releases, so security releases are NOT
+# installed automatically, and `health` and `doctor` say so. Install a
+# release by hand with `upgrade --target X.Y.Z`. Must be true or false.
+version_check:
+  enabled: true
+
+# CISA KEV catalog sources, tried in order before each CVE scan; the first
+# whose catalog passes the sanity checks is cached, and `boxmunge security`
+# shows which one answered. The default is CISA's feed, then CISA's own
+# mirror on GitHub (for address ranges CISA's CDN refuses). Set sources to
+# replace the list; each must be an https:// URL serving the same JSON. A
+# mistake here fails only the KEV refresh, which alerts naming it.
+# kev:
+#   sources:
+#     - https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
+#     - https://raw.githubusercontent.com/cisagov/kev-data/main/known_exploited_vulnerabilities.json
+
+# Optional webhooks: a JSON POST (event, project, timestamp, hostname,
+# details) to each url whose events list the event. Events: deploy, stage,
+# promote, unstage, rollback. Delivery is best-effort; a failure is logged.
+# webhooks:
+#   - url: https://hooks.example.com/boxmunge
+#     events: [deploy, promote, rollback]
+
+# userns: {name, offset} is written by install and by
+# `boxmunge-upgrade userns-migrate`. Never edit it by hand.

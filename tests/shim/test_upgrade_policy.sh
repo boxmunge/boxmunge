@@ -19,9 +19,9 @@ blocklist() { printf '{"%s": {"reason": "apply", "failed_at": "x"}}\n' "$1" \
 new_root a
 run_shim install-sudoers
 expect 0 "Wrote deploy sudo rule" "install-sudoers writes the rule"
-expected_rule="deploy ALL=(root) NOPASSWD: $BOXMUNGE_ROOT/bin/boxmunge-upgrade auto, $BOXMUNGE_ROOT/bin/boxmunge-upgrade target *"
+expected_rule="deploy ALL=(root) NOPASSWD: $BOXMUNGE_ROOT/bin/boxmunge-upgrade auto, $BOXMUNGE_ROOT/bin/boxmunge-upgrade target *, $BOXMUNGE_ROOT/bin/boxmunge-upgrade repair-deps"
 rules="$(grep -v '^#' "$BOXMUNGE_SUDOERS_FILE")"
-[[ "$rules" == "$expected_rule" ]] && pass "sudoers grants exactly auto and target" \
+[[ "$rules" == "$expected_rule" ]] && pass "sudoers grants exactly auto, target and repair-deps (no arguments)" \
     || fail "unexpected sudoers rule: $rules"
 for forbidden in "upgrade run" "check-probation" "clear-blocklist" "force-target" "install-sudoers"; do
     grep -v "^#" "$BOXMUNGE_SUDOERS_FILE" | grep -q -- "$forbidden" && fail "sudoers mentions $forbidden" \
@@ -126,6 +126,15 @@ expect 1 "Usage: boxmunge-upgrade auto" "auto refuses arguments"
 mock_server a 'echo "{\"action\": \"upgrade\", \"version\": \"1.0.0;id\", \"url\": \"x\"}"'
 run_shim auto
 expect 1 "Invalid version" "auto refuses a malformed discovered version"
+# The release class discovery gives names the success alert; anything else stops.
+mock_server a 'echo "{\"action\": \"upgrade\", \"version\": \"1.5.0\", \"url\": \"x\", \"class\": \"urgent\"}"'
+run_shim auto
+expect 1 "Unknown release class 'urgent' for 1.5.0" "auto refuses an unknown discovered release class"
+mock_server a 'echo "{\"action\": \"upgrade\", \"version\": \"1.5.0\", \"url\": \"x\", \"class\": \"security\"}"'
+PATH="$FAILVISUDO:$PATH" run_shim auto
+expect 1 "failed visudo" "auto passes a known release class through to the upgrade"
+run_shim run 1.5.0 https://example.com/x security extra
+expect 1 "Usage: boxmunge-upgrade run <version> <url> [<class>]" "run refuses extra arguments"
 run_shim clear-blocklist "1.0.0' or '1"
 expect 1 "Invalid version" "clear-blocklist requires semver"
 mock_server a 'echo "$*" >> "$BOXMUNGE_ROOT/calls"; echo "{\"action\": \"up_to_date\"}"'

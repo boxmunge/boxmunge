@@ -15,8 +15,25 @@ def explain_relaxed_kev_only() -> str:
     return (
         "relaxed posture: only actively-exploited (CISA KEV) findings "
         "quarantine; everything else is informational regardless of distro "
-        "severity. Raise the posture to balanced or strict for "
-        "distro-severity-based quarantine."
+        "severity. Raise the posture to strict for distro-severity-based "
+        "quarantine."
+    )
+
+
+def explain_awaiting_fix(
+    base: Severity, effective: Severity, penalty: int,
+    posture_label: str, threshold_label: str,
+) -> str:
+    """Explanation for a finding at balanced's alert-only severity gate."""
+    rated = base.value if base == effective else (
+        f"{base.value} → effective {effective.value} (hardening penalty: +{penalty})")
+    return (
+        f"{rated}, network-reachable, and no fix exists yet. It is not known to "
+        f"be exploited (not on the CISA KEV catalog), so under {posture_label} "
+        f"posture (gate: {threshold_label}) the site stays up and nothing needs "
+        "doing now. You will be alerted when a fix lands (then rebuild and "
+        "redeploy) or if it is listed as actively exploited (then it "
+        "quarantines). `security.posture: strict` takes such findings down."
     )
 
 
@@ -76,18 +93,29 @@ def explain_kev_fix_not_running(cve_id: str, fixed_version: str | None) -> str:
 
 
 def explain_fix_available(
-    fixed_version: str | None, *, would_quarantine: bool, posture_label: str,
+    fixed_version: str | None, *, meets_gate: bool, gate_quarantines: bool,
+    posture_label: str,
 ) -> str:
     """Explanation for a non-KEV finding with an upstream fix."""
     text = (
         f"Fix available upstream ({fixed_version}) but not running in this "
-        "image. Rebuild the image (pull the base image) and redeploy to pick "
-        "it up; boxmunge does not rebuild images for you."
+        "image. A `build:` service is rebuilt on its base image's current "
+        "digest by its next stage and promote, or prod-deploy (--redeploy "
+        "when nothing new was uploaded); otherwise bump the image tag or "
+        "digest, or, for a package the Dockerfile installs, set compose "
+        "`build: {no_cache: true}`, then redeploy (CVE_POLICY.md, \"Base "
+        "images and the build cache\"); boxmunge does not rebuild images for "
+        "you."
     )
-    if would_quarantine:
+    if meets_gate and gate_quarantines:
         text += (
             f" Without the fix this finding meets the {posture_label} "
             "quarantine gate."
+        )
+    elif meets_gate:
+        text += (
+            f" It meets the {posture_label} alert gate: not known to be "
+            "exploited, so the site stays up, but apply the fix."
         )
     return text
 
@@ -200,8 +228,9 @@ def explain_threshold(
 
 HARDENING_UPCOMING_FIX = (
     "Add `read_only: true` to the service in compose.yml, declare it in the "
-    "manifest so boxmunge hardens it, or accept the risk with a `security` "
-    "declaration."
+    "manifest so boxmunge hardens it, or accept the risk: suppress the CVE "
+    "after review, or choose `security.posture: balanced`, which quarantines "
+    "only on actively exploited (CISA KEV) CVEs."
 )
 
 
@@ -221,7 +250,8 @@ def explain_hardening_upcoming(
     """Why a finding that does not quarantine today will from 0.12, and the fix.
 
     ``threshold_detail`` is the explanation the finding gets under the 0.12
-    penalty. 0.11.0 only warns."""
+    penalty. 0.11 only warns, and only strict and paranoid are judged under
+    it (the postures whose severity gate quarantines)."""
     return (
         f"WARNING, not quarantined yet: the stricter hardening penalty would "
         f"quarantine this finding. From 0.12 that penalty applies. "

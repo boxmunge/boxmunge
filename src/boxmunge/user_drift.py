@@ -22,6 +22,7 @@ from boxmunge.docker import tag_image
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.fs_nofollow import read_text_nofollow
 from boxmunge.notify import notify
+from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.run_as import SOURCE_COMPOSE, RunAsError, identity, read_users
 
 if TYPE_CHECKING:
@@ -61,12 +62,13 @@ def held_back(paths: BoxPaths, project: str) -> frozenset[str]:
     except FileNotFoundError:
         return frozenset()
     except (OSError, ValueError) as e:
-        raise RunAsError(f"cannot read {path}: {e}; remove it and deploy {project}") from e
+        raise RunAsError(f"cannot read {path}: {e}; remove it and run "
+                         f"{redeploy_command(paths, project)}") from e
     # An object, as every file in state/deploy is (identity reads them all).
     services = doc.get("services") if isinstance(doc, dict) else None
     if not isinstance(services, list) or not all(isinstance(s, str) for s in services):
-        raise RunAsError(f"{path} is not {{\"services\": [...]}}; remove it and deploy "
-                         f"{project}")
+        raise RunAsError(f"{path} is not {{\"services\": [...]}}; remove it and run "
+                         f"{redeploy_command(paths, project)}")
     return frozenset(services)
 
 
@@ -101,7 +103,8 @@ def guard_pull(paths: BoxPaths, project: str, refs: dict[str, str],
            f"{component} held back {project}'s new images ({text}): these services run as "
            f"their image's own user, so the new image would change who owns and writes "
            f"their data. Their tags point at the images they ran before. Review the "
-           f"change, declare security.user if needed, and deploy {project}: the deploy "
+           f"change, declare security.user if needed, and run "
+           f"{redeploy_command(paths, project)}: the deploy "
            f"pulls these images again and decides from them.",
            component=component, project=project, priority=1)
     return moved

@@ -12,10 +12,12 @@ import sys
 
 MCP_REPAIR = (
     "install.sh and every platform upgrade install it from the release's "
-    "hash-pinned requirements-mcp.txt, so this environment is incomplete. "
-    "Repair it by re-running the installed release's installer as root: "
-    "`sudo bash boxmunge-install.sh`, from that version's GitHub release "
-    "(`boxmunge-server --version` shows the version)."
+    "hash-pinned requirements-mcp.txt, so this environment is incomplete "
+    "(an upgrade run by an older release's upgrade shim can leave it out). "
+    "Repair it, also during probation, from the deploy shell with "
+    "`upgrade --repair-deps`, or as root with "
+    "`sudo /opt/boxmunge/bin/boxmunge-upgrade repair-deps`: it installs the "
+    "installed release's hash-pinned dependencies from its signed bundle."
 )
 
 

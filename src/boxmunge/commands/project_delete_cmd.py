@@ -14,6 +14,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from boxmunge.commands.confirm import confirm
 from boxmunge.built_images import remove_built_images
 from boxmunge import docker_containers
 from boxmunge.data_helper import container_owned_dirs, empty_under
@@ -52,6 +53,15 @@ def project_state_files(paths: BoxPaths, name: str) -> list[Path]:
     ]
 
 
+def remove_project_state(paths: BoxPaths, name: str) -> None:
+    """Delete the per-project files kept outside the project directory."""
+    for state_file in project_state_files(paths, name):
+        state_file.unlink(missing_ok=True)
+    alerts_dir = paths.project_alerts_dir(name)
+    if alerts_dir.is_dir():
+        alerts_dir.rmdir()  # fails loudly on a record kind ALERT_KINDS lacks
+
+
 def run_project_delete(
     project_name: str, paths: BoxPaths, yes: bool = False, force: bool = False,
 ) -> int:
@@ -69,9 +79,7 @@ def run_project_delete(
         print("  - Remove Caddy site config")
         print("  - Remove health, deploy, pause, quarantine, scan, and update state")
         print("  - Deregister from project allowlist")
-        response = input("\nProceed? [y/N] ")
-        if response.lower() != "y":
-            print("Aborted.")
+        if not confirm("project-delete"):
             return 1
 
     try:
@@ -202,11 +210,7 @@ def delete_locked(project_name: str, paths: BoxPaths, force: bool) -> int:
                       paths, project=project_name)
             rc = 1
 
-    for state_file in project_state_files(paths, project_name):
-        state_file.unlink(missing_ok=True)
-    alerts_dir = paths.project_alerts_dir(project_name)
-    if alerts_dir.is_dir():
-        alerts_dir.rmdir()  # fails loudly on a record kind ALERT_KINDS lacks
+    remove_project_state(paths, project_name)
 
     project_dir = paths.project_dir(project_name)
     if project_dir.exists():
@@ -225,7 +229,24 @@ def delete_locked(project_name: str, paths: BoxPaths, force: bool) -> int:
 
     log_operation("project-delete", "Project deleted", paths, project=project_name)
     print(f"Project '{project_name}' deleted.")
+    _report_kept_volumes(project_name)
     return rc
+
+
+def _report_kept_volumes(project_name: str) -> None:
+    """Named volumes outlive `compose down`, and a new project of the same
+    name would mount their old data again: say which are kept."""
+    try:
+        volumes = [v for p in (project_name, f"{project_name}-staging")
+                   for v in docker_containers.project_volumes(p)]
+    except DockerError as e:
+        print(f"  WARN: could not list the project's Docker volumes ({e}); any named "
+              f"volumes were kept (`docker volume ls`).")
+        return
+    if volumes:
+        print(f"  Docker volumes are kept, with their data: {', '.join(volumes)}. A new "
+              f"project named '{project_name}' would mount them again. Remove them as "
+              f"the supervisor with: docker volume rm {' '.join(volumes)}")
 
 
 def cmd_project_delete(args: list[str]) -> None:

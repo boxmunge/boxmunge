@@ -22,13 +22,21 @@ Three subcommands, each exits 1 with an ERROR: line on any violation:
       notes, so the draft must read exactly as CLASS and BREAKING. This
       catches auto-generated notes that quote a PR title containing a marker.
 
-  audit --github-releases FILE [--releases PATH]
+  audit --github-releases FILE [--releases PATH] [--held X.Y.Z ...]
       Maintenance check, run by hand: FILE is
       `gh api --paginate --slurp 'repos/boxmunge/boxmunge/releases?per_page=100'`.
       Every release in releases.json must be published on GitHub with text
       that reads as its class and breaking flag, so GitHub-fallback boxes
-      select exactly as the version-check service does. Edit the title of
-      any release it reports.
+      select exactly as the version-check service does, and exactly the
+      --held versions (the ones the service's circuit breaker holds; none
+      by default) must carry [held] in their title. Edit the title of any
+      release it reports.
+
+The [held] marker is the GitHub twin of a circuit-breaker hold, for boxes
+that cannot reach the service. Boxes read it from the title only (notes
+quote contributors' PR titles), so only someone with write access to the
+repository can set it, and verify refuses a draft carrying it anywhere: a
+release is published unheld, and held afterwards by editing its title.
 
 Stdlib only, so it runs before any dependency is installed.
 """
@@ -51,6 +59,7 @@ TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+)$")
 
 MARKERS = {"security": "[security]", "breakfix": "[breakfix]"}
 BREAKING_MARKER = "[breaking]"
+HELD_MARKER = "[held]"
 _REACH = ("Boxes on {major}.x apply it automatically when no breaking release (this one "
           "included) lies between their version and this one")
 PREAMBLE = {
@@ -103,6 +112,12 @@ def is_breaking(name: str, body: str) -> bool:
     return BREAKING_MARKER in f"{name or ''}\n{body or ''}".lower()
 
 
+def is_held(name: str) -> bool:
+    """Whether a box reads a GitHub release as held: [held] in the title only.
+    Mirrors boxmunge.release_selection.github_release_held (tests cross-check)."""
+    return HELD_MARKER in (name or "").lower()
+
+
 def plan_release(tag: str, releases_path: Path, pyproject_path: Path) -> ReleasePlan:
     match = TAG_RE.match(tag)
     if not match:
@@ -137,6 +152,11 @@ def plan_release(tag: str, releases_path: Path, pyproject_path: Path) -> Release
 
 
 def verify_release(name: str, body: str, expected: str, expected_breaking: bool) -> None:
+    if HELD_MARKER in f"{name or ''}\n{body or ''}".lower():
+        raise ReleaseLintError(
+            f"release text carries {HELD_MARKER}, but a release is published unheld: "
+            f"remove it from the draft's title/notes. To hold a published release, trip "
+            f"the circuit breaker and add {HELD_MARKER} to its title (docs/DEVELOPMENT.md).")
     found = classify_release(name, body)
     if found != expected:
         raise ReleaseLintError(
@@ -158,9 +178,11 @@ def verify_release(name: str, body: str, expected: str, expected_breaking: bool)
         raise ReleaseLintError(f"release title {name!r} lacks {BREAKING_MARKER}")
 
 
-def audit_releases(releases_path: Path, github: list[dict]) -> None:
+def audit_releases(releases_path: Path, github: list[dict],
+                   held: set[str] = frozenset()) -> list[str]:
     """Raise listing every releases.json entry whose published GitHub release
-    is missing or reads differently from its entry."""
+    is missing or reads differently from its entry, or is held (or not)
+    against `held`. Returns the tags held on GitHub."""
     catalog = _catalog()
     try:
         releases = catalog.load_releases(Path(releases_path))
@@ -168,7 +190,9 @@ def audit_releases(releases_path: Path, github: list[dict]) -> None:
         raise ReleaseLintError(str(e)) from e
     published = {r.get("tag_name"): r for r in github
                  if not r.get("draft") and not r.get("prerelease")}
-    problems = []
+    problems = [f"--held {v}: not a release listed in {releases_path}"
+                for v in sorted(held - {entry["version"] for entry in releases})]
+    held_tags = []
     for entry in releases:
         tag = f"v{entry['version']}"
         release = published.get(tag)
@@ -176,6 +200,9 @@ def audit_releases(releases_path: Path, github: list[dict]) -> None:
             problems.append(f"{tag}: no published GitHub release")
             continue
         name, body = release.get("name") or "", release.get("body") or ""
+        problems += _hold_problems(tag, name, body, entry["version"] in held)
+        if is_held(name):
+            held_tags.append(tag)
         found = classify_release(name, body)
         if found != entry["class"]:
             problems.append(f"{tag}: GitHub text reads as {found}, releases.json says "
@@ -189,6 +216,20 @@ def audit_releases(releases_path: Path, github: list[dict]) -> None:
         raise ReleaseLintError(
             f"{len(problems)} release(s) on GitHub disagree with releases.json:\n  "
             + "\n  ".join(problems))
+    return held_tags
+
+
+def _hold_problems(tag: str, name: str, body: str, should_hold: bool) -> list[str]:
+    problems = []
+    if HELD_MARKER in body.lower() and not is_held(name):
+        problems.append(f"{tag}: {HELD_MARKER} in its notes does nothing (boxes read it from "
+                        f"the title only); move it to the title, or remove it")
+    if should_hold and not is_held(name):
+        problems.append(f"{tag}: held, but its GitHub title lacks {HELD_MARKER} (add it)")
+    elif is_held(name) and not should_hold:
+        problems.append(f"{tag}: its GitHub title carries {HELD_MARKER}, but --held does not "
+                        f"name it (remove it, or pass --held {tag[1:]})")
+    return problems
 
 
 def _cmd_check(args: argparse.Namespace) -> None:
@@ -217,8 +258,9 @@ def _cmd_audit(args: argparse.Namespace) -> None:
         github = [r for page in github for r in page]  # gh api --slurp pages
     if not all(isinstance(r, dict) for r in github):
         raise ReleaseLintError(f"{args.github_releases}: expected release objects")
-    audit_releases(Path(args.releases), github)
-    print(f"every release in {args.releases} reads the same on GitHub")
+    held = audit_releases(Path(args.releases), github, set(args.held))
+    print(f"every release in {args.releases} reads the same on GitHub; "
+          f"held on GitHub: {', '.join(held) or 'none'}")
 
 
 def main(argv: list[str]) -> int:
@@ -238,6 +280,8 @@ def main(argv: list[str]) -> int:
     audit = sub.add_parser("audit")
     audit.add_argument("--github-releases", required=True)
     audit.add_argument("--releases", default=str(RELEASES_JSON))
+    audit.add_argument("--held", action="append", default=[], metavar="X.Y.Z",
+                       help="a version the circuit breaker holds (repeat for each)")
     args = parser.parse_args(argv)
     try:
         {"check": _cmd_check, "verify": _cmd_verify, "audit": _cmd_audit}[args.command](args)

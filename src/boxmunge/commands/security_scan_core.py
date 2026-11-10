@@ -23,12 +23,14 @@ from boxmunge.commands.security_scan_inputs import (
     hardening_profile,
     identify,
     load_all_suppressions,
+    load_prior_decisions,
     load_project_meta,
     load_user_model,
 )
 from boxmunge.commands.security_enforce import (
     Enforcement,
     announce_quarantine,
+    clears_quarantine,
     enforce,
     headline_of,
     raise_enforcement_error,
@@ -48,8 +50,7 @@ from boxmunge.cve.relevance import (
 )
 from boxmunge.cve.scan_state import (
     BASIS_CONTAINERS,
-    decisions_from_scan_state,
-    read_scan_state,
+    ScanStateWriteError,
     write_scan_state,
 )
 from boxmunge.cve.suppressions import Suppression
@@ -63,7 +64,6 @@ from boxmunge.cve.scanner import (
 from boxmunge.fileutil import project_lock
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
-from boxmunge.state import StateError
 
 
 # Per-project aggregate scan budget.
@@ -108,6 +108,13 @@ class ProjectScan:
     # Host-scope suppressions that expired since the last scan; the fleet
     # run alerts them once rather than once per project (audit B-14).
     host_expired: tuple[Suppression, ...] = ()
+    # Set when the scan ran and was acted on but its result could not be
+    # written (ScanStateWriteError); the fleet run fails and alerts on it.
+    record_error: str | None = None
+    # The CVE whose quarantine this scan lifted, or why a quarantine it
+    # cleared was kept (security_enforce).
+    lifted: str | None = None
+    kept: str | None = None
 
     @property
     def unidentified_services(self) -> tuple[str, ...]:
@@ -192,27 +199,6 @@ def scan_one_project(
             paths, project, in_grace=in_grace, audit_only=audit_only, kev=kev,
             defer_new=defer_new,
         )
-
-
-def _prior_decisions(paths: BoxPaths, project: str) -> tuple[ProjectDecision, ...]:
-    """The previous scan's decisions, for transition detection."""
-    try:
-        prior_state = read_scan_state(paths.project_scan_state(project))
-        if prior_state is None:
-            return ()
-        return decisions_from_scan_state(prior_state, project_name=project)
-    except (StateError, ValueError, KeyError, TypeError, AttributeError) as e:
-        # Audit B-12: a truncated or hand-mangled file (JSON errors are
-        # ValueErrors) must not stop this project's scan, let alone the
-        # fleet's; this scan overwrites it.
-        # A malformed prior state shouldn't block the scan; log and treat
-        # as "no prior" (alerts will be emitted as if first scan).
-        log_warning(
-            "cve-scan",
-            f"ignoring unreadable prior scan state for {project}: {e}",
-            paths, project=project,
-        )
-        return ()
 
 
 def _scan_targets(
@@ -342,7 +328,7 @@ def audit_targets(
     results, failed, skipped, warnings = _scan_targets(paths, project, targets)
     decisions = _evaluate(paths, project, meta, profile, supps, results, kev)
     return ProjectScan(
-        project=project, posture=meta.posture_str, dangerously=meta.dangerously,
+        project=project, posture=meta.posture.value, dangerously=meta.dangerously,
         decisions=tuple(decisions),
         warnings=tuple(_unscanned(unidentified=unidentified) + warnings),
         failed_images=tuple(failed), skipped_images=tuple(skipped),
@@ -369,7 +355,7 @@ def scan_one_project_locked(
 
     # Load the prior scan_state BEFORE we overwrite it (transition alerts).
     scan_state_path = paths.project_scan_state(project)
-    prior_decisions = _prior_decisions(paths, project)
+    prior_decisions = load_prior_decisions(paths, project)
 
     inventory = identify(paths, project, meta)
     targets, unidentified = inventory.targets, inventory.unidentified
@@ -382,17 +368,19 @@ def scan_one_project_locked(
     if not targets:
         # Persist an empty scan-state so we don't wedge the per-project view.
         # Audit-only (resume re-scan, audit A-3) leaves the prior alone.
+        record_error = None
         if not audit_only:
             outcome = _enforce(paths, project, meta, None, in_grace=in_grace)
-            write_scan_state(
+            record_error = _record(
                 scan_state_path, decisions=(),
                 unscanned=tuple(_unscanned(unidentified=unidentified)), **basis,
             )
-            raise_enforcement_error(outcome.error)
+            raise_enforcement_error(outcome.error, record_error)
         return ProjectScan(
-            project=project, posture=meta.posture_str, dangerously=dangerously,
+            project=project, posture=meta.posture.value, dangerously=dangerously,
             decisions=(), warnings=tuple(warnings),
-            unidentified=tuple(unidentified.items()), **basis,
+            unidentified=tuple(unidentified.items()), record_error=record_error,
+            **basis,
         )
 
     results, failed, skipped, scan_warnings = _scan_targets(paths, project, targets)
@@ -402,11 +390,16 @@ def scan_one_project_locked(
     headline = headline_of(decisions)
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow
     # itself and never act. Everyone else enforces: an existing quarantine
-    # is re-asserted on every scan (B-03), a new one fires outside grace.
+    # is re-asserted on every scan (B-03) unless this scan cleared it, a new
+    # one fires outside grace.
     outcome = Enforcement()
     if not audit_only:
+        cleared = clears_quarantine(
+            meta.posture, decisions, complete=not (failed or skipped or unidentified),
+            kev_fresh=not kev.is_stale(_today()))
         outcome = _enforce(
             paths, project, meta, headline, in_grace=in_grace or defer_new,
+            cleared=tuple(decisions) if cleared else None,
         )
 
     if failed and not decisions:
@@ -415,8 +408,11 @@ def scan_one_project_locked(
             f"All images failed to scan for project {project!r}{detail}"
         )
 
+    # A write failure must not discard the scan: enforcement has run, and the
+    # alerts below still have to fire; the failure is reported with the result.
+    record_error = None
     if not audit_only:
-        write_scan_state(
+        record_error = _record(
             scan_state_path, decisions=tuple(decisions),
             unscanned=tuple(_unscanned(failed, skipped, unidentified)), **basis,
         )
@@ -431,12 +427,13 @@ def scan_one_project_locked(
         host_expired = _emit_transition_alerts(
             paths, project, decisions, prior_decisions, supps,
         )
-    raise_enforcement_error(outcome.error)
+    raise_enforcement_error(outcome.error, record_error)
 
     return ProjectScan(
         project=project,
-        posture=meta.posture_str,
+        posture=meta.posture.value,
         dangerously=dangerously,
+        record_error=record_error,
         decisions=tuple(decisions),
         warnings=tuple(warnings),
         failed_images=tuple(failed),
@@ -445,17 +442,29 @@ def scan_one_project_locked(
         **basis,
         headline=headline,
         host_expired=host_expired,
+        lifted=outcome.lifted,
+        kept=outcome.kept,
     )
+
+
+def _record(path, **kwargs) -> str | None:
+    """write_scan_state; the error text when the result could not be
+    written, so the caller finishes enforcing and alerting first."""
+    try:
+        write_scan_state(path, **kwargs)
+    except ScanStateWriteError as e:
+        return str(e)
+    return None
 
 
 def _enforce(
     paths: BoxPaths, project: str, meta: ProjectMeta,
     headline: tuple[ProjectDecision, FindingDisposition] | None,
-    *, in_grace: bool,
+    *, in_grace: bool, cleared: tuple[ProjectDecision, ...] | None = None,
 ) -> Enforcement:
     return enforce(
         paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
-        policy=meta.policy(), headline=headline, in_grace=in_grace,
+        policy=meta.policy(), headline=headline, in_grace=in_grace, cleared=cleared,
     )
 
 

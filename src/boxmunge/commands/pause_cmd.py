@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import sys
 
+from boxmunge.commands import pause_snapshot
+from boxmunge.commands.confirm import confirm
+from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import compose_stop, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, atomic_write_text, project_lock
 from boxmunge.legacy_stage import refuse_if_legacy_stage
@@ -15,7 +18,9 @@ from boxmunge.pause import (
     render_maintenance_caddy_config, write_paused_state,
 )
 from boxmunge.paths import BoxPaths
+from boxmunge.release_txn import open_install_reason
 from boxmunge.staged_release import SlotError, clear_production_stopped
+from boxmunge.state import StateError
 
 
 def run_pause(
@@ -23,6 +28,7 @@ def run_pause(
     paths: BoxPaths,
     yes: bool = False,
     reason: str | None = None,
+    no_snapshot: bool = False,
 ) -> int:
     """pause: confirm, take the project lock and pause. Returns 0 on
     success, 1 on failure.
@@ -36,7 +42,8 @@ def run_pause(
         print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
         return 1
 
-    if _refuse_if_already_paused(project_name, paths):
+    if _refuse_if_already_paused(project_name, paths) \
+            or _refuse_if_installing(project_name, paths):
         return 1
 
     hosts = _manifest_hosts(project_name, paths)
@@ -48,14 +55,13 @@ def run_pause(
         print(f"  - Visitors to {', '.join(hosts)} see a maintenance page")
         print(f"  - Containers stopped (state preserved)")
         print(f"  - Health checks, backups, container-updates skip this project")
-        response = input("\nProceed? [y/N] ")
-        if response.lower() != "y":
-            print("Aborted.")
+        print(f"  - {pause_snapshot.plan_line(paths, project_name, no_snapshot)}")
+        if not confirm("pause"):
             return 1
 
     try:
         with project_lock(project_name, paths):
-            return pause_locked(project_name, paths, reason)
+            return pause_locked(project_name, paths, reason, no_snapshot)
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
@@ -65,10 +71,24 @@ def _refuse_if_already_paused(project_name: str, paths: BoxPaths) -> bool:
     """A completed pause refuses; an incomplete one is finished by pausing
     again."""
     if is_paused(project_name, paths) and pause_action_complete(project_name, paths):
-        print(f"ERROR: Project '{project_name}' is already paused.",
-              file=sys.stderr)
+        print(f"ERROR: Project '{project_name}' is already paused. Run "
+              f"`boxmunge resume {project_name}` to bring it back.", file=sys.stderr)
         return True
     return False
+
+
+def _refuse_if_installing(project_name: str, paths: BoxPaths) -> bool:
+    """An open install (release_txn) refuses a pause. Every way out of it is
+    a deploy, a rollback or an abandon, and a pause refuses the first two
+    while resume waits for the install: nothing could proceed. The stop
+    would also run the project directory's compose files, the new
+    release's, over the old release's containers."""
+    reason = open_install_reason(paths, project_name)
+    if reason is None:
+        return False
+    print(f"ERROR: Cannot pause '{project_name}' while its install is open: {reason}. "
+          f"Pause it once that is done.", file=sys.stderr)
+    return True
 
 
 def _manifest_hosts(project_name: str, paths: BoxPaths) -> list[str] | None:
@@ -86,10 +106,13 @@ def _manifest_hosts(project_name: str, paths: BoxPaths) -> list[str] | None:
     return hosts
 
 
-def pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int:
+def pause_locked(project_name: str, paths: BoxPaths, reason: str | None,
+                 no_snapshot: bool = False) -> int:
     """The pause core. Caller holds the project lock; never takes it.
 
-    The pause record is written first, marked incomplete, so automation
+    A new pause first snapshots the running project (pause_snapshot) unless
+    `no_snapshot`, and refuses, changing nothing, if that fails. The pause
+    record is written next, marked incomplete, so automation
     (health checks, backups, updates, upgrade restarts) leaves the project
     alone from the start. It is marked complete only once the maintenance
     page is live, the containers are stopped and their restart policies
@@ -102,18 +125,28 @@ def pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int:
         return 1
     if refuse_if_legacy_stage(paths, project_name):
         return 1
-    # Re-check under the lock: a pause may have landed while the operator
-    # was answering the prompt.
-    if _refuse_if_already_paused(project_name, paths):
+    # Re-check under the lock: a pause or an install may have landed while
+    # the operator was answering the prompt.
+    if _refuse_if_already_paused(project_name, paths) \
+            or _refuse_if_installing(project_name, paths):
         return 1
     hosts = _manifest_hosts(project_name, paths)
     if hosts is None:
         return 1
 
-    if is_paused(project_name, paths):
+    finishing = is_paused(project_name, paths)
+    if finishing:
         print(f"Finishing the incomplete pause of '{project_name}'...")
-    else:
-        write_paused_state(project_name, paths, reason=reason)
+    try:
+        snap = (pause_snapshot.for_finishing if finishing else pause_snapshot.take)(
+            paths, project_name, no_snapshot)
+    except (pause_snapshot.PauseRefused, DockerError, ManifestError,
+            ReleaseStateError, StateError) as e:
+        print(f"ERROR: Cannot pause '{project_name}': {e}.", file=sys.stderr)
+        return 1
+    if not finishing:
+        write_paused_state(project_name, paths, reason=reason,
+                           snapshot=snap.as_record() if snap is not None else None)
 
     # Swap Caddy site config BEFORE stopping containers — visitors should
     # never see "504 Bad Gateway" between container stop and config swap.
@@ -136,6 +169,8 @@ def pause_locked(project_name: str, paths: BoxPaths, reason: str | None) -> int:
     except DockerError as e:
         return _pause_incomplete(
             project_name, paths, f"stopping the containers failed: {e}")
+    if snap is not None:
+        pause_snapshot.record(paths, project_name, snap)
     _take_over_copy_stop(project_name, paths)
     # Keep it stopped across a Docker restart or reboot (B-19 for pause).
     try:
@@ -182,7 +217,7 @@ def _pause_incomplete(project_name: str, paths: BoxPaths, what: str) -> int:
 def cmd_pause(args: list[str]) -> None:
     from boxmunge.commands.argv import parse_args, require_project_name
     parsed = parse_args(
-        "pause", args, flags={"--yes"}, options={"--reason"},
+        "pause", args, flags={"--yes", "--no-snapshot"}, options={"--reason"},
         min_positional=1, max_positional=1,
     )
     project = require_project_name("pause", parsed.positional[0])
@@ -190,4 +225,5 @@ def cmd_pause(args: list[str]) -> None:
     reason = parsed.get("--reason")
 
     paths = BoxPaths()
-    sys.exit(run_pause(project, paths, yes=yes, reason=reason))
+    sys.exit(run_pause(project, paths, yes=yes, reason=reason,
+                       no_snapshot=parsed.has("--no-snapshot")))

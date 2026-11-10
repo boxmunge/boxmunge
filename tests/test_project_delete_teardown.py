@@ -231,3 +231,20 @@ def test_emptied_dirs_are_removed_even_when_unreadable(box, monkeypatch):
         if (pdir / "pgdata").exists():
             (pdir / "pgdata").chmod(0o755)
     assert not pdir.exists()
+
+
+class TestKeptVolumes:
+    def test_names_the_kept_volumes_and_how_to_remove_them(self, box, monkeypatch, capsys):
+        monkeypatch.setattr("boxmunge.docker_containers.project_volumes",
+                            lambda p: [f"{p}_pgdata"] if p == NAME else [])
+        assert _delete(box, MagicMock()) == 0
+        out = capsys.readouterr().out
+        assert "Docker volumes are kept, with their data: myapp_pgdata" in out
+        assert "docker volume rm myapp_pgdata" in out
+
+    def test_an_unlistable_volume_set_is_a_warning_not_a_failure(self, box, monkeypatch, capsys):
+        def boom(p):
+            raise DockerError("daemon unreachable")
+        monkeypatch.setattr("boxmunge.docker_containers.project_volumes", boom)
+        assert _delete(box, MagicMock()) == 0
+        assert "could not list the project's Docker volumes" in capsys.readouterr().out

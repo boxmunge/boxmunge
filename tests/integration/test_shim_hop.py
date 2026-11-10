@@ -9,8 +9,11 @@ checks the shim it leaves installed, and that the new shim, once installed,
 waits for the old shim's upgrade (which locks only the legacy upgrade.lock).
 
 The old shims in old_shims/ are copies of released files: v0.10.1 (the
-latest release before the shim was split, identical to main at the time)
-and v0.6.3 (from before the shim re-ran install.sh).
+latest release before the shim was split, identical to main at the time),
+v0.10.0 (the last to run install.sh without --upgrade-shim) and v0.6.3 (from
+before the shim re-ran install.sh). v0.10.1's and v0.10.0's build the new venv
+without requirements-mcp.txt, so the hop also checks that install.sh completes
+that venv before the swap, and leaves the previous release alone.
 """
 from __future__ import annotations
 
@@ -69,6 +72,8 @@ def test_bundle_ships_one_self_contained_shim(bundle: Path) -> None:
 @pytest.mark.parametrize(("old_shim", "mode"), [
     ("boxmunge-upgrade-v0.10.1", "ok"),
     ("boxmunge-upgrade-v0.10.1", "fail"),
+    ("boxmunge-upgrade-v0.10.0", "ok"),
+    ("boxmunge-upgrade-v0.10.0", "fail"),
     ("boxmunge-upgrade-v0.6.3", "ok"),
     ("boxmunge-upgrade-v0.6.3", "fail"),
 ])
@@ -102,3 +107,11 @@ def test_old_shim_hop_leaves_a_working_shim(bundle: Path, old_shim: str, mode: s
         assert "Failed to download bundle" in facts["target_out"], log
     if mode == "ok" and not old_shim.endswith("v0.6.3"):
         assert facts["LEFTOVER_LIBS"] == "no", log
+        # Both build the standby without requirements-mcp.txt, and v0.10.0
+        # runs install.sh without --upgrade-shim. This release's install.sh
+        # puts MCP into that slot, the one that goes live, and leaves the
+        # previous release (the rollback target) alone: nothing installed
+        # into it, and the version recorded only by the new release's apply.
+        assert facts["MCP_INSTALLED_BY"] == "/opt/boxmunge/env-b/bin/pip,", log
+        assert facts["ENV_A_PIP_CALLS"] == "0", log
+        assert facts["VERSION"] == "1.4.0", log

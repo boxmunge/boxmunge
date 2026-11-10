@@ -90,8 +90,8 @@ that would not merge.
 
 ### Paths that need maintainer review
 
-Some paths are security-sensitive and always need review from a maintainer (enforced by
-`.github/CODEOWNERS`): the restricted shell and bundle reception, bootstrap and install scripts,
+Some paths are security-sensitive, and the maintainer reviews every change to them (they are listed
+in `.github/CODEOWNERS`): the restricted shell and bundle reception, bootstrap and install scripts,
 the upgrade shim, CI workflows, the CVE policy engine, the container security overlay and compose
 validation, and secrets handling. Changes there are welcome. Expect a slower, more careful review.
 
@@ -144,10 +144,30 @@ pip install --require-hashes -r requirements-tui.txt
 pip install --require-hashes -r requirements-dev.txt
 pip install -e . --no-deps
 make lint              # ruff
-make test              # server unit tests (fast, no Docker)
+make test              # server unit tests, in parallel (no Docker)
 make test-cli          # client unit tests
 make test-integration  # integration tests (needs Docker and age)
 ```
+
+### The fast loop
+
+The full unit suite is over 7,000 tests. Run it once before you push, in parallel, and iterate on
+the tests you are changing:
+
+```bash
+pytest tests/test_thing.py -q -x            # the tests for what you are changing, stop at the first failure
+pytest tests/ -q -k "rollback and not git"  # or select by name
+pytest tests/ -q --lf -n auto               # rerun only what failed last time
+make lint && make test                      # before pushing: ruff, then the whole unit suite (-n auto)
+```
+
+`make test` runs one pytest-xdist worker per CPU. On a machine shared with other test runs, cap
+it: `PYTEST_XDIST_AUTO_NUM_WORKERS=8 make test`. `make test-serial` runs without xdist, for `pdb`.
+Every unit test must pass in any order and in any worker: build state under `tmp_path` (never in
+the checkout or a fixed `/tmp` path), use `monkeypatch` for environment and module state, give
+parametrized cases ids that do not depend on set order or the clock, and wait for an event rather
+than for a fixed time. Leave the Docker tiers to CI unless your change touches Docker behaviour:
+they take long locally, and CI runs them on Linux, which is authoritative.
 
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the codebase map, how to add a command, and the
 full-system VM test harness.

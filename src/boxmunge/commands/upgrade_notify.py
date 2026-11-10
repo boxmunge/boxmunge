@@ -27,16 +27,17 @@ def notify_locked_skips(paths: BoxPaths, skipped_locked: list[str]) -> None:
 def notify_refused(paths: BoxPaths, refused: dict[str, str]) -> None:
     """One priority-1 alert per upgrade naming every refused project.
 
-    One summary rather than one alert per project; the dry run never
-    alerts, so an upgrade alerts once, and again on a later upgrade only
-    while the compose.yml is still refused.
+    One summary rather than one alert per project (refused by the compose
+    validator or the start checks, or a stopped project whose overlay could
+    not be regenerated); the dry run never alerts, so an upgrade alerts
+    once, and again on a later upgrade only while the cause remains.
     """
     if not refused:
         return
     from boxmunge.notify import notify
     lines = "\n".join(f"- {name}: {why}" for name, why in sorted(refused.items()))
-    notify(paths, "upgrade — compose refused",
-           f"The upgrade's compose validator refused {len(refused)} project(s). "
-           f"They keep their previous configs and running containers and were "
-           f"not restarted. Fix compose.yml and redeploy:\n{lines}",
+    notify(paths, "upgrade — projects refused",
+           f"The upgrade refused {len(refused)} project(s). They keep their "
+           f"previous configs and containers and were not restarted. Fix the "
+           f"cause each line names and redeploy:\n{lines}",
            component="upgrade", priority=1)

@@ -1,8 +1,9 @@
 """Failure reports cannot be multiplied, are bounded, and the schema migrates.
 
 Auto-trip lets public, unauthenticated reports withhold a release fleetwide,
-so a report must count once per reporter (an IPv4 address or an IPv6 /64, as
-the rate limiter groups them) and only for versions the service publishes.
+so a report must count once per reporter (an IPv4 /24 or an IPv6 /48, the
+network prefix the service stores instead of an address) and only for
+versions the service publishes.
 """
 
 import json
@@ -22,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import db_schema  # noqa: E402
 import failure_store  # noqa: E402
+import retention  # noqa: E402
 
 SERVICE_DIR = Path(__file__).parent.parent
 
@@ -75,17 +77,24 @@ def _held(client):
 
 
 class TestReporterIdentity:
-    def test_addresses_in_one_ipv6_slash_64_count_once(self, make_client, tmp_path):
+    @pytest.mark.parametrize("first, second, prefix", [
+        ("2001:db8:0:1::1", "2001:db8:0:2::2", "2001:db8::/48"),
+        ("198.51.100.1", "198.51.100.200", "198.51.100.0/24"),
+    ])
+    def test_addresses_in_one_network_count_once(self, make_client, tmp_path,
+                                                 first, second, prefix):
         client = make_client(threshold="2")
-        assert _post(client, "2001:db8::1").status_code == 204
-        assert _post(client, "2001:db8::2").status_code == 204
-        assert _rows(tmp_path / "checks.db") == [("0.2.1", "2001:db8::/64")]
+        assert _post(client, first).status_code == 204
+        assert _post(client, second).status_code == 204
+        assert _rows(tmp_path / "checks.db") == [("0.2.1", prefix)]
         assert _held(client) is None
 
-    def test_distinct_slash_64s_are_distinct_reporters(self, make_client, tmp_path):
+    @pytest.mark.parametrize("first, second", [
+        ("2001:db8:1::1", "2001:db8:2::1"), ("198.51.100.1", "198.51.101.1")])
+    def test_distinct_networks_are_distinct_reporters(self, make_client, first, second):
         client = make_client(threshold="2")
-        _post(client, "2001:db8:0:1::1")
-        _post(client, "2001:db8:0:2::1")
+        _post(client, first)
+        _post(client, second)
         assert _held(client) == [{"version": "0.2.1", "reason": "circuit_breaker"}]
 
     def test_one_address_counts_once_across_the_auto_trip_window(self, make_client, tmp_path):
@@ -102,6 +111,51 @@ class TestReporterIdentity:
         assert len(_rows(tmp_path / "checks.db")) == 1
         assert _held(client) is None
 
+    def test_different_failures_from_one_network_are_all_kept(self, make_client, tmp_path):
+        """VC-6: one /48 can hold many customers' boxes. A second box failing
+        differently must not lose its detail to the first box's report, and
+        the network still counts once towards auto-trip."""
+        client = make_client(threshold="2")
+        for addr, stage, detail in (("2001:db8:0:1::1", "apply", "install_sh_exit_100"),
+                                    ("2001:db8:0:2::1", "preflight", "cosign_verify"),
+                                    ("2001:db8:0:3::1", "apply", "install_sh_exit_100")):
+            body = {**_report(stage=stage), "detail": detail}
+            assert client.post("/v1/report-failure", json=body, environ_base=PROXY,
+                               headers={"X-Forwarded-For": addr}).status_code == 204
+        assert _rows(tmp_path / "checks.db", "stage, detail") == [
+            ("apply", "install_sh_exit_100"), ("preflight", "cosign_verify")]
+        assert _held(client) is None
+        summary = client.get("/v1/failures?version=0.2.1").get_json()
+        assert (summary["total"], summary["reporters"]) == (2, 1)
+
+    def test_one_network_stores_a_bounded_number_of_reports(self, make_client, tmp_path):
+        make_client()
+        db_path, now = tmp_path / "checks.db", datetime.now(timezone.utc)
+        stored = [failure_store.record_failure(db_path, "0.2.1", "0.2.0", "apply",
+                                               "198.51.100.0/24", now, f"reason {n}")
+                  for n in range(failure_store.REPORTS_PER_REPORTER + 3)]
+        assert stored == [True] * failure_store.REPORTS_PER_REPORTER + [False] * 3
+
+    def test_box_ids_never_count_towards_auto_trip(self, make_client):
+        """A box ID is whatever the sender puts in the body, so it is forgeable:
+        counting it would let one network hold a release fleet-wide. Only the
+        network prefix of the connection counts."""
+        client = make_client(threshold="2")
+        for n in range(3):
+            body = {**_report(), "box_id": f"box-{n}", "detail": f"failure {n}"}
+            client.post("/v1/report-failure", json=body, environ_base=PROXY,
+                        headers={"X-Forwarded-For": f"198.51.100.{n + 1}"})
+        assert _held(client) is None
+
+    def test_enabling_auto_trip_warns_in_the_service_log(self, make_client, capsys):
+        make_client(threshold="3")
+        err = capsys.readouterr().err
+        assert "CIRCUIT_BREAKER_AUTO_THRESHOLD=3" in err and "unauthenticated" in err
+
+    def test_auto_trip_off_says_nothing(self, make_client, capsys):
+        make_client()
+        assert "CIRCUIT_BREAKER_AUTO_THRESHOLD" not in capsys.readouterr().err
+
     def test_concurrent_reports_from_one_reporter_store_one_row(self, make_client, tmp_path):
         make_client()  # creates the schema
         db_path = tmp_path / "checks.db"
@@ -112,7 +166,7 @@ class TestReporterIdentity:
         def report():
             barrier.wait()
             results.append(failure_store.record_failure(
-                db_path, "0.2.1", "0.2.0", "apply", "198.51.100.1", now))
+                db_path, "0.2.1", "0.2.0", "apply", "198.51.100.0/24", now))
 
         threads = [threading.Thread(target=report) for _ in range(8)]
         for t in threads:
@@ -151,19 +205,30 @@ def _insert_aged(db_path, *ages_and_reporters):
 
 
 AGED = (
-    (failure_store.RETENTION + timedelta(minutes=1), None),          # expired
-    (failure_store.RETENTION - timedelta(days=1), None),             # kept
-    (failure_store.REPORT_WINDOW + timedelta(minutes=1), "198.51.100.7"),  # forgotten
-    (failure_store.REPORT_WINDOW - timedelta(minutes=1), "198.51.100.8"),  # still deduping
+    (failure_store.RETENTION + timedelta(minutes=1), "198.51.7.0/24"),   # expired
+    (failure_store.RETENTION - timedelta(days=1), "198.51.8.0/24"),      # kept
+    (failure_store.REPORT_WINDOW + timedelta(minutes=1), "198.51.9.0/24"),  # kept
 )
-SWEPT = [(None,), (None,), ("198.51.100.8",)]
+SWEPT = [("198.51.8.0/24",), ("198.51.9.0/24",)]
 
 
 class TestRetention:
-    def test_sweep_expires_reports_and_forgets_reporters(self, migrated_db):
+    def test_sweep_expires_reports_and_keeps_the_rest_with_their_prefix(self, migrated_db):
         _insert_aged(migrated_db, *AGED)
-        failure_store.sweep(migrated_db, datetime.now(timezone.utc))
+        retention.sweep(migrated_db, datetime.now(timezone.utc))
         assert _rows(migrated_db, "reporter") == SWEPT
+
+    def test_a_reporter_outside_the_window_may_report_again(self, make_client, tmp_path):
+        client = make_client()
+        _post(client, "198.51.100.1")
+        conn = sqlite3.connect(tmp_path / "checks.db")
+        conn.execute("UPDATE failures SET reported_at = ?",
+                     ((datetime.now(timezone.utc) - failure_store.REPORT_WINDOW
+                       - timedelta(minutes=1)).isoformat(),))
+        conn.commit()
+        conn.close()
+        _post(client, "198.51.100.1")
+        assert len(_rows(tmp_path / "checks.db")) == 2
 
     def test_pre_start_step_sweeps(self, migrated_db):
         _insert_aged(migrated_db, *AGED)
@@ -173,7 +238,7 @@ class TestRetention:
 
     def test_workers_sweep_without_waiting_for_reports(self, migrated_db):
         _insert_aged(migrated_db, *AGED)
-        sweeper = failure_store.Sweeper(migrated_db, timedelta(milliseconds=10))
+        sweeper = retention.Sweeper(migrated_db, timedelta(milliseconds=10))
         sweeper.start()
         try:
             deadline = time.monotonic() + 5
@@ -185,23 +250,19 @@ class TestRetention:
 
     def test_app_starts_a_sweeper(self, make_client):
         client = make_client()
-        sweeper = client.application.extensions["failure_sweeper"]
-        assert sweeper.interval == failure_store.SWEEP_INTERVAL
+        sweeper = client.application.extensions["retention_sweeper"]
+        assert sweeper.interval == retention.SWEEP_INTERVAL
         assert sweeper._thread.is_alive()
 
     def test_privacy_statement_matches_retention(self):
         """static/index.html is the published promise about reporter data."""
         text = " ".join((SERVICE_DIR / "static" / "index.html").read_text().split())
-        assert failure_store.REPORT_WINDOW == timedelta(hours=6)
         assert failure_store.RETENTION == timedelta(days=90)
-        # Discarded by the next sweep after the window: about six hours.
-        assert failure_store.SWEEP_INTERVAL <= timedelta(minutes=5)
-        assert "is kept for about six hours, then discarded" in text
-        assert "/64" in text
+        assert retention.SWEEP_INTERVAL <= timedelta(minutes=5)
         assert "deleted after 90 days" in text
 
     @pytest.mark.parametrize("sql", [
-        failure_store.DUPLICATE_SQL, failure_store.FORGET_SQL,
+        failure_store.WINDOW_SQL,
         failure_store.EXPIRE_SQL, failure_store.COUNT_SQL,
     ])
     def test_report_queries_use_an_index(self, make_client, tmp_path, sql):
@@ -247,7 +308,7 @@ class TestSchemaMigration:
         self._legacy_db(db_path)
         db_schema.migrate(db_path)
         assert _rows(db_path) == [
-            ("0.2.1", "2001:db8::/64"), ("0.2.1", "198.51.100.4"), ("0.2.1", None),
+            ("0.2.1", "2001:db8::/48"), ("0.2.1", "198.51.100.0/24"), ("0.2.1", None),
             ("0.2.1", None)]
         conn = sqlite3.connect(db_path)
         try:
@@ -273,10 +334,10 @@ class TestSchemaMigration:
         assert ("index", "failures_by_reporter") in schema(fresh)
 
     def test_migrate_is_idempotent(self, migrated_db):
-        failure_store.record_failure(migrated_db, "0.2.1", "0.2.0", "apply", "198.51.100.1",
+        failure_store.record_failure(migrated_db, "0.2.1", "0.2.0", "apply", "198.51.100.0/24",
                                      datetime.now(timezone.utc))
         db_schema.migrate(migrated_db)
-        assert _rows(migrated_db) == [("0.2.1", "198.51.100.1")]
+        assert _rows(migrated_db) == [("0.2.1", "198.51.100.0/24")]
 
     def test_newer_database_refuses_to_migrate(self, migrated_db):
         conn = sqlite3.connect(migrated_db)
@@ -319,3 +380,11 @@ class TestWorkersDoNotMigrate:
         assert argv[:2] == ["sh", "-c"]
         assert argv[2].startswith(f"python db_schema.py {app.DB_PATH} && exec gunicorn ")
         assert "--preload" not in argv[2]
+
+    def test_image_copies_every_service_module(self):
+        """A module left out of the COPY line imports fine here and crashes
+        every worker in the image."""
+        dockerfile = (SERVICE_DIR / "Dockerfile").read_text().replace("\\\n", " ")
+        copy = next(line for line in dockerfile.splitlines() if line.startswith("COPY admin_auth"))
+        modules = {p.name for p in SERVICE_DIR.glob("*.py")}
+        assert modules <= set(copy.split()), modules - set(copy.split())

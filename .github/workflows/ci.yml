@@ -1,7 +1,7 @@
 name: CI
 
-# Runs on every pull request and on every push to main. Branch protection
-# requires these jobs before a PR can merge (see CONTRIBUTING.md).
+# Runs on every pull request and on every push to main. main's ruleset
+# requires the ci-ok job, which passes only when every other job did.
 #
 # Security notes for maintainers reviewing changes to this file:
 # - Trigger is `pull_request`, never `pull_request_target`: fork PRs run with a
@@ -17,15 +17,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # A new push to a pull request cancels its superseded run. A push to main
+  # is a group of its own (its run id): one merge never cancels the run of
+  # the merge before it, so every commit on main is tested.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.13'
       - name: Install pinned tooling
@@ -36,8 +39,8 @@ jobs:
   unit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.13'
       - name: Install pinned dependencies
@@ -47,13 +50,14 @@ jobs:
           pip install --require-hashes -r requirements-dev.txt
           pip install -e . --no-deps
       - name: Server unit tests (includes pinning, file-length, and DCO-script lints)
-        run: python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -m 'not integration' -q
+        # One pytest-xdist worker per CPU; the suite is parallel-safe.
+        run: python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -m 'not integration' -q -n auto
 
   cli:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.13'
       - name: Install pinned client and tooling
@@ -73,8 +77,8 @@ jobs:
   version-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.13'
       - name: Install pinned service and test dependencies
@@ -85,62 +89,184 @@ jobs:
         run: cd services/version-check && python -m pytest tests -q
 
   integration:
+    # Split into shards of whole test files that run in parallel, one runner
+    # (and one Docker daemon) each; tests/shard.py balances them by measured
+    # time. Every shard's job is `integration` to ci-ok.
+    # The heavy Docker jobs always run and report (see arm64). On a pull
+    # request they skip their work only for a change made solely of files no
+    # test of theirs reads: the client, the version-check service,
+    # contributor docs. Any other path runs them, including one added later
+    # and never listed here. A push to main always runs them.
+    name: integration (${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]  # every K of --shard K/3 below
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          # Full history: the scope step compares with the base, and
+          # test_legacy_upgrade.py installs 0.10.1 from `git archive v0.10.1`.
+          fetch-depth: 0
+      - name: Can this change affect the Docker tests?
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        # Only a pull request may skip: a push to main runs these tiers in
+        # full. The same paths as userns-dind's scope step; the unit test
+        # test_nothing_the_docker_tiers_read_depends_on_a_skippable_path keeps
+        # every listed path out of what these tests read.
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "A push to main runs the Docker tests in full."
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bash scripts/ci-scope.sh --outside "$BASE" cli/ services/version-check/ \
+            docs/DEVELOPMENT.md docs/PLUGIN_API.md README.md CONTRIBUTING.md \
+            CODE_OF_CONDUCT.md SECURITY.md INSTALL.md
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        if: steps.scope.outputs.relevant == 'true'
         with:
           python-version: '3.13'
       - name: Install age
+        if: steps.scope.outputs.relevant == 'true'
         run: sudo apt-get update && sudo apt-get install -y age
       - name: Install pinned dependencies
+        if: steps.scope.outputs.relevant == 'true'
         run: |
           # requirements-mcp.txt: every server install includes MCP, and
           # test_mcp_integration.py talks to mcp-serve through it.
           pip install --require-hashes -r requirements.txt -r requirements-mcp.txt
           pip install --require-hashes -r requirements-dev.txt
           pip install -e . --no-deps
-      - name: Fetch the v0.10.1 tag
-        # test_legacy_upgrade.py installs boxmunge 0.10.1 from `git archive
-        # v0.10.1`; the checkout above is depth 1 with no tags.
-        run: git fetch --no-tags --depth=1 origin refs/tags/v0.10.1:refs/tags/v0.10.1
       - name: Integration tests (real Docker)
+        if: steps.scope.outputs.relevant == 'true'
         env:
           # Turn "prerequisite missing" into a failure instead of a silent skip.
           BOXMUNGE_REQUIRE_INTEGRATION: '1'
         # Selects every test marked `integration`, wherever it lives.
-        run: python -m pytest tests/ --ignore=tests/vm -m "integration and not userns_dind" -q
+        run: >-
+          python -m pytest tests/ --ignore=tests/vm -m "integration and not userns_dind" -q
+          --shard ${{ matrix.shard }}/3 --durations=15
+
+  arm64:
+    # boxmunge supports arm64 hosts. Builds the system image natively on
+    # arm64 (age and rclone are pinned per architecture), also through its
+    # compose file as install.sh does, runs its tools, decrypts a snapshot
+    # made by age 1.2.1 with them, and installs and runs the pinned arm64
+    # cosign through bootstrap/cosign.sh, the library install.sh sources.
+    # A required check: the job always runs and reports, and does its work
+    # only when the change touches what it tests (scripts/ci-touches.sh). No
+    # workflow `paths:` filter or job `if:`, which would leave the check
+    # waiting forever on every other PR.
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+      - name: Does this change touch the system image, the installer or CI?
+        id: scope
+        env:
+          # A pull request: its base. A push to main: the commit before it.
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        # relevant=true runs the checks, false skips them; a failing
+        # comparison fails the job rather than skipping (scripts/ci-scope.sh).
+        run: >-
+          bash scripts/ci-scope.sh "$BASE" system/ install.sh bootstrap/ scripts/
+          .github/workflows/ tests/fixtures/age-v1.2.1/
+      - name: Build the system image
+        if: steps.scope.outputs.relevant == 'true'
+        run: docker build -t boxmunge-system:ci system/
+      - name: Build it through system/compose.yml, as install.sh does
+        if: steps.scope.outputs.relevant == 'true'
+        run: BOXMUNGE_UID=1000 BOXMUNGE_GID=1000 docker compose -f system/compose.yml build
+      - name: age and rclone run in it, as arm64 binaries
+        if: steps.scope.outputs.relevant == 'true'
+        run: |
+          test "$(docker run --rm --entrypoint uname boxmunge-system:ci -m)" = aarch64
+          docker run --rm --entrypoint age boxmunge-system:ci --version
+          docker run --rm --entrypoint rclone boxmunge-system:ci version
+      - name: Its age decrypts a snapshot made by age 1.2.1
+        if: steps.scope.outputs.relevant == 'true'
+        run: |
+          docker run --rm -v "$PWD/tests/fixtures/age-v1.2.1:/f:ro" --entrypoint age \
+            boxmunge-system:ci --decrypt -i /f/identity.txt -o - /f/snapshot.tar.gz.age \
+            > snapshot.tar.gz
+          sha256sum -c tests/fixtures/age-v1.2.1/snapshot.tar.gz.sha256
+      - name: The pinned arm64 cosign downloads, matches its hash and runs
+        if: steps.scope.outputs.relevant == 'true'
+        run: |
+          test "$(dpkg --print-architecture)" = arm64
+          sudo bash -c 'set -euo pipefail; source bootstrap/cosign.sh; install_cosign "$(dpkg --print-architecture)"'
+          cosign version
 
   userns-dind:
     # Tests that remap and restart the Docker daemon. They control dockerd
     # themselves inside a privileged dind container (no systemd there); see
     # tests/integration/userns/run-in-dind.sh. Docker 28 boxes are on the
     # graph driver; Docker 29 boxes may be on either store.
-    runs-on: ubuntu-latest
+    # Pinned: on ubuntu-latest's Ubuntu 26.04 image, the privileged dind
+    # container's root filesystem turns read-only partway through (EROFS on
+    # /etc/docker/daemon.json) and every test after it fails. Boxes run
+    # Debian 13; the runner's OS is only the host for the dind container.
+    # Each daemon runs every test, split into shards as the integration job
+    # is (the migration crash sweeps one per shard: `shard_by_test`), and is
+    # skipped by the same scope rule.
+    name: userns-dind (${{ matrix.daemon.label }}, ${{ matrix.shard }}/3)
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - image: docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+        daemon:
+          - label: docker 29, containerd store
+            image: docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
             prior_store: containerd
-          - image: docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+          - label: docker 29, overlay2
+            image: docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
             prior_store: overlay2
-          - image: docker:28.5.2-dind@sha256:2a232a42256f70d78e3cc5d2b5d6b3276710a0de0596c145f627ecfae90282ac
+          - label: docker 28, overlay2
+            image: docker:28.5.2-dind@sha256:2a232a42256f70d78e3cc5d2b5d6b3276710a0de0596c145f627ecfae90282ac
             prior_store: overlay2
+        shard: [1, 2, 3]  # every K of --shard K/3 below
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+      - name: Can this change affect the Docker tests?
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        # Only a pull request may skip: a push to main runs these tiers in
+        # full. The same paths as integration's scope step; the unit test
+        # test_nothing_the_docker_tiers_read_depends_on_a_skippable_path keeps
+        # every listed path out of what these tests read.
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "A push to main runs the Docker tests in full."
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bash scripts/ci-scope.sh --outside "$BASE" cli/ services/version-check/ \
+            docs/DEVELOPMENT.md docs/PLUGIN_API.md README.md CONTRIBUTING.md \
+            CODE_OF_CONDUCT.md SECURITY.md INSTALL.md
       - name: Remapped-daemon tests (privileged dind)
+        if: steps.scope.outputs.relevant == 'true'
         run: >-
           docker run --rm --privileged
-          -e BOXMUNGE_DIND_PRIOR_STORE=${{ matrix.prior_store }}
-          -v "$PWD:/src:ro" --entrypoint sh "${{ matrix.image }}"
+          -e BOXMUNGE_DIND_PRIOR_STORE=${{ matrix.daemon.prior_store }}
+          -v "$PWD:/src:ro" --entrypoint sh "${{ matrix.daemon.image }}"
           /src/tests/integration/userns/run-in-dind.sh
+          tests/integration/userns --shard ${{ matrix.shard }}/3 --durations=15
 
   dco:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
       - name: Every commit is signed off (git commit -s)
@@ -148,3 +274,21 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
         run: bash scripts/check-dco.sh "$BASE" "$HEAD"
+
+  ci-ok:
+    # The one check main's ruleset requires: it passes only if every job
+    # above succeeded (dco may skip on a push, where it is skipped by design;
+    # scripts/ci-ok.py). Required checks match exact names, and the
+    # sharded matrix jobs' names carry their shard and daemon.
+    # `always()` so a failed or cancelled job fails this check rather than
+    # skipping it. Add every new job to `needs`.
+    if: always()
+    needs: [lint, unit, cli, version-check, integration, userns-dind, dco, arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - name: Every CI job passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          EVENT: ${{ github.event_name }}
+        run: python3 scripts/ci-ok.py

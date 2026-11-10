@@ -8,19 +8,20 @@ its left-open report. The phases and what happens at each failure point are the
 spec's closing table: a failed keep closes the transaction with nothing
 changed; a failed install, hook or config generation leaves it open (rerun,
 --abandon before hook_started, rollback from hook_started on, or a
-different deploy); once replace_release returns, it is closed whatever the
-result. A rerun of the same source and ref resumes from the recorded phase,
+different deploy), and so does a start that stops before `compose up` ran
+(deploy.NotStarted: no container changed, nothing was recorded); once
+replace_release returns, it is closed whatever the result. A rerun of the same source and ref resumes from the recorded phase,
 reusing the recorded snapshot. While a release is staged, a new install
 (fresh or fix-forward) first proves itself disjoint from staging (D8).
 """
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
-from boxmunge.commands.deploy import replace_release, run_pre_deploy_hook
+from boxmunge.commands.deploy import NotStarted, replace_release, run_pre_deploy_hook
 from boxmunge.commands.deploy_steps import snapshot_live_release
 from boxmunge.commands.release_config import (
     ReleaseDecision, decide_release_users, generate_release_config,
@@ -29,7 +30,6 @@ from boxmunge.commands.quarantine_gate import (
     keep_quarantined, manifest_in_force, require_unchanged,
 )
 from boxmunge.crashpoint import crash_point
-from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker_run import DockerError
 from boxmunge.data_dirs import ReleaseStateError, SetAsideError, log_kept, set_aside_announcer
 from boxmunge.intake import IntakeError, report_refusal, validate_release_tree
@@ -43,7 +43,7 @@ from boxmunge.release_keep import (
 from boxmunge.release_target import DeployRefused
 from boxmunge.release_txn import (
     InstallTxn, advance, close_txn, load_txn, open_txn, options_text, stale_reason,
-    start_refusal, supersede_txn,
+    rollback_refused, start_refusal, supersede_txn,
 )
 from boxmunge.staged_release import has_slot, sweep_debris
 from boxmunge.staging_isolation import StagingIsolationError, check_install_isolation
@@ -61,6 +61,7 @@ class TreeDeploy:
     staged_id: str | None = None
     component: str = "deploy"
     no_snapshot: bool = False
+    pull: bool = field(kw_only=True)  # build with --pull (commands/deploy_build)
     on_installed: Callable[[], None] | None = None   # after the code is in place
     on_switched: Callable[[int], None] | None = None  # after replace_release returns
     # A quarantined project's manifest before this install replaced it; set by
@@ -193,7 +194,7 @@ def _decide(project_name: str, paths: BoxPaths, req: TreeDeploy,
     clearance), or the exit code of a refusal (reported)."""
     try:
         return decide_release_users(project_name, paths, req.manifest, req.component,
-                                    req.previous_manifest)
+                                    req.previous_manifest, pull=req.pull)
     except DeployRefused as e:
         print(f"ERROR: {req.ref} cannot start as it is:\n{e}", file=sys.stderr)
         log_error(req.component, f"{req.ref} cannot start as it is: {e}", paths,
@@ -245,12 +246,17 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: I
     if not resumed_switch:
         txn = advance(paths, project_name, txn, "switching")
     else:
-        print(f"Finishing the interrupted install of {req.ref}: production may now run "
-              f"it, so its pre-deploy hook is not run again and no new snapshot is taken.")
+        print(f"Finishing the install of {req.ref} from its switch: its pre-deploy hook has "
+              f"run (and its containers may have started), so the hook is not run again "
+              f"and no new snapshot is taken.")
     crash_point("txn.switching")
-    rc = replace_release(project_name, paths, req.manifest, req.ref, txn.snapshot or None,
-                         component=req.component, txn=txn.id, replaced_ref=txn.replaced_ref,
-                         clearance=decision.clearance)
+    try:
+        rc = replace_release(project_name, paths, req.manifest, req.ref, txn.snapshot or None,
+                             component=req.component, txn=txn.id,
+                             replaced_ref=txn.replaced_ref, clearance=decision.clearance)
+    except NotStarted as e:
+        return report_left_open(project_name, paths, txn, req,
+                                f"its start stopped before `compose up` ran: {e}")
     crash_point("txn.replaced")
     # on_switched must stay the first write after replace_release returns:
     # nothing durable separates the two, so a crash before it is a crash
@@ -266,7 +272,7 @@ def switch_and_close(project_name: str, paths: BoxPaths, req: TreeDeploy, txn: I
 def report_left_open(project_name: str, paths: BoxPaths, txn: InstallTxn, req: TreeDeploy,
                      why: str, rc: int = 1, *, rerun: bool = True) -> int:
     options = options_text(project_name, txn, rerun=rerun,
-                           quarantined=is_quarantined(project_name, paths))
+                           rollback_refused=rollback_refused(paths, project_name))
     print(f"ERROR: The install of {req.ref} stopped at {txn.phase}: {why}. This attempt "
           f"did not start or change production's containers, and other starts of "
           f"{project_name} are refused until this install is finished: {options}.",
@@ -367,7 +373,7 @@ def bundle_resume_problem(project_name: str, paths: BoxPaths, txn: InstallTxn,
 
 
 def resume_without_bundle(project_name: str, paths: BoxPaths, txn: InstallTxn,
-                          ref: str | None, component: str) -> int:
+                          ref: str | None, component: str, *, pull: bool) -> int:
     """`prod-deploy` found no bundle while an install is open: a bundle
     install that reached `installed` resumes from the project dir."""
     problem = bundle_resume_problem(project_name, paths, txn, ref)
@@ -380,4 +386,5 @@ def resume_without_bundle(project_name: str, paths: BoxPaths, txn: InstallTxn,
     except IntakeError as e:
         return report_refusal(e)
     return deploy_tree_locked(project_name, paths, TreeDeploy(
-        tree=None, ref=txn.ref, source="bundle", manifest=manifest, component=component))
+        tree=None, ref=txn.ref, source="bundle", manifest=manifest, component=component,
+        pull=pull))

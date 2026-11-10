@@ -6,7 +6,7 @@ import yaml
 
 from boxmunge.compose import generate_compose_override
 from boxmunge.compose_validate import ComposeSecurityError, validate_user_compose
-from boxmunge.manifest import get_routable_services, load_manifest, validate_manifest
+from boxmunge.manifest import load_manifest, validate_manifest
 from boxmunge.run_as import ServiceUser, effective_user
 from boxmunge.user_entries import USER_ENTRIES
 
@@ -45,7 +45,6 @@ def test_loading_moves_user_entries_out_of_services(tmp_path) -> None:
     path.write_text(yaml.safe_dump(_manifest(**DB_ENTRY)))
     manifest = load_manifest(path)
     assert list(manifest["services"]) == ["web"] and manifest[USER_ENTRIES] == {"db": DB_ENTRY}
-    assert list(get_routable_services(manifest)) == ["web"]
     u = effective_user("db", {"image": "postgres:16"}, manifest, "")
     assert (u.source, u.user) == ("manifest", None)
 

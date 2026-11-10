@@ -1,7 +1,9 @@
 # Docker Compose file for __PROJECT_NAME__
 #
-# boxmunge will generate compose.boxmunge.yml to handle proxy networking.
-# Do NOT add boxmunge-proxy network config here — keep this file portable.
+# boxmunge generates compose.boxmunge.yml on top of this file: the proxy
+# network, env files for the services manifest.yml declares, resource limits
+# and container hardening. Do NOT add boxmunge-proxy network config here —
+# keep this file portable.
 
 services:
   frontend:
@@ -41,7 +43,9 @@ services:
   #   volumes:
   #     - ./data/postgres:/var/lib/postgresql/data
   #   healthcheck:
-  #     test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-app}"]
+  #     # $$ leaves the variable to the container's shell: Compose itself
+  #     # fills ${...} only from the project's .env file.
+  #     test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-app}"]
   #     interval: 10s
   #     timeout: 5s
   #     retries: 3

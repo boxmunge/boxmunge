@@ -8,12 +8,16 @@ registry image behind container-update's back), then inspect them, decide
 each service's user (run_as.effective_user), check what that means for the
 service's data (deploy_checks) and record the decision. Profiled services
 are included: `up <service>` (restore) starts them from the same record.
+
+Builds run with --pull unless the operator passed --no-pull or the command
+is a rollback (deploy_build).
 """
 from __future__ import annotations
 
 from typing import Any
 
 from boxmunge.commands import deploy_checks
+from boxmunge.commands.deploy_build import build_services
 from boxmunge import docker_containers
 from boxmunge.compose_images import built_image_name, is_platform_image
 from boxmunge.docker_containers import ImageFacts, image_facts
@@ -63,17 +67,15 @@ def _pull_again(target: ReleaseTarget, services: dict[str, dict],
 
 
 def build_and_pull(target: ReleaseTarget, services: dict[str, dict],
-                   refetch: frozenset[str] = frozenset()) -> dict[str, str]:
-    """Build, pull what is missing, and pull `refetch` again under candidate
-    names (returned: {service: ref to decide from})."""
+                   refetch: frozenset[str] = frozenset(), *, pull: bool) -> dict[str, str]:
+    """Build (`pull`: with --pull), pull what is missing, and pull `refetch`
+    again under candidate names (returned: {service: ref to decide from})."""
     builds = sorted(n for n, s in services.items() if s.get("build") is not None)
     pulls = sorted(n for n, s in services.items() if s.get("build") is None
                    and isinstance(s.get("image"), str) and not is_platform_image(s["image"]))
     again = sorted(n for n in pulls if n in refetch)
     if builds:
-        print(f"  Building {', '.join(builds)}...")
-        _run([*target.command(), "build", *builds], cwd=target.compose.cwd,
-             timeout=_BUILD_TIMEOUT)
+        build_services(target, builds, pull=pull)
     decided = _pull_again(target, services, again) if again else {}
     rest = [n for n in pulls if n not in refetch]
     if rest:
@@ -125,17 +127,18 @@ def _log_opt_outs(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
 
 
 def prepare_release_users(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, Any], *,
-                          component: str, rollback: bool = False,
+                          component: str, pull: bool, rollback: bool = False,
                           refetch: frozenset[str] = frozenset()) -> dict[str, ServiceUser]:
     """Build/pull, inspect, decide and check every service's user; nothing
     is recorded (record_release_users does, once the release's configs are
-    written). A rollback keeps what the record decided; one with no record
-    only builds and returns {}. `refetch`: services whose registry image is
-    pulled again (a USER change container-update held back). Raises
-    DeployRefused, DockerError or RunAsError (the record cannot be read)."""
+    written). `pull`: build with --pull (build_and_pull). A rollback keeps
+    what the record decided; one with no record only builds and returns {}.
+    `refetch`: services whose registry image is pulled again (a USER change
+    container-update held back). Raises DeployRefused, DockerError or
+    RunAsError (the record cannot be read)."""
     carried = read_users(paths, target.project, staging=target.staging) if rollback else None
     model, services = resolved_services(target)
-    decide_from = build_and_pull(target, services, refetch)
+    decide_from = build_and_pull(target, services, refetch, pull=pull)
     if carried == {}:
         # A rollback of a project whose users no deploy has decided: it
         # goes back to running as its images say, as it did; its next
@@ -151,8 +154,9 @@ def prepare_release_users(paths: BoxPaths, target: ReleaseTarget, manifest: dict
         offset = remap_offset(paths)
     except RemapError as e:
         raise DeployRefused([str(e)]) from e
+    rerun = f"boxmunge rollback {target.project}" if component == "rollback" else None
     refusals, data_warnings = deploy_checks.release_problems(
-        paths, target, model, services, facts, users, offset)
+        paths, target, model, services, facts, users, offset, rerun=rerun)
     for warning in warnings + data_warnings:
         print(f"  WARNING: {warning}")
         log_warning(component, warning, paths, project=target.project)

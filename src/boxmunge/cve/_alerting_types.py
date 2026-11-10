@@ -20,12 +20,18 @@ AlertKind = Literal[
     "suppression_expired",
     "grace_heads_up",
     "kev_stale",
+    "kev_withdrawn",
+    "kev_sources_disagree",
+    "kev_withdrawal_held",
     "scan_failed",
+    "scan_unrecorded",
     "breaker_held",
     "kev_fix_pending",
     "fix_available",
     "kev_at_risk",
     "hardening_upcoming",
+    "awaiting_fix",
+    "quarantine_lifted",
 ]
 
 
