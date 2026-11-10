@@ -52,23 +52,30 @@ def local_base_builds(target: ReleaseTarget) -> frozenset[str]:
     pulling build would build that service again, with --pull). Raises
     DeployRefused for the reverse: a local build on a pulling service."""
     specs = _build_specs(target)
-    local = {n for n, spec in specs.items() if spec.get("pull") is False}
+    # Each local service, and the local context it builds on (None: it
+    # sets pull: false itself).
+    local: dict[str, str | None] = {
+        n: None for n, spec in specs.items() if spec.get("pull") is False}
     grew = True
     while grew:
-        more = {n for n, spec in specs.items()
-                if n not in local and service_contexts(spec) & local}
+        more = {n: sorted(service_contexts(spec) & set(local))[0]
+                for n, spec in specs.items() if n not in local
+                and service_contexts(spec) & set(local)}
         local |= more
         grew = bool(more)
     _refuse_pulling_contexts(specs, local)
     return frozenset(local)
 
 
-def _refuse_pulling_contexts(specs: dict[str, dict], local: set[str]) -> None:
+def _refuse_pulling_contexts(specs: dict[str, dict], local: dict[str, str | None]) -> None:
     """Building a local service builds its `service:` contexts too, without
     --pull, so a pulling context would be built again, over its pulled
     build, on the base images this box already has."""
+    def why(name: str) -> str:
+        via = local[name]
+        return "(compose build.pull: false)" if via is None else f"because it builds on '{via}'"
     problems = [
-        f"'{name}' builds from the local image store (compose build.pull: false) but "
+        f"'{name}' builds from the local image store {why(name)} but "
         f"names '{context}' as a `service:` build context, and '{context}' pulls its "
         f"base images: building '{name}' would build '{context}' again without "
         f"--pull, on the base images this box already has. Set `build: {{pull: false}}` "

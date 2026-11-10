@@ -217,3 +217,19 @@ def test_each_compose_file_is_read_once(paths, monkeypatch) -> None:
                         lambda self, *a, **kw: reads.append(self.name) or real(self, *a, **kw))
     deploy_build.local_base_builds(production_target(paths, "app"))
     assert sorted(reads) == ["compose.yml", "tools.yml"]
+
+
+def test_a_build_local_only_through_its_context_says_so(paths, monkeypatch) -> None:
+    """`web` sets no pull: it builds locally because it builds on `tool`;
+    naming build.pull: false for it would send the operator looking for
+    a setting that is not there."""
+    _calls(monkeypatch)
+    _compose(paths, "services:\n  tool:\n    build:\n      context: .\n      pull: false\n"
+                    "  base:\n    build: .\n"
+                    "  web:\n    build:\n      context: .\n      additional_contexts:\n"
+                    "        tools: 'service:tool'\n        base: 'service:base'\n")
+    with pytest.raises(DeployRefused) as e:
+        deploy_build.local_base_builds(production_target(paths, "app"))
+    [problem] = e.value.problems
+    assert "'web' builds from the local image store because it builds on 'tool'" in problem
+    assert "build.pull: false" not in problem.split(" but ")[0]
