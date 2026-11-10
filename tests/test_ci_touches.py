@@ -230,7 +230,11 @@ NOT_DEPENDENCIES = {
     ("Makefile", "cli/"): "the lint and lock targets; the bundle never reads cli/",
     ("Makefile", "docs/DEVELOPMENT.md"): "a comment on the lock targets",
     ("Makefile", "services/version-check/"): "the lock target only",
+    ("relock-holds.txt", "docs/DEVELOPMENT.md"): "a comment",
     ("scripts/check-dco.sh", "CONTRIBUTING.md"): "named in its error message",
+    ("scripts/lock-freshness.py", "cli/"):
+        "release tooling: CI's unit job runs it on release pull requests, no Docker test does",
+    ("scripts/lock-freshness.py", "docs/DEVELOPMENT.md"): "named in its error message",
     ("scripts/release-lint.py", "services/version-check/"):
         "release tooling: the release workflow and its unit test run it, no Docker test does",
     ("scripts/release-lint.py", "docs/DEVELOPMENT.md"): "named in its error message",
