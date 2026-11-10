@@ -19,6 +19,7 @@ and this module.
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, replace
 from datetime import date, datetime
@@ -28,6 +29,7 @@ from typing import Any
 import yaml
 
 from boxmunge.fileutil import atomic_write_text
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 
 _CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,}$")
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -177,15 +179,15 @@ def load_suppressions(
     "project" — existing callers that read a per-project file get the
     pre-existing behavior unchanged.
     """
-    if not path.exists():
-        return ()
-
     try:
-        text = path.read_text()
-    except OSError as e:
+        # The root scan reads it in a deploy-writable project directory.
+        text = read_text_nofollow_or_none(path)
+    except (OSError, UnicodeDecodeError) as e:
         raise SuppressionsError(
             f"Cannot read suppressions file {path}: {e}"
         ) from e
+    if text is None:
+        return ()
 
     try:
         data = yaml.safe_load(text)
@@ -324,7 +326,7 @@ def remove_suppression(path: Path, cve_id: str) -> Suppression:
     - Empty resulting list is written as `{"suppressions": []}` so the
       file remains as a deliberate "no suppressions" statement.
     """
-    if not path.exists():
+    if not os.path.lexists(path):
         raise SuppressionsError(
             f"Cannot remove {cve_id}: suppressions file does not exist at {path}"
         )
@@ -360,14 +362,14 @@ def _serialise_history(entries: tuple[dict[str, Any], ...]) -> str:
 
 
 def _load_history(path: Path) -> tuple[dict[str, Any], ...]:
-    if not path.exists():
-        return ()
     try:
-        text = path.read_text()
-    except OSError as e:
+        text = read_text_nofollow_or_none(path)
+    except (OSError, UnicodeDecodeError) as e:
         raise SuppressionsError(
             f"Cannot read suppressions history file {path}: {e}"
         ) from e
+    if text is None:
+        return ()
     try:
         data = yaml.safe_load(text)
     except yaml.YAMLError as e:

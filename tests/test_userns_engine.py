@@ -254,6 +254,20 @@ def test_a_failed_backup_stops_before_any_downtime(paths, monkeypatch, tmp_path)
         en._backups(paths, inv)
 
 
+def test_a_pause_record_that_cannot_be_read_stops_before_any_downtime(
+        paths, monkeypatch, tmp_path) -> None:
+    """Not taken for "paused" (which skips the project's backup): read, and
+    refused when it cannot be."""
+    paths.project_dir("shop").mkdir(parents=True)
+    paths.project_manifest("shop").write_text("project: shop\n")
+    paths.project_paused_state("shop").symlink_to(tmp_path / "gone.json")
+    monkeypatch.setattr("boxmunge.commands.backup_cmd.backup_locked",
+                        lambda p, paths, kind: pytest.fail("backed up past the record"))
+    inv = Inventory("overlay2", "", str(tmp_path), "29.9.0", projects=["shop"])
+    with pytest.raises(en.MigrationError, match="symlink.*nothing was stopped"):
+        en._backups(paths, inv)
+
+
 def test_rebuild_resumes_a_volume_part_way(paths, monkeypatch, tmp_path) -> None:
     root = tmp_path / "docker"
     (root / "volumes" / "v" / "_data").mkdir(parents=True)

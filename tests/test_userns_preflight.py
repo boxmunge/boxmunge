@@ -193,6 +193,18 @@ def test_an_open_install_transaction_is_refused(paths, quiet, monkeypatch) -> No
     assert "REFUSED: shop: install open" in text and "REFUSED: shop: old-layout stage" in text
 
 
+@pytest.mark.parametrize("record", ["project_paused_state", "project_quarantine_state"])
+def test_a_lifecycle_record_that_cannot_be_read_is_refused(paths, quiet, tmp_path,
+                                                          record) -> None:
+    """A dangling link at a pause or quarantine record's name is a record
+    that cannot be read: refused, never taken as "not paused" (which would
+    also skip the project's pre-migration backup) or a crash."""
+    getattr(paths, record)("shop").symlink_to(tmp_path / "gone.json")
+    report = _run(paths, _inv(quiet))
+    assert not report.ok and "REFUSED: shop: " in report.text()
+    assert "symlink" in report.text()
+
+
 def test_a_project_without_a_binds_record_is_reported(paths, quiet) -> None:
     uploads = paths.project_dir("shop") / "uploads"
     inv = _inv(quiet, containers=[_container(mounts=[MountEntry(

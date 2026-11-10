@@ -8,6 +8,7 @@ is never extended with a paused field.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from typing import Any
 
@@ -19,8 +20,9 @@ from boxmunge.state import read_state
 
 
 def is_paused(project_name: str, paths: BoxPaths) -> bool:
-    """True if the project has been paused."""
-    return paths.project_paused_state(project_name).exists()
+    """True if the project has been paused: anything is at its record's
+    name, a link included (reading the record then refuses it)."""
+    return os.path.lexists(paths.project_paused_state(project_name))
 
 
 def write_paused_state(
@@ -158,7 +160,7 @@ def read_paused_state(
     object.
     """
     path = paths.project_paused_state(project_name)
-    if not path.exists():
+    if not os.path.lexists(path):
         return None
     return read_state(path)
 

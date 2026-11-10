@@ -26,7 +26,7 @@ from boxmunge.cve.breaker import (
     write_held,
 )
 from boxmunge.cve.policy import Disposition, ProjectDecision
-from boxmunge.cve.quarantine import is_quarantined
+from boxmunge.cve.quarantine import QuarantineError, read_quarantine_state
 from boxmunge.cve.scan_state import decisions_from_scan_state, read_scan_state
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.log import log_operation, log_warning
@@ -58,7 +58,9 @@ def _apply(paths: BoxPaths, project: str, decisions: tuple[ProjectDecision, ...]
         return None
     try:
         with project_lock(project, paths):
-            if is_quarantined(project, paths):
+            # Read, not just looked for: a record that cannot be read (a
+            # dangling link included) is an error, never "already quarantined".
+            if read_quarantine_state(project, paths) is not None:
                 return None  # another run got there first
             meta = load_project_meta(paths, project)
             outcome = enforce(
@@ -67,7 +69,7 @@ def _apply(paths: BoxPaths, project: str, decisions: tuple[ProjectDecision, ...]
             )
     except LockError:
         return "held by another operation; the next scan quarantines it"
-    except (RuntimeError, ManifestError, OSError) as e:
+    except (RuntimeError, ManifestError, OSError, QuarantineError) as e:
         return str(e)
     if outcome.landed:
         announce_quarantine(paths, project, decisions)
@@ -88,10 +90,17 @@ def apply_new_quarantines(
     if in_grace:
         result.held = already
         return result
-    candidates = {
-        name: _candidate(scan.decisions) for name, scan in scans.items()
-        if scan.headline is not None and not is_quarantined(name, paths)
-    }
+    candidates = {}
+    for name, scan in scans.items():
+        if scan.headline is None:
+            continue
+        try:
+            if read_quarantine_state(name, paths) is not None:
+                continue  # already quarantined
+        except QuarantineError as e:
+            result.errors[name] = str(e)
+            continue
+        candidates[name] = _candidate(scan.decisions)
     verdict = decide(candidates, projects_scanned=len(scans), already_held=already)
     for name in sorted(verdict.apply):
         error = _apply(paths, name, scans[name].decisions)

@@ -14,7 +14,8 @@ from pathlib import Path
 from boxmunge.backup import BackupKind
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
-from boxmunge.pause import is_paused
+from boxmunge.state import StateError
+from boxmunge.pause import read_paused_state
 from boxmunge.userns.inventory import Inventory
 from boxmunge.userns.journal import Journal
 from boxmunge.userns.preflight_checks import Report, disk
@@ -31,7 +32,13 @@ def _backups(paths: BoxPaths, inv: Inventory) -> None:
     for p in inv.projects:
         if not paths.project_manifest(p).exists():
             continue
-        if is_paused(p, paths):
+        try:
+            # Read, not looked for: a record that cannot be read must not
+            # pass for "paused" and skip this backup.
+            paused = read_paused_state(p, paths) is not None
+        except StateError as e:
+            raise MigrationError(f"{e}; nothing was stopped") from e
+        if paused:
             print(f"  {p} is paused: no pre-migration backup (its containers are stopped); "
                   f"its data is carried like any other")
             continue

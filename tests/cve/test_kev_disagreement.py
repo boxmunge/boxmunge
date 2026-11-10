@@ -12,15 +12,18 @@ Offline: urlopen is stubbed per URL.
 """
 from __future__ import annotations
 
+import errno
 import json
 import urllib.error
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+from boxmunge import fileutil
 from boxmunge.commands import security_actions, security_kev, security_scan_core
 from boxmunge.cve import kev_refresh
 from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, load_kev
 from boxmunge.cve.kev_refresh import (
-    DISAGREES, REJECTED, UNREACHABLE, refresh_from, refresh_kev,
+    DISAGREES, LAGGING, REJECTED, UNREACHABLE, refresh_from, refresh_kev,
 )
 from boxmunge.cve.kev_source_history import load_history
 from boxmunge.cve.kev_withdrawals import load_withdrawals
@@ -147,6 +150,40 @@ def test_the_refresh_records_what_each_source_served(tmp_path, monkeypatch):
     history = load_history(paths)
     assert history[OWN].disagreed_runs == 1
     assert history[CISA].disagreed_runs == 0
+
+
+def test_a_failed_history_write_after_the_cache_leaves_the_last_history(
+        tmp_path, monkeypatch):
+    """The history is written after the cache, atomically: a write that
+    fails leaves the previous history in place and readable, so the next
+    refresh goes ahead. The source's entry is one catalog behind, but the
+    cache is its own, and a source is held to its own cache: falling back
+    is still refused as lagging, and nothing is withdrawn."""
+    paths = BoxPaths(root=tmp_path)
+    _cache_from_cisa(paths)
+    before = paths.kev_sources.read_text()
+    real_rename = fileutil.durable_rename
+
+    def full_disk(tmp: Path, dest: Path) -> None:
+        if dest == paths.kev_sources:
+            raise OSError(errno.ENOSPC, "No space left on device")
+        real_rename(tmp, dest)
+    monkeypatch.setattr(fileutil, "durable_rename", full_disk)
+    moved_on = (NOW - timedelta(hours=1)).isoformat()
+    _serve(monkeypatch, {OWN: _feed(_ids() + NEW, moved_on)})
+    result = refresh_from(paths, SOURCES)
+    assert result.source == OWN and result.failures == ()
+    assert load_kev(paths).released_at == datetime.fromisoformat(moved_on)
+    assert paths.kev_sources.read_text() == before
+    assert sorted(p.name for p in paths.kev_sources.parent.iterdir()) == sorted(
+        [paths.kev_catalog.name, paths.kev_sources.name])   # no temp left
+    monkeypatch.setattr(fileutil, "durable_rename", real_rename)
+    _serve(monkeypatch, {OWN: _feed(_ids(), LAGGED_AT), CISA: _feed(_ids() + NEW, NOW.isoformat())})
+    result = refresh_from(paths, SOURCES)
+    assert result.source == CISA
+    assert [(f.source, f.kind) for f in result.failures] == [(OWN, LAGGING)]
+    assert set(NEW) <= load_kev(paths).cve_ids and load_withdrawals(paths) == {}
+    assert load_history(paths)[CISA].released_at == NOW
 
 
 # ---------- a later source cannot lock the first one out (#157 review) ----------
