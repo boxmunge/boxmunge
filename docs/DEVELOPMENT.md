@@ -178,8 +178,10 @@ hand: `make relock` (with the pip and pip-tools from `requirements-dev.txt`) upg
 no release younger than the same 7-day cooldown. It holds back the majors listed in
 `relock-holds.txt`: taking one is a decision of its own, made with whatever code change it needs.
 Re-lock before each release, respecting the cooldown (release step 1 below). CI fails a release
-pull request (a `release/*` branch) while a runtime pin is behind a same-major release that has been
-out for more than 14 days (`scripts/lock-freshness.py`).
+pull request (a `release/*` branch) while a runtime pin is behind a same-major release (for a
+calendar-versioned package such as certifi, any newer release) that has been out for more than 14
+days (`scripts/lock-freshness.py`). `requirements-dev.txt` may pin another version of a package a
+runtime lock also pins (click, idna, pygments): nothing installs them in one pip run.
 
 ## How a release reaches a server
 
