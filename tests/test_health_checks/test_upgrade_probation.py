@@ -70,4 +70,4 @@ def test_is_part_of_health():
     import inspect
 
     from boxmunge.commands import health_cmd
-    assert "check_upgrade_probation" in inspect.getsource(health_cmd.collect_health)
+    assert "check_upgrade_probation" in inspect.getsource(health_cmd._checks)

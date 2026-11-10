@@ -39,7 +39,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 
-from boxmunge import bind_sources, compose_resolve, docker_containers, start_alerts
+from boxmunge import bind_sources, chown_hold, compose_references, compose_resolve
+from boxmunge import docker_containers, start_alerts
 from boxmunge import compose_up_steps as up_steps
 from boxmunge.bind_sources import BindSourceError
 from boxmunge.compose_own_files import container_bind_problems
@@ -50,6 +51,7 @@ from boxmunge.intake import IntakeError, validate_release_tree
 from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.log import log_error
 from boxmunge.notify import notify
+from boxmunge.overlay_users import stale_containers_problem, stale_overlay_problem
 from boxmunge.paths import RESERVED_PROJECT_NAMES
 from boxmunge.release_txn import load_txn, stale_reason, start_refusal
 from boxmunge.staged_release import (
@@ -68,7 +70,7 @@ class ComposeRefused(DockerError):
 
 def _refused(paths: BoxPaths, project_name: str, component: str, reason: str,
              *, tampering: bool = True) -> ComposeRefused:
-    message = (f"Refused to start {project_name}: {reason}. Nothing was started "
+    message = (f"Refused to start {project_name}: {reason.rstrip('.')}. Nothing was started "
                f"or recreated; its running containers were left as they are.")
     log_error(component, message, paths, project=project_name)
     now = datetime.now(timezone.utc)
@@ -97,6 +99,20 @@ def _refuse_if_install_open(paths: BoxPaths, project_name: str, component: str,
     raise _refused(paths, project_name, component, reason, tampering=False)
 
 
+def _refuse_stale_overlay(paths: BoxPaths, project_name: str, component: str,
+                          compose_files: list[str], deploying: bool, txn: str | None) -> None:
+    """A start that runs the overlay as it is, after the users record
+    changed, would run a service as its old user (overlay_users). Deploys
+    and the cores resuming an install write the overlay themselves."""
+    if deploying or txn is not None:
+        return
+    if paths.project_compose_override(project_name).name not in compose_files:
+        return
+    problem = stale_overlay_problem(paths, project_name)
+    if problem is not None:
+        raise _refused(paths, project_name, component, problem, tampering=False)
+
+
 def _refuse_if_legacy_stage(paths: BoxPaths, project_name: str, component: str) -> None:
     refusal = legacy_stage_refusal(paths, project_name)
     if refusal is not None:
@@ -123,11 +139,12 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
     release = target.cwd
     try:
         validate_release_tree(release, project_name, paths, component)
-        _, read_files = compose_resolve.walk_references(release / "compose.yml", (release,))
+        _, read_files = compose_references.walk_references(release / "compose.yml", (release,))
         read_files = [*read_files, *(Path(f) for f in target.files)]
         model = compose_resolve.resolve_deployed_config(
             target.cwd, target.files, target.project_name, all_profiles=True,
             project_directory=target.project_directory, env_file=target.env_file)
+        read_files += compose_resolve.model_env_files(model, target.project_directory or release)
         problems = separation_problems(model, project_dir, release,
                                        foreign_copies(project_dir, meta.made))
         if problems:
@@ -141,7 +158,7 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
             rec = bind_sources.read_record(record_path)
             bind_sources.check_sources(project_dir, sources, rec["sources"])
             bind_sources.check_control(project_dir, read_files, rec["control"],
-                                       control_root=release)
+                                       control_root=release, redo=f"stage {project_name} again")
     except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError,
             ReleaseStateError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
@@ -163,7 +180,8 @@ def check_start(
     production start of a project staged by boxmunge 0.10.1 is refused.
 
     `record` (deploy, stage, upgrade) records the sources' kinds and the
-    sha256 of every file boxmunge reads, instead of comparing them with the
+    sha256 of every file boxmunge reads (those the reference walk found and
+    the env files of the resolved model), instead of comparing them with the
     record; missing sources are created first.
 
     Unless `deploying`, the project's EXISTING containers' bind mounts are
@@ -190,10 +208,11 @@ def check_start(
     record_path = paths.project_bind_record(project_name)
     _refuse_if_install_open(paths, project_name, component, txn)
     _refuse_if_legacy_stage(paths, project_name, component)
+    _refuse_stale_overlay(paths, project_name, component, compose_files, deploying, txn)
     try:
         validate_release_tree(project_dir, project_name, paths, component,
                               lenient_values=True)
-        _, read_files = compose_resolve.walk_references(
+        _, read_files = compose_references.walk_references(
             project_dir / compose_files[0], (project_dir,))
         if not deploying:
             problems = _container_problems(project_name, project_dir, read_files)
@@ -201,13 +220,15 @@ def check_start(
                 raise BindSourceError(problems[0] + _REDEPLOY)
         model = compose_resolve.resolve_deployed_config(
             project_dir, compose_files, project_name, all_profiles=True)
+        read_files = [*read_files, *compose_resolve.model_env_files(model, project_dir)]
         sources = bind_sources.model_sources(model, project_dir)
         if record:
             bind_sources.record(project_dir, sources, read_files, record_path)
         else:
             rec = bind_sources.read_record(record_path)
             bind_sources.check_sources(project_dir, sources, rec["sources"])
-            bind_sources.check_control(project_dir, read_files, rec["control"])
+            bind_sources.check_control(project_dir, read_files, rec["control"],
+                                       redo=f"prod-deploy {project_name}")
     except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
 
@@ -233,7 +254,7 @@ def stale_containers(paths: BoxPaths, project_name: str, *, component: str,
     be asked."""
     project_dir = paths.project_dir(project_name)
     try:
-        _, read_files = compose_resolve.walk_references(
+        _, read_files = compose_references.walk_references(
             project_dir / compose_files[0], (project_dir,))
     except (compose_resolve.ComposeResolveError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
@@ -302,18 +323,24 @@ def compose_up_checked(
                                         services, up)
     except DockerError as e:
         raise up_steps.ComposeUpFailed(str(e)) from e
+    if not staging and start:
+        # `services` brings up those they depend on too (start_images).
+        chown_hold.after_start(paths, project_name,
+                               None if services is None else sorted(images), component)
     # A partial up (restore's one service) may leave the rest stopped.
     if not staging and start and not services:
         up_steps.clear_copy_stop(paths, project_name, component)
         up_steps.sweep_live_scripts(paths, project_name, component)
 
 
-def check_containers_start(paths: BoxPaths, project_name: str, *, component: str) -> None:
+def check_containers_start(paths: BoxPaths, project_name: str, names: list[str], *,
+                           component: str) -> None:
     """Check what starting production's existing, stopped containers would
     mount. A `docker start` reads no compose file — it mounts what each
     container was created with — so only the containers' own bind mounts
     are checked: the own-file and nesting rules, and each source walked
-    without following links, of the kind recorded at deploy. Raises
+    without following links, of the kind recorded at deploy. The containers
+    to start (`names`) must run as the users record says. Raises
     ComposeRefused, also while an install transaction is open (no install
     resumes by restarting stopped containers) and for a project staged by
     boxmunge 0.10.1, as check_start does."""
@@ -330,6 +357,14 @@ def check_containers_start(paths: BoxPaths, project_name: str, *, component: str
         bind_sources.check_sources(project_dir, sources, rec["sources"])
     except (BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
+    if paths.project_users_record(project_name).exists():
+        starting = {c.service for c in docker_containers.project_containers(project_name)
+                    if c.name in names}
+        created = {svc: user for svc, user in
+                   docker_containers.container_users(project_name).items() if svc in starting}
+        stale = stale_containers_problem(paths, project_name, created)
+        if stale is not None:
+            raise _refused(paths, project_name, component, stale, tampering=False)
 
 
 def start_containers_checked(
@@ -337,7 +372,7 @@ def start_containers_checked(
 ) -> None:
     """check_containers_start, then `docker start` the named containers.
     Raises ComposeRefused or DockerError."""
-    check_containers_start(paths, project_name, component=component)
+    check_containers_start(paths, project_name, names, component=component)
     start_containers(names)
 
 

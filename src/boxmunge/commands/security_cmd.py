@@ -30,6 +30,7 @@ from boxmunge.commands.security_views import (
 from boxmunge.cve.breaker import BreakerError, read_held
 from boxmunge.cve.policy import Disposition
 from boxmunge.cve.grace import GraceError, read_grace_state
+from boxmunge.cve.kev import kev_status
 from boxmunge.cve.scan_state import read_scan_state
 from boxmunge.cve.quarantine import (
     QuarantineError, checked_quarantine_record, is_quarantined, read_quarantine_state,
@@ -60,6 +61,8 @@ Usage:
                              --until <YYYY-MM-DD> --reason <text>
   boxmunge security unsuppress <CVE> (--project <name>|--host)
   boxmunge security resume <project>                   Lift CVE quarantine
+  boxmunge security resume <project> --accept-stale-kev
+                             Lift with no usable KEV catalog (audited)
 
 --host suppressions and scan --apply-held are operator-only (refused by the
 deploy shell). --until is at most 90 days ahead.
@@ -273,6 +276,7 @@ def fleet_summary(paths: BoxPaths) -> dict:
         "last_fleet_scan": max(last_scans) if last_scans else None,
         "grace": grace_payload,
         "held_by_breaker": _held_payload(paths),
+        "kev": kev_status(paths, today),
     }
     if unreadable:
         summary["unreadable"] = unreadable
@@ -384,6 +388,7 @@ def cmd_security(args: list[str]) -> None:
                     "grace": _grace_payload(
                         paths, now=datetime.now(timezone.utc),
                     ),
+                    "kev": kev_status(paths, datetime.now(timezone.utc).date()),
                 }))
             else:
                 print("No projects registered.")

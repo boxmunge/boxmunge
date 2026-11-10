@@ -54,9 +54,11 @@ def check_sshd_deploy_env(run=subprocess.run) -> HealthCheck:
                            "needs root to ask sshd (run `sudo boxmunge-server health`)")
     result = run([SSHD, "-T", "-C", "user=deploy,host=localhost,addr=127.0.0.1"],
                  capture_output=True, text=True, check=False, timeout=30)
-    if result.returncode != 0:
-        return HealthCheck(ENV_NAME, "error",
-                           f"sshd -T failed ({result.stderr.strip()}): {_FIX}")
+    if result.returncode != 0:  # it could not tell: no sign of a widened setting
+        return HealthCheck(ENV_NAME, "warn",
+                           f"`sshd -T` failed ({result.stderr.strip() or result.returncode}), "
+                           f"so deploy's effective settings could not be checked. "
+                           f"`sudo sshd -t` names a config error; otherwise {_FIX}")
     lines = result.stdout.splitlines()
     accepted = sorted(line.split(" ", 1)[1] for line in lines if line.startswith("acceptenv "))
     problems = []

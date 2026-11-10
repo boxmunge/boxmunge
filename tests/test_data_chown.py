@@ -7,7 +7,8 @@ import pytest
 
 from boxmunge import docker_containers
 from boxmunge.backup import BackupError
-from boxmunge.commands import backup_cmd, data_cmd
+from boxmunge import chown_hold
+from boxmunge.commands import backup_cmd, chown_snapshot, data_cmd
 from boxmunge.docker_containers import StartState
 from boxmunge.pending_snapshot import pending, record_pending
 from boxmunge.run_as import ServiceUser, read_users, write_users
@@ -42,6 +43,13 @@ def _setup(paths, monkeypatch, volumes_exist=True, backup="none", backup_service
                         calls.append((mounts[1], script)))
     monkeypatch.setattr(data_cmd, "chown_under", lambda label, root, rel, ids:
                         calls.append((f"{root}:{rel}", ids)))
+    monkeypatch.setattr(data_cmd, "_containers", lambda p, s: ["shop-app-1"])
+    monkeypatch.setattr(data_cmd, "staging_copies", lambda *a: [])
+    monkeypatch.setattr(chown_hold, "hold", lambda p, n, s: calls.append(("hold", s)) or [s])
+    monkeypatch.setattr(data_cmd, "prepare_compose_override",
+                        lambda p, m, component: calls.append(("overlay", component)))
+    monkeypatch.setattr(chown_snapshot, "running_by_service",
+                        lambda p: {"app": ["shop-app-1"], "db": ["shop-db-1"]})
     return project_dir, calls
 
 
@@ -51,8 +59,9 @@ def test_chown_stops_chowns_every_persistent_mount_and_records(paths, monkeypatc
                                 "db": ServiceUser(None, "manifest")})
     data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
     assert calls[0][:2] == ["docker", "stop"]
-    assert calls[1:] == [(f"{project_dir}:uploads", (10001, 10001)),
-                         ("type=volume,src=shop_cache,dst=/x", "chown -R -h 10001:10001 /x")]
+    assert calls[1:] == [("hold", "app"), (f"{project_dir}:uploads", (10001, 10001)),
+                         ("type=volume,src=shop_cache,dst=/x", "chown -R -h 10001:10001 /x"),
+                         ("overlay", "data-chown")]
     users = read_users(paths, "shop")
     assert users["app"] == ServiceUser("10001:10001", "data-chown", "node")
     assert users["db"] == ServiceUser(None, "manifest")
@@ -72,7 +81,7 @@ def test_a_bind_reached_through_a_link_is_refused(paths, monkeypatch, tmp_path) 
     (project_dir / "uploads").symlink_to(tmp_path)
     with pytest.raises(BindSourceError, match="symlink"):
         data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
-    assert [c for c in calls if isinstance(c, tuple)] == []
+    assert [c for c in calls if isinstance(c, tuple) and c[0] != "hold"] == []
 
 
 def test_a_service_without_data_is_refused(paths, monkeypatch, capsys) -> None:
@@ -95,8 +104,8 @@ def test_a_bind_inside_another_containers_rw_bind_is_refused(paths, monkeypatch)
 
 
 def _dumping(paths, monkeypatch, calls, fail=False):
-    def dump(paths_, project, dump_command, service, compose_file=None):
-        calls.append("dump")
+    def dump(paths_, project, dump_command, service, compose_file=None, offline=False):
+        calls.append("dump-offline" if offline else "dump")
         if fail:
             raise BackupError("service web is not running")
         raw = paths.project_backups(project) / ".dump-x.tar.gz"
@@ -249,7 +258,7 @@ def test_a_read_only_mount_elsewhere_does_not_stop_it_being_kept(
 def test_a_project_whose_running_release_cannot_be_told_refuses(paths, monkeypatch) -> None:
     from boxmunge.backup_source import BackupSource
     _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
-    monkeypatch.setattr(data_cmd, "backup_source",
+    monkeypatch.setattr(chown_snapshot, "backup_source",
                         lambda p, n: BackupSource(None, skip="which release runs is ambiguous"))
     with pytest.raises(data_cmd.DataError, match="ambiguous.*--no-snapshot"):
         data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))

@@ -8,13 +8,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from boxmunge import pending_snapshot
 from boxmunge.config import DEFAULTS, ConfigError, load_config
 from boxmunge.docker import DockerError, compose_down
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.pushover import format_alert, format_recovery
-from boxmunge.state import read_state, write_state
+from boxmunge.state import StateError, read_state, write_state
 
 
 # Window after deploy/resume during which warning-level failures are masked.
@@ -33,7 +34,7 @@ def _parse_ts(value: str) -> datetime | None:
     if not value:
         return None
     try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(value)
     except ValueError:
         return None
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
@@ -199,12 +200,24 @@ def _record_ok(project_name: str, paths: BoxPaths, state: dict, now: str) -> Non
     })
 
 
+def _note_pending_removal(project_name: str, paths: BoxPaths) -> None:
+    """The stop removes every container: a data chown snapshot pending for
+    the next deploy must not take that for a run of its service."""
+    try:
+        pending_snapshot.note_removal(paths, project_name)
+    except (DockerError, StateError) as e:
+        log_warning("health", f"Could not note the containers this stop removes for the "
+                    f"data chown snapshot pending for the next deploy ({e}); that deploy "
+                    f"may not use it, and takes its own", paths, project=project_name)
+
+
 def _record_critical(
     project_name: str, paths: BoxPaths, state: dict, now: str, message: str,
 ) -> None:
     """Critical: stop the containers, then alert at priority 1."""
     log_error("health", f"CRITICAL: {message} — stopping containers", paths, project=project_name)
     consecutive = state.get("consecutive_failures", 0) + 1
+    _note_pending_removal(project_name, paths)
     try:
         compose_down(paths.project_dir(project_name), project_name=project_name)
         stopped = True

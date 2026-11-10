@@ -142,7 +142,7 @@ class TestParity:
         offers, held = catalog.apply_holds(catalog.select_offers(entries, caller),
                                            lambda v: False)
         body = catalog.check_response(offers, held, catalog.find_blocked(entries, caller))
-        with patch("urllib.request.urlopen", return_value=_response(body)):
+        with patch("urllib.request.OpenerDirector.open", return_value=_response(body)):
             result = discover_update(_box(tmp_path, caller), mode=mode)
         assert result["source"] == "endpoint"
         assert _version(result) == {"security": security, "breakfix": breakfix}[mode]
@@ -152,7 +152,7 @@ class TestParity:
     def test_box_via_github(self, tmp_path, mode, name, releases, caller, security,
                             breakfix, blocked, reason):
         github = _response(_github_entries(releases))
-        with patch("urllib.request.urlopen", side_effect=[URLError("down"), github]):
+        with patch("urllib.request.OpenerDirector.open", side_effect=[URLError("down"), github]):
             result = discover_update(_box(tmp_path, caller), mode=mode)
         assert result["source"] == "github"
         assert _version(result) == {"security": security, "breakfix": breakfix}[mode]

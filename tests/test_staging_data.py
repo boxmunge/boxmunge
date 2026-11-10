@@ -142,9 +142,11 @@ class _Docker:
         # tests (test_compose_guard, test_root_compose_call_sites).
         self.checks: list[str] = []
         monkeypatch.setattr(staging_data, "check_containers_start",
-                            lambda paths, project, component: self.checks.append("before stop"))
+                            lambda paths, project, names, component:
+                            self.checks.append("before stop"))
         monkeypatch.setattr("boxmunge.compose_guard.check_containers_start",
-                            lambda paths, project, component: self.checks.append("before start"))
+                            lambda paths, project, names, component:
+                            self.checks.append("before start"))
 
     def __call__(self, cmd, capture=False, check=True, timeout=None):
         self.calls.append(cmd)

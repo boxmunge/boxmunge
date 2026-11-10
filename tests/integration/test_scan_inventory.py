@@ -101,7 +101,8 @@ def scan(deployed):
     try:
         result = scan_one_project(
             paths, name, audit_only=True,
-            kev=KevCatalog(cve_ids=frozenset(), fetched_at=datetime.now(timezone.utc)),
+            kev=KevCatalog(cve_ids=frozenset(), fetched_at=datetime.now(timezone.utc),
+                       released_at=datetime.now(timezone.utc), source="test"),
         )
     finally:
         mp.undo()
@@ -199,7 +200,8 @@ def _audit_scan(paths, name):
     try:
         result = scan_one_project(
             paths, name, audit_only=True,
-            kev=KevCatalog(cve_ids=frozenset(), fetched_at=datetime.now(timezone.utc)),
+            kev=KevCatalog(cve_ids=frozenset(), fetched_at=datetime.now(timezone.utc),
+                       released_at=datetime.now(timezone.utc), source="test"),
         )
     finally:
         mp.undo()

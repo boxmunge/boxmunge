@@ -14,51 +14,60 @@ if TYPE_CHECKING:
     from boxmunge.cve.scanner import Finding, Severity
 
 
+def _kev(fetched_at=None, released_at=None, source=None):
+    from boxmunge.cve.kev import KevCatalog
+    return KevCatalog(frozenset(), fetched_at, released_at, source)
+
+
 def test_kev_stale_alert_is_priority_one_and_names_the_feed() -> None:
-    """format_kev_stale_alert(None) must return a priority-1 Alert whose
-    title references the KEV feed so the operator knows what degraded."""
+    """The alert is priority 1 and its title names the KEV feed."""
     from boxmunge.cve._alerting_fleet import format_kev_stale_alert
 
-    alert = format_kev_stale_alert(None)
+    alert = format_kev_stale_alert(_kev(), stale_reason="no catalog", tried=())
     assert alert.priority == 1
     assert "KEV" in alert.title
+    assert alert.kind == "kev_stale"
 
 
-def test_kev_stale_alert_with_fetched_at_includes_timestamp() -> None:
-    """When fetched_at is provided, the body must include the ISO timestamp
-    so operators can see when the feed was last successfully fetched."""
+def test_kev_stale_alert_names_the_reason_release_and_source() -> None:
     from boxmunge.cve._alerting_fleet import format_kev_stale_alert
 
-    ts = datetime(2026, 6, 10, 12, 0, 0, tzinfo=timezone.utc)
-    alert = format_kev_stale_alert(ts)
-    assert alert.priority == 1
-    assert "KEV" in alert.title
-    assert ts.isoformat() in alert.body
+    fetched = datetime(2026, 6, 10, 12, 0, 0, tzinfo=timezone.utc)
+    released = datetime(2026, 6, 9, 19, 44, 0, tzinfo=timezone.utc)
+    alert = format_kev_stale_alert(
+        _kev(fetched, released, "https://mirror.example/kev.json"),
+        stale_reason="the catalog is lagging", tried=("https://a.example: HTTP 403 Forbidden",))
+    assert "stale" in alert.title
+    assert "Why: the catalog is lagging." in alert.body
+    assert f"released {released.isoformat()}" in alert.body
+    assert f"last fetched {fetched.isoformat()}" in alert.body
+    assert "from https://mirror.example/kev.json" in alert.body
+    assert "- https://a.example: HTTP 403 Forbidden" in alert.body
 
 
 def test_kev_stale_alert_body_mentions_never_fetched_when_none() -> None:
-    """When fetched_at is None, the body should indicate the feed was never
-    fetched so the operator knows this is a fresh/unconfigured state."""
     from boxmunge.cve._alerting_fleet import format_kev_stale_alert
 
-    alert = format_kev_stale_alert(None)
-    assert "never fetched" in alert.body
+    body = format_kev_stale_alert(_kev(), stale_reason="x", tried=()).body
+    assert "never fetched" in body and "released unknown" in body
+
+
+def test_kev_alert_on_a_fresh_cache_says_the_refresh_was_rejected() -> None:
+    from boxmunge.cve._alerting_fleet import format_kev_stale_alert
+
+    now = datetime.now(timezone.utc)
+    alert = format_kev_stale_alert(_kev(now, now, "s"), stale_reason=None,
+                                   tried=("s: rejected: feed returned 0 entries",))
+    assert "refresh rejected" in alert.title
+    assert "Why:" not in alert.body
 
 
 def test_kev_stale_alert_says_kev_only_postures_cannot_quarantine() -> None:
     from boxmunge.cve._alerting_fleet import format_kev_stale_alert
 
-    body = format_kev_stale_alert(None).body
+    body = format_kev_stale_alert(_kev(), stale_reason="x", tried=()).body
     assert "relaxed and balanced (the default) KEV is the only quarantine trigger" in body
     assert "nothing can quarantine those projects" in body
-
-
-def test_kev_stale_alert_kind() -> None:
-    """The alert kind must be 'kev_stale' for correct routing/filtering."""
-    from boxmunge.cve._alerting_fleet import format_kev_stale_alert
-
-    alert = format_kev_stale_alert(None)
-    assert alert.kind == "kev_stale"
 
 
 # ---------- helpers for format_quarantine_alert / format_informational_alert ----------
