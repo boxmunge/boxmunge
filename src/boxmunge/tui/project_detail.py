@@ -206,13 +206,21 @@ class ProjectDetailScreen(Screen):
                 stderr=asyncio.subprocess.STDOUT,
                 env=docker_env(),
             )
+        except OSError as e:
+            log_widget.write(f"Cannot follow the logs: {e}")
+            return
+        try:
             while True:
                 line = await process.stdout.readline()
                 if not line:
                     break
                 log_widget.write(line.decode("utf-8", errors="replace").rstrip())
-        except (OSError, asyncio.CancelledError):
-            pass
+        finally:
+            # A tab switch or filter cycle cancels this task: stop the
+            # follower with it instead of leaving it running.
+            if process.returncode is None:
+                process.terminate()
+            await process.wait()
 
     def on_tabbed_content_tab_activated(
         self, event: TabbedContent.TabActivated

@@ -101,3 +101,4 @@ def test_the_rollback_key_on_the_detail_screen_asks_first(paths, ran) -> None:
 
 def test_every_tui_action_has_a_prompt() -> None:
     assert set(tui_actions.PROMPTS) == set(MUTATING)
+
