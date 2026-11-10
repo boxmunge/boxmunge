@@ -363,15 +363,18 @@ upgrade_to() {
         *) log "WARN: the health check after the swap gave no verdict ($HEALTH_VERDICT); the probation checks again" ;;
     esac
 
-    # 7. ENTER PROBATION
+    # 7. ENTER PROBATION. Root's record of it goes first (probation.sh): a
+    # crash before probation.json is written leaves a record and no
+    # probation, which check-probation rolls back as an interrupted upgrade.
     log "Entering probation for $version..."
+    clear_probation_markers
+    record_probation "$version"
     BM_VERSION="$version" BM_PREV_SLOT="$prev_slot" BM_HOURS="$PROBATION_HOURS" "$(active_venv)/bin/python" -c "
 import os
 from boxmunge.upgrade_state import write_probation
 from boxmunge.paths import BoxPaths
 write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT'], hours=int(os.environ['BM_HOURS']))
 "
-    clear_probation_markers
     [[ -z "$baseline" ]] || write_root_file "$HEALTH_BASELINE_FILE" "$ACTIVE_SLOT $baseline"
     bm_log info upgrade "probation entered" "{\"version\": \"$version\", \"prev_slot\": \"$prev_slot\", \"hours\": $PROBATION_HOURS}"
     rm -f "$(inflight_marker "$ACTIVE_SLOT")"

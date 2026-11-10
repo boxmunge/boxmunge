@@ -121,8 +121,7 @@ on_probation() {
     rm "$BOXMUNGE_ROOT/env-b/bin/python"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$BOXMUNGE_ROOT/env-b/bin/python"
     chmod +x "$BOXMUNGE_ROOT/env-b/bin/python"
-    write_probation "1.5.0" "b" "$SOON"
-    mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+    write_probation "1.5.0" "b" "$SOON"  # also makes upgrade-root/
     [[ -z "${2:-}" ]] || echo "$2" > "$BOXMUNGE_ROOT/upgrade-root/health-baseline"
 }
 rolled_back() { [[ "$(readlink "$BOXMUNGE_ROOT/env-active")" == "$BOXMUNGE_ROOT/env-b" ]]; }

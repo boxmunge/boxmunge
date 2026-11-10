@@ -206,10 +206,33 @@ $body"
 # shellcheck disable=SC2034  # used by the sourcing tests
 SOON="$(python3 -c 'from datetime import datetime, timedelta, timezone; print((datetime.now(timezone.utc) + timedelta(hours=1)).isoformat())')"
 
-# write_probation <version> <previous_slot> <expires_at>
+# write_probation <version> <previous_slot> <expires_at>: a probation an
+# upgrade started: probation.json, and root's record of it (record_probation).
 write_probation() {
+    forge_probation "$@"
+    record_probation "$1"
+}
+
+# forge_probation <version> <previous_slot> <expires_at>: probation.json
+# alone, as deploy can write it.
+forge_probation() {
     printf '{"version": "%s", "previous_slot": "%s", "started_at": "2026-01-01T00:00:00+00:00", "expires_at": "%s"}\n' \
         "$1" "$2" "$3" > "$BOXMUNGE_ROOT/upgrade-state/probation.json"
+}
+
+# record_probation <version> [<expiry epoch>]: root's record of a probation of
+# <version> in the live slot, ending a fresh probation's 6 hours from now.
+record_probation() {
+    local slot
+    slot="$(readlink "$BOXMUNGE_ROOT/env-active")"
+    [[ -d "$BOXMUNGE_ROOT/upgrade-root" ]] || mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+    echo "${slot##*/env-} $1 ${2:-$(( $(date +%s) + 6 * 3600 ))}" > "$BOXMUNGE_ROOT/upgrade-root/probation-expiry"
+}
+
+# age_swap <hours>: make env-active look swapped <hours> ago.
+age_swap() {
+    python3 -c 'import os, sys, time; t = time.time() - float(sys.argv[2]) * 3600; os.utime(sys.argv[1], (t, t), follow_symlinks=False)' \
+        "$BOXMUNGE_ROOT/env-active" "$1"
 }
 
 drop_root() { rm -rf "$BOXMUNGE_ROOT"; unset BOXMUNGE_ROOT; }

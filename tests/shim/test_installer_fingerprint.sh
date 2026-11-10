@@ -31,7 +31,8 @@ stub "$FIXTURE/venv/bin/boxmunge-server" '[[ "$1" != --version ]] || echo "boxmu
 stub "$FIXTURE/venv/bin/python" 'if [[ "$1" == "-" ]]; then cat >/dev/null; exit 0; fi
 case "$2" in
     *write_probation*) printf "{\"version\": \"%s\", \"previous_slot\": \"%s\", \"expires_at\": \"'"$SOON"'\"}\n" \
-        "$BM_VERSION" "$BM_PREV_SLOT" > "$BOXMUNGE_ROOT/upgrade-state/probation.json" ;;
+        "$BM_VERSION" "$BM_PREV_SLOT" > "$BOXMUNGE_ROOT/upgrade-state/probation.json"
+        echo "record before probation.json: $(cat "$BOXMUNGE_ROOT/upgrade-root/probation-expiry")" >> "$BOXMUNGE_ROOT/calls" ;;
     *get_build_version*) echo "1.5.0" ;;
 esac
 exit 0'
@@ -76,6 +77,12 @@ expect 0 "install.sh unchanged" "a matching root-only fingerprint skips install.
 # starts with no failure count left by an earlier one of the same version.
 [[ ! -e "$BOXMUNGE_ROOT/upgrade-root/live-slot-failed" ]] && pass "entering probation clears the live-slot failure count" \
     || fail "live-slot-failed survived into the new probation"
+# Root records the probation before probation.json exists: deploy can write
+# that file, so only a recorded probation is acted on (test_probation_record).
+recorded="$(calls | sed -n 's/^record before probation.json: //p')"
+read -r slot version expiry <<< "$recorded"
+[[ "$slot $version" == "b 1.5.0" && "$expiry" -gt $(( $(date +%s) + 6 * 3600 - 120 )) ]] \
+    && pass "the probation is recorded root-only before probation.json is written" || fail "recorded: '$recorded'"
 drop_root
 
 box

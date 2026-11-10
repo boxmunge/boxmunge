@@ -96,7 +96,7 @@ done
 
 for bad_version in '1.2.3; rm -rf /' '../../x' '1.2' 'v1.2.3' '1.2.3-'; do
     new_root a
-    write_probation "$bad_version" "b" "$PAST"
+    forge_probation "$bad_version" "b" "$PAST"  # root would never record it
     run_shim check-probation
     expect 1 "Invalid version" "probation version '$bad_version' is refused"
     [[ -d "$BOXMUNGE_ROOT/env-b" ]] && pass "env-b kept for version '$bad_version'" \

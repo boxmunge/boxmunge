@@ -5,28 +5,52 @@
 # Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
 # the shim that releases ship.
 
-# read_probation: parse probation.json into PROB_VERSION, PROB_PREV_SLOT,
-# PROB_EXPIRED (yes/no) and PROB_EXPIRES_AT (re-formatted in UTC, so safe to
-# print). The file is deploy-writable: deploy may end a probation early, but
-# must not lengthen one (a far-future expires_at would defer upgrades for
-# good). So the first run that reads a probation records its expiry in
-# root-only upgrade-root/probation-expiry, keyed by the live slot, at most a
-# fresh probation's length from then, and the probation ends at the earlier
-# of that and expires_at. A recorded expiry more than a probation's length
-# ahead means the clock went back (an NTP step, a VM restore); it is moved to
-# a probation's length from now rather than promoting at once, which deleted
-# the rollback target.
+# A probation and root's record of it. probation.json is deploy-writable:
+# deploy may end a probation early (by removing it), but must neither start
+# one nor lengthen one, or it could defer every upgrade for good. So
+# upgrade_to records each probation it starts, before writing probation.json,
+# in root-only upgrade-root/probation-expiry:
+#   "<slot> <version> <expiry>"  the live slot, the release on probation, and
+#                                when the probation ends (seconds since 1970)
+#   "none"                       no probation since the last one ended
+# A probation.json that does not match the record (its live slot and version)
+# was not started by an upgrade: it is removed, logged and alerted
+# (refuse_unrecorded_probation). The probation ends at the earlier of the
+# recorded expiry and expires_at. A recorded expiry more than a probation's
+# length ahead means the clock went back (an NTP step, a VM restore); it is
+# moved to a probation's length from now rather than promoting at once, which
+# deleted the rollback target.
+#
+# A probation an older shim (0.11.5 or earlier) started has no record (none,
+# or that shim's "<slot> <expiry>"). It is adopted when root's own state
+# shows the upgrade it names: config/version is that release, and env-active
+# was swapped less than a probation's length ago; it then ends a probation's
+# length after that swap. Otherwise it is refused like any unrecorded one.
 PROBATION_EXPIRY_FILE="$UPGRADE_ROOT_DIR/probation-expiry"
+
+# record_probation <version>: root's record of a probation starting now.
+record_probation() {
+    write_root_file "$PROBATION_EXPIRY_FILE" "$ACTIVE_SLOT $1 $(( $(date +%s) + PROBATION_HOURS * 3600 ))"
+}
+
+# read_probation: parse probation.json, against root's record, into
+# PROB_VERSION, PROB_PREV_SLOT, PROB_EXPIRED (yes/no), PROB_EXPIRES_AT
+# (re-formatted in UTC, so safe to print), PROB_STATUS (recorded, adopted or
+# unrecorded), PROB_NOTE (clock_back, lengthened or nothing), PROB_RECORD (the
+# record to keep) and PROB_RECORDED (the record as found). It changes nothing:
+# settle_probation acts on the result.
 read_probation() {
-    local out content recorded="" record_re='^[ab] [0-9]+$'
+    local out content valid='^([ab] [^ ]+ [0-9]+|[ab] [0-9]+|none)$'
     refuse_symlink "$PROBATION_FILE"
     content="$(read_untrusted "$PROBATION_FILE")" || exit 1
     refuse_symlink "$PROBATION_EXPIRY_FILE"
-    [[ ! -e "$PROBATION_EXPIRY_FILE" ]] || recorded="$(cat "$PROBATION_EXPIRY_FILE")"
-    [[ -z "$recorded" || "$recorded" =~ $record_re ]] \
-        || die_logged "$PROBATION_EXPIRY_FILE is malformed; remove it (the next run records the expiry again)"
-    out="$(BM_PROBATION="$content" BM_RECORDED="$recorded" BM_SLOT="$ACTIVE_SLOT" BM_HOURS="$PROBATION_HOURS" python3 - <<'PYPROB'
-import json, os, re, sys
+    PROB_RECORDED=""
+    [[ ! -e "$PROBATION_EXPIRY_FILE" ]] || PROB_RECORDED="$(cat "$PROBATION_EXPIRY_FILE")"
+    [[ -z "$PROB_RECORDED" || "$PROB_RECORDED" =~ $valid ]] \
+        || die_logged "$PROBATION_EXPIRY_FILE is malformed. As supervisor, remove it and $PROBATION_FILE: that ends the probation, keeping the live release"
+    out="$(BM_PROBATION="$content" BM_RECORDED="$PROB_RECORDED" BM_SLOT="$ACTIVE_SLOT" BM_HOURS="$PROBATION_HOURS" \
+        BM_INSTALLED="$(installed_version)" BM_ENV_ACTIVE="$BOXMUNGE_ROOT/env-active" python3 - <<'PYPROB'
+import json, os, sys
 from datetime import datetime, timedelta, timezone
 d = json.loads(os.environ["BM_PROBATION"])
 keys = ("version", "previous_slot", "expires_at")
@@ -36,21 +60,25 @@ expires = datetime.fromisoformat(d["expires_at"])
 if expires.tzinfo is None:
     sys.exit("probation.json expires_at has no timezone")
 now = datetime.now(timezone.utc)
-cap = now + timedelta(hours=int(os.environ["BM_HOURS"]))
-recorded, note = None, ""
-m = re.fullmatch(r"([ab]) ([0-9]+)", os.environ["BM_RECORDED"])  # checked by the caller
-if m and m.group(1) == os.environ["BM_SLOT"]:
-    recorded = datetime.fromtimestamp(int(m.group(2)), timezone.utc)
-if recorded is None:
-    recorded = min(expires, cap)
-    note = "beyond_cap" if expires > cap else ""
-elif recorded > cap:
-    recorded, note = cap, "clock_back"
+length = timedelta(hours=int(os.environ["BM_HOURS"]))
+record = os.environ["BM_RECORDED"].split()  # checked by the caller
+status, note, recorded = "unrecorded", "", now
+if len(record) == 3 and record[:2] == [os.environ["BM_SLOT"], d["version"]]:
+    status, recorded = "recorded", datetime.fromtimestamp(int(record[2]), timezone.utc)
+elif len(record) < 3 and record != ["none"] and d["version"] == os.environ["BM_INSTALLED"]:
+    swapped = datetime.fromtimestamp(os.lstat(os.environ["BM_ENV_ACTIVE"]).st_mtime, timezone.utc)
+    if now - swapped < length:
+        status, recorded = "adopted", swapped + length
+if recorded > now + length:
+    recorded, note = now + length, "clock_back"
+elif expires > recorded + timedelta(minutes=1):
+    note = "lengthened"
 ends = min(expires, recorded)
 print(d["version"])
 print(d["previous_slot"])
 print("yes" if now >= ends else "no")
 print(ends.strftime("%Y-%m-%d %H:%M UTC"))
+print(status)
 print(note)
 print(int(recorded.timestamp()))
 PYPROB
@@ -59,19 +87,42 @@ PYPROB
     PROB_PREV_SLOT="$(echo "$out" | sed -n '2p')"
     PROB_EXPIRED="$(echo "$out" | sed -n '3p')"
     PROB_EXPIRES_AT="$(echo "$out" | sed -n '4p')"
+    PROB_STATUS="$(echo "$out" | sed -n '5p')"
+    PROB_NOTE="$(echo "$out" | sed -n '6p')"
     require_semver "$PROB_VERSION" "$PROBATION_FILE"
     require_slot "$PROB_PREV_SLOT" "$PROBATION_FILE"
-    local record
-    record="$ACTIVE_SLOT $(echo "$out" | sed -n '6p')"
-    [[ "$record" == "${recorded%$'\n'}" ]] || write_root_file "$PROBATION_EXPIRY_FILE" "$record"
-    case "$(echo "$out" | sed -n '5p')" in
-        beyond_cap)
-            log "WARN: $PROBATION_FILE expires_at is beyond a ${PROBATION_HOURS}h probation; it ends at $PROB_EXPIRES_AT"
-            bm_log warn upgrade "probation expiry beyond cap" "{\"version\": \"$PROB_VERSION\"}" ;;
+    PROB_RECORD="$ACTIVE_SLOT $PROB_VERSION $(echo "$out" | sed -n '7p')"
+}
+
+# settle_probation: act on what read_probation found.
+settle_probation() {
+    [[ "$PROB_STATUS" != unrecorded ]] || refuse_unrecorded_probation
+    if [[ "$PROB_STATUS" == adopted ]]; then
+        log "WARN: the probation of $PROB_VERSION has no record (an older shim started it); adopted, as root's state shows that upgrade: it ends at $PROB_EXPIRES_AT"
+        bm_log warn upgrade "probation started by an older shim adopted" "{\"version\": \"$PROB_VERSION\"}"
+    fi
+    [[ "$PROB_RECORD" == "$PROB_RECORDED" ]] || write_root_file "$PROBATION_EXPIRY_FILE" "$PROB_RECORD"
+    case "$PROB_NOTE" in
+        lengthened)
+            log "WARN: $PROBATION_FILE expires_at is later than the probation root recorded; it ends at $PROB_EXPIRES_AT" ;;
         clock_back)
             log "WARN: the probation of $PROB_VERSION was to end more than ${PROBATION_HOURS}h from now, so the clock went back; it now ends at $PROB_EXPIRES_AT"
             bm_log warn upgrade "probation expiry moved: the clock went back" "{\"version\": \"$PROB_VERSION\"}" ;;
     esac
+}
+
+# refuse_unrecorded_probation: probation.json names a probation no upgrade on
+# this box started (root's record names another slot or release, says none
+# is running, or an older shim's probation lacks the evidence above). Deploy
+# can write that file, and one it planted would defer upgrades and refuse
+# targets for a probation's length, again each time it is planted. It has no
+# authority, so it is removed, with an error in the operational log and an
+# alert: the run stops, and the next one carries on as if it was never there.
+refuse_unrecorded_probation() {
+    local msg="$PROBATION_FILE names $PROB_VERSION on probation, but no upgrade on this box started that probation (root's record, $PROBATION_EXPIRY_FILE, does not match it), so it was removed and nothing else changed; the next run carries on. If it comes back, something running as the deploy user is writing it: find and stop it."
+    rm -f "$PROBATION_FILE"
+    send_notification "boxmunge: planted probation removed" "$msg" 1
+    die_logged "$msg"
 }
 
 # load_probation: 0 with PROB_* set while a release is on probation, 1 when
@@ -92,6 +143,7 @@ load_probation() {
         rm -f "$PROBATION_FILE"
         return 1
     fi
+    settle_probation
 }
 
 # work_interrupted: an upgrade or rollback was cut short, and check-probation
@@ -175,11 +227,13 @@ recover_interrupted_upgrade() {
 }
 
 # clear_probation_markers: forget what check-probation counted or said about
-# a probation (all in root-only upgrade-root/). Whenever a probation ends or
-# starts, so a new one never inherits them.
+# a probation (all in root-only upgrade-root/), and record that none is
+# running. Whenever a probation ends or starts, so a new one never inherits
+# them.
 clear_probation_markers() {
     rm -f "$UPGRADE_ROOT_DIR/rollback-impossible" "$UPGRADE_ROOT_DIR/rollback-impossible.logged" \
-        "$UPGRADE_ROOT_DIR/live-slot-failed" "$PROBATION_EXPIRY_FILE" "$HEALTH_BASELINE_FILE" "$HEALTH_UNJUDGED_FILE"
+        "$UPGRADE_ROOT_DIR/live-slot-failed" "$HEALTH_BASELINE_FILE" "$HEALTH_UNJUDGED_FILE"
+    [[ "$(cat "$PROBATION_EXPIRY_FILE" 2>/dev/null)" == none ]] || write_root_file "$PROBATION_EXPIRY_FILE" none
 }
 
 # rollback_impossible <version> <prev_slot> <why>: the release on probation

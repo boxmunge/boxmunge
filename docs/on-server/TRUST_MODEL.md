@@ -215,13 +215,17 @@ reads from that directory is checked before use:
   that is the current standby slot. One naming the live slot is stale and is
   removed. Promotion deletes the standby whatever it holds; a rollback swaps
   to it only if it is a working venv, and otherwise refuses (with one error
-  and one alert per probation). The first run that reads a probation records
-  its expiry root-only, at most a fresh probation's 6 hours from then, and the
-  probation ends at the earlier of that and `expires_at`: deploy can end a
-  probation early but not lengthen it, so a forged far-future value cannot
-  hold off upgrades. A recorded expiry more than 6 hours ahead means the clock
-  went back (an NTP step, a VM restore); it is moved to 6 hours from then,
-  rather than promoting the release at once.
+  and one alert per probation). The upgrade that starts a probation records
+  it root-only first (the live slot, the release and an expiry 6 hours on),
+  and the probation ends at the earlier of that and `expires_at`: deploy can
+  end a probation early but neither start one nor lengthen one. A
+  `probation.json` the record does not cover is removed, with an error in the
+  operational log and an alert, so a planted one cannot hold off upgrades.
+  A probation a shim up to 0.11.5 started has no record; it is adopted only
+  when `config/version` is its release and `env-active` was swapped less
+  than 6 hours before. A recorded expiry more than 6 hours ahead means the
+  clock went back (an NTP step, a VM restore); it is moved to 6 hours from
+  then, rather than promoting the release at once.
 - `blocklist.json` must be a JSON object keyed by semver versions.
 - None of these files, nor the legacy `upgrade.lock` (below), may be a
   symlink, a FIFO or anything but a plain file. Root opens them without
@@ -240,7 +244,7 @@ The shim deletes a venv slot only while the live one runs, and never the live
 one. State deploy must not influence is root-only: the crash-safety markers
 inside the venv slots, and in `/opt/boxmunge/upgrade-root/` (root, 0700) the
 interruption counts, `upgrade.lock`, the installer fingerprint (which decides
-whether an upgrade re-runs `install.sh`), the probation's recorded expiry and
+whether an upgrade re-runs `install.sh`), the record of the probation and
 failure counts (keyed by the live slot, not by the version in `probation.json`),
 the health report from just before the upgrade (`health-baseline`: a health
 error already there then does not roll the release back) and the name of the
