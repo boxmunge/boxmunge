@@ -107,7 +107,13 @@ class _ReferenceWalk:
                 f"checked. Write the path literally."
             )
             return False
-        if outside_roots(ref, base, self.roots):
+        try:
+            outside = outside_roots(ref, base, self.roots)
+        except (OSError, ValueError) as e:  # a NUL in the name, say
+            self.problems.append(f"{what} {ref!r} is not a usable path ({e}). Write a "
+                                 f"plain file path inside the project.")
+            return False
+        if outside:
             norm, _ = host_path_forms(ref, base)
             self.problems.append(
                 f"{what} {ref!r} resolves to {norm}, outside the project "
@@ -148,9 +154,10 @@ class _ReferenceWalk:
         if not compose_paths:
             self.problems.append(f"{what} entry names no path. {ALLOWED_INCLUDES}")
             return
-        targets = [self._target(what, ref, base) for ref in compose_paths]
+        found = [self._target(what, ref, base) for ref in compose_paths]
+        targets = [target for target in found if target is not None]
         new_base = entry_base(compose_paths, base)
-        if new_base is None or None in targets:
+        if new_base is None or len(targets) != len(found):
             return  # reported above
         # Compose loads the included project's `.env` from its base, so that
         # file steers interpolation of the included model.

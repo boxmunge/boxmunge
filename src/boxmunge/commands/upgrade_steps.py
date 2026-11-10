@@ -16,8 +16,8 @@ from typing import Any, Iterator
 from boxmunge.caddy import generate_caddy_config, override_refusal, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.upgrade_offline import (
-    PutBackError, UnreadableRecord, offline_dry_run_line, offline_exit, regenerate_offline,
-    render_overlay, unreadable_record,
+    PutBackError, UnreadableRecord, in_memory_line, offline_dry_run_line, offline_exit,
+    regenerate_offline, render_overlay, unreadable_record,
 )
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
@@ -304,16 +304,6 @@ def _regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any], re
     regen.processed.append(name)
 
 
-def _in_memory_line(name: str, written: object) -> str:
-    if written is None:
-        return (f"{name}: repository manifest.yml has no schema_version; the "
-                f"upgrade will alert to set it to {CURRENT_SCHEMA_VERSION} in the "
-                f"repository")
-    return (f"{name}: repository manifest.yml uses schema v{written}; migrated in "
-            f"memory to v{CURRENT_SCHEMA_VERSION} (the upgrade will alert to update "
-            f"it in the repository)")
-
-
 def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
     """The dry run's line for a project the apply will exclude, or None. Its
     files are neither rendered nor checked, so such a project can never fail
@@ -370,7 +360,7 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
         if migrated is not None:
             written = manifest.get("schema_version")
             if _links_into_repository(project_dir):
-                report.append(_in_memory_line(name, written))
+                report.append(in_memory_line(name, written))
             else:
                 report.append(f"{name}: migration OK (schema v{written or 1} "
                               f"-> v{CURRENT_SCHEMA_VERSION})")

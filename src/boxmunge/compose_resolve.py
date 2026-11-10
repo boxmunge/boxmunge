@@ -64,8 +64,12 @@ def _missing_env_files_present(compose_path: Path, base: Path | None = None) -> 
             if not isinstance(svc, dict):
                 continue
             for ref in env_file_paths(svc.get("env_file")):
-                if (not isinstance(ref, str) or not ref or has_env_substitution(ref)
-                        or outside_roots(ref, base, (base,))):
+                try:
+                    skip = (not isinstance(ref, str) or not ref or has_env_substitution(ref)
+                            or outside_roots(ref, base, (base,)))
+                except (OSError, ValueError):
+                    skip = True  # not a usable name (a NUL, say)
+                if skip:
                     continue  # the reference walk reports these
                 placeholder = _placeholder(base, Path(host_path_forms(ref, base)[0]))
                 if placeholder is not None:
@@ -91,8 +95,8 @@ def _placeholder(base: Path, target: Path) -> tuple[int, str] | None:
     rel = Path(os.path.relpath(target, base)).parts
     try:
         dir_fd = open_dir_beneath(base, rel[:-1])
-    except OSError:
-        return None  # missing, a link, or not under base: Compose reports it
+    except (OSError, ValueError):
+        return None  # missing, a link, a NUL, or not under base: Compose reports it
     try:
         os.close(os.open(rel[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
                          | os.O_CLOEXEC, 0o644, dir_fd=dir_fd))
