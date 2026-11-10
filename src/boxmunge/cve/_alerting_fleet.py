@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 
 from boxmunge.cve._alerting_types import Alert
-from boxmunge.cve.kev import KevCatalog
+from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, KevCatalog
 from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
 from boxmunge.cve.suppressions import Suppression
 
@@ -82,24 +82,41 @@ def format_kev_withdrawn_alert(source: str | None, withdrawn: Sequence[str]) -> 
     )
 
 
-def format_kev_sources_disagree_alert(source: str | None, lines: Sequence[str]) -> Alert:
+def format_kev_sources_disagree_alert(
+    source: str | None, lines: Sequence[str], *, overridden: Sequence[str] = (),
+) -> Alert:
     """An earlier source in kev.sources served an older catalog lacking CVEs
     the cached one lists, and a later source's catalog was cached instead
-    (kev_refresh, CVE-03). Normal priority: the catalog is current; the
-    operator's preferred source is not what it is current from."""
+    (kev_refresh, CVE-03). Normal priority while that is a source catching
+    up; priority 1 once it has ``overridden`` the first source (or CISA's
+    feed) for runs in a row or against an old cache: then the later source,
+    not the operator's first choice, decides what counts as exploited."""
+    cisa = KEV_DEFAULT_SOURCES[0]
+    if overridden:
+        title = f"CISA KEV first source overridden by {source}"
+    else:
+        title = "CISA KEV sources disagree — newer catalog kept"
+    if cisa in overridden or any(line.startswith(f"{cisa}:") for line in lines):
+        advice = (f"CISA's own feed is the source passed over, so check what {source} "
+                  f"serves: a copy of CISA's catalog does not list CVEs CISA does not.")
+    else:
+        advice = ("If the earlier source is a mirror you run, check that it syncs; if this "
+                  f"repeats once it has caught up, check what {source} serves.")
+    lead = (f"{', '.join(overridden)} has been passed over for {source} on several runs in "
+            f"a row (or against an old cache):" if overridden else
+            "A source ranked earlier in kev.sources served an older KEV catalog that "
+            "lacks CVEs the cached one lists:")
     return Alert(
         kind="kev_sources_disagree",
-        title="CISA KEV sources disagree — newer catalog kept",
+        title=title,
         body="\n".join([
-            "A source ranked earlier in kev.sources served an older KEV catalog that "
-            "lacks CVEs the cached one lists:",
+            lead,
             *(f"- {line}" for line in lines),
             "",
             f"The catalog from {source} was cached instead, so those CVEs still count as "
-            f"actively exploited. If the earlier source is a mirror you run, check that it "
-            f"syncs; if this repeats once it has caught up, check what {source} serves.",
+            f"actively exploited. {advice}",
         ]),
-        priority=0,
+        priority=1 if overridden else 0,
     )
 
 

@@ -28,8 +28,10 @@ def refresh_kev_and_alert(paths: BoxPaths, now: datetime) -> KevCatalog:
     Entries CISA withdrew (a few, accepted) get a normal-priority notice;
     the refresh recorded them (cve.kev_withdrawals), so a quarantine held
     for one is kept, not lifted (kev_withdrawal). An earlier source passed
-    over because it lags the cache (sources disagree) gets a normal notice
-    when a later source was cached, and the priority-1 alert when none was.
+    over because it lags the cache (sources disagree) gets a notice when a
+    later source was cached (priority 1 once that overrides the first
+    source, kev_refresh.KEV_OVERRIDE_RUNS), and the priority-1 alert when
+    none was.
     """
     refresh = refresh_kev(paths)
     kev = load_kev(paths)
@@ -37,13 +39,16 @@ def refresh_kev_and_alert(paths: BoxPaths, now: datetime) -> KevCatalog:
         _send(paths, format_kev_withdrawn_alert(refresh.source, refresh.withdrawn))
     if refresh.updated and refresh.disagreements:
         _send(paths, format_kev_sources_disagree_alert(
-            refresh.source, [f.line() for f in refresh.disagreements]))
+            refresh.source, [f.line() for f in refresh.disagreements],
+            overridden=[f.source for f in refresh.overridden]))
     stale_reason = kev.stale_reason(now.date())
     if stale_reason is None and not refresh.needs_alert:
         return kev
     if stale_reason is not None and _all_lagging(refresh):
         stale_reason += ("; every source answered this run, but with a catalog "
-                         "older than the cached one")
+                         "older than the cached one"
+                         + (" (or older and missing some of its CVEs)"
+                            if refresh.disagreements else ""))
     tried = _tried(refresh)
     log_warning(
         "cve-scan",

@@ -426,8 +426,9 @@ fresh:
 When the sources disagree, the catalog is not rolled back either. Say
 `kev.sources` lists a mirror you run first and CISA second, and one night
 the mirror was down, so CISA's newer catalog was cached. If the mirror
-comes back with an older catalog that lacks CVEs the cached one lists,
-those CVEs were not withdrawn: the mirror has not caught up. Taking that
+comes back with an older catalog that lacks CVEs the cached one lists, and
+that catalog is no newer than the one the mirror served last time, the
+mirror has not caught up: those CVEs were not withdrawn. Taking that
 catalog would drop the newest KEV entries, and a project not yet
 quarantined for one of them never would be. So the mirror is passed over
 and the later sources are tried. Each of them is held to the cached date,
@@ -435,10 +436,23 @@ so the first that passes agrees with the cache or is newer. It is cached,
 and a normal-priority notice (`CISA KEV sources disagree — newer catalog
 kept`) names the source that lags and what it lacks. If no later source
 answers, the cached catalog is kept and the run alerts at priority 1, as
-for a rejected catalog. An older catalog from an earlier source that drops
-none of the cached CVEs is still accepted: the sources agree on content,
-the ranking wins, and a later source cannot lock the earlier one out by
-date alone.
+for a rejected catalog. While an earlier source disagrees, a later source
+may not drop a CVE the earlier one still lists: that catalog is rejected
+too.
+
+Each refresh records the release date of the catalog every source served
+(`state/kev/sources.json`). An earlier source that has moved on (its
+catalog is newer than the last one it served, or it has served none
+before) wins by rank even when it lacks some cached CVEs: those go through
+the withdrawal rules above (up to 3 accepted and recorded, more rejected).
+Otherwise a later source that listed one CVE of its own, stamped a little
+ahead, would keep CISA locked out for good. So would an earlier catalog
+that drops nothing, which is always accepted. When the first source in
+`kev.sources`, or CISA's own feed wherever it is listed, is passed over 2
+runs in a row, or against a cached catalog released over 7 days ago, the
+notice becomes a priority-1 alert: `CISA KEV first source overridden by
+<source>`. If `sources.json` cannot be read, no catalog is accepted
+(priority 1) until root repairs or removes the file.
 
 **Fail-safe: toward uptime, never toward quarantine.** When the catalog is
 missing or stale, `is_known_exploited` returns `False`. The site is not taken

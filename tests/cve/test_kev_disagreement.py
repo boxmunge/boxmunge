@@ -19,7 +19,10 @@ from datetime import datetime, timedelta, timezone
 from boxmunge.commands import security_actions, security_kev, security_scan_core
 from boxmunge.cve import kev_refresh
 from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, load_kev
-from boxmunge.cve.kev_refresh import DISAGREES, UNREACHABLE, refresh_from, refresh_kev
+from boxmunge.cve.kev_refresh import (
+    DISAGREES, REJECTED, UNREACHABLE, refresh_from, refresh_kev,
+)
+from boxmunge.cve.kev_source_history import load_history
 from boxmunge.cve.kev_withdrawals import load_withdrawals
 from boxmunge.paths import BoxPaths
 from tests.test_commands.cve_helpers import Pushover, make_box, scan_result
@@ -66,11 +69,15 @@ def _serve(monkeypatch, answers: dict) -> None:
 
 
 def _cache_from_cisa(paths: BoxPaths) -> None:
-    """OWN was down last night; CISA answered with the newest catalog."""
+    """OWN served LAGGED_AT before; it was down last night, and CISA
+    answered with the newest catalog."""
     paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
     paths.kev_catalog.write_text(json.dumps({
         "source": CISA, "released_at": CACHED_AT, "fetched_at": CACHED_AT,
         "cve_ids": _ids() + NEW}))
+    paths.kev_sources.write_text(json.dumps({"sources": {
+        OWN: {"released_at": LAGGED_AT, "disagreed_runs": 0},
+        CISA: {"released_at": CACHED_AT, "disagreed_runs": 0}}}))
 
 
 def test_a_lagging_earlier_source_does_not_roll_the_catalog_back(tmp_path, monkeypatch):
@@ -118,6 +125,101 @@ def test_a_newer_earlier_source_may_still_withdraw_entries(tmp_path, monkeypatch
     assert result.source == OWN and result.withdrawn == (NEW[1],)
 
 
+def test_an_earlier_source_that_moved_on_without_cached_ids_wins_by_rank(
+        tmp_path, monkeypatch):
+    """Newer than what OWN served last time: it has not stalled, it moved on
+    without those IDs. Ranking wins, and the drops are withdrawals."""
+    paths = BoxPaths(root=tmp_path)
+    _cache_from_cisa(paths)
+    moved_on = (NOW - timedelta(days=2)).isoformat()
+    _serve(monkeypatch, {OWN: _feed(_ids(), moved_on)})
+    result = refresh_from(paths, SOURCES)
+    assert result.source == OWN and result.withdrawn == tuple(NEW)
+    assert set(load_withdrawals(paths)) == set(NEW)
+
+
+def test_the_refresh_records_what_each_source_served(tmp_path, monkeypatch):
+    paths = BoxPaths(root=tmp_path)
+    _cache_from_cisa(paths)
+    _serve(monkeypatch, {OWN: _feed(_ids(), LAGGED_AT), CISA: _feed(_ids() + NEW, CACHED_AT)})
+    refresh_from(paths, SOURCES)
+    history = load_history(paths)
+    assert history[OWN].disagreed_runs == 1
+    assert history[CISA].disagreed_runs == 0
+
+
+# ---------- a later source cannot lock the first one out (#157 review) ----------
+
+MIRROR = "https://mirror.example/kev.json"
+FAKE = "CVE-2026-9999"
+
+
+def _night(paths, monkeypatch, cisa, mirror) -> object:
+    _serve(monkeypatch, {CISA: cisa, MIRROR: mirror})
+    return refresh_from(paths, (CISA, MIRROR))
+
+
+def test_a_later_source_inventing_an_id_cannot_lock_cisa_out(tmp_path, monkeypatch):
+    """Night 0 CISA times out and the mirror's list (CISA's plus one ID of
+    its own, stamped ahead) is cached. CISA has served nothing before, so
+    its older catalog without that ID is not a stall: it wins by rank, the
+    invented ID is a withdrawal, and the mirror never withdraws a real one."""
+    paths = BoxPaths(root=tmp_path)
+    real = _ids()
+    ahead = (NOW + timedelta(minutes=30)).isoformat()
+    first = _night(paths, monkeypatch, urllib.error.URLError(TimeoutError("t")),
+                   _feed(real + [FAKE], ahead))
+    assert first.source == MIRROR
+    dropped: list[str] = []
+    for night in range(1, 6):
+        dropped += real[(night - 1) * 3: night * 3]
+        result = _night(paths, monkeypatch, _feed(real, (NOW - timedelta(hours=1)).isoformat()),
+                        _feed([c for c in real if c not in dropped] + [FAKE],
+                              (NOW + timedelta(minutes=30 + night)).isoformat()))
+        assert result.source == CISA and result.disagreements == (), night
+    assert load_kev(paths).source == CISA
+    assert set(real) <= load_kev(paths).cve_ids
+    assert set(load_withdrawals(paths)) == {FAKE}
+
+
+def _override(paths, monkeypatch) -> None:
+    """CISA served D0, then timed out; the mirror (D0's list plus FAKE,
+    stamped later) was cached."""
+    d0 = (NOW - timedelta(days=1)).isoformat()
+    paths.d0 = d0
+    _night(paths, monkeypatch, _feed(_ids(), d0), b"")
+    _night(paths, monkeypatch, urllib.error.URLError(TimeoutError("t")),
+           _feed(_ids() + [FAKE], (NOW - timedelta(hours=2)).isoformat()))
+    assert load_kev(paths).source == MIRROR
+
+
+def test_the_first_source_overridden_twice_running_escalates(tmp_path, monkeypatch):
+    paths = BoxPaths(root=tmp_path)
+    _override(paths, monkeypatch)
+    mirror = _feed(_ids() + [FAKE], (NOW - timedelta(hours=1)).isoformat())
+    once = _night(paths, monkeypatch, _feed(_ids(), paths.d0), mirror)
+    assert once.source == MIRROR and [f.kind for f in once.failures] == [DISAGREES]
+    assert once.overridden == ()
+    twice = _night(paths, monkeypatch, _feed(_ids(), paths.d0), mirror)
+    assert [f.source for f in twice.overridden] == [CISA]
+    # CISA publishes again: it moved on, so it wins by rank and FAKE goes.
+    newer = _night(paths, monkeypatch, _feed(_ids(), NOW.isoformat()), mirror)
+    assert newer.source == CISA and newer.withdrawn == (FAKE,)
+    assert load_history(paths)[CISA].disagreed_runs == 0
+
+
+def test_a_later_source_cannot_withdraw_what_an_earlier_one_still_lists(
+        tmp_path, monkeypatch):
+    paths = BoxPaths(root=tmp_path)
+    _override(paths, monkeypatch)
+    dropping = _feed(_ids()[3:] + [FAKE], (NOW - timedelta(hours=1)).isoformat())
+    result = _night(paths, monkeypatch, _feed(_ids(), paths.d0), dropping)
+    assert result.source is None and result.needs_alert
+    assert [f.kind for f in result.failures] == [DISAGREES, REJECTED]
+    assert f"which {CISA}, ranked above it, still lists" in result.failures[1].error
+    assert set(_ids()) <= load_kev(paths).cve_ids
+
+
 # ---------- the scan run's alerts ----------
 
 
@@ -152,3 +254,28 @@ def test_an_unresolved_disagreement_is_a_priority_alert(tmp_path, monkeypatch):
     assert (alert.kind, alert.priority) == ("kev_stale", 1)
     assert f"- {OWN}: catalog released" in alert.body
     assert f"- {CISA}: timed out after 30s" in alert.body
+
+
+def test_an_override_of_cisa_alerts_at_priority_one_naming_it(tmp_path, monkeypatch):
+    """The second run in a row CISA is passed over: the notice becomes a
+    priority-1 alert that says the first source is overridden, without the
+    "a mirror you run" advice."""
+    paths = make_box(tmp_path)
+    Pushover(monkeypatch, paths)
+    paths.config_file.write_text(paths.config_file.read_text()
+                                 + f"kev:\n  sources: [{CISA}, {MIRROR}]\n")
+    _override(paths, monkeypatch)
+    mirror = _feed(_ids() + [FAKE], (NOW - timedelta(hours=1)).isoformat())
+    _night(paths, monkeypatch, _feed(_ids(), paths.d0), mirror)
+    _serve(monkeypatch, {CISA: _feed(_ids(), paths.d0), MIRROR: mirror})
+    monkeypatch.setattr(security_kev, "refresh_kev", refresh_kev)
+    monkeypatch.setattr(security_kev, "load_kev", load_kev)
+    monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
+    monkeypatch.setattr(security_scan_core, "scan_image", lambda r, timeout: scan_result(r))
+    sent: list = []
+    monkeypatch.setattr(security_kev, "send_alerts", lambda a, p: sent.extend(a))
+    assert security_actions.cmd_security_scan([], paths) == 0
+    [alert] = [a for a in sent if a.kind == "kev_sources_disagree"]
+    assert alert.priority == 1
+    assert alert.title == f"CISA KEV first source overridden by {MIRROR}"
+    assert "mirror you run" not in alert.body and "CISA's own feed" in alert.body
