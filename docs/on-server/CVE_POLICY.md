@@ -1416,6 +1416,82 @@ release's own policy. Nothing else restarts a quarantined project.
 is lifted from a project that is still paused, the pause record takes over
 the saved policies and `boxmunge resume` restores them.
 
+## Base images and the build cache
+
+A fix in a `build:` service's base image reaches it at the next build.
+`stage`, `prod-deploy` and `promote` build with `--pull`: for every base
+image (`FROM`) the build asks the registry for the tag's current digest.
+
+- If the digest moved, the new base is downloaded and the build runs on it.
+  Every Dockerfile step after `FROM` runs again.
+- If the digest did not move, nothing is downloaded and the build cache
+  still holds, so the rebuild is quick. The check is one registry request
+  per base image.
+- A `FROM` pinned by digest (`FROM nginx:1.27@sha256:...`) names one exact
+  image and never changes. Bump the digest to take a fix.
+- A package your Dockerfile installs (`RUN apt-get install ...`) is kept by
+  the build cache while the base is unchanged. Set compose
+  `build: {no_cache: true}`, or change that step, to install it again.
+
+To take a base-image fix for a bundle release that is already deployed,
+without uploading it again, run `prod-deploy <project> --redeploy`. A git
+project's `prod-deploy <project>` rebuilds the commit its ref names. A
+redeploy checks the release as strictly as a new deploy, so an old release
+that this boxmunge's rules refuse must be fixed and uploaded again.
+
+A base image that cannot be read from its registry (unreachable,
+rate-limited, credentials refused, or no such image) fails the build before
+anything starts. The error says why and names `--no-pull`. `stage`,
+`prod-deploy` and `promote` accept `--no-pull`. It builds from the base
+images in the box's local image store (`docker image ls`), which may miss
+fixes the registry has. A build never falls back to them on its own.
+
+A pulling build does not put the base it fetched in that store. Docker
+keeps it in the builder's cache only, and the store's tag for that base
+stays where it was, or stays absent. A build without `--pull` asks the
+registry for any base the store does not have, so `--no-pull` (and
+`rollback`) work without the registry only for bases the store already
+holds. To keep one there, `docker pull` it on the box.
+
+A `FROM` that names an image only this box has (one from `docker load` or a
+hand build) cannot be pulled, so a pulling build fails on it. Set
+`build: {pull: false}` on that service (in `compose.yml` or a file it
+includes). Its build then uses the local image store while the others pull,
+and so does the build of any service that names it as a `service:` context.
+To build on another service of the same project instead, use a named context
+rather than its image name:
+
+```yaml
+services:
+  base:
+    build: ./base
+  web:
+    build:
+      context: ./web
+      additional_contexts:
+        base: service:base   # FROM base in web/Dockerfile
+```
+
+`promote` checks the registry again. It does not reuse the base the stage
+pulled. Docker keeps a pulled base in the builder's cache and does not move
+the box's local tag, so a promote without `--pull` would build on the older
+base the box had before the stage. Normally the digest has not moved since
+the stage, so the promote's build is fully cached and production runs the
+base the stage tested. If the base image's tag moved between `stage` and
+`promote`, production gets the newer base, which staging never ran. To
+test it first, stage again before promoting.
+
+`rollback` does not pull, so that it works in an incident even when the
+registry cannot be reached, as long as each base image is in the box's
+local image store. It rebuilds the previous release on that local base,
+which can be older than the base the release ran on. To rebuild the
+rolled-back release on current base images, follow the rollback with
+`prod-deploy <project> --redeploy`. For a git project,
+`prod-deploy <project> --ref <commit>` does the same. Unlike the rollback,
+which keeps the recorded decisions a release from an older boxmunge does not
+make, the redeploy checks the release as strictly as a new deploy, so such a
+release can be refused.
+
 ## Shipping a fix the upstream image does not have yet
 
 A KEV finding quarantines until the fix runs, and cannot be suppressed.
@@ -1424,7 +1500,8 @@ When the distro already ships the fixed package (the finding's
 has not rebuilt the image, build the fix on top of it: turn the service
 into a `build:` service whose Dockerfile starts `FROM` the same image and
 upgrades the package, then `prod-deploy` the release. The quarantine gate
-scans the built image, and a clean deploy lifts the quarantine.
+scans the built image, and a clean deploy lifts the quarantine. The deploy
+builds on the newest `nginx:1.27` (see "Base images and the build cache").
 
 ```yaml
 # compose.yml: replaces `image: nginx:1.27` on the service
@@ -1432,7 +1509,6 @@ services:
   web:
     build:
       context: ./patched
-      pull: true        # use the newest nginx:1.27, not the cached one
       no_cache: true    # re-run the upgrade on every deploy
 ```
 

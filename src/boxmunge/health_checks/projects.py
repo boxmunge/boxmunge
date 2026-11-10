@@ -155,7 +155,8 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
         ("pause incomplete: ", ", ".join(incomplete) + " (may still be serving; run `pause "
          "<project>` again to finish, or `resume <project>`)", incomplete),
         ("paused, awaiting a deploy: ", ", ".join(awaiting) + " (down behind the "
-         "maintenance page until `prod-deploy <project>`)", awaiting),
+         "maintenance page until `prod-deploy <project> --redeploy`, or `prod-deploy "
+         "<project>` after an upload)", awaiting),
         ("paused: ", ", ".join(paused), paused),
     ) if names]
     if bad or quarantined or stopped or incomplete or awaiting:

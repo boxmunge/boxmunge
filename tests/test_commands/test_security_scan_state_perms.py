@@ -199,7 +199,7 @@ def test_cve_texts_name_real_actions():
     from boxmunge.cve._alerting_formatters import format_fixable_alert
     from boxmunge.cve.policy_explain import HARDENING_UPCOMING_FIX, explain_fix_available
     body = format_fixable_alert("demo", []).body
-    assert "pull the base image" not in body and "build: {pull: true}" in body
+    assert "pull: true" not in body and "prod-deploy demo --redeploy" in body
     assert "Shipping a fix the upstream image does not have yet" in body
     assert "pull the base image" not in explain_fix_available("1.2", meets_gate=False, gate_quarantines=True, posture_label="x")
     assert "suppress the CVE after review" in HARDENING_UPCOMING_FIX

@@ -22,6 +22,7 @@ from boxmunge.pause import awaiting_deploy
 from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
+from boxmunge.redeploy_hint import redeploy_command
 
 if TYPE_CHECKING:
     from boxmunge.staged_release import ComposeTarget
@@ -155,7 +156,8 @@ def run_check(project_name: str, paths: BoxPaths, verbose: bool = True) -> int:
     if paths.is_project_pre_registered(project_name):
         if verbose:
             print(f"ERROR: Project '{project_name}' is pre-registered (secrets set) but "
-                  f"not yet deployed. Deploy first with: boxmunge prod-deploy {project_name}", file=sys.stderr)
+                  f"not yet deployed. Upload its first bundle, then deploy it with: "
+                  f"boxmunge prod-deploy {project_name}", file=sys.stderr)
         return 1
 
     try:
@@ -432,7 +434,8 @@ def _check_one(name: str, paths: BoxPaths, read_only: bool) -> int:
             )
         elif awaiting_deploy(name, paths):
             print(f"{name}: PAUSED (awaiting deploy; down behind its maintenance page "
-                  f"until `prod-deploy {name}`)")
+                  f"until a deploy: `{redeploy_command(paths, name)}`, or "
+                  f"`prod-deploy {name}` of an upload)")
         return 0
     held = tick_hold(name, paths, read_only)
     if held is not None:

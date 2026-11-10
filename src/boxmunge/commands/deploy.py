@@ -12,7 +12,8 @@ from boxmunge.commands.release_config import (
     decide_release_users, generate_release_config, promote_candidates,
 )
 from boxmunge.commands.deploy_steps import (
-    post_deploy_diagnostics, record_deploy_state, smoke_ok, take_pre_deploy_snapshot,
+    going_ahead, post_deploy_diagnostics, record_deploy_state, smoke_ok,
+    take_pre_deploy_snapshot,
 )
 from boxmunge.compose import ComposeError
 from boxmunge.compose_guard import compose_up_checked
@@ -34,7 +35,6 @@ from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.probation import clear_probation_if_active
 from boxmunge.release import ReleaseStateError, live_ref, previous_dir
 from boxmunge.release_target import DeployRefused, production_target
 from boxmunge.run_as import RunAsError
@@ -52,51 +52,45 @@ def _run_deploy_inner(
     no_snapshot: bool = False,
     dry_run: bool = False,
     component: str = "deploy",
+    *,
+    pull: bool = True,
+    redeploy: bool = False,
 ) -> int:
-    """Inner deploy logic — caller must hold the project lock."""
+    """Inner deploy logic — caller must hold the project lock. `pull`: build
+    with --pull. `redeploy`: deploy the installed bundle release again;
+    without it, no new bundle is refused (deploy_no_bundle)."""
+    from boxmunge.commands import deploy_no_bundle as no_bundle
     project_dir = paths.project_dir(project_name)
     is_new = not (project_dir / "manifest.yml").exists()
+    git = not is_new and (project_dir / "repo").exists()
+    refused = redeploy and no_bundle.redeploy_problem(project_name, paths, git=git, ref=ref)
+    if refused:
+        print(f"ERROR: {refused}", file=sys.stderr)
+        return 1
 
     # Git projects have a repo/ dir and check a commit out in place. Bundle
     # projects take a release from the inbox.
-    if not is_new and (project_dir / "repo").exists():
-        return _deploy_repo(project_name, paths, ref, no_snapshot, dry_run, component)
+    if git:
+        going_ahead(paths, dry_run)
+        return _deploy_repo(project_name, paths, ref, no_snapshot, dry_run, component, pull)
 
+    missing: SourceError | None = None
     try:
-        bundle_path = resolve_bundle_source(project_name, paths, ref=ref)
+        bundle_path = None if redeploy else resolve_bundle_source(project_name, paths, ref=ref)
     except SourceError as e:
-        from boxmunge.commands.deploy_tree import resume_without_bundle
-        from boxmunge.release_txn import load_txn
-        try:
-            txn = load_txn(paths, project_name)
-        except ReleaseStateError as err:
-            print(f"ERROR: {err}", file=sys.stderr)
-            return 1
-        if txn is not None and dry_run:
-            from boxmunge.commands.deploy_tree import bundle_resume_problem
-            problem = bundle_resume_problem(project_name, paths, txn, ref)
-            if problem:
-                print(f"ERROR: {problem}.", file=sys.stderr)
-                return 1
-            print(f"[DRY RUN] Would resume the open install of {txn.ref} "
-                  f"(phase {txn.phase}) from the project dir")
-            return 0
-        if txn is not None:
-            return resume_without_bundle(project_name, paths, txn, ref, component)
-        if is_new or ref:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 1
-        print(f"No new bundle for '{project_name}' in the inbox; "
-              f"redeploying the release already on disk.")
-        return redeploy_installed(project_name, paths, None, no_snapshot,
-                                  dry_run, component)
-    return _deploy_bundle(project_name, paths, bundle_path, is_new,
-                          no_snapshot, dry_run, component)
+        bundle_path, missing = None, e
+    if bundle_path is not None:
+        going_ahead(paths, dry_run)
+        return _deploy_bundle(project_name, paths, bundle_path, is_new,
+                              no_snapshot, dry_run, component, pull)
+    return no_bundle.deploy_without_bundle(
+        project_name, paths, missing=missing, is_new=is_new, ref=ref, redeploy=redeploy,
+        no_snapshot=no_snapshot, dry_run=dry_run, component=component, pull=pull)
 
 
 def _deploy_bundle(
     project_name: str, paths: BoxPaths, bundle_path: Path, is_new: bool,
-    no_snapshot: bool, dry_run: bool, component: str,
+    no_snapshot: bool, dry_run: bool, component: str, pull: bool,
 ) -> int:
     """Validate a bundle in .releases/incoming/, then install and start it
     inside an install transaction (commands/deploy_tree.py)."""
@@ -120,7 +114,8 @@ def _deploy_bundle(
 
             return deploy_tree_locked(project_name, paths, TreeDeploy(
                 tree=tree, ref=new_ref, source="bundle", manifest=manifest,
-                component=component, no_snapshot=no_snapshot, on_installed=installed))
+                component=component, no_snapshot=no_snapshot, pull=pull,
+                on_installed=installed))
     except IntakeError as e:
         return report_refusal(e)
 
@@ -132,11 +127,14 @@ def redeploy_installed(
     no_snapshot: bool,
     dry_run: bool,
     component: str,
+    *,
+    pull: bool,
 ) -> int:
     """Validate and start the bundle release already in the project dir.
 
     `ref` labels the release in deploy state; None keeps the installed
-    release's own ref. Caller holds the project lock.
+    release's own ref. `pull`: build with --pull. Caller holds the project
+    lock.
     """
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
@@ -155,12 +153,12 @@ def redeploy_installed(
         return 0
     snapshot_name = take_pre_deploy_snapshot(project_name, paths, manifest, no_snapshot)
     return _start_release(project_name, paths, manifest, actual_ref,
-                          snapshot_name, component)
+                          snapshot_name, component, pull)
 
 
 def _deploy_repo(
     project_name: str, paths: BoxPaths, ref: str | None,
-    no_snapshot: bool, dry_run: bool, component: str,
+    no_snapshot: bool, dry_run: bool, component: str, pull: bool,
 ) -> int:
     """Fetch origin, resolve the ref (--ref, else the live manifest's) to a
     full SHA, and deploy exactly that commit (commands/git_deploy.py)."""
@@ -182,7 +180,7 @@ def _deploy_repo(
         print(f"[DRY RUN] Would deploy {project_name} at {wanted} ({sha})")
         return 0
     return deploy_git_locked(project_name, paths, GitDeploy(
-        sha=sha, source="git", component=component, no_snapshot=no_snapshot))
+        sha=sha, source="git", component=component, no_snapshot=no_snapshot, pull=pull))
 
 
 def _start_release(
@@ -192,6 +190,7 @@ def _start_release(
     actual_ref: str,
     snapshot_name: str | None,
     component: str,
+    pull: bool,
 ) -> int:
     """Run pre-deploy, generate config, start, smoke-test, record.
 
@@ -200,7 +199,7 @@ def _start_release(
     """
     print(f"Deploying {project_name} (ref: {actual_ref})...")
     try:
-        decision = decide_release_users(project_name, paths, manifest, component)
+        decision = decide_release_users(project_name, paths, manifest, component, pull=pull)
     except (DeployRefused, DockerError) as e:
         print(f"ERROR: {project_name} cannot start as it is; nothing was run or changed "
               f"({production_now(paths, project_name)}). Fix the following and deploy "
@@ -441,6 +440,9 @@ def deploy_locked(
     no_snapshot: bool = False,
     dry_run: bool = False,
     component: str = "deploy",
+    *,
+    pull: bool = True,
+    redeploy: bool = False,
 ) -> int:
     """The deploy core. Caller holds the project lock; never takes it.
 
@@ -449,9 +451,9 @@ def deploy_locked(
     """
     if not deploy_eligible(project_name, paths):
         return 1
-    clear_probation_if_active(paths, "deploy")
     return _run_deploy_inner(
         project_name, paths, ref, no_snapshot, dry_run, component=component,
+        pull=pull, redeploy=redeploy,
     )
 
 
@@ -461,12 +463,16 @@ def run_deploy(
     ref: str | None = None,
     no_snapshot: bool = False,
     dry_run: bool = False,
+    *,
+    pull: bool = True,
+    redeploy: bool = False,
 ) -> int:
     """prod-deploy: take the project lock and deploy. Returns 0 on success,
     1 on failure, 3 for a compose hardening rejection."""
     try:
         with project_lock(project_name, paths):
-            return deploy_locked(project_name, paths, ref, no_snapshot, dry_run)
+            return deploy_locked(project_name, paths, ref, no_snapshot, dry_run,
+                                 pull=pull, redeploy=redeploy)
     except LockError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
@@ -476,15 +482,18 @@ def cmd_deploy(args: list[str]) -> None:
     """CLI entry point for prod-deploy command."""
     from boxmunge.commands.argv import parse_args, require_project_name, usage_error
     parsed = parse_args(
-        "prod-deploy", args, flags={"--no-snapshot", "--dry-run", "--abandon"},
+        "prod-deploy", args,
+        flags={"--no-snapshot", "--dry-run", "--abandon", "--no-pull", "--redeploy"},
         options={"--ref"}, min_positional=1, max_positional=1,
     )
     project = require_project_name("prod-deploy", parsed.positional[0])
     if parsed.has("--abandon"):
-        if parsed.get("--ref") or parsed.has("--no-snapshot") or parsed.has("--dry-run"):
+        if parsed.get("--ref") or any(parsed.has(f) for f in (
+                "--no-snapshot", "--dry-run", "--no-pull", "--redeploy")):
             usage_error("prod-deploy", "--abandon takes no other options")
         from boxmunge.commands import install_abandon
         sys.exit(install_abandon.run_abandon(project, BoxPaths()))
     sys.exit(run_deploy(project, BoxPaths(), ref=parsed.get("--ref"),
                         no_snapshot=parsed.has("--no-snapshot"),
-                        dry_run=parsed.has("--dry-run")))
+                        dry_run=parsed.has("--dry-run"), pull=not parsed.has("--no-pull"),
+                        redeploy=parsed.has("--redeploy")))

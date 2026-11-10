@@ -3,7 +3,8 @@ can repair.
 
 Each case is a state resume refuses to start, whose remedy is a deploy (which
 a plain pause refuses). The refusal names `resume <p> --no-start`, then
-`prod-deploy <p>`, and that remedy is shown to succeed. In between, the
+`prod-deploy <p> --redeploy` (the inbox holds no new bundle), and that
+remedy is shown to succeed. In between, the
 project stays paused for everything but a deploy.
 """
 from __future__ import annotations
@@ -57,17 +58,18 @@ def _resume(paths, **kw) -> int:
 
 
 def _remedy_succeeds(paths, capsys, refused_rc: int, ref: str | None = None) -> None:
-    """Resume refuses naming the remedy; `--no-start` then `prod-deploy` works."""
+    """Resume refuses naming the remedy; `--no-start` then `prod-deploy`
+    (--redeploy, or --ref for a new upload) works."""
     assert _resume(paths) == refused_rc and _resume.up_calls == 0
     err = capsys.readouterr().err
-    assert "`boxmunge resume myapp --no-start`, then `boxmunge prod-deploy myapp`" in err \
+    assert "`boxmunge resume myapp --no-start`, then `boxmunge prod-deploy myapp --redeploy`" in err \
         or "`boxmunge resume myapp --no-start` first" in err
     assert is_paused("myapp", paths) and not deploy_eligible("myapp", paths)
     assert _resume(paths, no_start=True) == 0 and _resume.up_calls == 0
     assert awaiting_deploy("myapp", paths)
     assert paths.project_caddy_site("myapp").read_text() == MAINTENANCE
     with docker_off() as up:
-        assert run_deploy("myapp", paths, ref=ref) == 0
+        assert run_deploy("myapp", paths, ref=ref, redeploy=ref is None) == 0
         up.assert_called()
     assert not is_paused("myapp", paths)
     assert paths.project_caddy_site("myapp").read_text() != MAINTENANCE
@@ -115,10 +117,10 @@ def test_an_image_gone_from_the_local_store(paths, capsys) -> None:
         assert _resume(paths) == 1
     released.assert_not_called()   # given back only once a start has run
     err = capsys.readouterr().err
-    assert "`boxmunge resume myapp --no-start`, then `boxmunge prod-deploy myapp`" in err
+    assert "`boxmunge resume myapp --no-start`, then `boxmunge prod-deploy myapp --redeploy`" in err
     assert _resume(paths, no_start=True) == 0
     with docker_off():
-        assert run_deploy("myapp", paths) == 0
+        assert run_deploy("myapp", paths, redeploy=True) == 0
     assert not is_paused("myapp", paths)
 
 
@@ -156,7 +158,7 @@ def test_it_stays_paused_for_everything_but_a_deploy(paths, capsys) -> None:
     # Timers (health, backups, container updates, upgrade restarts) skip a
     # paused project: nothing starts it but the deploy.
     assert block is not None and block.reason is BlockReason.PAUSED
-    assert "prod-deploy myapp" in block.refuse_message
+    assert "prod-deploy myapp --redeploy" in block.refuse_message
     [row] = display_rows(collect_status(paths).rows)
     assert row["status"] == "PAUSED (awaiting deploy)"
     lifecycle = check_lifecycle_blocked(paths)
@@ -174,7 +176,7 @@ def test_a_deploy_that_never_started_leaves_it_awaiting(paths, capsys) -> None:
             patch("boxmunge.commands.deploy_handover.give_release_policies") as released, \
             patch("boxmunge.compose_guard.check_start",
                   side_effect=ComposeRefused("bind source changed kind")):
-        assert run_deploy("myapp", paths) == 1
+        assert run_deploy("myapp", paths, redeploy=True) == 1
         up.assert_not_called()
     released.assert_not_called()   # still held: nothing started
     assert awaiting_deploy("myapp", paths)
@@ -189,7 +191,7 @@ def test_policies_are_given_back_only_after_the_up(paths) -> None:
     with docker_off() as up, patch("boxmunge.commands.deploy_handover.give_release_policies",
                                    side_effect=lambda *a: order.append("release")):
         up.side_effect = lambda *a, **k: order.append("up")
-        assert run_deploy("myapp", paths) == 0
+        assert run_deploy("myapp", paths, redeploy=True) == 0
     assert order == ["up", "release"]
 
 
@@ -204,14 +206,14 @@ def test_a_start_that_fails_part_way_keeps_the_pause(paths, capsys) -> None:
             patch("boxmunge.pause.compose_stop") as stopped, \
             patch("boxmunge.pause.hold_restart_policies") as held:
         up.side_effect = DockerError("container web exited (1)")
-        assert run_deploy("myapp", paths) == 1
+        assert run_deploy("myapp", paths, redeploy=True) == 1
     stopped.assert_called_once()
     held.assert_called_once()
     assert awaiting_deploy("myapp", paths)
     assert paths.project_caddy_site("myapp").read_text() == MAINTENANCE
     assert "what the failed start started was stopped again" in capsys.readouterr().err
     with docker_off():
-        assert run_deploy("myapp", paths) == 0
+        assert run_deploy("myapp", paths, redeploy=True) == 0
     assert not is_paused("myapp", paths)
 
 

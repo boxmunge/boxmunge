@@ -9,6 +9,7 @@ from boxmunge.log import log_error, log_warning
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
+from boxmunge.probation import clear_probation_if_active
 from boxmunge.pending_snapshot import KEY as PENDING_SNAPSHOT, age, pending_for_live
 from boxmunge.state import read_state, write_state
 
@@ -187,3 +188,10 @@ def smoke_ok(
     log_error("deploy", f"Smoke test {smoke_result.status}: {smoke_result.message}",
               paths, project=project_name)
     return False
+
+
+def going_ahead(paths: BoxPaths, dry_run: bool) -> None:
+    """A deploy going ahead ends the upgrade's probation; a refusal or a
+    dry run does not."""
+    if not dry_run:
+        clear_probation_if_active(paths, "deploy")

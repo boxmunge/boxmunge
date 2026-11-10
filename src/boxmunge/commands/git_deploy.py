@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -50,6 +50,7 @@ class GitDeploy:
     staged_id: str | None = None
     component: str = "deploy"
     no_snapshot: bool = False
+    pull: bool = field(kw_only=True)  # build with --pull (commands/deploy_build)
     candidate: Path | None = None   # the commit already materialised (a git slot's release)
     on_installed: Callable[[], None] | None = None
     on_switched: Callable[[int], None] | None = None  # after replace_release returns
@@ -193,7 +194,7 @@ def _checkout_and_switch(project_name: str, paths: BoxPaths, req: GitDeploy,
                          txn: InstallTxn) -> int:
     tree_req = TreeDeploy(tree=None, ref=req.sha, source=req.source, manifest={},
                           staged_id=req.staged_id, component=req.component,
-                          on_switched=req.on_switched,
+                          pull=req.pull, on_switched=req.on_switched,
                           previous_manifest=req.previous_manifest)
     try:
         if not txn.reached("previous_kept"):

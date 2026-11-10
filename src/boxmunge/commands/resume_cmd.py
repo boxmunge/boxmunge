@@ -41,6 +41,7 @@ from boxmunge.pause import (
 )
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
+from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.release_txn import open_install_reason
 from boxmunge.state import read_state, write_state
 
@@ -178,8 +179,8 @@ def resume_locked(
     try:
         prepare_compose_override(paths, manifest, component="resume")
     except (OSError, ValueError, DockerError, BindSourceError) as e:
-        print(f"ERROR: cannot regenerate the compose overlay: {e}. {_deploy_hint(project_name)}",
-              file=sys.stderr)
+        print(f"ERROR: cannot regenerate the compose overlay: {e}. "
+              f"{_deploy_hint(project_name, paths)}", file=sys.stderr)
         log_error("resume", f"Overlay regeneration failed: {e}", paths, project=project_name)
         return 1, None
     compose_files = _compose_files(project_name, paths)
@@ -199,7 +200,7 @@ def resume_locked(
                     deploying=recreate)
     except ComposeRefused as e:
         # Exit code 3 reserved for compose hardening rejections (audit H-N2).
-        print(f"ERROR: {e} {_deploy_hint(project_name)}", file=sys.stderr)
+        print(f"ERROR: {e} {_deploy_hint(project_name, paths)}", file=sys.stderr)
         return 3, None
     except DockerError as e:
         print(f"ERROR: cannot inspect the project's containers: {e}", file=sys.stderr)
@@ -229,7 +230,7 @@ def resume_locked(
                               component="resume")
             for svc, why in held.items():
                 print(f"  WARNING: {svc} resumes on its previous image: the new one's "
-                      f"{why}; prod-deploy {project_name} to decide from it.")
+                      f"{why}; {redeploy_command(paths, project_name)} decides from it.")
         except RunAsError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             log_error("resume", str(e), paths, project=project_name)
@@ -257,7 +258,7 @@ def resume_locked(
                   project=project_name)
         if isinstance(e, ComposeUpFailed):
             _stop_again(project_name, paths)
-        print(f"  {_deploy_hint(project_name)}", file=sys.stderr)
+        print(f"  {_deploy_hint(project_name, paths)}", file=sys.stderr)
         return 1, None
     try:
         release_restart_policies(project_name, paths)
@@ -311,10 +312,12 @@ def resume_locked(
     return 0, (None if smoke_ok else smoke_msg)
 
 
-def _deploy_hint(project_name: str) -> str:
+def _deploy_hint(project_name: str, paths: BoxPaths) -> str:
     """For a refusal whose remedy is a deploy, which a pause refuses."""
     return (f"It stays paused. If only a deploy can fix this: `boxmunge resume "
-            f"{project_name} --no-start`, then `boxmunge prod-deploy {project_name}`.")
+            f"{project_name} --no-start`, then `boxmunge "
+            f"{redeploy_command(paths, project_name)}` (or `boxmunge prod-deploy "
+            f"{project_name}` of an upload).")
 
 
 def _stop_again(project_name: str, paths: BoxPaths) -> None:
@@ -365,8 +368,9 @@ def hand_to_deploy_locked(project_name: str, paths: BoxPaths) -> int:
     scanned = (" (its images are scanned first; a clean deploy also lifts the CVE "
                "quarantine)" if is_quarantined(project_name, paths) else "")
     then = (f"Finish its open install{scanned}: {install}" if install is not None else
-            f"Deploy it: `boxmunge prod-deploy {project_name}` (or `promote "
-            f"{project_name}`){scanned}")
+            f"Deploy it: `boxmunge {redeploy_command(paths, project_name)}`, "
+            f"`boxmunge prod-deploy {project_name}` of an upload, or `promote "
+            f"{project_name}`{scanned}")
     print(f"'{project_name}' was not started. It stays down behind its maintenance page, "
           f"with its containers stopped, until the next deploy (or rollback) starts it, "
           f"which ends the pause. {then}.")

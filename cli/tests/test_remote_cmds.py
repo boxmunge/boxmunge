@@ -2,6 +2,7 @@
 """stage / prod-deploy / promote / status / logs through the real entry point,
 with fake ssh and scp on PATH recording what reaches the server."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -84,7 +85,25 @@ def test_prod_deploy_abandon_forwards_without_bundling(project, fake_remote) -> 
     assert not list(project.glob("*.tar.gz"))
 
 
-@pytest.mark.parametrize("flag", ["--dry-run", "--no-snapshot"])
+@pytest.mark.parametrize("command", ["stage", "prod-deploy", "promote"])
+def test_no_pull_is_refused_before_upload_by_an_older_server(project, fake_remote, command,
+                                                             capsys) -> None:
+    """The fixture's server is 0.11.0."""
+    assert run_cli([command, "--no-pull"]) == 3
+    assert fake_remote.calls("scp") == []
+    assert _remote_commands(fake_remote) == ["handshake"]
+    assert "--no-pull needs boxmunge-server 0.11.4" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("command", ["stage", "prod-deploy", "promote"])
+def test_no_pull_is_forwarded(project, fake_remote, command) -> None:
+    fake_remote.respond("ssh", "handshake", stdout=json.dumps({
+        "server_version": "0.11.4", "min_client_version": "0.1.0", "schema_version": 3}))
+    assert run_cli([command, "--no-pull"]) == 0
+    assert _remote_commands(fake_remote)[-1].endswith(f"{command} myapp --no-pull")
+
+
+@pytest.mark.parametrize("flag", ["--dry-run", "--no-snapshot", "--no-pull"])
 def test_prod_deploy_abandon_takes_no_other_options(project, fake_remote, flag,
                                                     capsys) -> None:
     assert run_cli(["prod-deploy", "--abandon", flag]) == 2

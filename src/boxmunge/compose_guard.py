@@ -53,6 +53,7 @@ from boxmunge.log import log_error
 from boxmunge.notify import notify
 from boxmunge.overlay_users import stale_containers_problem, stale_overlay_problem
 from boxmunge.paths import RESERVED_PROJECT_NAMES
+from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.release_txn import load_txn, stale_reason, start_refusal
 from boxmunge.staged_release import (
     STAGING_OVERLAY, SlotError, load_slot, slot_dir, staging_target,
@@ -228,7 +229,7 @@ def check_start(
             rec = bind_sources.read_record(record_path)
             bind_sources.check_sources(project_dir, sources, rec["sources"])
             bind_sources.check_control(project_dir, read_files, rec["control"],
-                                       redo=f"prod-deploy {project_name}")
+                                       redo=redeploy_command(paths, project_name))
     except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
 
@@ -302,7 +303,7 @@ def compose_up_checked(
     up = functools.partial(compose_up, run_dir, compose_files=files, build=False,
                            project_name=compose_project, start=start, pinned=True, **where)
     up_steps.restore_build_names(paths, project_name, compose_project, overlay, component)
-    redo = f"stage {project_name}" if staging else f"prod-deploy {project_name}"
+    redo = f"stage {project_name}" if staging else redeploy_command(paths, project_name)
     try:
         images = up_steps.start_images(run_dir, files, compose_project, services, where)
     except compose_resolve.ComposeResolveError as e:

@@ -282,7 +282,8 @@ def test_a_refused_switch_puts_the_maintenance_page_back(box, monkeypatch, capsy
                    staged_id=None, snapshot="")
     for phase in ("previous_kept", "installed"):
         txn = advance(box.paths, "demo", txn, phase)
-    req = deploy_tree.TreeDeploy(tree=None, ref="demo-r2", source="bundle", manifest=MANIFEST)
+    req = deploy_tree.TreeDeploy(tree=None, ref="demo-r2", source="bundle", manifest=MANIFEST,
+                                pull=False)
     assert deploy_tree.switch_and_close("demo", box.paths, req, txn,
                                         ReleaseDecision({}, clearance)) == 1
     err = capsys.readouterr().err

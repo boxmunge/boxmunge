@@ -35,6 +35,7 @@ from datetime import date
 
 from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.policy import ProjectDecision
+from boxmunge.redeploy_hint import redeploy_either
 
 ACCEPT_FLAG = "--accept-stale-kev"
 
@@ -69,9 +70,11 @@ def resume_exits(project: str, check: KevLiftCheck) -> list[str]:
                      f"{project} {ACCEPT_FLAG}` (logged and alerted). It brings the images "
                      f"the project runs now back online.")
     else:
-        exits.append(f"Or deploy a release without those CVEs: `prod-deploy {project}` (its "
-                     f"images are scanned first). {ACCEPT_FLAG} does not apply: a fresh "
-                     f"catalog would refuse this lift too.")
+        exits.append(f"Or deploy a release without those CVEs: upload it and run "
+                     f"`prod-deploy {project}`, or rebuild the installed release on fixed "
+                     f"base images with `{redeploy_either(project)}` (its images are "
+                     f"scanned first). {ACCEPT_FLAG} does not apply: a fresh catalog would "
+                     f"refuse this lift too.")
     return exits
 
 

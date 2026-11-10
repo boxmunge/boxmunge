@@ -84,7 +84,8 @@ def _restore(box, seen):
 def _redeploy(box, seen):
     from boxmunge.commands.deploy import run_deploy
     with staging_docker_off():
-        assert run_deploy("myapp", box.paths) == 0     # its pre-deploy backup fails: a WARN
+        # its pre-deploy backup fails: a WARN
+        assert run_deploy("myapp", box.paths, redeploy=True) == 0
     _dumped(seen)
 
 

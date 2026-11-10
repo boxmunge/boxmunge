@@ -60,6 +60,7 @@ from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.pause import awaiting_deploy
+from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.paths import BoxPaths
 from boxmunge.pending_snapshot import record_pending
 from boxmunge.release import ReleaseStateError
@@ -235,7 +236,7 @@ def _regenerates(paths: BoxPaths, project: str) -> str:
     if block is not None and block.reason is BlockReason.QUARANTINED:
         return (f"a deploy of a fixed release, or `boxmunge security resume {project}` once "
                 f"its images are clean")
-    return f"`prod-deploy {project}`"
+    return f"`{redeploy_command(paths, project)}`"
 
 
 def _regenerate_overlay(paths: BoxPaths, project: str, manifest: dict, service: str,
@@ -332,11 +333,11 @@ def chown_locked(paths: BoxPaths, project: str, service: str, ids: tuple[int, in
         raise DataError(f"{service}'s data was given to {ids[0]}:{ids[1]} and the user "
                         f"recorded, but staging's copies were not: {e}. Then run `boxmunge "
                         f"data chown {project} {service} {ids[0]}:{ids[1]} --staging`; "
-                        f"run `prod-deploy {project}` either way") from e
+                        f"run `{redeploy_command(paths, project)}` either way") from e
     log_operation("data-chown", f"Gave {service}'s data to {ids[0]}:{ids[1]}", paths,
                   project=project, detail={"mounts": done, "staging": staged})
-    print(f"Done. Deploy {project} now: {service} runs as {ids[0]}:{ids[1]} from its "
-          f"next start.")
+    print(f"Done. Deploy {project} now (`{redeploy_command(paths, project)}`): {service} "
+          f"runs as {ids[0]}:{ids[1]} from its next start.")
 
 
 def _containers(project: str, service: str) -> list[str]:

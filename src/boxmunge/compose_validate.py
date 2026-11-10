@@ -384,8 +384,8 @@ def validate_user_compose(
     # File references are checked on the literal files, everything else on the model.
     references, read_files = compose_references.walk_references(compose_path, roots, base=base_dir)
     if references:
-        raise ComposeSecurityError(f"{references[0]} Then deploy the fixed release: "
-                                   f"prod-deploy {project_name}.")
+        raise ComposeSecurityError(f"{references[0]} Then upload the fixed release and "
+                                   f"deploy it: prod-deploy {project_name}.")
     try:
         doc = compose_resolve.resolve_compose_config(
             compose_path, project_name, project_directory=project_directory)

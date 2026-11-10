@@ -22,6 +22,7 @@ from typing import Any
 from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
 from boxmunge.pause import awaiting_deploy, is_paused, read_paused_state
 from boxmunge.paths import BoxPaths
+from boxmunge.redeploy_hint import redeploy_command, redeploy_either
 from boxmunge.userns.marker import SHIM, migration_in_progress
 
 
@@ -97,12 +98,14 @@ def lifecycle_block(project_name: str, paths: BoxPaths) -> Block | None:
                 refuse_message=(
                     f"Project '{project_name}' is paused, awaiting a deploy (`resume "
                     f"{project_name} --no-start`): it stays down behind its maintenance "
-                    f"page until `prod-deploy {project_name}`, `promote {project_name}` or "
+                    f"page until a deploy (`prod-deploy {project_name}` of an upload, or "
+                    f"`{redeploy_command(paths, project_name)}`), `promote {project_name}` or "
                     f"`rollback {project_name}` starts it, or `boxmunge resume {project_name}` "
                     f"does."
                 ),
                 skip_message=(f"Skipped paused project '{project_name}' (awaiting a "
-                              f"deploy: prod-deploy {project_name})"),
+                              f"deploy: {redeploy_command(paths, project_name)}, or "
+                              f"prod-deploy {project_name} of an upload)"),
             )
         return Block(
             reason=BlockReason.PAUSED,
@@ -177,7 +180,9 @@ def paused_refusal(project_name: str, block: Block) -> str:
         return block.refuse_message
     return (f"Project '{project_name}' is paused and CVE-quarantined. To deploy a fixed "
             f"release: `boxmunge resume {project_name} --no-start` (it starts nothing), "
-            f"then `boxmunge prod-deploy {project_name}`: its images are scanned first, and "
+            f"then `boxmunge prod-deploy {project_name}` of an uploaded fix (or "
+            f"`{redeploy_either(project_name)}` to rebuild the installed release on fixed "
+            f"base images): its images are scanned first, and "
             f"once it starts it ends the pause and lifts the quarantine. Or, once the "
             f"images it runs are clean: `boxmunge security resume {project_name}` (it stays "
             f"paused), then `boxmunge resume {project_name}`.")
