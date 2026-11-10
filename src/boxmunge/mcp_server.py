@@ -10,6 +10,7 @@ import os
 import sys
 from typing import Any, BinaryIO, Callable
 
+from boxmunge.mcp_args import argument_problem
 from boxmunge.mcp_tools import (
     _tool_agent_help,
     _tool_backup,
@@ -33,6 +34,7 @@ from boxmunge.mcp_tools import (
     _tool_upgrade,
     _tool_validate,
 )
+from boxmunge.version import get_build_version, parse_version_string
 
 # ---------------------------------------------------------------------------
 # MCP tool definitions (name, description, inputSchema, handler)
@@ -312,6 +314,28 @@ _TOOL_DEFS: list[dict[str, Any]] = [
     },
 ]
 
+_DEFS_BY_NAME: dict[str, dict[str, Any]] = {d["name"]: d for d in _TOOL_DEFS}
+
+
+def _handler(name: str) -> Callable[..., dict]:
+    return _DEFS_BY_NAME[name]["handler"]
+
+
+def call_tool(name: str, arguments: dict | None) -> dict:
+    """Run tool `name`, after checking `arguments` against its schema."""
+    defn = _DEFS_BY_NAME.get(name)
+    if defn is None:
+        return {"success": False, "exit_code": 1,
+                "data": {}, "messages": [f"Unknown tool: {name}"]}
+    arguments = {} if arguments is None else arguments
+    problem = argument_problem(defn["inputSchema"], arguments)
+    if problem:
+        return {"success": False, "exit_code": 2, "data": {},
+                "messages": [f"ERROR: {name}: {problem}. Call it again with "
+                             f"arguments that match its input schema."]}
+    return _handler(name)(**arguments)
+
+
 # ---------------------------------------------------------------------------
 # Protocol stream isolation
 # ---------------------------------------------------------------------------
@@ -363,12 +387,9 @@ def create_mcp_server() -> Any:
 
     Requires the `mcp` package to be installed.
     """
-    from importlib import metadata
-
     from mcp.server import Server
     from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
-    handlers: dict[str, Callable[..., dict]] = {d["name"]: d["handler"] for d in _TOOL_DEFS}
     tools = ListToolsResult(tools=[
         Tool(name=d["name"], description=d["description"], input_schema=d["inputSchema"])
         for d in _TOOL_DEFS
@@ -378,23 +399,18 @@ def create_mcp_server() -> Any:
         return tools
 
     async def on_call_tool(ctx: Any, params: Any) -> CallToolResult:
-        handler = handlers.get(params.name)
-        if handler is None:
-            result = {"success": False, "exit_code": 1,
-                      "data": {}, "messages": [f"Unknown tool: {params.name}"]}
-        else:
-            # A tool that raises is a tool error: the agent reads it as an
-            # isError result. mcp 2 would make it a JSON-RPC error, which MCP
-            # keeps for protocol failures and clients need not show the model.
-            try:
-                result = handler(**(params.arguments or {}))
-            except Exception as e:
-                return CallToolResult(content=[TextContent(type="text", text=str(e))],
-                                      is_error=True)
+        # A tool that raises is a tool error: the agent reads it as an
+        # isError result. mcp 2 would make it a JSON-RPC error, which MCP
+        # keeps for protocol failures and clients need not show the model.
+        try:
+            result = call_tool(params.name, params.arguments)
+        except Exception as e:
+            return CallToolResult(content=[TextContent(type="text", text=str(e))],
+                                  is_error=True)
         return CallToolResult(content=[TextContent(type="text",
                                                    text=json.dumps(result, default=str))])
 
-    server = Server("boxmunge", version=metadata.version("boxmunge-server"),
+    server = Server("boxmunge", version=parse_version_string(get_build_version())[0],
                     on_list_tools=on_list_tools, on_call_tool=on_call_tool)
     _drop_tracing(server)
     return server

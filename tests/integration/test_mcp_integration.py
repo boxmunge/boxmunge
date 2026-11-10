@@ -10,10 +10,10 @@ import json
 import subprocess
 import sys
 import threading
-from importlib import metadata
 
 import pytest
 
+from boxmunge.version import get_build_version, parse_version_string
 from tests.integration.conftest import REQUIRE_INTEGRATION
 
 pytestmark = [pytest.mark.integration]
@@ -148,6 +148,22 @@ class TestServerContract:
         assert result.is_error is True
         assert [c.text for c in result.content] == ["compose exploded"]
 
+    @pytest.mark.parametrize("arguments,needle", [
+        ({}, "missing required argument(s): project"),
+        ({"project": "myapp", "verbose": "yes"}, "verbose must be boolean"),
+    ])
+    def test_a_bad_argument_is_an_envelope_naming_it(self, arguments, needle) -> None:
+        """mcp 1 ran jsonschema over the arguments; now mcp_args does, before
+        the handler, and the agent gets a refusal it can act on."""
+        async def call(client):
+            return await client.call_tool("check", arguments)
+
+        result = _in_process(call)
+        assert result.is_error is False
+        data = json.loads(result.content[0].text)
+        assert data["success"] is False and data["exit_code"] == 2
+        assert needle in data["messages"][0]
+
     def test_the_server_records_no_traces(self) -> None:
         from boxmunge.mcp_server import create_mcp_server
         assert create_mcp_server().middleware == []
@@ -194,9 +210,10 @@ def test_clients_of_older_protocol_versions_are_served(version: str) -> None:
         {"method": "tools/call", "params": {"name": "project_list", "arguments": {}}},
     ])
     assert init["result"]["protocolVersion"] == version
-    # mcp 1 reported its own version here, mcp 2 an empty one: ours is the answer.
+    # mcp 1 reported its own version here, mcp 2 an empty one: ours is the
+    # answer, from the same source as the handshake tool's server_version.
     assert init["result"]["serverInfo"] == {
-        "name": "boxmunge", "version": metadata.version("boxmunge-server")}
+        "name": "boxmunge", "version": parse_version_string(get_build_version())[0]}
     assert len(listed["result"]["tools"]) == 21
     assert called["result"]["isError"] is False
     assert json.loads(called["result"]["content"][0]["text"])["success"] is True
@@ -213,8 +230,10 @@ def noisy():
     os.write(1, b"raw fd 1\\n")
     return {"success": True, "exit_code": 0, "data": {}, "messages": []}
 
-mcp_server._TOOL_DEFS[:] = [{"name": "noisy", "description": "writes everywhere",
-    "inputSchema": {"type": "object", "properties": {}}, "handler": noisy}]
+noisy_def = {"name": "noisy", "description": "writes everywhere",
+    "inputSchema": {"type": "object", "properties": {}}, "handler": noisy}
+mcp_server._TOOL_DEFS[:] = [noisy_def]
+mcp_server._DEFS_BY_NAME["noisy"] = noisy_def
 asyncio.run(mcp_server.serve_stdio(mcp_server.create_mcp_server()))
 """
 

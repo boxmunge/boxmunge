@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from boxmunge.commands.log_cmd import _parse_since, filter_log_entries, parse_log_file
+from boxmunge.commands.log_cmd import parse_since, filter_log_entries, parse_log_file
 
 
 def _write_log_entries(log_file: Path, entries: list[dict]) -> None:
@@ -83,7 +83,7 @@ class TestFilterLogEntries:
         assert result[1]["msg"] == "Check failed"  # fourth entry
 
     def test_filter_by_since(self) -> None:
-        """Test that entries are filtered by timestamp cutoff using _parse_since."""
+        """Test that entries are filtered by timestamp cutoff using parse_since."""
         # Use a large window to include all entries
         result = filter_log_entries(SAMPLE_ENTRIES, since="9999d")
         assert len(result) == 4  # All entries included
@@ -92,8 +92,8 @@ class TestFilterLogEntries:
         result = filter_log_entries(SAMPLE_ENTRIES, since="0m")
         assert len(result) == 0  # No entries are newer than "now"
 
-        # Test that _parse_since returns a datetime object with timezone
-        cutoff = _parse_since("1d")
+        # Test that parse_since returns a datetime object with timezone
+        cutoff = parse_since("1d")
         assert isinstance(cutoff, datetime)
         assert cutoff.tzinfo is not None
         # Verify it's in the past (1 day ago)
@@ -105,14 +105,14 @@ class TestFilterLogEntries:
         assert abs(actual_diff - expected_diff) < 5
 
     def test_parse_since_invalid(self) -> None:
-        """Test that _parse_since raises ValueError for invalid input."""
+        """Test that parse_since raises ValueError for invalid input."""
         with pytest.raises(ValueError, match="Invalid duration"):
-            _parse_since("abc")
+            parse_since("abc")
 
     def test_parse_since_unknown_unit(self) -> None:
-        """Test that _parse_since raises ValueError for unknown unit."""
+        """Test that parse_since raises ValueError for unknown unit."""
         with pytest.raises(ValueError, match="Unknown unit"):
-            _parse_since("5x")
+            parse_since("5x")
 
 
 class TestRunLogTornLines:

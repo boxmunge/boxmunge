@@ -197,11 +197,18 @@ runtime lock also pins (click, idna, pygments): nothing installs them in one pip
    `X.Y.0`.
 3. `.github/workflows/release.yml` checks the tag with `scripts/release-lint.py` (listed in
    `releases.json` with a valid class, matching `pyproject.toml`), then, in a read-only job, runs
-   the tests, builds the installer and bundle, and generates an SBOM. A separate job holding the
-   write and signing tokens signs `SHA256SUMS` with cosign (keyless, tied to this workflow and
-   tag), creates a draft release whose title and notes carry the class marker (and `[breaking]`
-   for a breaking release) generated from `releases.json`, verifies the draft carries exactly
-   those markers, and publishes it. Any failure, including signing, fails the workflow.
+   the tests, builds the installer and bundle, and generates an SBOM (`scripts/generate-sbom.sh`:
+   the package and every hash-pinned dependency a box installs, plus age, rclone and the images
+   boxes pull, validated as CycloneDX). A separate job holding the write and signing tokens
+   signs `SHA256SUMS` with cosign (keyless, tied to this workflow and tag), creates a draft
+   release whose title and notes carry the class marker (and `[breaking]` for a breaking
+   release) generated from `releases.json`, verifies the draft carries exactly those markers,
+   and publishes it. Any failure, including signing, fails the workflow. The notes
+   are that generated preamble followed by GitHub's generated changelog, the pull requests since
+   the previous release. The changelog quotes PR titles, so the workflow turns any marker in it
+   into plain text (`[held]` becomes `(held)`) first: a PR title cannot reclassify a release or
+   stop it being published. Edit the published notes by hand if you want more than the changelog,
+   and keep markers out of what you add (`audit` below checks).
 4. Once the release is published, the maintainer redeploys the version-check service so it serves
    the new `releases.json`. Do not redeploy it before then: it would offer a release boxes cannot
    download yet. Servers discover new releases through that service, with the GitHub releases
@@ -312,8 +319,8 @@ been guessing.
 
 Boxes read `[held]` from the release title only, never from the notes (auto-generated notes
 quote contributors' PR titles), so only someone with write access to the repository can set
-it. The release workflow refuses to publish a draft carrying `[held]` anywhere: a release is
-published unheld and held afterwards. To release the hold, reset the breaker
+it. The release workflow neutralises `[held]` in the changelog it generates and refuses to
+publish a draft still carrying it anywhere: a release is published unheld and held afterwards. To release the hold, reset the breaker
 (`/v1/circuit-breaker/reset?version=X.Y.Z`) and take `[held]` out of the title again. Check
 that GitHub matches the service with
 `python scripts/release-lint.py audit --github-releases FILE --held X.Y.Z` (one `--held`
