@@ -27,7 +27,7 @@ from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.release_txn import InstallTxn, load_txn, stale_reason, start_refusal
 from boxmunge.docker import DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
-from boxmunge.legacy_stage import LegacyStage, cannot_tell_left_as_is, legacy_stage
+from boxmunge.legacy_stage import LegacyStage, cannot_tell_left_as_is, legacy_stage, staged_by
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import (
@@ -314,8 +314,8 @@ def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
     if why is None:
         return None
     if isinstance(why, LegacyStage):
-        return (f"{name}: a release staged by boxmunge 0.10.1 ({why.kind}) will be left "
-                f"as is; after the upgrade, resolve it with boxmunge-server legacy-stage "
+        return (f"{name}: a release staged by {staged_by(why.kind)} ({why.kind}) will be "
+                f"left as is; after the upgrade, resolve it with boxmunge-server legacy-stage "
                 f"{name}")
     if isinstance(why, InstallTxn):
         line = f"{name}: an install ({why.ref}, {why.phase}) is open; the project will be left as is"

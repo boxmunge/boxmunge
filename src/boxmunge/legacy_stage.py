@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stages left by boxmunge 0.10.1, in the old layout (staged release in the
-project dir, production's kept in .releases/prestage/).
+project dir, production's kept in .releases/prestage/), and by the releases
+before it (0.9.x, 0.10.0: kind "pre0101"), which wrote the staged release
+over production's files and kept no copy of them.
 
 This is the only module that knows the old layout. The upgrade never
 migrates such a stage (D9): the project keeps running its current
@@ -39,7 +41,16 @@ LEGACY_STAGING_FILES = ("compose.staging-base.yml", "compose.boxmunge-staging.ym
 
 @dataclass(frozen=True)
 class LegacyStage:
-    kind: str   # "bundle" | "git" | "leftover"
+    kind: str   # "bundle" | "git" | "leftover" | "pre0101"
+
+
+def staged_by(kind: str) -> str:
+    """Who made a stage of this kind."""
+    return "a boxmunge release before 0.10.1" if kind == "pre0101" else "boxmunge 0.10.1"
+
+
+PRE0101_STATE = ("the project directory holds the staged files, and production's containers "
+                 "run the release deployed before it")
 
 
 def legacy_staging_state(paths: BoxPaths, project: str) -> Path:
@@ -80,7 +91,12 @@ def legacy_stage(paths: BoxPaths, project: str) -> LegacyStage | None:
         _present(project_dir / name) for name in LEGACY_STAGING_FILES)
     if not staged:
         return None
-    return LegacyStage("git" if _present(project_dir / "repo") else "leftover")
+    if _present(project_dir / "repo"):
+        return LegacyStage("git")
+    # Every 0.10.1 deploy writes live.json; the releases before it kept no
+    # .releases/ at all, and their stage wrote over production's files.
+    live = _present(project_dir / ".releases" / "live.json")
+    return LegacyStage("leftover" if live else "pre0101")
 
 
 def real_dir_problem(path: Path) -> str | None:
@@ -106,9 +122,33 @@ def legacy_staging_compose(project_dir: Path) -> list[str] | None:
 
 
 def legacy_refusal(project: str, stage: LegacyStage) -> str:
-    return (f"'{project}' has a release staged by boxmunge 0.10.1 ({stage.kind}); the "
-            f"project directory may hold the staged files. Resolve it first with: "
-            f"boxmunge-server legacy-stage {project}")
+    on_disk = (PRE0101_STATE if stage.kind == "pre0101"
+               else "the project directory may hold the staged files")
+    return (f"'{project}' has a release staged by {staged_by(stage.kind)} ({stage.kind}); "
+            f"{on_disk}. Resolve it first with: boxmunge-server legacy-stage {project}")
+
+
+def awaiting_deploy_text(project: str) -> str:
+    """After `legacy-stage --discard` of a pre0101 stage: what runs, and the fix."""
+    return (f"{project}'s project directory holds a release staged by a boxmunge release "
+            f"before 0.10.1, which legacy-stage discarded; production keeps running the "
+            f"release deployed before it. Nothing starts {project} from these files: upload "
+            f"the bundle of the release production should run and prod-deploy {project} (or "
+            f"stage and promote the staged release's bundle)")
+
+
+def awaiting_deploy_refusal(paths: BoxPaths, project: str) -> str | None:
+    """Why a start of `project` is refused after a pre0101 stage was
+    discarded, until a deploy installs a release (and writes live.json)."""
+    try:
+        rec = get_record(paths, project) or {}
+        if rec.get("kind") != "pre0101" or rec.get("choice") != "discard":
+            return None
+        if _present(paths.project_releases(project) / "live.json"):
+            return None
+    except (StateError, OSError) as e:
+        return f"cannot tell whether {project}'s files are a discarded stage's: {e}"
+    return awaiting_deploy_text(project)
 
 
 def _undetermined(project: str, error: OSError) -> str:
@@ -311,9 +351,14 @@ def evidence(paths: BoxPaths, project: str, stage: LegacyStage) -> Evidence:
 
 # -- The dedupe record (state/legacy-stages.json) and the alert -------------
 
-LEGACY_ALERT = ("{p} has a release staged by boxmunge 0.10.1. It was left as is and keeps "
+LEGACY_ALERT = ("{p} has a release staged by {by}.{state} It was left as is and keeps "
                 "running its current containers; starts, deploys, pause and quarantine are "
                 "refused or held until you run `boxmunge-server legacy-stage {p}`.")
+
+
+def legacy_alert_text(project: str, kind: str) -> str:
+    state = f" The {PRE0101_STATE.replace('the ', '', 1)}." if kind == "pre0101" else ""
+    return LEGACY_ALERT.format(p=project, by=staged_by(kind), state=state)
 ALERT_EVERY = timedelta(hours=24)
 
 
@@ -391,8 +436,8 @@ def alert_legacy(paths: BoxPaths, project: str, stage: LegacyStage, *,
         last = _last_alert(paths, rec)
         if last is not None and now - last < ALERT_EVERY:
             return False
-        if not notify(paths, f"{project}: release staged by boxmunge 0.10.1",
-                      LEGACY_ALERT.format(p=project), component="legacy-stage",
+        if not notify(paths, f"{project}: release staged by {staged_by(stage.kind)}",
+                      legacy_alert_text(project, stage.kind), component="legacy-stage",
                       project=project, priority=1):
             return False
         rec["last_alert"] = now.isoformat()

@@ -90,7 +90,7 @@ def _legacy_view(paths: BoxPaths, name: str) -> dict[str, Any] | None:
         raise StateError(cannot_tell(name, e)) from e
     if stage is None:
         return None
-    if stage.kind == "leftover":
+    if stage.kind in ("leftover", "pre0101"):
         return {"kind": stage.kind, "evidence": None}
     try:
         found = evidence(paths, name, stage).classification

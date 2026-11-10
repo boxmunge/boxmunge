@@ -40,8 +40,8 @@ from boxmunge.fileutil import (
 from boxmunge.fs_nofollow import chown_tree_deploy, read_text_nofollow
 from boxmunge.git_layout import alert_unlinked, relink_advice
 from boxmunge.legacy_stage import (
-    LEGACY_STAGING_FILES, Evidence, LegacyStage, drop_record, get_record,
-    legacy_staging_compose, legacy_staging_state, real_dir_problem, update_record,
+    LEGACY_STAGING_FILES, Evidence, LegacyStage, awaiting_deploy_text, drop_record, get_record,
+    legacy_staging_compose, legacy_staging_state, real_dir_problem, staged_by, update_record,
 )
 from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_operation
@@ -97,7 +97,7 @@ def platform_rollback_possible(paths: BoxPaths) -> str | None:
 
 
 def allowed_choices(stage: LegacyStage) -> list[str]:
-    return ["discard"] if stage.kind == "leftover" else ["discard", "keep-staged"]
+    return ["discard"] if stage.kind in ("leftover", "pre0101") else ["discard", "keep-staged"]
 
 
 def predeploy_snapshots(paths: BoxPaths, project: str,
@@ -273,8 +273,10 @@ def _production_code(paths: BoxPaths, project: str, stage: LegacyStage,
                      ev: Evidence | None, choice: str) -> None:
     """Step 4. --discard reads nothing from the evidence, so a resumed one
     needs none (step 4 changes what the evidence reads)."""
-    if stage.kind == "leftover":
-        return  # production runs the release a 0.10.1 promote installed
+    if stage.kind in ("leftover", "pre0101"):
+        # leftover: production runs the release a 0.10.1 promote installed.
+        # pre0101: no copy of production's release is on the box to put back.
+        return
     if choice == "discard":
         if stage.kind == "bundle":
             restore_prestage_0101(paths, project)
@@ -402,14 +404,26 @@ def resolve(paths: BoxPaths, project: str, stage: LegacyStage, ev: Evidence | No
     _production_code(paths, project, stage, ev, choice)
     _clean_up(paths, project)
     drop_stage_record(paths, project)
+    if stage.kind == "pre0101":
+        # Never started from the staged files: the record (kept by
+        # report_resolved) refuses every start until a deploy (awaiting_deploy).
+        return
     finish_apply(paths, project)
 
 
 def report_resolved(paths: BoxPaths, project: str, choice: str) -> None:
-    """Step 8."""
-    drop_record(paths, project)
-    log_operation(COMPONENT, f"Resolved the release staged by boxmunge 0.10.1: --{choice}",
+    """Step 8. A discarded pre0101 stage keeps its record, which refuses
+    starts until a deploy replaces the staged files; it alerts the fix."""
+    kind = (get_record(paths, project) or {}).get("kind")
+    by = staged_by(kind or "")
+    log_operation(COMPONENT, f"Resolved the release staged by {by}: --{choice}",
                   paths, project=project, detail={"choice": choice})
+    if kind == "pre0101":
+        notify(paths, f"{project}: deploy production's release",
+               awaiting_deploy_text(project) + ".", component=COMPONENT, project=project,
+               priority=1)
+        return
+    drop_record(paths, project)
     notify(paths, f"{project}: 0.10.1 stage resolved",
            f"The release staged by boxmunge 0.10.1 was resolved with --{choice}.",
            component=COMPONENT, project=project, priority=0)

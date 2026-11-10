@@ -15,8 +15,8 @@ from boxmunge.compose_guard import ComposeRefused
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.legacy_stage import (
-    Evidence, EvidenceError, LegacyStage, cannot_tell, evidence, get_record, legacy_stage,
-    update_record,
+    PRE0101_STATE, Evidence, EvidenceError, LegacyStage, awaiting_deploy_refusal,
+    cannot_tell, drop_record, evidence, get_record, legacy_stage, staged_by, update_record,
 )
 from boxmunge.legacy_stage_ops import (
     LegacyStageError, allowed_choices, drop_stage_record, finish_apply,
@@ -47,10 +47,13 @@ def _step_failed(e: Exception) -> int:
 
 
 def _show(project: str, stage: LegacyStage, ev: Evidence | None) -> None:
-    print(f"{project}: a release staged by boxmunge 0.10.1 ({stage.kind}).")
+    print(f"{project}: a release staged by {staged_by(stage.kind)} ({stage.kind}).")
     lines = (ev.describe() if ev else
              ["production runs the release a 0.10.1 promote installed; staging was left "
               "behind"] if stage.kind == "leftover" else
+             [f"{PRE0101_STATE}; --discard stops staging and starts nothing: a deploy of "
+              f"production's release then replaces the staged files"]
+             if stage.kind == "pre0101" else
              ["a --discard of it was started; the evidence is not read again"])
     for line in lines:
         print(f"  {line}")
@@ -102,6 +105,9 @@ def _report(paths: BoxPaths, project: str, choice: str) -> int:
         print(f"ERROR: {project} is resolved, but reporting it failed: {e}.", file=sys.stderr)
         return 1
     print(f"{project}: resolved (--{choice}).")
+    awaiting = awaiting_deploy_refusal(paths, project)
+    if awaiting:
+        print(f"  {awaiting}.")
     return 0
 
 
@@ -109,8 +115,11 @@ def _finish_resolved(paths: BoxPaths, project: str, choice: str | None,
                      recorded: str | None) -> int:
     """After step 6 the stage is no longer detected: the record finishes it."""
     if not recorded:
-        print(f"ERROR: '{project}' has no release staged by boxmunge 0.10.1.", file=sys.stderr)
+        print(f"ERROR: '{project}' has no release staged by boxmunge 0.10.1 or earlier.", file=sys.stderr)
         return 1
+    if (recorded == "discard" and choice in (None, "discard")
+            and (get_record(paths, project) or {}).get("kind") == "pre0101"):
+        return _awaiting_deploy(paths, project)
     if choice != recorded:
         message = (f"{project}'s 0.10.1 stage was resolved with --{recorded} up to its last "
                    f"step; finish it with: boxmunge-server legacy-stage {project} --{recorded}")
@@ -124,6 +133,23 @@ def _finish_resolved(paths: BoxPaths, project: str, choice: str | None,
     except STEP_ERRORS as e:
         return _step_failed(e)
     return _report(paths, project, recorded)
+
+
+def _awaiting_deploy(paths: BoxPaths, project: str) -> int:
+    """A discarded pre0101 stage: nothing is left for this command to do.
+    Its record goes once a deploy has replaced the staged files."""
+    awaiting = awaiting_deploy_refusal(paths, project)
+    if awaiting:
+        print(f"{awaiting}.")
+        return 0
+    try:
+        drop_record(paths, project)
+    except STEP_ERRORS as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    print(f"{project}: the stage was discarded and a deploy has replaced its files; "
+          f"nothing is left to resolve.")
+    return 0
 
 
 def legacy_stage_locked(paths: BoxPaths, project: str, choice: str | None,
@@ -153,7 +179,7 @@ def legacy_stage_locked(paths: BoxPaths, project: str, choice: str | None,
     # A started --discard needs no evidence, and its step 4 may have made it
     # unreadable (a never-deployed project's live.json is gone): whatever is
     # typed now reaches the resume or the refusal naming --discard.
-    if stage.kind != "leftover" and recorded != "discard":
+    if stage.kind not in ("leftover", "pre0101") and recorded != "discard":
         try:
             ev = evidence(paths, project, stage)
         except EvidenceError as e:

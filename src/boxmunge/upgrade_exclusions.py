@@ -28,7 +28,7 @@ from boxmunge.compose_guard import ComposeRefused, check_kept_files
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.git_layout import alert_old_schema, alert_unlinked, relink_advice
 from boxmunge.legacy_stage import (
-    LegacyStage, alert_legacy, cannot_tell_left_as_is, records_path,
+    LegacyStage, alert_legacy, cannot_tell_left_as_is, records_path, staged_by,
 )
 from boxmunge.log import log_error, log_warning
 from boxmunge.manifest import load_manifest, load_manifest_as_written, write_manifest
@@ -157,7 +157,7 @@ def notify_exclusions(paths: BoxPaths, excluded: Exclusions) -> None:
         try:
             alert_legacy(paths, name, LegacyStage(kind))
         except (StateError, OSError) as e:
-            message = (f"Could not alert that {name} has a release staged by boxmunge 0.10.1 "
+            message = (f"Could not alert that {name} has a release staged by {staged_by(kind)} "
                        f"(the dedupe record {records_path(paths)}: {type(e).__name__}: {e}); "
                        f"fix or remove that file. The project was left as is; resolve it with "
                        f"boxmunge-server legacy-stage {name}")
