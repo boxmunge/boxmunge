@@ -25,7 +25,8 @@ def _run(results: dict[str, str], event: str = "pull_request") -> subprocess.Com
                           capture_output=True, text=True, check=False)
 
 
-ALL = ["arm64", "cli", "dco", "integration", "lint", "unit", "userns-dind", "version-check"]
+ALL = ["arm64", "cli", "dco", "integration", "lint", "locks", "unit", "userns-dind",
+       "version-check"]
 
 
 def test_all_succeeded_passes() -> None:

@@ -6,8 +6,11 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import io
+import urllib.error
 from pathlib import Path
 
+import pytest
 import yaml
 
 REPO = Path(__file__).resolve().parents[1]
@@ -79,3 +82,38 @@ def test_release_pull_requests_check_every_runtime_lock() -> None:
     makefile = (REPO / "Makefile").read_text()
     runtime = makefile.split("\nlock-runtime:\n")[1].split("\n\n")[0]
     assert sorted(runtime.count(f"-o {lock} ") for lock in RUNTIME_LOCKS) == [1] * 4
+
+
+def test_a_calendar_versioned_package_is_overdue_across_a_new_year() -> None:
+    """certifi ships CA removals as its next year's release: a year is not a major."""
+    releases = {"2026.10.23": _release(100), "2027.1.15": _release(30)}
+    assert lf.overdue("2026.10.23", releases, NOW, max_age_days=14) == "2027.1.15"
+
+
+def test_a_calendar_versioned_release_inside_the_limit_is_not_overdue() -> None:
+    releases = {"2026.10.23": _release(100), "2027.1.15": _release(10)}
+    assert lf.overdue("2026.10.23", releases, NOW, max_age_days=14) is None
+
+
+def test_an_oversized_pypi_answer_is_refused_naming_the_package(monkeypatch) -> None:
+    monkeypatch.setattr(lf, "MAX_RESPONSE_BYTES", 16)
+    with pytest.raises(lf.FetchError, match=r"^certifi: .*refusing to read it"):
+        lf.read_releases(io.BytesIO(b'{"releases": {"1.0": []}}'), "certifi")
+
+
+def test_a_pypi_answer_within_the_limit_is_read() -> None:
+    assert lf.read_releases(io.BytesIO(b'{"releases": {"1.0": []}}'), "x") == {"1.0": []}
+
+
+def test_a_network_error_names_the_package_and_exits_without_a_traceback(
+        monkeypatch, tmp_path, capsys) -> None:
+    def refuse(url, timeout):
+        raise urllib.error.URLError("Name or service not known")
+
+    monkeypatch.setattr(lf.urllib.request, "urlopen", refuse)
+    lock = tmp_path / "requirements.txt"
+    lock.write_text("pyyaml==6.0.3 \\\n    --hash=sha256:aa\n")
+    assert lf.main([str(lock)], now=NOW) == 2
+    err = capsys.readouterr().err
+    assert "pyyaml: could not fetch https://pypi.org/pypi/pyyaml/json" in err
+    assert "Traceback" not in err
