@@ -17,7 +17,7 @@ import urllib.error
 from datetime import datetime, timedelta, timezone
 
 from boxmunge.commands import security_actions, security_kev, security_scan_core
-from boxmunge.cve import kev_refresh
+from boxmunge.cve import kev_fetch
 from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, load_kev
 from boxmunge.cve.kev_refresh import (
     DISAGREES, REJECTED, UNREACHABLE, refresh_from, refresh_kev,
@@ -37,6 +37,8 @@ LAGGED_AT = (NOW - timedelta(days=4)).isoformat()
 
 
 class _Resp:
+    headers: dict[str, str] = {}
+
     def __init__(self, body: bytes) -> None:
         self._body = body
 
@@ -65,7 +67,7 @@ def _serve(monkeypatch, answers: dict) -> None:
         if isinstance(answer, Exception):
             raise answer
         return _Resp(answer)
-    monkeypatch.setattr(kev_refresh, "_open", open_)
+    monkeypatch.setattr(kev_fetch, "_open", open_)
 
 
 def _cache_from_cisa(paths: BoxPaths) -> None:

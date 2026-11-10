@@ -15,7 +15,7 @@ import yaml
 
 from boxmunge.commands import security_actions, security_kev, security_scan_core
 from boxmunge.config import ConfigError, load_config
-from boxmunge.cve import kev_refresh
+from boxmunge.cve import kev_fetch
 from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, load_kev
 from boxmunge.cve.kev_refresh import (
     CONFIG, REJECTED, UNREACHABLE, kev_sources, refresh_from, refresh_kev,
@@ -28,6 +28,8 @@ RECENT = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
 
 
 class _Resp:
+    headers: dict[str, str] = {}
+
     def __init__(self, body: bytes) -> None:
         self._body = body
 
@@ -65,7 +67,7 @@ def _serve(monkeypatch, answers: dict) -> list[str]:
             raise answer
         return _Resp(answer)
 
-    monkeypatch.setattr(kev_refresh, "_open", open_)
+    monkeypatch.setattr(kev_fetch, "_open", open_)
     return calls
 
 

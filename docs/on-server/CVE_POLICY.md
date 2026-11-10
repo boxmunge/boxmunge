@@ -286,6 +286,13 @@ its error (`boxmunge log --component cve-scan`). This is not a hidden
 fallback. Every source on the list is a copy of CISA's catalog that boxmunge
 trusts, and `boxmunge security` shows which one answered.
 
+The source the cached catalog came from is asked conditionally, with the
+`ETag` and `Last-Modified` it gave. Its `304 Not Modified` counts as that
+source answering with the cached catalog: the fetch time moves on and the
+~1.8 MB catalog is not downloaded again. The catalog's own release date
+does not move, so a source that stopped publishing still goes stale (see
+"Staleness and fail-safe").
+
 To replace the list, set `kev.sources` in `boxmunge.yml`. It must be a
 non-empty list of `https://` URLs that serve the same JSON, for example an
 internal mirror. A redirect to a non-`https://` URL is refused. A mistake
@@ -969,10 +976,12 @@ of the two the last scan checked.
 ## Scan cadence
 
 - **Daily** at 03:00 system time via systemd timer `boxmunge-cve-scan.timer`,
-  with up to 30 minutes of randomized delay (03:00 to 03:30).
-- **Not yet at deploy or image-update time.** `prod-deploy`, `stage`,
-  `promote` and `container-update` do not scan, and no deploy is rejected
-  for CVEs: a new image runs unscanned until the next daily scan. Run
+  with up to 30 minutes of randomized delay (03:00 to 03:30). The nightly
+  container update runs first (02:30 to 03:00), and a scan due while it is
+  still running waits for it, so the images it pulled are scanned that night.
+- **Not yet at deploy time.** `prod-deploy`, `stage` and `promote` do not
+  scan, and no deploy is rejected for CVEs: a new image runs unscanned
+  until the next daily scan. Run
   `boxmunge security scan <project>` after a deploy to check it at once.
   The exception is a quarantined project: `prod-deploy`, `promote` and
   `stage` scan its release before starting it (see "Recovering a
