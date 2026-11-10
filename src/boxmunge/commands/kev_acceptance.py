@@ -32,6 +32,7 @@ from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
+from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.release_txn import load_txn, rerun_command
 
 
@@ -120,9 +121,8 @@ def _again(project: str, paths: BoxPaths) -> str:
         txn = load_txn(paths, project)
     except ReleaseStateError as e:
         return f"run this prod-deploy again with {ACCEPT_FLAG} once {e} is resolved"
-    if txn is None:
-        git = (paths.project_dir(project) / "repo").exists()
-        command = f"prod-deploy {project}" + ("" if git else " --redeploy")
+    if txn is None:  # --redeploy of the installed release: no install is opened
+        command = redeploy_command(paths, project)
     elif txn.source in ("bundle", "git"):
         command = rerun_command(project, txn)
     else:

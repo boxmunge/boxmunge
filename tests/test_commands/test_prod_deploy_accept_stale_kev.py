@@ -21,9 +21,14 @@ from boxmunge.project_registry import add_project
 from boxmunge.release_target import production_target
 from tests.test_commands.cve_helpers import BALANCED, finding, make_clearance, seed_quarantine
 from tests.test_commands.test_deploy import _place_deploy_bundle
-from tests.test_commands.test_stale_kev_lift import (  # noqa: F401 — gate_box is a fixture
-    KEV_CVE, OTHER_CVE, _manifest, _write_kev, gate_box,
+from tests.test_commands.test_stale_kev_lift import (
+    KEV_CVE, OTHER_CVE, _manifest, _write_kev, make_gate_box,
 )
+
+
+@pytest.fixture
+def gate_box(tmp_path, monkeypatch):
+    return make_gate_box(tmp_path, monkeypatch)
 
 
 def _clear(paths, accepted: bool):
