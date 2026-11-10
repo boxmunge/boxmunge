@@ -7,8 +7,8 @@ name: Release
 #   installs and runs third-party packages, so it gets no write token and no
 #   OIDC token.
 # - publish: holds contents: write and id-token: write. Runs no third-party
-#   Python: it signs SHA256SUMS with cosign (keyless), drafts the release,
-#   verifies the draft's class markers, and publishes.
+#   Python: it signs SHA256SUMS with cosign (keyless), composes the notes,
+#   drafts the release, verifies the draft's class markers, and publishes.
 #
 # Any failure fails the workflow. There is no unsigned fallback: the upgrade
 # shim refuses an unsigned release, so publishing one would only put an
@@ -138,6 +138,21 @@ jobs:
             --output-certificate dist/boxmunge-install.cert \
             dist/boxmunge-install.sh
 
+      - name: Compose the release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # GitHub's generated changelog (the PRs since the previous release)
+          # quotes PR titles. release-lint.py neutralises every class marker
+          # in it ("[held]" becomes "(held)") and puts the preamble generated
+          # from releases.json first, so no PR title can reclassify a release
+          # for boxes that fall back to the GitHub API, or trip the verify
+          # step below (as a PR titled "[held] ..." did for v0.11.5).
+          gh api -X POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" \
+            -f tag_name="$GITHUB_REF_NAME" > "$RUNNER_TEMP/generated-notes.json"
+          python3 scripts/release-lint.py notes --preamble dist/release-preamble.md \
+            --generated-json "$RUNNER_TEMP/generated-notes.json" --out dist/release-notes.md
+
       - name: Create draft GitHub Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
@@ -152,8 +167,7 @@ jobs:
             dist/sbom.json
           fail_on_unmatched_files: true
           name: ${{ needs.build.outputs.title }}
-          body_path: dist/release-preamble.md
-          generate_release_notes: true
+          body_path: dist/release-notes.md
           # Created as a draft: drafts are invisible to boxes, so nothing is
           # offered until the text has been verified below.
           draft: true
@@ -164,10 +178,10 @@ jobs:
           RELEASE_CLASS: ${{ needs.build.outputs.release_class }}
           RELEASE_BREAKING: ${{ needs.build.outputs.breaking }}
         run: |
-          # Generated notes quote PR titles; a PR titled "[security] ..."
-          # would otherwise turn a feature release into an auto-applied one
-          # for boxes that fall back to the GitHub API, and one titled
-          # "[breaking] ..." would stop them crossing a non-breaking release.
+          # Boxes that fall back to the GitHub API classify by the markers
+          # in the title and notes: a wrong title or preamble would make a
+          # feature release auto-applied (or a fix stop crossing a breaking
+          # line). The draft must read exactly as releases.json says.
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
             --json name,body > "$RUNNER_TEMP/release.json"
           python3 scripts/release-lint.py verify \
