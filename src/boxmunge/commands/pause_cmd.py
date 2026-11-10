@@ -12,7 +12,7 @@ from boxmunge.fileutil import LockError, atomic_write_text, project_lock
 from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
-from boxmunge.lifecycle import migration_refusal
+from boxmunge.lifecycle import BlockReason, is_blocked, migration_refusal, paused_refusal
 from boxmunge.pause import (
     hold_restart_policies, is_paused, mark_pause_complete, pause_action_complete,
     render_maintenance_caddy_config, write_paused_state,
@@ -71,8 +71,12 @@ def _refuse_if_already_paused(project_name: str, paths: BoxPaths) -> bool:
     """A completed pause refuses; an incomplete one is finished by pausing
     again."""
     if is_paused(project_name, paths) and pause_action_complete(project_name, paths):
-        print(f"ERROR: Project '{project_name}' is already paused. Run "
-              f"`boxmunge resume {project_name}` to bring it back.", file=sys.stderr)
+        # A quarantine or a migration refuses resume too: name their way out.
+        block = is_blocked(project_name, paths)
+        way = (paused_refusal(project_name, block)
+               if block is not None and block.reason is not BlockReason.PAUSED else
+               f"Run `boxmunge resume {project_name}` to bring it back.")
+        print(f"ERROR: Project '{project_name}' is already paused. {way}", file=sys.stderr)
         return True
     return False
 
