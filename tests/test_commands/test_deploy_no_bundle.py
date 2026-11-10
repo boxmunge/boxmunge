@@ -115,6 +115,22 @@ def test_redeploy_finishes_an_open_first_install(paths, capsys) -> None:
     assert _current_ref(paths) == f"myapp-{V1}"
 
 
+def test_redeploy_with_an_open_non_bundle_install_does_not_claim_to_finish_it(
+        paths, capsys) -> None:
+    """--redeploy only finishes an open bundle install; with a rollback
+    open it is refused, so it must not first say it will finish it."""
+    from boxmunge.release_txn import open_txn
+    _prod_v1(paths)
+    open_txn(paths, "myapp", source="rollback", ref=f"myapp-{V1}", replaced_ref=None,
+             staged_id=None, snapshot="")
+    capsys.readouterr()
+    with docker_off():
+        assert run_deploy("myapp", paths, redeploy=True) == 1
+    captured = capsys.readouterr()
+    assert "finishes it first" not in captured.out
+    assert captured.err
+
+
 def test_a_refused_deploy_leaves_upgrade_probation_alone(paths, monkeypatch) -> None:
     _prod_v1(paths)
     cleared: list[str] = []
