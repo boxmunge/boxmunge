@@ -1,4 +1,4 @@
-"""Back up and restore the service database while the workers keep running.
+"""Back up the service database while it runs, and restore it while it does not.
 
 manifest.yml's backup commands, which boxmunge runs inside the container:
 
@@ -12,10 +12,17 @@ committed state, into memory, and VACUUMs that copy so the bytes carry no
 freed pages (rows deleted for retention stay deleted). restore() checks the
 dump (a SQLite database that passes its integrity check, holding this
 service's tables at a schema version this service knows) before writing
-anything, then writes it through the backup API, under SQLite's locks, so
-open worker connections see either the old database or the restored one.
+anything, then writes it through the backup API, under SQLite's locks.
 Last it runs the pre-start step on it (db_schema.prepare): an older dump is
 migrated, and rows past retention are deleted.
+
+dump() is safe beside running workers: it waits for a write transaction to
+end. restore() is not for a database in use: any connection inside a
+transaction, a reader included, holds a lock it needs, so it waits
+LOCK_WAIT_SECONDS and then fails (StillLocked), and a worker's in-memory
+state would outlive the swap anyway. Run it with the project stopped, as
+`boxmunge restore` does: it stops the project, starts only the backup
+service for the restore, then recreates every service on the restored data.
 
 Snapshots taken with the old `cat` dump are SQLite files too, and restore
 the same way.
@@ -43,10 +50,11 @@ class RestoreError(RuntimeError):
 
 
 class StillLocked(RuntimeError):
-    """The database stayed locked by a writer for LOCK_WAIT_SECONDS."""
+    """The database stayed locked by another connection for LOCK_WAIT_SECONDS."""
 
 
-def _copy(source: sqlite3.Connection, target: sqlite3.Connection, what: str) -> None:
+def _copy(source: sqlite3.Connection, target: sqlite3.Connection, what: str,
+          remedy: str) -> None:
     """The whole of `source` into `target` in one backup step, waiting at most
     LOCK_WAIT_SECONDS for the lock. (sqlite3's backup() would retry for ever.)"""
     deadline = time.monotonic() + LOCK_WAIT_SECONDS
@@ -54,7 +62,7 @@ def _copy(source: sqlite3.Connection, target: sqlite3.Connection, what: str) -> 
     def progress(status: int, remaining: int, total: int) -> None:
         if status in _BUSY and time.monotonic() > deadline:
             raise StillLocked(f"{what} stayed locked by another connection for "
-                              f"{LOCK_WAIT_SECONDS:.0f}s; try again")
+                              f"{LOCK_WAIT_SECONDS:g}s; {remedy}")
 
     source.backup(target, pages=-1, progress=progress)
 
@@ -65,7 +73,7 @@ def dump(db_path: Path, out: BinaryIO) -> None:
     source = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=0)
     copy = sqlite3.connect(":memory:")
     try:
-        _copy(source, copy, str(db_path))
+        _copy(source, copy, str(db_path), "try again")
         copy.execute("VACUUM")
         out.write(copy.serialize())
     finally:
@@ -104,12 +112,14 @@ def _checked(data: bytes) -> sqlite3.Connection:
 
 
 def restore(db_path: Path, source: BinaryIO) -> None:
-    """Replace the database at `db_path` with the dump read from `source`."""
+    """Replace the database at `db_path` with the dump read from `source`.
+    The service must be stopped (see the module docstring)."""
     copy = _checked(source.read())
     try:
         live = db.connect(db_path, timeout=0)  # _copy does the waiting
         try:
-            _copy(copy, live, str(db_path))
+            _copy(copy, live, str(db_path),
+                  "stop the service (`boxmunge restore` does) and try again")
         finally:
             live.close()
     finally:
