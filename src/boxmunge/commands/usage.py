@@ -196,12 +196,15 @@ Usage: boxmunge inbox [project] [--json]
 
 List uploaded bundles, or remove them from the inbox.""",
     "secrets": """\
-Usage: boxmunge secrets set (<project>|--host) KEY=VALUE
+Usage: boxmunge secrets set (<project>|--host) KEY
+       boxmunge secrets set (<project>|--host) KEY=VALUE
        boxmunge secrets get (<project>|--host) KEY
        boxmunge secrets list (<project>|--host)
        boxmunge secrets unset (<project>|--host) KEY
 
-Manage project or host secrets. Does not support --dry-run.""",
+Manage project or host secrets. Does not support --dry-run. 'set KEY' asks
+for the value without echo at a terminal, or reads it from stdin (one line),
+so it is in no command line; KEY=VALUE puts it in this command's argv.""",
     "check": """\
 Usage: boxmunge check <project> [--json]
 

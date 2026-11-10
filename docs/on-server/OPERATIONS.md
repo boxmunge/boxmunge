@@ -443,6 +443,14 @@ secrets unset myapp OLD_KEY
 
 Project secrets are stored in `secrets.env` and injected into the project's containers.
 
+`secrets set myapp KEY` (no `=`) takes the value from stdin instead: at a terminal it asks
+without echo, otherwise it reads all of stdin, less one trailing newline (a second line is
+refused, not dropped; empty stdin is refused, so an empty value is sent as an empty line).
+The value is then in no command line, so `ps` on the box does not show it, and nor does
+the deploy shell's command string. `KEY=VALUE` puts the value in the command line of the
+`boxmunge-server` process while it runs. The client's `boxmunge secrets set` always sends
+the value on stdin. Either way it is stored in plain text in `secrets.env`.
+
 Keys must be environment-variable names (letters, digits and underscores, not starting
 with a digit). Values may contain spaces, tabs, `=` and any printable text, but not
 newlines or other control characters, which would add lines to the env file. Either
