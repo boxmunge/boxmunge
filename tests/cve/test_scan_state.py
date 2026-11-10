@@ -98,9 +98,13 @@ def _stored(**overrides):
 _MISSING = object()
 
 
-def test_a_stored_finding_with_no_attack_vector_reads_back_as_none():
+@pytest.mark.parametrize("attack_vector", [None, _MISSING])
+def test_a_stored_finding_with_no_attack_vector_reads_back_as_none(attack_vector):
+    """Trivy gives no CVSS vector for some findings: null (or absent) is
+    "AV unknown", not an unreadable file."""
     from boxmunge.cve.scan_state import decisions_from_scan_state
-    [decision] = decisions_from_scan_state(_stored(), project_name="p")
+    [decision] = decisions_from_scan_state(
+        _stored(attack_vector=attack_vector), project_name="p")
     assert decision.findings[0].finding.attack_vector is None
 
 

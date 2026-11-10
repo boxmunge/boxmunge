@@ -755,6 +755,25 @@ def test_suppress_current_no_quarantine_findings_rejected(
     assert "no current quarantine-level findings" in err
 
 
+@pytest.mark.parametrize("scope", [["--project", "demo"], ["--host"]])
+def test_suppress_current_refuses_an_unreadable_scan_state_naming_it(
+    tmp_path, capsys, scope,
+) -> None:
+    """A corrupted severity is an unreadable scan state, reported with the
+    file and field and a command that rewrites it, never a traceback."""
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    paths = _suppress_paths(tmp_path)
+    _write_quarantine_scan_state(paths, "demo", [("CVE-2026-0001", "Severe")])
+    rc = cmd_security_suppress(
+        ["--current", *scope, "--until", _SOON, "--reason", "x"], paths)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert str(paths.project_scan_state("demo")) in err
+    assert "'effective_severity'" in err
+    assert "security scan demo" in err
+    assert "Traceback" not in err
+
+
 def test_suppress_current_without_scan_state_rejected(
     tmp_path, capsys,
 ) -> None:

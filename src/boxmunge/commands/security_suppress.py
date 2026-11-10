@@ -26,6 +26,7 @@ from boxmunge.cve.suppressions import (
     add_suppression,
     find_recent_removal,
 )
+from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.log import log_error, log_operation
 from boxmunge.paths import BoxPaths, validate_project_name
 from boxmunge.project_registry import is_registered
@@ -281,7 +282,13 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
             )
         else:
             assert project is not None
-            findings = current_quarantine_cves(paths, project)
+            try:
+                findings = current_quarantine_cves(paths, project)
+            except PROJECT_INPUT_ERRORS as e:
+                report_project_failure("cve-suppress", project, e, paths)
+                print("  Nothing was suppressed. Fix that, then retry, or specify a "
+                      "CVE id explicitly.", file=sys.stderr)
+                return 1
             if not findings:
                 print(
                     f"ERROR: no current quarantine-level findings for "

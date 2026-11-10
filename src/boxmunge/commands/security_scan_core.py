@@ -192,8 +192,9 @@ def _scan_targets(
     """Scan each target within the project budget.
 
     A ref already in ``scanned`` (this fleet run's results) is not scanned
-    again; each new result is added. Only results are shared: a failure is
-    retried by the next project, which has its own budget.
+    again; each new result is added. Only results are shared: an image that
+    failed, or that the budget skipped, is scanned by the next project that
+    runs it, under that project's own budget.
 
     Returns (results, failed image refs, budget-skipped image refs, warnings).
     """

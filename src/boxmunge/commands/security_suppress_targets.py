@@ -18,6 +18,7 @@ from boxmunge.cve.scanner import Severity
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.log import log_error
 from boxmunge.paths import BoxPaths
+from boxmunge.state import StateError
 
 def _rank(finding: dict[str, Any]) -> int:
     """A stored finding's effective-severity rank (StateError if unreadable)."""
@@ -52,22 +53,29 @@ def current_quarantine_cves(
     CVE id, the highest-severity entry wins (a CVE elevated in one image
     keeps that severity in the output). Result ordered Critical → Unknown,
     then by CVE id for stable display.
+
+    Raises StateError naming the file, and the scan that rewrites it, when
+    the scan state cannot be read.
     """
-    state = read_scan_state(paths.project_scan_state(project))
+    path = paths.project_scan_state(project)
+    state = read_scan_state(path)
     if not state:
         return []
     seen: dict[str, dict[str, Any]] = {}
-    for decision in state.get("decisions", []) or []:
-        for f in decision.get("findings", []) or []:
-            if f.get("disposition") != Disposition.QUARANTINE.value:
-                continue
-            cve = f.get("cve_id")
-            if not cve:
-                continue
-            existing = seen.get(cve)
-            if existing is None or _rank(f) > _rank(existing):
-                seen[cve] = f
-    return sorted(seen.values(), key=lambda f: (-_rank(f), f.get("cve_id", "")))
+    try:
+        for decision in state.get("decisions", []) or []:
+            for f in decision.get("findings", []) or []:
+                if f.get("disposition") != Disposition.QUARANTINE.value:
+                    continue
+                cve = f.get("cve_id")
+                if not cve:
+                    continue
+                existing = seen.get(cve)
+                if existing is None or _rank(f) > _rank(existing):
+                    seen[cve] = f
+        return sorted(seen.values(), key=lambda f: (-_rank(f), f.get("cve_id", "")))
+    except StateError as e:
+        raise StateError(f"{path}: {e}; `security scan {project}` rewrites it") from e
 
 
 def all_currently_quarantining_cves(paths: BoxPaths) -> tuple[list[str], list[str]]:

@@ -88,6 +88,22 @@ def test_a_shared_result_is_used_even_after_the_budget_is_spent(fleet, monkeypat
     assert [d.image_ref for d in scan.decisions] == [_SHARED]
 
 
+def test_an_image_one_project_skipped_for_budget_is_scanned_by_the_next(
+    fleet, monkeypatch,
+) -> None:
+    """A budget skip is not a result: nothing is shared, and the next project,
+    with its own budget, runs Trivy on the image."""
+    paths, trivy = fleet
+    scanned: dict = {}
+    monkeypatch.setattr(security_scan_core, "_PROJECT_BUDGET_SECONDS", 0)
+    first = scan_one_project(paths, "aaa", scanned=scanned)
+    assert sorted(first.skipped_images) == sorted(["aaa-web:1", _SHARED])
+    assert scanned == {} and trivy == []
+    monkeypatch.setattr(security_scan_core, "_PROJECT_BUDGET_SECONDS", 600)
+    second = scan_one_project(paths, "bbb", scanned=scanned)
+    assert second.complete and sorted(trivy) == sorted(["bbb-web:1", _SHARED])
+
+
 def test_a_project_scan_resolves_compose_twice_and_lists_containers_once(
     fleet, monkeypatch,
 ) -> None:
