@@ -43,6 +43,13 @@ class BundleRefused(Exception):
     """The bundle cannot be turned into a detached pair the old verifiers accept."""
 
 
+def _obj(value: object, what: str) -> dict:
+    """value as a JSON object; anything else (missing, a list, a string) refuses."""
+    if not isinstance(value, dict):
+        raise BundleRefused(f"{what} is missing or not an object")
+    return value
+
+
 def _b64(value: object, what: str) -> bytes:
     if not isinstance(value, str) or not value:
         raise BundleRefused(f"{what} is missing")
@@ -70,18 +77,18 @@ def _entry(material: dict) -> dict:
     if not isinstance(entries, list) or len(entries) != 1:
         raise BundleRefused(f"expected exactly one transparency log entry, found "
                             f"{len(entries) if isinstance(entries, list) else 'none'}")
-    entry = entries[0]
+    entry = _obj(entries[0], "the log entry")
     if entry.get("kindVersion") != KIND_VERSION:
         raise BundleRefused(f"the log entry is {entry.get('kindVersion')}, not {KIND_VERSION}")
-    log_id = (entry.get("logId") or {}).get("keyId")
+    log_id = _obj(entry.get("logId"), "the log entry's logId").get("keyId")
     if log_id != REKOR_V1_LOG_ID:
         raise BundleRefused(
             f"the log entry is in log {log_id}, not Rekor v1 ({REKOR_V1_LOG_ID}). cosign 2.4.1 "
             "verifies a detached signature by searching Rekor v1, so every old box would refuse "
             "this release. Sign with a Rekor v1 signing config (cosign sign-blob "
             "--signing-config), or stop publishing the detached pair")
-    _b64((entry.get("inclusionPromise") or {}).get("signedEntryTimestamp"),
-         "the log entry's signed entry timestamp (inclusionPromise)")
+    promise = _obj(entry.get("inclusionPromise"), "the log entry's inclusionPromise")
+    _b64(promise.get("signedEntryTimestamp"), "the log entry's signed entry timestamp (inclusionPromise)")
     if not str(entry.get("integratedTime", "")).isdigit() or int(entry["integratedTime"]) <= 0:
         raise BundleRefused("the log entry has no integrated time")
     return entry
@@ -91,18 +98,16 @@ def derive(bundle: dict) -> tuple[bytes, bytes]:
     """Return the (.sig, .cert) file contents for a bundle, or raise BundleRefused."""
     if bundle.get("mediaType") != MEDIA_TYPE:
         raise BundleRefused(f"media type is {bundle.get('mediaType')!r}, not {MEDIA_TYPE!r}")
-    material = bundle.get("verificationMaterial")
-    if not isinstance(material, dict):
-        raise BundleRefused("the bundle has no verificationMaterial")
+    material = _obj(bundle.get("verificationMaterial"), "the bundle's verificationMaterial")
     if set(material) & {"x509CertificateChain", "publicKey"}:
         raise BundleRefused("the bundle carries a certificate chain or a public key, "
                             "not one leaf certificate")
-    cert = _b64((material.get("certificate") or {}).get("rawBytes"), "the leaf certificate")
+    cert = _b64(_obj(material.get("certificate"), "the leaf certificate").get("rawBytes"),
+                "the leaf certificate's rawBytes")
     _entry(material)
-    message = bundle.get("messageSignature")
-    if not isinstance(message, dict):
-        raise BundleRefused("the bundle has no messageSignature (a DSSE envelope is not a blob signature)")
-    algorithm = (message.get("messageDigest") or {}).get("algorithm")
+    message = _obj(bundle.get("messageSignature"),
+                   "the bundle's messageSignature (a DSSE envelope is not a blob signature)")
+    algorithm = _obj(message.get("messageDigest"), "the message digest").get("algorithm")
     if algorithm != "SHA2_256":
         raise BundleRefused(f"the message digest is {algorithm}, not SHA2_256")
     signature = message.get("signature")

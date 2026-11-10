@@ -81,12 +81,19 @@ def _mutations() -> dict[str, tuple]:
                       "media type"),
         "chain": (set_(["verificationMaterial", "x509CertificateChain"], {"certificates": []}),
                   "not one leaf certificate"),
-        "no_cert": (set_(["verificationMaterial", "certificate"], _DELETE), "leaf certificate is missing"),
         "sha512": (set_(["messageSignature", "messageDigest", "algorithm"], "SHA2_512"), "not SHA2_256"),
         "ed25519": (set_(["messageSignature", "signature"], base64.b64encode(bytes(64)).decode()),
                     "not an ECDSA"),
         "bad_b64": (set_(["messageSignature", "signature"], "not base64!"), "not base64"),
-        "dsse": (set_(["messageSignature"], _DELETE), "no messageSignature"),
+        "dsse": (set_(["messageSignature"], _DELETE), "messageSignature (a DSSE envelope"),
+        "no_cert": (set_(["verificationMaterial", "certificate"], _DELETE), "leaf certificate is missing"),
+        # Fields of the wrong JSON type refuse, never crash.
+        "log_id_list": (set_([*entry, "logId"], ["x"]), "logId is missing or not an object"),
+        "promise_string": (set_([*entry, "inclusionPromise"], "x"), "inclusionPromise is missing or not an object"),
+        "entry_string": (set_(["verificationMaterial", "tlogEntries", 0], "x"), "log entry is missing or not an object"),
+        "digest_list": (set_(["messageSignature", "messageDigest"], []), "message digest is missing or not an object"),
+        "cert_string": (set_(["verificationMaterial", "certificate"], "x"), "leaf certificate is missing or not an object"),
+        "material_list": (set_(["verificationMaterial"], []), "verificationMaterial is missing or not an object"),
     }
 
 
@@ -99,7 +106,8 @@ def test_refuses_a_bundle_old_verifiers_cannot_use(name: str, tmp_path: Path) ->
     bundle = _bundle()
     mutate(bundle)
     proc, sig, cert = _derive(tmp_path, bundle)
-    assert proc.returncode == 1
+    assert proc.returncode == 1, proc.stderr
+    assert "Traceback" not in proc.stderr
     assert message in proc.stderr
     assert not sig.exists() and not cert.exists()
 
