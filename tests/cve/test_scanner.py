@@ -903,3 +903,11 @@ def test_scan_image_lang_types_defaults_empty_when_no_results(
     assert result.lang_types == frozenset()
     assert PkgClass.from_trivy_string(None) is PkgClass.UNKNOWN
     assert PkgClass.from_trivy_string("OS-PKGS") is PkgClass.OS
+
+
+def test_one_severity_order_ranks_unknown_lowest_on_trivys_vendor_scale() -> None:
+    from boxmunge.cve.scanner import SEVERITY_ORDER, _parse_vendor_severities
+    assert [s.rank for s in SEVERITY_ORDER] == [0, 1, 2, 3, 4]
+    assert Severity.UNKNOWN.rank < Severity.LOW.rank < Severity.CRITICAL.rank
+    parsed = _parse_vendor_severities({"a": 0, "b": 4, "c": 5, "d": "3", "e": None})
+    assert parsed == {"a": Severity.UNKNOWN, "b": Severity.CRITICAL}

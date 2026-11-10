@@ -10,8 +10,9 @@ from __future__ import annotations
 import errno
 import json
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from boxmunge.cve.policy import (
     Disposition,
@@ -22,6 +23,8 @@ from boxmunge.cve.scanner import AttackVector, Finding, PkgClass, Severity, Vuln
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.state import StateError, read_state
 from boxmunge.fs_nofollow import read_text_nofollow
+
+E = TypeVar("E", bound=Enum)
 
 # The scan runs daily (03:00-03:30); 36h tolerates one late or missed run's
 # worth of jitter without crying wolf, and catches a second missed night.
@@ -163,102 +166,21 @@ def read_scan_state(path: Path) -> dict[str, Any] | None:
     return read_state(path)
 
 
-def headline_from_scan_state(state: dict[str, Any]) -> dict[str, Any] | None:
-    """Pick the most-severe quarantine-disposition finding across all decisions.
-
-    Returns None if no quarantine-level finding exists. Useful for fleet
-    summaries and per-project text output.
-    """
-    _RANK = {
-        Severity.CRITICAL.value: 4,
-        Severity.HIGH.value: 3,
-        Severity.MEDIUM.value: 2,
-        Severity.LOW.value: 1,
-        Severity.UNKNOWN.value: 0,
-    }
-    headline: dict[str, Any] | None = None
-    for decision in state.get("decisions", []):
-        for f in decision.get("findings", []):
-            if f.get("disposition") != Disposition.QUARANTINE.value:
-                continue
-            if headline is None:
-                headline = f
-                continue
-            if _RANK.get(f.get("effective_severity"), 0) > _RANK.get(
-                headline.get("effective_severity"), 0,
-            ):
-                headline = f
-    return headline
-
-
-def severity_from_stored(value: str) -> Severity:
-    """Map a stored severity string back to the enum. Unknown → UNKNOWN."""
-    for sev in Severity:
-        if sev.value == value:
-            return sev
-    return Severity.UNKNOWN
+def stored_enum(cls: type[E], value: Any, field: str) -> E:
+    """A stored enum value read back; StateError naming the field when it is
+    missing or not one of ``cls``'s values (a corrupted or hand-edited file
+    is unreadable, never "unknown")."""
+    try:
+        return cls(value)
+    except ValueError:
+        raise StateError(
+            f"stored {field!r} is {value!r}, not a {cls.__name__} value") from None
 
 
 def stored_severities(raw: dict[str, Any]) -> tuple[Severity, Severity]:
-    """A stored finding's (base, effective) severities. A missing or
-    unrecognised value reads as UNKNOWN."""
-    return (severity_from_stored(raw.get("base_severity", "Unknown")),
-            severity_from_stored(raw.get("effective_severity", "Unknown")))
-
-
-def status_from_stored(value: Any) -> VulnStatus:
-    """Map a stored status string back to VulnStatus.
-
-    Missing/None (legacy pre-rebalance files) or unrecognized → UNKNOWN,
-    matching the backward-compat posture of attack_vector_from_stored.
-    """
-    if value is None:
-        return VulnStatus.UNKNOWN
-    for s in VulnStatus:
-        if s.value == value:
-            return s
-    return VulnStatus.UNKNOWN
-
-
-def pkg_class_from_stored(value: Any) -> PkgClass:
-    """Map a stored pkg_class string back to the enum.
-
-    Missing/unrecognised → UNKNOWN, matching the backward-compat posture of
-    attack_vector_from_stored. State written before the relevance gate has
-    no pkg_class; UNKNOWN keeps such findings out of the gate entirely.
-    """
-    if not isinstance(value, str):
-        return PkgClass.UNKNOWN
-    return PkgClass.from_trivy_string(value)
-
-
-def attack_vector_from_stored(value: Any) -> AttackVector | None:
-    """Map a stored attack_vector string back to the enum.
-
-    Accepts None or missing field for backward compatibility with scan_state
-    files written before v0.7.1 introduced the attack_vector field. Anything
-    else unrecognized also falls back to None — failing here would block the
-    operator from reading legacy state, and the caller treats None as
-    "AV unknown" already.
-    """
-    if value is None:
-        return None
-    for av in AttackVector:
-        if av.value == value:
-            return av
-    return None
-
-
-def _deserialize_disposition(value: str) -> Disposition:
-    """Map a stored disposition tag back to the enum.
-
-    Raises ValueError on an unknown tag — fail loud rather than silently
-    coercing (we can't reason about a state-file we don't recognize).
-    """
-    for d in Disposition:
-        if d.value == value:
-            return d
-    raise ValueError(f"unknown disposition tag in scan state: {value!r}")
+    """A stored finding's (base, effective) severities."""
+    return (stored_enum(Severity, raw.get("base_severity"), "base_severity"),
+            stored_enum(Severity, raw.get("effective_severity"), "effective_severity"))
 
 
 def decisions_from_scan_state(
@@ -288,7 +210,7 @@ def decisions_from_scan_state(
         at_risk_running = False
         for raw in raw_decision.get("findings", []) or []:
             base, effective = stored_severities(raw)
-            disposition = _deserialize_disposition(raw["disposition"])
+            disposition = stored_enum(Disposition, raw.get("disposition"), "disposition")
             finding = Finding(
                 cve_id=raw.get("cve_id", ""),
                 severity=base,
@@ -297,11 +219,11 @@ def decisions_from_scan_state(
                 fixed_version=raw.get("fixed_version"),
                 title=raw.get("title", "") or "",
                 primary_url=raw.get("primary_url"),
-                attack_vector=attack_vector_from_stored(
-                    raw.get("attack_vector"),
-                ),
-                status=status_from_stored(raw.get("status")),
-                pkg_class=pkg_class_from_stored(raw.get("pkg_class")),
+                # None when Trivy gave no CVSS vector.
+                attack_vector=None if raw.get("attack_vector") is None else stored_enum(
+                    AttackVector, raw["attack_vector"], "attack_vector"),
+                status=stored_enum(VulnStatus, raw.get("status"), "status"),
+                pkg_class=stored_enum(PkgClass, raw.get("pkg_class"), "pkg_class"),
                 pkg_type=raw.get("pkg_type"),
             )
             findings.append(

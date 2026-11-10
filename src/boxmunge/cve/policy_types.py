@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
-from boxmunge.cve.scanner import Finding, Severity
+from boxmunge.cve.scanner import SEVERITY_ORDER, Finding, Severity
 from boxmunge.cve.suppressions import Suppression
 
 
@@ -38,27 +38,6 @@ class Disposition(Enum):
     # no fix exists yet, not known to be exploited. Alerted once.
     AWAITING_FIX = "awaiting_fix"
 
-
-# Severity ordering for threshold comparison and penalty elevation.
-# Re-declared here (rather than imported from scanner) so policy.py is
-# decoupled from scanner internals — five entries, not worth coupling.
-# UNKNOWN = 0 sorts last and is a no-op for elevation: we cannot raise
-# something we don't recognize.
-_SEVERITY_RANK: dict[Severity, int] = {
-    Severity.UNKNOWN: 0,
-    Severity.LOW: 1,
-    Severity.MEDIUM: 2,
-    Severity.HIGH: 3,
-    Severity.CRITICAL: 4,
-}
-
-# Inverse: rank-to-severity for elevation (skips UNKNOWN, which is a no-op).
-_RANK_TO_SEVERITY: dict[int, Severity] = {
-    1: Severity.LOW,
-    2: Severity.MEDIUM,
-    3: Severity.HIGH,
-    4: Severity.CRITICAL,
-}
 
 # Posture → the severity gate: the minimum effective (distro, below paranoid)
 # severity that meets it, and what meeting it does. At-or-above meets it.
@@ -150,8 +129,7 @@ def elevate_severity(base: Severity, penalty: int) -> Severity:
     """
     if base == Severity.UNKNOWN:
         return Severity.UNKNOWN
-    elevated_rank = min(_SEVERITY_RANK[base] + penalty, _SEVERITY_RANK[Severity.CRITICAL])
-    return _RANK_TO_SEVERITY[elevated_rank]
+    return SEVERITY_ORDER[min(base.rank + penalty, Severity.CRITICAL.rank)]
 
 
 def parse_posture(value: str | None) -> Posture:

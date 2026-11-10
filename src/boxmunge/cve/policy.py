@@ -78,7 +78,6 @@ from boxmunge.cve.scanner import (
 )
 from boxmunge.cve.policy_types import (
     _POSTURE_LABEL,
-    _SEVERITY_RANK,
     Disposition,
     FindingDisposition,
     PolicyError,
@@ -410,7 +409,7 @@ def evaluate_project(
     sorted_dispositions = tuple(
         sorted(
             dispositions,
-            key=lambda d: (-_SEVERITY_RANK[d.effective_severity], d.finding.cve_id),
+            key=lambda d: (-d.effective_severity.rank, d.finding.cve_id),
         )
     )
 

@@ -13,17 +13,15 @@ from typing import Any
 
 from boxmunge.cve.kev import load_kev
 from boxmunge.cve.policy import Disposition
-from boxmunge.cve.scan_state import read_scan_state
+from boxmunge.cve.scan_state import read_scan_state, stored_enum
+from boxmunge.cve.scanner import Severity
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.log import log_error
 from boxmunge.paths import BoxPaths
 
-# Severity rank for ordering --current suppression output (Critical first).
-# Mirrors policy._SEVERITY_RANK but uses the stored string values from
-# scan_state.json so we don't have to round-trip through the enum here.
-_SEVERITY_RANK = {
-    "Critical": 4, "High": 3, "Medium": 2, "Low": 1, "Unknown": 0,
-}
+def _rank(finding: dict[str, Any]) -> int:
+    """A stored finding's effective-severity rank (StateError if unreadable)."""
+    return stored_enum(Severity, finding.get("effective_severity"), "effective_severity").rank
 
 
 def project_suppressions_path(paths: BoxPaths, project: str) -> Path:
@@ -67,19 +65,9 @@ def current_quarantine_cves(
             if not cve:
                 continue
             existing = seen.get(cve)
-            rank_new = _SEVERITY_RANK.get(f.get("effective_severity"), 0)
-            rank_old = _SEVERITY_RANK.get(
-                existing.get("effective_severity") if existing else None, 0,
-            )
-            if existing is None or rank_new > rank_old:
+            if existing is None or _rank(f) > _rank(existing):
                 seen[cve] = f
-    return sorted(
-        seen.values(),
-        key=lambda f: (
-            -_SEVERITY_RANK.get(f.get("effective_severity"), 0),
-            f.get("cve_id", ""),
-        ),
-    )
+    return sorted(seen.values(), key=lambda f: (-_rank(f), f.get("cve_id", "")))
 
 
 def all_currently_quarantining_cves(paths: BoxPaths) -> tuple[list[str], list[str]]:
@@ -111,24 +99,10 @@ def all_currently_quarantining_cves(paths: BoxPaths) -> tuple[list[str], list[st
         for f in findings:
             cve = f["cve_id"]
             existing = seen.get(cve)
-            sev_new = f.get("effective_severity") or ""
-            sev_old = (
-                existing.get("effective_severity") or "" if existing else ""
-            )
-            rank_new = _SEVERITY_RANK.get(sev_new, 0)
-            rank_old = _SEVERITY_RANK.get(sev_old, 0)
-            if existing is None or rank_new > rank_old:
+            if existing is None or _rank(f) > _rank(existing):
                 seen[cve] = f
-    return [
-        f["cve_id"]
-        for f in sorted(
-            seen.values(),
-            key=lambda f: (
-                -_SEVERITY_RANK.get(f.get("effective_severity") or "", 0),
-                f.get("cve_id", ""),
-            ),
-        )
-    ], left_out
+    ordered = sorted(seen.values(), key=lambda f: (-_rank(f), f.get("cve_id", "")))
+    return [f["cve_id"] for f in ordered], left_out
 
 
 def drop_kev_listed(

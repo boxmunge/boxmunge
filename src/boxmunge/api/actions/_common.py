@@ -10,7 +10,7 @@ from boxmunge.api.result import ActionError, ErrorCode
 from boxmunge.api.schema import BOOLEAN, STRING, enum, obj
 from boxmunge.api.timefmt import TIMESTAMP, utc_timestamp
 from boxmunge.cve.quarantine import QUARANTINE_TEXT_FIELDS, checked_quarantine_record
-from boxmunge.cve.scan_state import severity_from_stored
+from boxmunge.cve.scan_state import stored_enum
 from boxmunge.cve.scanner import Severity
 from boxmunge.paths import BoxPaths, InvalidProjectName
 
@@ -37,8 +37,8 @@ SEVERITY = machine_enum(Severity)
 
 def severity_value(stored: Any) -> str:
     """A stored severity as the API publishes it, read as the platform
-    reads it (missing or unrecognised is unknown)."""
-    return machine_value(severity_from_stored(stored))
+    reads it (StateError when missing or unrecognised)."""
+    return machine_value(stored_enum(Severity, stored, "severity"))
 
 
 QUARANTINE_SCHEMA = obj({

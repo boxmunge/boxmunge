@@ -24,12 +24,11 @@ from boxmunge.commands.security_views import project_cve_status
 from boxmunge.api.timefmt import NULLABLE_TIMESTAMP, utc_timestamp
 from boxmunge.cve.breaker import BreakerError, read_held
 from boxmunge.cve.policy import Disposition
-from boxmunge.cve.scan_state import (
-    attack_vector_from_stored, pkg_class_from_stored, status_from_stored, stored_severities,
-)
+from boxmunge.cve.scan_state import stored_enum, stored_severities
 from boxmunge.cve.scanner import AttackVector, PkgClass, VulnStatus
 from boxmunge.paths import BoxPaths
 from boxmunge.security_overlay import services_with_off_profile
+from boxmunge.state import StateError
 
 POSTURES = ("relaxed", "balanced", "strict", "paranoid")
 
@@ -135,6 +134,12 @@ def _security_project(params: dict[str, Any], ctx: ActionContext) -> dict[str, A
     except SecurityViewError as e:
         raise ActionError(ErrorCode.FAILED, str(e)) from e
     scan = view.scan_state or {}
+    try:
+        findings = [_finding_view(finding, decision.get("image_ref"))
+                    for decision in scan.get("decisions", [])
+                    for finding in decision.get("findings") or []]
+    except StateError as e:
+        raise StateError(f"{ctx.paths.project_scan_state(name)}: {e}") from e
     return {
         "project": name,
         "posture": view.posture,
@@ -146,11 +151,7 @@ def _security_project(params: dict[str, Any], ctx: ActionContext) -> dict[str, A
         "last_scan": utc_timestamp(scan.get("scanned_at"),
                                    f"{ctx.paths.project_scan_state(name)} scanned_at"),
         "unscanned": list(scan.get("unscanned", [])),
-        "findings": [
-            _finding_view(finding, decision.get("image_ref"))
-            for decision in scan.get("decisions", [])
-            for finding in decision.get("findings") or []
-        ],
+        "findings": findings,
         "quarantine": quarantine_view(
             view.quarantine_state, ctx.paths.project_quarantine_state(name),
         ) if view.quarantined else None,
@@ -173,24 +174,23 @@ def _finding_view(finding: dict[str, Any], image_ref: str | None) -> dict[str, A
         "base_severity": machine_value(base),
         "effective_severity": machine_value(effective),
         **{key: finding.get(key) for key in _OPTIONAL_FINDING_KEYS},
-        **{key: _machine(finding, key, read) for key, read in _ENUM_FINDING_KEYS.items()},
+        **{key: _machine(finding, key, cls) for key, cls in _ENUM_FINDING_KEYS.items()},
     }
 
 
 # Optional finding keys holding a stored enum, read as the platform reads them.
 _ENUM_FINDING_KEYS = {
-    "attack_vector": attack_vector_from_stored,
-    "status": status_from_stored,
-    "pkg_class": pkg_class_from_stored,
+    "attack_vector": AttackVector,
+    "status": VulnStatus,
+    "pkg_class": PkgClass,
 }
 
 
-def _machine(finding: dict[str, Any], key: str, read: Any) -> str | None:
-    """A key older scan files lack stays null; otherwise its machine value."""
+def _machine(finding: dict[str, Any], key: str, cls: Any) -> str | None:
+    """A null key stays null (no CVSS vector); otherwise its machine value."""
     if finding.get(key) is None:
         return None
-    member = read(finding[key])
-    return None if member is None else machine_value(member)
+    return machine_value(stored_enum(cls, finding[key], key))
 
 
 ACTIONS = (

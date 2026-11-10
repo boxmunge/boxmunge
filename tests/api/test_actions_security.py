@@ -137,19 +137,20 @@ def test_a_quarantine_record_with_a_null_severity_fails_naming_the_file(fixture_
     assert [u["project"] for u in summary["unreadable"]] == ["billing"]
 
 
-def test_finding_severities_read_as_the_platform_reads_them(fixture_paths) -> None:
-    """A missing or unrecognised stored severity is "Unknown", exactly as
-    scan_state.decisions_from_scan_state reads it for enforcement."""
+@pytest.mark.parametrize("field, value", [
+    ("effective_severity", "Catastrophic"), ("base_severity", None), ("status", "maybe"),
+])
+def test_an_unrecognised_stored_value_is_refused_naming_file_and_field(
+    fixture_paths, field, value,
+) -> None:
+    """Read as the platform reads it for enforcement: a corrupted value is an
+    unreadable file, never "unknown"."""
     path = fixture_paths.project_scan_state("shop")
     state = json.loads(path.read_text())
-    first, second = state["decisions"][0]["findings"][:2]
-    del first["base_severity"], first["effective_severity"]
-    second["effective_severity"] = "Catastrophic"
+    state["decisions"][0]["findings"][0][field] = value
     path.write_text(json.dumps(state))
-    findings = _call(fixture_paths, "security.project", {"project": "shop"})["findings"]
-    assert (findings[0]["base_severity"], findings[0]["effective_severity"]) == (
-        "unknown", "unknown")
-    assert findings[1]["effective_severity"] == "unknown"
+    error = _error(fixture_paths, "security.project", {"project": "shop"})
+    assert f"{path}: stored '{field}'" in error.message
 
 
 def test_every_enum_reads_as_a_lowercase_machine_value(fixture_paths) -> None:

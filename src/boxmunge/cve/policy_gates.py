@@ -10,7 +10,6 @@ from boxmunge.cve.policy_explain import explain_awaiting_fix, explain_threshold
 from boxmunge.cve.policy_types import (
     _POSTURE_LABEL,
     _SEVERITY_GATES,
-    _SEVERITY_RANK,
     Disposition,
     FindingDisposition,
     Posture,
@@ -25,7 +24,7 @@ def paranoid_severity(finding: Finding) -> tuple[Severity, tuple[str, ...]]:
     when no vendor source gives the same rating.
     """
     ratings = finding.vendor_severities
-    highest = max((finding.severity, *ratings.values()), key=_SEVERITY_RANK.__getitem__)
+    highest = max((finding.severity, *ratings.values()), key=lambda sev: sev.rank)
     sources = sorted((src for src, sev in ratings.items() if sev is highest),
                      key=lambda src: (src != "nvd", src))
     return highest, tuple(sources) or ("trivy",)
@@ -71,7 +70,7 @@ def threshold_disposition(
     AWAITING_FIX either way (there is no quarantine to opt out of).
     """
     threshold, action = _SEVERITY_GATES[posture]
-    over = _SEVERITY_RANK[compare_sev] >= _SEVERITY_RANK[threshold]
+    over = compare_sev.rank >= threshold.rank
     label = _POSTURE_LABEL[posture]
     if over and action is Disposition.AWAITING_FIX:
         disposition = action
