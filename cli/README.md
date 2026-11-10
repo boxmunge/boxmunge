@@ -78,8 +78,9 @@ into the command) nobody can answer, so the command is refused before anything
 is sent unless `--yes` is given.
 
 `secrets set KEY` asks for the value without echo at a terminal. When standard
-input is not a terminal it reads the value from it instead: one line, whose
-trailing newline is dropped (a second line is refused, not dropped):
+input is not a terminal it reads the value from it instead: one line of UTF-8
+text, at most 64 KiB, whose trailing newline is dropped (a second line is
+refused, not dropped):
 
 ```bash
 pass show myapp/token | boxmunge secrets set API_TOKEN
@@ -87,7 +88,9 @@ pass show myapp/token | boxmunge secrets set API_TOKEN
 
 Either way the value goes to the server on ssh's stdin, so it is in no shell
 history and in no command line: process listings on your machine and on the
-server do not show it.
+server do not show it. Only the command that needs it reads standard input:
+the handshake before it never does, so it cannot swallow the value (nor an MCP
+host's first message to `mcp-serve`).
 `secrets set KEY=VALUE` works too, but puts the value in your shell history and
 in the CLI's own process listing. The server stores the value in plain text in
 the project's `secrets.env` (readable by the deploy user and root), and the
@@ -164,8 +167,9 @@ through when the server has no usable CISA KEV catalog to check it against.
 The server logs and alerts it, and never lets it override a catalog that
 lists a CVE still in the release's images.
 
-Some flags need a newer server than the client's minimum: `--no-pull`,
-`--redeploy` and `logs --staging` need boxmunge-server 0.11.4, and
+Some flags need a newer server than the client's minimum: `--abandon` needs
+boxmunge-server 0.11.0, `--no-pull`, `--redeploy` and `logs --staging` need
+0.11.4, and
 `--accept-stale-kev` and `secrets set` need 0.11.5. On an older server the
 client refuses them before anything is sent or uploaded, names the upgrade,
 and names what the older server accepts instead where there is something.
@@ -175,8 +179,7 @@ hook ran, `boxmunge prod-deploy --abandon` uploads nothing and runs
 `prod-deploy <project> --abandon` on the server: the previous release's files
 go back (a first deploy's code is removed), and containers and data were never
 touched. Once a hook may have run, use `boxmunge rollback` (or, for a first
-deploy, deploy a fix). Servers older than the release that added it refuse it
-as an unknown argument.
+deploy, deploy a fix). It needs boxmunge-server 0.11.0 or newer.
 
 ## MCP
 

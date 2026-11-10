@@ -25,13 +25,13 @@ from boxmunge_cli.version import parse_version
 # Oldest boxmunge-server this client works with: the release whose command
 # surface (stage/prod-deploy/promote flags, status --json, logs options,
 # handshake schema_version) the client was built and tested against. Newer
-# flags are not worth refusing every command for: prod-deploy --abandon is
-# left to older servers to reject ("unknown argument"; it uploads nothing),
-# and the flags in FLAG_SINCE are refused here, before anything is sent.
+# flags are not worth refusing every command for: the flags in FLAG_SINCE
+# are refused here instead, before anything is sent.
 MIN_SERVER_VERSION = "0.10.0"
 # Flags newer than MIN_SERVER_VERSION -> (the first server release that takes
 # them, what an older server accepts instead or None). "{project}" is filled in.
 FLAG_SINCE: dict[str, tuple[str, str | None]] = {
+    "--abandon": ("0.11.0", None),
     "--no-pull": ("0.11.4", "run the command without --no-pull"),
     "--staging": ("0.11.4", None),
     "--redeploy": ("0.11.4", "deploy the installed release again with "
@@ -96,8 +96,11 @@ def check_server_compatibility(config: dict[str, Any],
     uploaded, checked against what the server understands. batch: never
     prompt (no person at a terminal).
     """
+    # stdin=DEVNULL: ssh forwards its stdin, and this CLI's is meant for the
+    # command after the handshake (a piped secret, an MCP host's messages).
     result = subprocess.run(build_ssh_cmd(config, "handshake", batch=batch),
-                            capture_output=True, text=True, check=False)
+                            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                            check=False)
     if result.returncode != 0:
         detail = result.stderr.strip() or f"ssh exited with {result.returncode}"
         raise HandshakeError(

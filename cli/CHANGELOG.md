@@ -18,7 +18,7 @@ Deploying without an upload:
   in its inbox, or the open install an interrupted deploy left) without
   uploading the working tree.
 - `prod-deploy --abandon` undoes an interrupted install whose pre-deploy hook
-  has not run. It uploads nothing.
+  has not run. It uploads nothing. Needs boxmunge-server 0.11.0.
 
 New flags the server's refusals name:
 
@@ -33,10 +33,15 @@ Secrets and confirmations:
 
 - `secrets set KEY` asks for the value without echo at a terminal, or reads
   it from standard input (`pass show myapp/token | boxmunge secrets set
-  API_TOKEN`): one line, its trailing newline dropped, and a second line
-  refused rather than dropped. The value goes to the server on ssh's
-  standard input, never in a command line or your shell history. Needs
-  boxmunge-server 0.11.5.
+  API_TOKEN`): one line of UTF-8 text, at most 64 KiB, its trailing newline
+  dropped, and a second line refused rather than dropped. The value goes to
+  the server on ssh's standard input, never in a command line or your shell
+  history. Needs boxmunge-server 0.11.5.
+- Only the command that needs it reads standard input. The handshake that
+  runs first, and every ssh and scp call that sends nothing, get none, so
+  they cannot swallow input meant for the command (a piped secret, an MCP
+  host's first message). `remote COMMAND` passes standard input on to the
+  server command.
 - `rollback` and the server commands that ask before acting (`pause`,
   `resume`, `recover`, `restore`, `inbox clean`, `project-delete`) show the
   server's plan and ask at a terminal. When standard input is not a terminal

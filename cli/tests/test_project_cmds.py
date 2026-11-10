@@ -36,17 +36,22 @@ SERVER_0115 = json.dumps({"server_version": "0.11.5", "min_client_version": "0.1
                           "schema_version": 3})
 
 
+def _pipe(monkeypatch, data: str | bytes) -> None:
+    """Stand in for a pipe on stdin (bytes underneath, as a real one has)."""
+    raw = data.encode() if isinstance(data, str) else data
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8"))
+
+
 @pytest.fixture
 def stdin_server(fake_remote, monkeypatch):
-    """A server new enough to take a secret's value on stdin; ssh's stdin is recorded."""
+    """A server new enough to take a secret's value on stdin."""
     fake_remote.respond("ssh", "handshake", stdout=SERVER_0115)
-    monkeypatch.setenv("FAKE_REMOTE_READ_STDIN", "1")
     return fake_remote
 
 
 def test_secrets_set_sends_the_value_on_stdin_not_in_argv(project, stdin_server,
                                                           monkeypatch) -> None:
-    monkeypatch.setattr("sys.stdin", io.StringIO("p@ss word; $(x)\n"))
+    _pipe(monkeypatch, "p@ss word; $(x)\n")
     assert run_cli(["secrets", "set", "API_KEY"]) == 0
     assert _server_argv(stdin_server) == [["secrets", "set", "myapp", "API_KEY"]]
     assert stdin_server.stdins("ssh")[-1] == "p@ss word; $(x)\n"
@@ -70,7 +75,7 @@ def test_secrets_set_refuses_more_than_one_line_on_stdin(project, stdin_server, 
                                                           piped, capsys) -> None:
     """Only one trailing newline is the line's end; anything after it would
     be silently dropped, so it is refused as the server refuses it."""
-    monkeypatch.setattr("sys.stdin", io.StringIO(piped))
+    _pipe(monkeypatch, piped)
     assert run_cli(["secrets", "set", "API_KEY"]) == 2
     assert "line break" in capsys.readouterr().err
     assert _server_argv(stdin_server) == []
@@ -78,15 +83,65 @@ def test_secrets_set_refuses_more_than_one_line_on_stdin(project, stdin_server, 
 
 def test_secrets_set_takes_a_value_without_a_trailing_newline(project, stdin_server,
                                                               monkeypatch) -> None:
-    monkeypatch.setattr("sys.stdin", io.StringIO("s3cret"))
+    _pipe(monkeypatch, "s3cret")
     assert run_cli(["secrets", "set", "API_KEY"]) == 0
     assert stdin_server.stdins("ssh")[-1] == "s3cret\n"
+
+
+def test_secrets_set_with_stdin_closed_is_refused(project, stdin_server, monkeypatch,
+                                                  capsys) -> None:
+    """`boxmunge secrets set KEY <&-`: Python's sys.stdin is None."""
+    monkeypatch.setattr("sys.stdin", None)
+    assert run_cli(["secrets", "set", "API_KEY"]) == 1
+    assert "no value for API_KEY on stdin" in capsys.readouterr().err
+    assert _server_argv(stdin_server) == []
+
+
+def test_secrets_set_refuses_a_value_that_is_not_utf8(project, stdin_server, monkeypatch,
+                                                      capsys) -> None:
+    _pipe(monkeypatch, b"caf\xe9-secret\n")
+    assert run_cli(["secrets", "set", "API_KEY"]) == 2
+    err = capsys.readouterr().err
+    assert "must be UTF-8 text" in err and "caf" not in err  # never echoed
+    assert _server_argv(stdin_server) == []
+
+
+def test_secrets_set_sends_utf8_whatever_the_locale(project, stdin_server,
+                                                    monkeypatch) -> None:
+    _pipe(monkeypatch, "café ✓\n")
+    assert run_cli(["secrets", "set", "API_KEY"]) == 0
+    assert stdin_server.stdins("ssh")[-1] == "café ✓\n"
+
+
+@pytest.mark.parametrize("how", ["stdin", "argv"])
+def test_secrets_set_refuses_a_value_over_64_kib(project, stdin_server, monkeypatch, how,
+                                                 capsys) -> None:
+    big = "x" * (64 * 1024 + 1)
+    _pipe(monkeypatch, big + "\n")
+    argv = ["API_KEY"] if how == "stdin" else [f"API_KEY={big}"]
+    assert run_cli(["secrets", "set", *argv]) == 2
+    assert "64 KiB" in capsys.readouterr().err
+    assert _server_argv(stdin_server) == []
+
+
+def test_secrets_set_takes_a_value_of_exactly_64_kib(project, stdin_server,
+                                                     monkeypatch) -> None:
+    _pipe(monkeypatch, "x" * (64 * 1024) + "\n")
+    assert run_cli(["secrets", "set", "API_KEY"]) == 0
+
+
+def test_rollback_with_stdin_closed_needs_yes(project, fake_remote, monkeypatch,
+                                             capsys) -> None:
+    monkeypatch.setattr("sys.stdin", None)
+    assert run_cli(["rollback"]) == 2
+    assert "--yes" in capsys.readouterr().err
+    assert fake_remote.calls() == []
 
 
 def test_secrets_set_is_refused_by_an_older_server_before_the_value_is_sent(
         project, fake_remote, monkeypatch, capsys) -> None:
     """The fixture's server is 0.11.0: it would take the value only in argv."""
-    monkeypatch.setattr("sys.stdin", io.StringIO("s3cret\n"))
+    _pipe(monkeypatch, "s3cret\n")
     assert run_cli(["secrets", "set", "API_KEY"]) == 3
     assert _server_argv(fake_remote) == []
     err = capsys.readouterr().err

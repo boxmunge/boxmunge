@@ -215,3 +215,10 @@ def test_logs_staging_is_refused_by_an_older_server(project, fake_remote, capsys
     assert run_cli(["logs", "--staging"]) == 3
     assert _remote_commands(fake_remote) == ["handshake"]
     assert "--staging needs boxmunge-server 0.11.4" in capsys.readouterr().err
+
+
+def test_abandon_is_refused_by_a_server_older_than_it(project, fake_remote, capsys) -> None:
+    _server(fake_remote, "0.10.1")
+    assert run_cli(["prod-deploy", "--abandon"]) == 3
+    assert _remote_commands(fake_remote) == ["handshake"]
+    assert "--abandon needs boxmunge-server 0.11.0" in capsys.readouterr().err
