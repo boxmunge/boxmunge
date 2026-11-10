@@ -485,27 +485,10 @@ source "${SCRIPT_DIR}/bootstrap/install-ssh.sh"
 #
 # The bundle's shim is built self-contained (scripts/build-shim.py). A
 # pre-release build of this change installed its libraries separately into
-# bin/boxmunge-upgrade.d/; nothing reads that any more.
-#
-# Gated on `bash -n`, and written to a temporary file renamed into place: when
-# the upgrade shim runs this installer after its own self-update refused the
-# bundle's shim, bin/boxmunge-upgrade is the running shim, and bash reads a
-# script from its file as it goes, so copying over that inode would hand the
-# running upgrade the new bytes part-way through.
+# bin/boxmunge-upgrade.d/; nothing reads that any more. Renamed into place, never
+# copied over the running shim (bootstrap/install-shim.sh).
 # ---------------------------------------------------------------------------
-install_shim() {
-    local src="${SCRIPT_DIR}/scripts/boxmunge-upgrade" dest="${BOXMUNGE_ROOT}/bin/boxmunge-upgrade" tmp
-    if ! bash -n "${src}"; then
-        echo "ERROR: ${src} has syntax errors (see above), so this release cannot be installed;" \
-             "${dest} is left as it was. Install another release." >&2
-        exit 1
-    fi
-    tmp="$(mktemp "${BOXMUNGE_ROOT}/bin/.boxmunge-upgrade.XXXXXX")"
-    cp "${src}" "${tmp}"
-    chmod 755 "${tmp}"
-    mv -f "${tmp}" "${dest}"
-}
-install_shim
+BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/install-shim.sh"
 rm -rf "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade.d"
 
 # Symlink into /usr/local/bin so boxmunge works in non-interactive SSH sessions
