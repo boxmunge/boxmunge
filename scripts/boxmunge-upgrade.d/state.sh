@@ -262,9 +262,12 @@ add_to_blocklist(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_REASON'])
 #                                      venv swap (a power cut, a kill)
 #   pip_failures <version> [<count>]   its hash-pinned dependencies failed to
 #                                      install (a network blip, a full disk)
+#   cosign_failures <version> [<count>]  cosign refused its signature (an
+#                                      unreachable Sigstore looks the same)
 # Each prints the count, or sets it (0 forgets it).
 interruptions() { failure_count "$INTERRUPTED_FILE" "$@"; }
 pip_failures() { failure_count "$PIP_FAILURES_FILE" "$@"; }
+cosign_failures() { failure_count "$COSIGN_FAILURES_FILE" "$@"; }
 
 # failure_count <file> <version> [<count>]: the counts behind the above. Kept
 # in a root-only directory, not deploy-writable upgrade-state/, so deploy
