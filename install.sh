@@ -332,20 +332,23 @@ bash "${SCRIPT_DIR}/bootstrap/caddy-access-log.sh" sites
 # (e.g., the v0.4 maintenance bind-mount). Compose recreates Caddy only when
 # its definition changed; asking every time also finishes a recreate that an
 # earlier run copied the file for but did not get to.
-# A failed `up` (a transient pull of the pinned image, say) is noted.
+# A failed `up` (a transient pull of the pinned image, say) is noted, and
+# caddy/logs is kept: the Caddy that keeps running may still mount it.
+CADDY_KEPT_OLD=0
 refresh_caddy() {
     [[ -f "${SCRIPT_DIR}/caddy/compose.yml" ]] || return 0
     cp "${SCRIPT_DIR}/caddy/compose.yml" "${BOXMUNGE_ROOT}/caddy/compose.yml"
     chown root:deploy "${BOXMUNGE_ROOT}/caddy/compose.yml"
     chmod 640 "${BOXMUNGE_ROOT}/caddy/compose.yml"
     docker inspect boxmunge-caddy >/dev/null 2>&1 || return 0
-    docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d \
-        || note_incomplete "Caddy was not started from the new caddy/compose.yml (see above); the" \
-            "previous container, if any, keeps running. Start it as supervisor once the cause is" \
-            "fixed: sudo docker compose -f ${BOXMUNGE_ROOT}/caddy/compose.yml up -d"
+    docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d && return 0
+    CADDY_KEPT_OLD=1
+    note_incomplete "Caddy was not started from the new caddy/compose.yml (see above); the" \
+        "previous container, if any, keeps running. Start it as supervisor once the cause is" \
+        "fixed: sudo docker compose -f ${BOXMUNGE_ROOT}/caddy/compose.yml up -d"
 }
 refresh_caddy
-bash "${SCRIPT_DIR}/bootstrap/caddy-access-log.sh" retire
+[[ "${CADDY_KEPT_OLD}" -eq 1 ]] || bash "${SCRIPT_DIR}/bootstrap/caddy-access-log.sh" retire
 
 # CrowdSec reads Caddy's stdout through Docker; verified after the restart.
 if command -v cscli >/dev/null 2>&1; then
