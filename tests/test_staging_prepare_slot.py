@@ -125,6 +125,6 @@ def test_precheck_refuses_a_wildcard_host_before_anything_changes(paths) -> None
     workspace = paths.project_releases(P) / "incoming"
     tree, manifest = _release(workspace)
     manifest["hosts"] = ["myapp.example.com", "*.example.com"]
-    with pytest.raises(StagingIsolationError, match=r"\*\.example\.com.*prod-deploy myapp"):
+    with pytest.raises(StagingIsolationError, match=r"\*\.example\.com.*prod-deploy myapp --ref"):
         precheck_candidate(paths, P, manifest, tree, workspace)
     assert not (workspace / "staging-check").exists()

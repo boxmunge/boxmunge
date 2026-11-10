@@ -1340,7 +1340,7 @@ hosts:
 
 Plain hostnames don't need the flag. See `SECURITY.md` for the routing-isolation trade-off.
 
-A project with a wildcard host cannot be staged: staging serves `staging.<host>`, and no certificate can be issued for `staging.*.example.com`. `stage` refuses it before anything changes; deploy with `prod-deploy <project>`.
+A project with a wildcard host cannot be staged: staging serves `staging.<host>`, and no certificate can be issued for `staging.*.example.com`. `stage` refuses it before anything changes; deploy the release with `prod-deploy <project> --ref <bundle or git ref>`.
 
 ---
 

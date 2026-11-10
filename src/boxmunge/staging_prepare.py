@@ -177,8 +177,9 @@ def precheck_candidate(paths: BoxPaths, project: str, manifest: dict[str, Any],
             f"{project} serves the wildcard host(s) {', '.join(wildcards)}; staging "
             f"would serve staging.{wildcards[0]}, for which no certificate can be "
             f"issued, so Caddy would refuse it at the stage's last step. A project "
-            f"with a wildcard host cannot be staged: deploy the release with "
-            f"prod-deploy {project}.")
+            f"with a wildcard host cannot be staged: deploy the release straight "
+            f"to production with prod-deploy {project} --ref <the bundle or git "
+            f"ref you staged>.")
     check_dir = workspace / "staging-check"
     check_dir.mkdir()
     write_staging_files(paths, project, manifest, tree, check_dir)
