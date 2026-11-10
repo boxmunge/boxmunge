@@ -7,6 +7,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from boxmunge_cli.confirming import have_terminal
 from boxmunge_cli.server_setup.args import ServerSetupArgs
 from boxmunge_cli.server_setup.hostkeys import HostKeyError, ensure_trusted, record_for_port
 from boxmunge_cli.server_setup.install import (
@@ -84,7 +85,7 @@ def _fetch_installer(setup_args: ServerSetupArgs, workdir: Path) -> VerifiedInst
 
 def run_server_setup(setup_args: ServerSetupArgs, known_hosts: Path | None = None) -> int:
     """Run server-setup. Returns an exit code."""
-    if not setup_args.yes and not sys.stdin.isatty():
+    if not setup_args.yes and not have_terminal():
         print("ERROR: server-setup asks for confirmation, but stdin is not a terminal. "
               "Pass --yes to confirm non-interactively.", file=sys.stderr)
         return 2
