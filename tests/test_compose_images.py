@@ -131,3 +131,35 @@ def test_split_names_on_any_dockerfile_line_refused(inline: str) -> None:
 ])
 def test_unrelated_or_own_mentions_accepted(inline: str) -> None:
     assert _problems({"build": {"context": ".", "dockerfile_inline": inline}}) == []
+
+
+# Root's start checks read the Dockerfile from a project tree deploy (and,
+# through a bind mount, a container) could write: never by following a
+# link out of place, never blocking on a FIFO, never past a size cap.
+
+def test_a_dockerfile_linked_inside_the_project_is_still_scanned(tmp_path: Path) -> None:
+    real = tmp_path / "docker" / "Dockerfile.prod"
+    real.parent.mkdir()
+    real.write_text("FROM boxmunge.invalid/projb/web\n")
+    (tmp_path / "Dockerfile").symlink_to("docker/Dockerfile.prod")
+    problems = _problems({"build": {"context": "."}}, tmp_path / "Dockerfile")
+    assert any("projb" in p for p in problems)
+
+
+def test_a_fifo_dockerfile_is_refused_without_blocking(tmp_path: Path) -> None:
+    import os
+    os.mkfifo(tmp_path / "Dockerfile")
+    [problem] = _problems({"build": {"context": "."}}, tmp_path / "Dockerfile")
+    assert "not a regular file" in problem and "Dockerfile" in problem
+
+
+def test_an_oversized_dockerfile_is_refused_unread(tmp_path: Path) -> None:
+    from boxmunge.compose_images import DOCKERFILE_LIMIT_BYTES
+    dockerfile = tmp_path / "Dockerfile"
+    dockerfile.write_text("#" * (DOCKERFILE_LIMIT_BYTES + 1))
+    [problem] = _problems({"build": {"context": "."}}, dockerfile)
+    assert "larger than" in problem
+
+
+def test_a_missing_dockerfile_is_left_to_the_build(tmp_path: Path) -> None:
+    assert _problems({"build": {"context": "."}}, tmp_path / "Dockerfile") == []
