@@ -68,3 +68,43 @@ def test_a_shim_that_fails_bash_n_is_refused_and_the_old_one_kept(tmp_path: Path
 def test_install_sh_installs_the_shim_only_through_install_shim() -> None:
     assert "\ninstall_shim\n" in INSTALL_SH
     assert not re.search(r'^\s*cp [^\n]*scripts/boxmunge-upgrade"', INSTALL_SH, re.M)
+
+
+# --- the version install.sh reports ----------------------------------------
+
+def _version_block() -> str:
+    """install.sh from INSTALLED_VERSION= to the end of the version record (the
+    same span tests/integration/shim_hop.sh runs)."""
+    m = re.search(r"^INSTALLED_VERSION=.*?^fi\n", INSTALL_SH, re.M | re.S)
+    assert m, "the version block is not in install.sh"
+    return m.group(0)
+
+
+def _installed_version(tmp: Path, *, from_shim: int) -> tuple[str, str]:
+    """(INSTALLED_VERSION, config/version) with env-active on 0.11.3, a bundle
+    of 0.11.4, and config/version saying 0.11.2 to see whether it is written."""
+    (tmp / "bundle").mkdir()
+    (tmp / "bundle" / "pyproject.toml").write_text('[project]\nname = "boxmunge-server"\nversion = "0.11.4"\n')
+    (tmp / "root" / "env-active" / "bin").mkdir(parents=True)
+    (tmp / "root" / "config").mkdir()
+    (tmp / "root" / "config" / "version").write_text("0.11.2\n")
+    pip = tmp / "root" / "env-active" / "bin" / "pip"
+    pip.write_text('#!/bin/sh\necho "Name: boxmunge-server"\necho "Version: 0.11.3"\n')
+    pip.chmod(0o755)
+    script = tmp / "run.sh"
+    script.write_text(f"set -euo pipefail\nSCRIPT_DIR={tmp / 'bundle'}\nBOXMUNGE_ROOT={tmp / 'root'}\n"
+                      f"FROM_UPGRADE_SHIM={from_shim}\n" + _version_block() + 'echo "${INSTALLED_VERSION}"\n')
+    proc = subprocess.run([BASH, str(script)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout.strip(), (tmp / "root" / "config" / "version").read_text().strip()
+
+
+def test_run_by_the_shim_it_reports_the_bundle_version_not_the_live_one(tmp_path: Path) -> None:
+    """The shim runs install.sh before its swap: env-active is still the
+    previous release, so "boxmunge 0.11.3 installed successfully" was printed
+    while 0.11.4 was being installed. The version record is the shim's."""
+    assert _installed_version(tmp_path, from_shim=1) == ("0.11.4", "0.11.2")
+
+
+def test_run_by_hand_it_reports_and_records_the_live_venv(tmp_path: Path) -> None:
+    assert _installed_version(tmp_path, from_shim=0) == ("0.11.3", "0.11.3")

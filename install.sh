@@ -565,9 +565,16 @@ systemctl enable --now \
 # ---------------------------------------------------------------------------
 # Record installed version (read by boxmunge auto-update to decide if a
 # new release is available). Package is named boxmunge-server in pyproject.
+# Run by the upgrade shim, this is before its swap: env-active is still the
+# previous release, so the version being installed is the bundle's, and the
+# shim's apply records it.
 # ---------------------------------------------------------------------------
-INSTALLED_VERSION="$("${BOXMUNGE_ROOT}/env-active/bin/pip" show boxmunge-server 2>/dev/null \
-    | grep '^Version:' | cut -d' ' -f2 || echo "unknown")"
+INSTALLED_VERSION="$(if [[ "${FROM_UPGRADE_SHIM}" -eq 1 ]]; then
+        sed -n 's/^version = "\(.*\)"$/\1/p' "${SCRIPT_DIR}/pyproject.toml" | head -n 1
+    else
+        "${BOXMUNGE_ROOT}/env-active/bin/pip" show boxmunge-server 2>/dev/null | grep '^Version:' | cut -d' ' -f2
+    fi)" || true
+INSTALLED_VERSION="${INSTALLED_VERSION:-unknown}"
 
 if [[ "${INSTALLED_VERSION}" != "unknown" && "${FROM_UPGRADE_SHIM}" -eq 0 ]]; then
     echo "${INSTALLED_VERSION}" > "${BOXMUNGE_ROOT}/config/version"
