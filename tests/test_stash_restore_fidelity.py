@@ -23,6 +23,9 @@ def _as_root(deploy_uid: int, deploy_gid: int):
         # Ownership is set on the temp file's descriptor (fs_nofollow).
         patch("boxmunge.fs_nofollow.os.fchown"),
         patch("boxmunge.fs_nofollow.os.getuid", return_value=1000),
+        # The archive is this (non-root) test user's, not root's; the
+        # owner check on it is test_stash_restore_open's.
+        patch("boxmunge.stash._open_archive", lambda archive: open(archive, "rb")),
     )
 
 
@@ -67,8 +70,8 @@ class TestOwners:
         info.uid, info.gid, info.mode = 0, 1000, 0o640
         archive = paths.stashes / "boxmunge-stash-2026-01-01T000000.tar.gz"
         _build_malicious_archive(archive, [(info, b"AGE-SECRET-KEY-1X\n")])
-        euid, pw, chown, getuid = _as_root(1000, 1000)
-        with euid, pw, chown as mock_chown, getuid:
+        euid, pw, chown, getuid, opener = _as_root(1000, 1000)
+        with euid, pw, chown as mock_chown, getuid, opener:
             restore_stash(paths, archive)
         assert [c.args[1:] for c in mock_chown.call_args_list] == [(0, 1000)]
 
@@ -78,8 +81,8 @@ class TestOwners:
         info.uid, info.gid = 4242, 4242
         archive = paths.stashes / "boxmunge-stash-2026-01-01T000000.tar.gz"
         _build_malicious_archive(archive, [(info, b"hostname: x\n")])
-        euid, pw, chown, getuid = _as_root(1000, 1000)
-        with euid, pw, chown, getuid:
+        euid, pw, chown, getuid, opener = _as_root(1000, 1000)
+        with euid, pw, chown, getuid, opener:
             with pytest.raises(StashError, match="owner"):
                 restore_stash(paths, archive)
         assert not paths.config_file.exists()

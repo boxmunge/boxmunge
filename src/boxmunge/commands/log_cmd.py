@@ -44,7 +44,7 @@ def parse_log_file(path: Path) -> LogRead:
     return read
 
 
-def _parse_since(since: str) -> datetime:
+def parse_since(since: str) -> datetime:
     """Parse a duration string like '1h', '7d', '30m' into a cutoff datetime."""
     if not since:
         raise ValueError("Duration string must not be empty")
@@ -81,7 +81,7 @@ def filter_log_entries(
     if level:
         result = [e for e in result if e.get("level") == level]
     if since:
-        cutoff = _parse_since(since)
+        cutoff = parse_since(since)
         cutoff_str = cutoff.strftime("%Y-%m-%dT%H:%M:%S")
         result = [e for e in result if e.get("ts", "") >= cutoff_str]
     if tail is not None:
@@ -104,7 +104,7 @@ def query_log(
     A ``since`` window reads every archive it reaches back into. Without one,
     files are read newest first only until ``tail`` entries match.
     """
-    cutoff = _parse_since(since) if since else None
+    cutoff = parse_since(since) if since else None
     chunks: list[list[dict[str, Any]]] = []
     torn: list[list[str]] = []
     matched = 0
@@ -204,7 +204,7 @@ def cmd_log(args: list[str]) -> None:
     since = parsed.get("--since")
     if since is not None:
         try:
-            _parse_since(since)
+            parse_since(since)
         except ValueError as e:
             usage_error("log", str(e))
     tail: int | None = 50

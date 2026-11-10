@@ -1,6 +1,7 @@
 """boxmunge backup/backup-all/backup-sync commands."""
 
 import enum
+import stat
 import sys
 import time
 from pathlib import Path
@@ -52,15 +53,27 @@ def sweep_stale_dumps(paths: BoxPaths, project_name: str) -> None:
 
 
 def list_snapshots(paths: BoxPaths, project_name: str) -> list[Path]:
-    """List available backup snapshots for a project, newest first."""
+    """List available backup snapshots for a project, newest first.
+
+    backups/ is deploy-writable, so an entry there may be a link (dangling,
+    or to a file boxmunge did not write) or anything else: it is skipped
+    with a warning, never stat()ed through."""
     bdir = paths.project_backups(project_name)
     if not bdir.exists():
         return []
-    return sorted(
-        bdir.glob(f"{project_name}-*.tar.gz.age"),
-        key=lambda f: f.stat().st_mtime,
-        reverse=True,
-    )
+    found: list[tuple[float, Path]] = []
+    for path in bdir.glob(f"{project_name}-*.tar.gz.age"):
+        try:
+            st = path.lstat()
+        except FileNotFoundError:
+            continue  # removed meanwhile (prune)
+        if not stat.S_ISREG(st.st_mode):
+            log_warning("backup", f"Skipped {path}: not a regular file (a link or "
+                        f"other entry boxmunge did not write). Remove it.", paths,
+                        project=project_name)
+            continue
+        found.append((st.st_mtime, path))
+    return [path for _, path in sorted(found, key=lambda item: item[0], reverse=True)]
 
 
 def take_snapshot(

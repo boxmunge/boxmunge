@@ -23,12 +23,18 @@ scan (SECURITY.md says what it does not catch); everything else is exact.
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import Any
 
+from boxmunge.fs_nofollow import open_resolved_nofollow
+
 BUILT_IMAGE_HOST = "boxmunge.invalid"
 _STAGING = "-staging"
+# Far above any real Dockerfile; the cap on what root reads from a project
+# tree at every start check.
+DOCKERFILE_LIMIT_BYTES = 1024 * 1024
 
 # A Docker repository path component.
 _COMPONENT_RE = re.compile(r"[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*")
@@ -132,6 +138,30 @@ def _text_problems(what: str, text: str, project: str) -> list[str]:
     return problems
 
 
+def _read_dockerfile(where: str, dockerfile: Path) -> tuple[str | None, str | None]:
+    """(text, problem) of a local Dockerfile. Root reads it at every start
+    check from a tree deploy can write, so it is read at its resolved place
+    (local_dockerfile kept that inside the project), walked from / without
+    following a link swapped in at any depth since, nor blocking on a
+    FIFO, nor reading past DOCKERFILE_LIMIT_BYTES.
+    A missing one is left to the build to report."""
+    def unusable(what: str) -> tuple[None, str]:
+        return None, (f"{where} Dockerfile {dockerfile} {what}, so boxmunge cannot "
+                      f"check the images it names. Make it a regular file under "
+                      f"{DOCKERFILE_LIMIT_BYTES // 1024} KiB.")
+    try:
+        fd = open_resolved_nofollow(Path(os.path.realpath(dockerfile)), os.O_RDONLY)
+    except FileNotFoundError:
+        return None, None
+    except OSError:
+        return unusable("is not a regular file")
+    with os.fdopen(fd, "rb") as f:
+        data = f.read(DOCKERFILE_LIMIT_BYTES + 1)
+    if len(data) > DOCKERFILE_LIMIT_BYTES:
+        return unusable(f"is larger than {DOCKERFILE_LIMIT_BYTES} bytes")
+    return data.decode("utf-8", errors="replace"), None
+
+
 def _build_refs(svc_name: str, build: dict[str, Any], project: str,
                 dockerfile: Path | None) -> list[str]:
     where = f"service {svc_name}:"
@@ -156,8 +186,10 @@ def _build_refs(svc_name: str, build: dict[str, Any], project: str,
         if isinstance(value, str):
             problems += _split_name_problems(f"{where} build.args.{key}", value, project)
             texts.append((f"build.args.{key}", value))
-    if dockerfile is not None and dockerfile.is_file():
-        texts.append((f"Dockerfile {dockerfile.name}", dockerfile.read_text(errors="replace")))
+    if dockerfile is not None:
+        text, problem = _read_dockerfile(where, dockerfile)
+        texts.append((f"Dockerfile {dockerfile.name}", text))
+        problems += [problem] if problem else []
     for what, text in texts:
         if isinstance(text, str):
             problems += _text_problems(f"{where} {what}", text, project)
