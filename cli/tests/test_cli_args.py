@@ -101,6 +101,16 @@ def test_server_setup_without_yes_needs_a_terminal(project: Path, fake_remote,
     assert fake_remote.calls() == []
 
 
+def test_server_setup_with_stdin_closed_needs_yes(project: Path, fake_remote,
+                                                  monkeypatch, capsys) -> None:
+    """`server-setup ... <&-`: no stdin at all is refused like a pipe, not a traceback."""
+    monkeypatch.setattr("sys.stdin", None)
+    rc = run_cli(["server-setup", "root@box.example.com", "--email", "a@example.com"])
+    assert rc == 2
+    assert "--yes" in capsys.readouterr().err
+    assert fake_remote.calls() == []
+
+
 def test_version(capsys) -> None:
     import boxmunge_cli
     assert run_cli(["--version"]) == 0

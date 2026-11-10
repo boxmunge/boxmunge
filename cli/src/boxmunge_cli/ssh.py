@@ -66,14 +66,23 @@ def _exit_code(returncode: int) -> int:
 
 
 def run_ssh(config: dict[str, Any], command: str, *args: str, tty: bool = False,
-            stdin_text: str | None = None) -> int:
+            stdin_bytes: bytes | None = None, forward_stdin: bool = False) -> int:
     """Execute an SSH command. Returns the remote exit code (4 if ssh failed).
 
-    stdin_text: what the remote command reads on stdin (then end of file),
-    for a value that must not appear in any process's argv.
+    ssh forwards its stdin to the remote command, so the remote command
+    reads: stdin_bytes (then end of file), for a value that must be in no
+    process's argv; this CLI's own stdin with tty (a person answers the
+    server) or forward_stdin (a passthrough command may read it); else
+    nothing, so a command never consumes input meant for a later one.
     """
+    if stdin_bytes is not None:
+        stdin = {"input": stdin_bytes}
+    elif tty or forward_stdin:
+        stdin = {}
+    else:
+        stdin = {"stdin": subprocess.DEVNULL}
     result = subprocess.run(build_ssh_cmd(config, command, *args, tty=tty),
-                            input=stdin_text, text=stdin_text is not None, check=False)
+                            check=False, **stdin)
     return _exit_code(result.returncode)
 
 
@@ -84,7 +93,7 @@ _NO_LEGACY_FLAG = ("unknown option -- O", "illegal option -- O")
 def run_scp(config: dict[str, Any], local_path: str) -> int:
     """Upload a file via SCP. Returns the exit code."""
     result = subprocess.run(build_scp_cmd(config, local_path), check=False,
-                            stderr=subprocess.PIPE, text=True)
+                            stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     sys.stderr.write(result.stderr)
     if result.returncode != 0 and any(m in result.stderr for m in _NO_LEGACY_FLAG):
         print("ERROR: this scp does not support -O (the legacy scp protocol), which "

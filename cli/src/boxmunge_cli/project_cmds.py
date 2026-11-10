@@ -5,12 +5,12 @@ passthrough for any other server command."""
 from __future__ import annotations
 
 import argparse
-import getpass
 import re
 import sys
 
 from boxmunge_cli.confirming import needs_terminal
 from boxmunge_cli.remote_cmds import connect
+from boxmunge_cli.secret_input import checked_value, read_value
 from boxmunge_cli.ssh import run_ssh
 
 _SECRET_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -19,38 +19,17 @@ _SECRET_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _STDIN_SECRETS = "'secrets set' with the value on stdin"
 
 
-def _read_secret_value(key: str) -> str | None:
-    """The value for KEY: prompted without echo at a terminal, else one stdin line."""
-    if sys.stdin.isatty():
-        return getpass.getpass(f"Value for {key}: ")
-    line = sys.stdin.readline()
-    if not line:
-        print(f"ERROR: no value for {key} on stdin.", file=sys.stderr)
-        return None
-    return line.rstrip("\n")
-
-
-def _has_line_break(key: str, value: str) -> bool:
-    if "\n" not in value and "\r" not in value:
-        return False
-    print(f"ERROR: the value for {key} contains a line break, which a secret cannot "
-          f"hold. Nothing was sent.", file=sys.stderr)
-    return True
-
-
 def _secrets_set(key: str, sep: str, value: str) -> int:
     """Send the value on ssh's stdin, never in a command line (ours or the
     server's). The server takes it there from 0.11.5; an older one is
-    refused by the handshake before the value is read or sent."""
+    refused by the handshake before the value is read or sent. A KEY=VALUE
+    value is checked before the server is contacted."""
+    if sep:
+        checked_value(key, value)
     config = connect(features=(_STDIN_SECRETS,))
-    if not sep:
-        read = _read_secret_value(key)
-        if read is None:
-            return 1
-        value = read
-    if _has_line_break(key, value):
-        return 2
-    return run_ssh(config, "secrets", "set", config["project"], key, stdin_text=value + "\n")
+    payload = checked_value(key, value if sep else read_value(key))
+    return run_ssh(config, "secrets", "set", config["project"], key,
+                   stdin_bytes=payload + b"\n")
 
 
 def _cmd_secrets(args: argparse.Namespace) -> int:
@@ -68,8 +47,6 @@ def _cmd_secrets(args: argparse.Namespace) -> int:
         print(f"ERROR: invalid secret name {key!r}.", file=sys.stderr)
         return 2
     if args.action == "set":
-        if _has_line_break(key, value):
-            return 2
         return _secrets_set(key, sep, value)
     if sep:
         print(f"ERROR: secrets {args.action} takes a KEY, not KEY=VALUE.", file=sys.stderr)
@@ -100,7 +77,7 @@ def _cmd_remote(args: argparse.Namespace) -> int:
         return 2
     tty = needs_terminal(command[0], command[1:], "boxmunge remote " + " ".join(command))
     config = connect()
-    return run_ssh(config, command[0], *command[1:], tty=tty)
+    return run_ssh(config, command[0], *command[1:], tty=tty, forward_stdin=True)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:
@@ -108,9 +85,12 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "secrets", help="Manage this project's secrets on the server",
         description="Run 'secrets <action> <project>' on the server. Secrets live "
                     "in the project's secrets.env on the server, never in a bundle. "
-                    "'set KEY' reads the value from a terminal prompt (no echo) or "
-                    "from one line of stdin, and sends it to the server on ssh's "
-                    "stdin: it is in no shell history and in no command line, so "
+                    "'set KEY' reads the value from a terminal prompt (no echo) or, "
+                    "when standard input is not a terminal, from it: one line of UTF-8 "
+                    "text, at most 64 KiB, its trailing newline dropped, a second line "
+                    "refused (e.g. 'pass show myapp/token | boxmunge secrets set "
+                    "API_TOKEN'). The value goes to the server on ssh's stdin: it is "
+                    "in no shell history and in no command line, so "
                     "process listings (ps) here and on the server do not show it. "
                     "'set KEY=VALUE' still sends it that way, but the value is then "
                     "in your shell history and in this command's own process "
@@ -144,7 +124,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                     "The server's restricted shell decides what is allowed; run "
                     "'boxmunge remote help' for its command list. Commands that ask "
                     "before acting (pause, resume, recover, restore, rollback, "
-                    "inbox clean, project-delete) ask at a terminal; without one, "
-                    "add --yes.")
+                    "inbox clean, project-delete) ask at a terminal; when standard "
+                    "input is not a terminal (a script, CI), add --yes, or they are "
+                    "refused before anything is sent.")
     p.add_argument("command", nargs=argparse.REMAINDER, metavar="COMMAND [ARGS...]")
     p.set_defaults(func=_cmd_remote)
