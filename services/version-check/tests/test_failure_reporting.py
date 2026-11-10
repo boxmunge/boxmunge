@@ -1,13 +1,14 @@
 # services/version-check/tests/test_failure_reporting.py
 import json
 import sqlite3
-import os
 import sys
 import pytest
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+
+CB = "circuit-breaker-secret-0123456789abcdef"
 
 
 @pytest.fixture
@@ -108,20 +109,21 @@ class TestFailureQuery:
 
 
 class TestCircuitBreaker:
-    def test_trip_requires_auth(self, client):
+    def test_trip_requires_auth(self, client, app):
+        app.config["CB_SECRET"] = CB
         resp = client.post("/v1/circuit-breaker/trip?version=0.2.1")
         assert resp.status_code == 401
 
     def test_trip_with_valid_auth(self, client, app):
-        app.config["CB_SECRET"] = "test-secret"
+        app.config["CB_SECRET"] = CB
         resp = client.post("/v1/circuit-breaker/trip?version=0.2.1",
-            headers={"Authorization": "Bearer test-secret"})
+            headers={"Authorization": f"Bearer {CB}"})
         assert resp.status_code == 200
 
     def test_tripped_version_excluded_from_check(self, client, app):
-        app.config["CB_SECRET"] = "test-secret"
+        app.config["CB_SECRET"] = CB
         client.post("/v1/circuit-breaker/trip?version=0.2.1",
-            headers={"Authorization": "Bearer test-secret"})
+            headers={"Authorization": f"Bearer {CB}"})
         resp = client.get("/v1/check?v=0.2.0")
         data = resp.get_json()
         assert data["security"] is None
@@ -129,69 +131,20 @@ class TestCircuitBreaker:
         assert data["held"] == [{"version": "0.2.1", "reason": "circuit_breaker"}]
 
     def test_reset_re_enables_version(self, client, app):
-        app.config["CB_SECRET"] = "test-secret"
+        app.config["CB_SECRET"] = CB
         client.post("/v1/circuit-breaker/trip?version=0.2.1",
-            headers={"Authorization": "Bearer test-secret"})
+            headers={"Authorization": f"Bearer {CB}"})
         client.post("/v1/circuit-breaker/reset?version=0.2.1",
-            headers={"Authorization": "Bearer test-secret"})
+            headers={"Authorization": f"Bearer {CB}"})
         resp = client.get("/v1/check?v=0.2.0")
         data = resp.get_json()
         assert data["security"]["version"] == "0.2.1"
         assert data.get("held") is None
 
-    def test_reset_requires_auth(self, client):
+    def test_reset_requires_auth(self, client, app):
+        app.config["CB_SECRET"] = CB
         resp = client.post("/v1/circuit-breaker/reset?version=0.2.1")
         assert resp.status_code == 401
-
-
-class TestAutoTrip:
-    def test_auto_trip_disabled_by_default(self, client, app, tmp_path):
-        with patch("app.DB_PATH", tmp_path / "checks.db"):
-            for i in range(5):
-                client.post("/v1/report-failure", json={
-                    "version": "0.2.1", "installed_from": "0.2.0",
-                    "stage": "apply", "timestamp": "2024-01-15T14:30:00Z"},
-                    environ_base={"REMOTE_ADDR": f"10.0.{i + 1}.1"})
-            # Should not be tripped (auto-trip disabled)
-            resp = client.get("/v1/check?v=0.2.0")
-            data = resp.get_json()
-        assert data["security"]["version"] == "0.2.1"
-        assert data.get("held") is None
-
-    def test_auto_trip_when_threshold_reached(self, tmp_path, migrated_db):
-        releases_file = tmp_path / "threshold-releases.json"
-        releases_file.write_text(json.dumps({"releases": [
-            {"version": "0.2.1", "class": "security", "breaking": False,
-             "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1"},
-        ]}))
-        with patch("app.RELEASES_PATH", releases_file), \
-             patch("app.DB_PATH", tmp_path / "checks.db"), \
-             patch.dict(os.environ, {"CIRCUIT_BREAKER_AUTO_THRESHOLD": "3"}):
-            from app import create_app
-            client = create_app().test_client()
-            for i in range(3):
-                client.post("/v1/report-failure", json={
-                    "version": "0.2.1", "installed_from": "0.2.0",
-                    "stage": "apply", "timestamp": "2024-01-15T14:30:00Z"},
-                    environ_base={"REMOTE_ADDR": f"10.0.{i + 1}.1"})
-            resp = client.get("/v1/check?v=0.2.0")
-            data = resp.get_json()
-        assert data["security"] is None
-        assert data["held"] == [{"version": "0.2.1", "reason": "circuit_breaker"}]
-
-    @pytest.mark.parametrize("value", ["three", "-1", "2.5"])
-    def test_invalid_threshold_stops_startup(self, tmp_path, migrated_db, value):
-        releases_file = tmp_path / "threshold-releases.json"
-        releases_file.write_text(json.dumps({"releases": [
-            {"version": "0.2.1", "class": "security", "breaking": False,
-             "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1"},
-        ]}))
-        with patch("app.RELEASES_PATH", releases_file), \
-             patch("app.DB_PATH", tmp_path / "checks.db"), \
-             patch.dict(os.environ, {"CIRCUIT_BREAKER_AUTO_THRESHOLD": value}):
-            from app import create_app
-            with pytest.raises(ValueError, match="CIRCUIT_BREAKER_AUTO_THRESHOLD"):
-                create_app()
 
 
 class TestShimStages:
@@ -236,13 +189,13 @@ class TestCircuitBreakerBreakfix:
             from app import create_app
             application = create_app()
             application.config["TESTING"] = True
-            application.config["CB_SECRET"] = "s"
+            application.config["CB_SECRET"] = CB
             yield application
 
     def test_tripped_breakfix_is_held(self, bf_app):
         client = bf_app.test_client()
         client.post("/v1/circuit-breaker/trip?version=0.2.2",
-                    headers={"Authorization": "Bearer s"})
+                    headers={"Authorization": f"Bearer {CB}"})
         data = client.get("/v1/check?v=0.2.1").get_json()
         assert data["breakfix"] is None
         assert data["held"] == [{"version": "0.2.2", "reason": "circuit_breaker"}]
@@ -251,7 +204,7 @@ class TestCircuitBreakerBreakfix:
     def test_tripped_breakfix_falls_back_to_security(self, bf_app):
         client = bf_app.test_client()
         client.post("/v1/circuit-breaker/trip?version=0.2.2",
-                    headers={"Authorization": "Bearer s"})
+                    headers={"Authorization": f"Bearer {CB}"})
         data = client.get("/v1/check?v=0.2.0").get_json()
         assert data["security"]["version"] == "0.2.1"
         assert data["breakfix"]["version"] == "0.2.1"

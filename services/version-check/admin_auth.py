@@ -1,7 +1,9 @@
 """Who may use the admin endpoints, and the keys derived from STATS_SECRET.
 
-Two separate methods, never interchangeable:
-- the JSON endpoints (scripts) take `Authorization: Bearer <STATS_SECRET>`;
+Three separate methods, never interchangeable:
+- the JSON stats endpoint (scripts) takes `Authorization: Bearer <STATS_SECRET>`;
+- the circuit breaker's trip and reset take `Authorization: Bearer <CB_SECRET>`,
+  a separate secret because a hold reaches every box;
 - the HTML pages (browsers) take the session cookie a passkey sign-in sets.
 
 STATS_SECRET is also the passkey registration code. The code fingerprint
@@ -10,8 +12,10 @@ session-signing key needs both STATS_SECRET and a random key that never
 leaves the database, so a leaked Bearer secret cannot forge a session, and
 rotating STATS_SECRET still ends every session and reopens registration.
 With no STATS_SECRET, or one too short to resist guessing, every admin
-route refuses (AdminNotConfigured). Wrong guesses of the secret, by Bearer
-or as the registration code, share one per-client limit.
+route refuses (AdminNotConfigured); likewise the circuit breaker without a
+CB_SECRET, and a CB_SECRET too short stops the service from starting.
+Wrong guesses of either secret, by Bearer or as the registration code,
+share one per-client limit.
 """
 
 import hashlib
@@ -57,7 +61,7 @@ ADMIN_CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-s
 
 
 class AdminNotConfigured(RuntimeError):
-    """STATS_SECRET is unset or too short, so no admin method can be checked."""
+    """A secret is unset or too short, so the method it guards cannot be checked."""
 
 
 _GUESS_REFUSALS = {
@@ -93,21 +97,44 @@ def eq(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode(), b.encode())
 
 
-def stats_secret() -> str:
-    secret = current_app.config.get("STATS_SECRET") or os.environ.get("STATS_SECRET", "")
+def _too_short(name: str, what: str) -> AdminNotConfigured:
+    return AdminNotConfigured(
+        f"{what} is not configured: {name} is shorter than {MIN_SECRET_LENGTH} characters; "
+        "set a new one (e.g. `openssl rand -hex 32`) through the deploy shell and redeploy")
+
+
+def _secret(name: str, what: str) -> str:
+    secret = current_app.config.get(name) or os.environ.get(name, "")
     if not secret:
-        raise AdminNotConfigured("admin access is not configured: STATS_SECRET is unset; "
+        raise AdminNotConfigured(f"{what} is not configured: {name} is unset; "
                                  "set it through the deploy shell and redeploy")
     if len(secret) < MIN_SECRET_LENGTH:
-        raise AdminNotConfigured(
-            f"admin access is not configured: STATS_SECRET is shorter than "
-            f"{MIN_SECRET_LENGTH} characters; set a new one (e.g. `openssl rand -hex 32`) "
-            "through the deploy shell and redeploy")
+        raise _too_short(name, what)
     return secret
 
 
-def check_secret(candidate: str) -> bool:
-    """Compare a guess with STATS_SECRET in constant time, within the client's guess limit.
+def stats_secret() -> str:
+    return _secret("STATS_SECRET", "admin access")
+
+
+def cb_secret() -> str:
+    return _secret("CB_SECRET", "the circuit breaker")
+
+
+def refuse_short_cb_secret() -> None:
+    """At startup: a CB_SECRET that is set but guessable stops the service.
+
+    It is the only way to hold a release from every box, so a deploy must
+    not run with one an attacker could guess. Unset only refuses the
+    circuit-breaker endpoints, as an unset STATS_SECRET refuses admin access.
+    """
+    secret = os.environ.get("CB_SECRET", "")
+    if secret and len(secret) < MIN_SECRET_LENGTH:
+        raise _too_short("CB_SECRET", "the circuit breaker")
+
+
+def check_secret(candidate: str, secret: str) -> bool:
+    """Compare a guess with `secret` in constant time, within the client's guess limit.
 
     A client past the limit is refused before the comparison, so even the
     right secret does not get through until the window rolls over. A client
@@ -115,7 +142,6 @@ def check_secret(candidate: str) -> bool:
     one neither table has room for is refused (fail closed): a guess that
     could not be counted would be a free one.
     """
-    secret = stats_secret()
     limiter = current_app.extensions[GUESSES]
     refused = limiter.refusal(request.remote_addr)
     if refused is not None:
@@ -160,13 +186,14 @@ def set_session_cookie(response, secret: str) -> None:
                         path=SESSION_PATH, secure=True, httponly=True, samesite="Strict")
 
 
-def bearer_authorized() -> bool:
-    """The JSON endpoints' check: the Bearer header only, never the session cookie."""
+def bearer_authorized(secret: str) -> bool:
+    """The JSON endpoints' check against `secret` (stats_secret() or cb_secret(),
+    evaluated first, so an unconfigured one refuses loudly): the Bearer header
+    only, never the session cookie. A request without one is not a guess."""
     scheme, _, candidate = request.headers.get("Authorization", "").partition(" ")
     if scheme != "Bearer":
-        stats_secret()  # still refuse loudly when unconfigured
         return False
-    return check_secret(candidate)
+    return check_secret(candidate, secret)
 
 
 def require_session(view: Callable) -> Callable:
