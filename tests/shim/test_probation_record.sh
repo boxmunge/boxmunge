@@ -79,13 +79,19 @@ PATH="$FAILVISUDO:$PATH" run_shim target 1.5.0
 expect 1 "failed visudo" "target goes past the probation guard once it is removed"
 drop_root
 
-# Naming the installed release does not help once the last swap is older than
-# a probation: no upgrade can have started one since.
+# With no record at all (an older shim's upgrade, and no check since) a
+# probation of the installed release whose swap is older than a probation has
+# already run its length: a box that was off past its end, say. It is
+# adopted as ended and promoted, not alerted as planted; that is all a
+# planted one could do, and from then on the record says none is running.
 box
 age_swap 7
 forge_probation 1.4.0 b "$SOON"
-PATH="$FAILVISUDO:$PATH" run_shim target 1.5.0
-expect_refused "a planted probation of the installed release"
+run_shim check-probation
+expect 0 "promoted" "an older shim's probation that ran past its end is promoted"
+[[ "$OUT" == *"ran past its end with no check"* && "$OUT" != *"planted"* ]] \
+    && pass "it is said why, not alerted as planted" || fail "out: $OUT"
+[[ "$(record)" == none ]] && pass "then the record says none is running" || fail "record: $(record)"
 drop_root
 
 # After a probation ends (promoted here), root records that none is running,

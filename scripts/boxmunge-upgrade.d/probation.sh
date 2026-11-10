@@ -23,9 +23,11 @@
 #
 # A probation an older shim (0.11.5 or earlier) started has no record (none,
 # or that shim's "<slot> <expiry>"). It is adopted when root's own state
-# shows the upgrade it names: config/version is that release, and env-active
-# was swapped less than a probation's length ago; it then ends a probation's
-# length after that swap. Otherwise it is refused like any unrecorded one.
+# shows the upgrade it names (config/version is that release), and ends a
+# probation's length after env-active was swapped: one past that (the box was
+# off, say) is promoted at once, which is all a planted one could make
+# happen, and the record then says none is running. Otherwise it is refused
+# like any unrecorded one.
 PROBATION_EXPIRY_FILE="$UPGRADE_ROOT_DIR/probation-expiry"
 
 # record_probation <version>: root's record of a probation starting now.
@@ -68,8 +70,7 @@ if len(record) == 3 and record[:2] == [os.environ["BM_SLOT"], d["version"]]:
     status, recorded = "recorded", datetime.fromtimestamp(int(record[2]), timezone.utc)
 elif len(record) < 3 and record != ["none"] and d["version"] == os.environ["BM_INSTALLED"]:
     swapped = datetime.fromtimestamp(os.lstat(os.environ["BM_ENV_ACTIVE"]).st_mtime, timezone.utc)
-    if now - swapped < length:
-        status, recorded = "adopted", swapped + length
+    status, recorded = "adopted", swapped + length
 if recorded > now + length:
     recorded, note = now + length, "clock_back"
 elif expires > recorded + timedelta(minutes=1):
@@ -99,7 +100,9 @@ print(int(recorded.timestamp()))
 settle_probation() {
     [[ "$PROB_STATUS" != unrecorded ]] || refuse_unrecorded_probation
     if [[ "$PROB_STATUS" == adopted ]]; then
-        log "WARN: the probation of $PROB_VERSION has no record (an older shim started it); adopted, as root's state shows that upgrade: it ends at $PROB_EXPIRES_AT"
+        local ends="it ends at $PROB_EXPIRES_AT"
+        [[ "$PROB_EXPIRED" == no ]] || ends="it ran past its end with no check ($PROB_EXPIRES_AT; was the box off?), so it is promoted now"
+        log "WARN: the probation of $PROB_VERSION has no record (an older shim started it); adopted, as root's state shows that upgrade: $ends"
         bm_log warn upgrade "probation started by an older shim adopted" "{\"version\": \"$PROB_VERSION\"}"
     fi
     [[ "$PROB_RECORD" == "$PROB_RECORDED" ]] || write_root_file "$PROBATION_EXPIRY_FILE" "$PROB_RECORD"
@@ -120,7 +123,7 @@ settle_probation() {
 # authority, so it is removed, with an error in the operational log and an
 # alert: the run stops, and the next one carries on as if it was never there.
 refuse_unrecorded_probation() {
-    local msg="$PROBATION_FILE names $PROB_VERSION on probation, but no upgrade on this box started that probation (root's record, $PROBATION_EXPIRY_FILE, does not match it), so it was removed and nothing else changed; the next run carries on. If it comes back, something running as the deploy user is writing it: find and stop it."
+    local msg="$PROBATION_FILE names $PROB_VERSION on probation, but no upgrade on this box started that probation (root's record, $PROBATION_EXPIRY_FILE, does not match it; one an older shim started counts only for the installed release), so it was removed and nothing else changed; the next run carries on. If it comes back, something running as the deploy user is writing it: find and stop it."
     rm -f "$PROBATION_FILE"
     send_notification "boxmunge: planted probation removed" "$msg" 1
     die_logged "$msg"

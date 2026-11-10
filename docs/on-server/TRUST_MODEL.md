@@ -222,8 +222,8 @@ reads from that directory is checked before use:
   `probation.json` the record does not cover is removed, with an error in the
   operational log and an alert, so a planted one cannot hold off upgrades.
   A probation a shim up to 0.11.5 started has no record; it is adopted only
-  when `config/version` is its release and `env-active` was swapped less
-  than 6 hours before. A recorded expiry more than 6 hours ahead means the
+  when `config/version` is its release, and ends 6 hours after `env-active`
+  was swapped (at once, if the box was off past that). A recorded expiry more than 6 hours ahead means the
   clock went back (an NTP step, a VM restore); it is moved to 6 hours from
   then, rather than promoting the release at once.
 - `blocklist.json` must be a JSON object keyed by semver versions.
