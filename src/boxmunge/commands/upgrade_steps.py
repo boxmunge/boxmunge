@@ -36,7 +36,7 @@ from boxmunge.manifest import (
 from boxmunge.git_layout import relink_advice, repo_ownership_advice, unlinked_files
 from boxmunge.migration import migrate_manifest, MigrationError
 from boxmunge.pause import is_paused, render_maintenance_caddy_config
-from boxmunge.redeploy_hint import deploy_from_pause
+from boxmunge.redeploy_hint import deploy_from_pause, redeploy_command
 from boxmunge.fleet import report_project_failure
 from boxmunge.paths import BoxPaths, InvalidProjectName, validate_project_name
 from boxmunge.security_overlay import services_with_off_profile
@@ -295,14 +295,20 @@ def _regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any], re
 
 
 def _offline_exit(paths: BoxPaths, name: str) -> str:
-    """The command that brings a paused or quarantined project back. A
-    deploy is refused while it is paused, so where only a deploy fixes the
-    refusal (a changed control file), resume hands the pause to it."""
+    """The commands that bring a paused or quarantined project back. Where
+    only a deploy fixes the refusal (a changed control file), resume and
+    `security resume` run the same start check and are refused too. A
+    deploy is refused while the project is paused, so `resume --no-start`
+    hands the pause to it; a quarantine lets it through (its images are
+    scanned first) and is lifted once it starts."""
+    deploy = f"`boxmunge {redeploy_command(paths, name)}`"
+    if not is_paused(name, paths):
+        return (f"run `boxmunge security resume {name}`, or {deploy} (its images are "
+                f"scanned first; once it starts the quarantine lifts)")
     if not is_quarantined(name, paths):
         return f"run `boxmunge resume {name}`, or {deploy_from_pause(paths, name)}"
-    if is_paused(name, paths):
-        return f"run `boxmunge security resume {name}`, then `boxmunge resume {name}`"
-    return f"run `boxmunge security resume {name}`, or deploy a fixed release"
+    return (f"run {deploy_from_pause(paths, name)}: its images are scanned first, and once "
+            f"it starts the pause ends and the quarantine lifts")
 
 
 def _in_memory_line(name: str, written: object) -> str:
