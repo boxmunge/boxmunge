@@ -27,7 +27,7 @@ from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.scan_state import last_scanned_at
 from boxmunge.cve.policy import Disposition, ProjectDecision
 from boxmunge.cve.quarantine import is_quarantined
-from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
+from boxmunge.cve.scanner import ScanResult, TrivyNotInstalledError, refresh_db
 from boxmunge import docker_containers
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import LockError
@@ -202,9 +202,10 @@ def _scan_each(
     Raises TrivyNotInstalledError — no project can be scanned without it.
     """
     run = FleetRun()
+    scanned: dict[str, ScanResult] = {}  # Trivy results by exact image ref
     for name in targets:
         try:
-            scan = scan_one_project(paths, name, kev=kev, defer_new=True)
+            scan = scan_one_project(paths, name, kev=kev, defer_new=True, scanned=scanned)
         except LockError:
             # Audit A-2: another operation holds the project lock. Skip and
             # warn; the next cron tick will re-attempt.
