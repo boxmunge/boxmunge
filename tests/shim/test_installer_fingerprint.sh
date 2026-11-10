@@ -53,7 +53,7 @@ tar czf "$RELEASE/boxmunge-1.5.0.tar.gz" -C "$RELEASE" boxmunge
 (cd "$RELEASE" && sha256sum boxmunge-1.5.0.tar.gz > SHA256SUMS)
 touch "$RELEASE/SHA256SUMS.sig" "$RELEASE/SHA256SUMS.cert"
 # The fingerprint install.sh records for that bundle (the pipeline both use).
-BUNDLE_HASH="$( (cd "$RELEASE/boxmunge" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' -o -path './system/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}')"
+BUNDLE_HASH="$( (cd "$RELEASE/boxmunge" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' -o -path './system/*' -o -path './systemd/*' -o -path ./caddy/compose.yml -o -path './caddy/maintenance/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}')"
 
 # box: slot a live on 1.4.0, with the running shim and SFTP wrapper in bin/;
 # its python records bm_log messages and details.
