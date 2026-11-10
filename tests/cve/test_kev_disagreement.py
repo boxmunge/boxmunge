@@ -220,6 +220,26 @@ def test_a_later_source_cannot_withdraw_what_an_earlier_one_still_lists(
     assert set(_ids()) <= load_kev(paths).cve_ids
 
 
+def test_a_mirror_never_withdraws_a_cve_cisa_still_lists(tmp_path, monkeypatch):
+    """CISA's own list never stops guarding: however many runs CISA is
+    passed over serving the same date, the overriding mirror cannot drop a
+    CVE CISA lists (#157 final check). The refresh is refused instead, and
+    it heals once CISA publishes again."""
+    paths = BoxPaths(root=tmp_path)
+    _override(paths, monkeypatch)
+    real = _ids()
+    for night in range(1, 7):
+        kept = real[3:]  # 3 real IDs: within the removal limit every night
+        stamp = (NOW - timedelta(hours=2) + timedelta(minutes=night)).isoformat()
+        result = _night(paths, monkeypatch, _feed(real, paths.d0), _feed(kept + [FAKE], stamp))
+        assert result.source is None and result.needs_alert, night
+        assert set(real) <= load_kev(paths).cve_ids
+    assert load_history(paths)[CISA].disagreed_runs == 6
+    assert set(load_withdrawals(paths)).isdisjoint(real)
+    healed = _night(paths, monkeypatch, _feed(real, NOW.isoformat()), b"")
+    assert healed.source == CISA and healed.withdrawn == (FAKE,)
+
+
 def test_a_dead_first_mirror_does_not_freeze_the_catalog_for_good(tmp_path, monkeypatch):
     """A first-ranked mirror stops syncing; CISA's newer catalog is cached
     on a night the mirror is down; then CISA withdraws an ID the frozen

@@ -440,7 +440,12 @@ for a rejected catalog. While an earlier source disagrees, a later source
 may not drop a CVE the earlier one still lists: that catalog is rejected
 too, until the earlier source's stall passes the bound below. From then
 on its list no longer holds back a withdrawal, so a mirror that stopped
-syncing cannot freeze the catalog for good.
+syncing cannot freeze the catalog for good. CISA's own feed never expires
+the guard: a later source may never drop a CVE that CISA still lists. If
+CISA's feed answers but stays frozen for weeks while a mirror withdraws
+one of its CVEs, every refresh is refused at priority 1 until CISA
+publishes again. That is deliberate: CISA's own list outranks any copy of
+it.
 
 Each refresh records the release date of the catalog every source served
 (`state/kev/sources.json`). An earlier source that has moved on (its
