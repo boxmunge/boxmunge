@@ -1,7 +1,7 @@
 name: CI
 
-# Runs on every pull request and on every push to main. Branch protection
-# requires these jobs before a PR can merge (see CONTRIBUTING.md).
+# Runs on every pull request and on every push to main. main's ruleset
+# requires the ci-ok job, which passes only when every other job did.
 #
 # Security notes for maintainers reviewing changes to this file:
 # - Trigger is `pull_request`, never `pull_request_target`: fork PRs run with a
@@ -27,8 +27,8 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.13'
       - name: Install pinned tooling
@@ -39,8 +39,8 @@ jobs:
   unit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.13'
       - name: Install pinned dependencies
@@ -56,8 +56,8 @@ jobs:
   cli:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.13'
       - name: Install pinned client and tooling
@@ -77,8 +77,8 @@ jobs:
   version-check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.13'
       - name: Install pinned service and test dependencies
@@ -104,7 +104,7 @@ jobs:
       matrix:
         shard: [1, 2, 3]  # every K of --shard K/3 below
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           # Full history: the scope step compares with the base, and
           # test_legacy_upgrade.py installs 0.10.1 from `git archive v0.10.1`.
@@ -127,7 +127,7 @@ jobs:
           bash scripts/ci-scope.sh --outside "$BASE" cli/ services/version-check/ \
             docs/DEVELOPMENT.md docs/PLUGIN_API.md README.md CONTRIBUTING.md \
             CODE_OF_CONDUCT.md SECURITY.md INSTALL.md
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         if: steps.scope.outputs.relevant == 'true'
         with:
           python-version: '3.13'
@@ -164,7 +164,7 @@ jobs:
     # waiting forever on every other PR.
     runs-on: ubuntu-24.04-arm
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
       - name: Does this change touch the system image, the installer or CI?
@@ -232,7 +232,7 @@ jobs:
             prior_store: overlay2
         shard: [1, 2, 3]  # every K of --shard K/3 below
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
       - name: Can this change affect the Docker tests?
@@ -266,7 +266,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
           fetch-depth: 0
       - name: Every commit is signed off (git commit -s)
@@ -286,7 +286,7 @@ jobs:
     needs: [lint, unit, cli, version-check, integration, userns-dind, dco, arm64]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
       - name: Every CI job passed
         env:
           NEEDS: ${{ toJSON(needs) }}

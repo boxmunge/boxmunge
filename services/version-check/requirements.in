@@ -1,8 +1,5 @@
 # Runtime dependencies of the version-check service.
 # Regenerate with: make lock
 flask==3.1.*
-gunicorn==23.*
+gunicorn==26.*
 webauthn==3.0.*
-# pyOpenSSL needs it below Python 3.13 (the image runs 3.12), a marker
-# pip-compile drops when it runs on 3.13.
-typing-extensions

@@ -6,3 +6,6 @@ pytest-xdist>=3.8
 cyclonedx-bom>=4.5
 pip-tools>=7.4
 ruff>=0.8
+# cyclonedx-python-lib needs it below Python 3.13 (contributors may run the
+# server's 3.11 floor), a marker pip-compile drops when it runs on 3.13.
+typing-extensions
