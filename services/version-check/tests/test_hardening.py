@@ -87,6 +87,22 @@ class TestRateLimit:
                            headers={"X-Forwarded-For": "198.51.100.2"})
         assert other.status_code == 200
 
+    def test_one_network_filling_the_client_table_does_not_shut_out_other_boxes(
+            self, make_app):
+        """VC-4: one /48 holds 65,536 /64 client keys. Once they fill the
+        client table, a box on another network must still get an answer, or
+        every box that has not checked yet gets 429 and installs nothing."""
+        client = make_app(RATE_LIMIT_MAX_CLIENTS=3, RATE_LIMIT_NETWORK_REQUESTS=2).test_client()
+
+        def check(addr):
+            return client.get("/v1/check?v=0.2.0", environ_base=PROXY,
+                              headers={"X-Forwarded-For": addr}).status_code
+
+        flood = [check(f"2001:db8:aa:{n:x}::1") for n in range(6)]
+        assert flood == [200, 200, 200, 200, 200, 429], flood
+        assert check("198.51.100.1") == 200
+        assert check("2001:db8:bb::1") == 200
+
     def test_limited_response_is_explicit(self, make_app):
         client = make_app(RATE_LIMIT_REQUESTS=1).test_client()
         client.get("/v1/check?v=0.2.0")
