@@ -1,0 +1,218 @@
+name: cosign rehearsal
+
+# Step 0 of the move to cosign v3 release signing; no release is touched.
+# The sign job signs a throwaway SHA256SUMS the way releases are to be
+# signed:
+# - cosign COSIGN_SIGN_VERSION (bootstrap/cosign.sh) runs `sign-blob --bundle`,
+#   keyless, as this workflow's own identity;
+# - scripts/bundle-to-detached.py derives the legacy .sig/.cert pair from the
+#   bundle.
+# The verify job then checks those files on amd64 and arm64:
+# - with the boxes' cosign (COSIGN_VERSION), as every shim in the field does:
+#   the detached pair, with the shims' exact flags;
+# - with COSIGN_SIGN_VERSION: the detached pair and the bundle;
+# - through the shim's own verify_release_signature;
+# - and as negative controls: a changed SHA256SUMS, and the release identity
+#   (a rehearsal signature must never pass for a release).
+# Both cosign builds are installed through bootstrap/cosign.sh, by version
+# and SHA256, as install.sh installs the boxes' one.
+#
+# Triggers. The sign job holds an OIDC token (id-token: write), so it runs
+# only where that is safe:
+# - workflow_dispatch, and pushes to main that change what it rehearses;
+# - pull requests that change it, from branches of this repository only. A
+#   fork's pull request skips the sign job (and so the verify job): GitHub
+#   gives it no OIDC token, and nothing from a fork signs as this repository.
+# - Dependabot's runs get no OIDC token either, so its pull requests (an
+#   actions bump touches this file) skip both jobs too, rather than fail.
+# The identity it signs as is this workflow at the run's ref
+# (cosign-rehearsal.yml@refs/heads/main, @refs/pull/<n>/merge). Boxes accept
+# only release.yml@refs/tags/vX.Y.Z, which the verify job proves this
+# signature does not pass.
+#
+# Every `uses:` is pinned to a commit SHA; tests/test_release_pinning.py
+# enforces it.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - bootstrap/cosign.sh
+      - scripts/bundle-to-detached.py
+      - scripts/boxmunge-upgrade.d/release.sh
+      - .github/workflows/cosign-rehearsal.yml
+  pull_request:
+    paths:
+      - bootstrap/cosign.sh
+      - scripts/bundle-to-detached.py
+      - scripts/boxmunge-upgrade.d/release.sh
+      - .github/workflows/cosign-rehearsal.yml
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  sign:
+    if: >-
+      (github.event_name != 'pull_request'
+       || github.event.pull_request.head.repo.full_name == github.repository)
+      && github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the signing cosign (bootstrap/cosign.sh)
+        run: |
+          source bootstrap/cosign.sh
+          COSIGN_BIN="$RUNNER_TEMP/cosign-sign/cosign"
+          mkdir -p "$(dirname "$COSIGN_BIN")"
+          install_cosign "$(dpkg --print-architecture)" "$COSIGN_SIGN_VERSION"
+          dirname "$COSIGN_BIN" >> "$GITHUB_PATH"
+
+      - name: Sign a throwaway SHA256SUMS into a bundle, and derive the legacy pair
+        run: |
+          mkdir rehearsal
+          cd rehearsal
+          printf 'boxmunge cosign rehearsal %s run %s.%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > payload.txt
+          sha256sum payload.txt > SHA256SUMS
+          cosign version
+          cosign sign-blob --yes --bundle SHA256SUMS.sigstore.json SHA256SUMS
+          python3 -I ../scripts/bundle-to-detached.py SHA256SUMS.sigstore.json \
+            --signature SHA256SUMS.sig --certificate SHA256SUMS.cert
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cosign-rehearsal
+          path: rehearsal/
+          retention-days: 30
+          if-no-files-found: error
+
+  verify:
+    needs: sign
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    env:
+      # The identity the sign job's certificate names, exactly.
+      IDENTITY: https://github.com/${{ github.workflow_ref }}
+      ISSUER: https://token.actions.githubusercontent.com
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: cosign-rehearsal
+          path: rehearsal/
+
+      - name: Install the boxes' cosign and the signing cosign (bootstrap/cosign.sh)
+        run: |
+          source bootstrap/cosign.sh
+          arch="$(dpkg --print-architecture)"
+          for pin in box:"$COSIGN_VERSION" sign:"$COSIGN_SIGN_VERSION"; do
+            COSIGN_BIN="$RUNNER_TEMP/cosign-${pin%%:*}/cosign"
+            mkdir -p "$(dirname "$COSIGN_BIN")"
+            install_cosign "$arch" "${pin#*:}"
+            "$COSIGN_BIN" version
+          done
+          # The identity as a regexp, the form the shim pins it in.
+          echo "IDENTITY_RE=^$(printf '%s' "$IDENTITY" | sed 's/[.]/\\./g')\$" >> "$GITHUB_ENV"
+          {
+            echo "COSIGN_BOX=$RUNNER_TEMP/cosign-box/cosign"
+            echo "COSIGN_SIGN=$RUNNER_TEMP/cosign-sign/cosign"
+          } >> "$GITHUB_ENV"
+
+      - name: The derived pair is what the bundle gives, and the bundle passes the structural checks
+        run: |
+          python3 -I scripts/bundle-to-detached.py rehearsal/SHA256SUMS.sigstore.json \
+            --signature "$RUNNER_TEMP/again.sig" --certificate "$RUNNER_TEMP/again.cert"
+          cmp rehearsal/SHA256SUMS.sig "$RUNNER_TEMP/again.sig"
+          cmp rehearsal/SHA256SUMS.cert "$RUNNER_TEMP/again.cert"
+
+      - name: 1. The boxes' cosign verifies the detached pair, with the shims' flags
+        working-directory: rehearsal
+        run: |
+          "$COSIGN_BOX" verify-blob \
+            --certificate-identity-regexp "$IDENTITY_RE" \
+            --certificate-oidc-issuer "$ISSUER" \
+            --signature SHA256SUMS.sig --certificate SHA256SUMS.cert SHA256SUMS
+
+      - name: 2. The signing cosign verifies the detached pair
+        working-directory: rehearsal
+        run: |
+          "$COSIGN_SIGN" verify-blob \
+            --certificate-identity-regexp "$IDENTITY_RE" \
+            --certificate-oidc-issuer "$ISSUER" \
+            --signature SHA256SUMS.sig --certificate SHA256SUMS.cert SHA256SUMS
+
+      - name: 3. The signing cosign verifies the bundle
+        working-directory: rehearsal
+        run: |
+          "$COSIGN_SIGN" verify-blob --bundle SHA256SUMS.sigstore.json \
+            --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" SHA256SUMS
+
+      - name: 4. The shim's own verify_release_signature passes it, with either cosign
+        run: |
+          for cosign in "$COSIGN_BOX" "$COSIGN_SIGN"; do
+            PATH="$(dirname "$cosign"):$PATH" bash -c '
+              set -euo pipefail
+              log() { echo "$*" >&2; }
+              source scripts/boxmunge-upgrade.d/release.sh
+              COSIGN_CERT_IDENTITY_REGEXP="$IDENTITY_RE"
+              verify_release_signature rehearsal || { echo "refused: $COSIGN_REASON" >&2; exit 1; }'
+          done
+
+      - name: 5. Negative controls must fail
+        run: |
+          must_fail() {  # must_fail <what> <command...>
+            local what="$1"; shift
+            if "$@" >/dev/null 2>&1; then echo "::error::accepted: $what"; return 1; fi
+            echo "refused, as it must be: $what"
+          }
+          cp -r rehearsal "$RUNNER_TEMP/changed"
+          echo "one more line" >> "$RUNNER_TEMP/changed/SHA256SUMS"
+          cd "$RUNNER_TEMP/changed"
+          must_fail "the bundle over a changed SHA256SUMS" \
+            "$COSIGN_SIGN" verify-blob --bundle SHA256SUMS.sigstore.json \
+              --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" SHA256SUMS
+          must_fail "the detached pair over a changed SHA256SUMS (boxes' cosign)" \
+            "$COSIGN_BOX" verify-blob --certificate-identity-regexp "$IDENTITY_RE" \
+              --certificate-oidc-issuer "$ISSUER" \
+              --signature SHA256SUMS.sig --certificate SHA256SUMS.cert SHA256SUMS
+          cd "$GITHUB_WORKSPACE"
+          release_re="$(bash -c 'source scripts/boxmunge-upgrade.d/release.sh; printf %s "$COSIGN_CERT_IDENTITY_REGEXP"')"
+          must_fail "the rehearsal signature as a release (bundle)" \
+            "$COSIGN_SIGN" verify-blob --bundle rehearsal/SHA256SUMS.sigstore.json \
+              --certificate-identity-regexp "$release_re" --certificate-oidc-issuer "$ISSUER" rehearsal/SHA256SUMS
+          must_fail "the rehearsal signature as a release (the shim, boxes' cosign)" \
+            env PATH="$(dirname "$COSIGN_BOX"):$PATH" bash -c '
+              log() { :; }
+              source scripts/boxmunge-upgrade.d/release.sh
+              verify_release_signature rehearsal'
+
+      - name: 6. The boxes' cosign on the bundle (informational)
+        working-directory: rehearsal
+        run: |
+          if "$COSIGN_BOX" verify-blob --new-bundle-format --bundle SHA256SUMS.sigstore.json \
+              --certificate-identity "$IDENTITY" --certificate-oidc-issuer "$ISSUER" SHA256SUMS; then
+            result="verifies"
+          else
+            result="does not verify"
+          fi
+          echo "Boxes' cosign with --new-bundle-format --bundle on $(dpkg --print-architecture): $result" \
+            | tee -a "$GITHUB_STEP_SUMMARY"

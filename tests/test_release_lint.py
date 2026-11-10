@@ -2,45 +2,16 @@
 """Tests for scripts/release-lint.py, the release workflow's class gate."""
 from __future__ import annotations
 
-import importlib.util
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
 from boxmunge.release_selection import (
     github_release_breaking, github_release_class, github_release_held,
 )
-
-REPO = Path(__file__).resolve().parents[1]
-SCRIPT = REPO / "scripts" / "release-lint.py"
-GH = "https://github.com/boxmunge/boxmunge/releases/tag/v"
-
-
-def _load_module():
-    spec = importlib.util.spec_from_file_location("release_lint", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module  # dataclasses resolve their module by name
-    spec.loader.exec_module(module)
-    return module
-
-
-lint = _load_module()
-
-
-def _write_tree(tmp_path: Path, version: str, releases: list[tuple]) -> dict:
-    """releases: (version, class) or (version, class, breaking) tuples."""
-    releases_json = tmp_path / "releases.json"
-    releases_json.write_text(json.dumps({"releases": [
-        {"version": r[0], "class": r[1], "breaking": r[2] if len(r) > 2 else False,
-         "url": f"{GH}{r[0]}"}
-        for r in releases
-    ]}))
-    pyproject = tmp_path / "pyproject.toml"
-    pyproject.write_text(f'[project]\nname = "boxmunge-server"\nversion = "{version}"\n')
-    return {"releases": releases_json, "pyproject": pyproject}
+from tests.release_lint_helpers import REPO, SCRIPT, lint, write_tree
 
 
 def _run(*args: str) -> subprocess.CompletedProcess:
@@ -53,7 +24,7 @@ class TestCheck:
         ("security", "[security]"), ("breakfix", "[breakfix]"), ("feature", None),
     ])
     def test_listed_version_yields_class_title_and_notes(self, tmp_path, cls, marker):
-        files = _write_tree(tmp_path, "0.11.1", [("0.11.1", cls), ("0.11.0", "feature")])
+        files = write_tree(tmp_path, "0.11.1", [("0.11.1", cls), ("0.11.0", "feature")])
         plan = lint.plan_release("v0.11.1", files["releases"], files["pyproject"])
         assert plan.release_class == cls
         if marker:
@@ -66,30 +37,30 @@ class TestCheck:
     def test_generated_notes_classify_as_listed(self, tmp_path):
         """The marker we generate is read back by boxes as the listed class."""
         for cls in ("security", "breakfix", "feature"):
-            files = _write_tree(tmp_path, "0.11.1", [("0.11.1", cls)])
+            files = write_tree(tmp_path, "0.11.1", [("0.11.1", cls)])
             plan = lint.plan_release("v0.11.1", files["releases"], files["pyproject"])
             release = {"name": plan.title, "body": plan.notes}
             assert github_release_class(release) == cls
             assert lint.classify_release(plan.title, plan.notes) == cls
 
     def test_unlisted_version_fails(self, tmp_path):
-        files = _write_tree(tmp_path, "0.11.2", [("0.11.1", "feature")])
+        files = write_tree(tmp_path, "0.11.2", [("0.11.1", "feature")])
         with pytest.raises(lint.ReleaseLintError, match="0.11.2"):
             lint.plan_release("v0.11.2", files["releases"], files["pyproject"])
 
     def test_invalid_class_fails(self, tmp_path):
-        files = _write_tree(tmp_path, "0.11.1", [("0.11.1", "urgent")])
+        files = write_tree(tmp_path, "0.11.1", [("0.11.1", "urgent")])
         with pytest.raises(lint.ReleaseLintError, match="urgent"):
             lint.plan_release("v0.11.1", files["releases"], files["pyproject"])
 
     def test_tag_must_match_pyproject_version(self, tmp_path):
-        files = _write_tree(tmp_path, "0.11.0", [("0.11.1", "feature")])
+        files = write_tree(tmp_path, "0.11.0", [("0.11.1", "feature")])
         with pytest.raises(lint.ReleaseLintError, match="pyproject"):
             lint.plan_release("v0.11.1", files["releases"], files["pyproject"])
 
     @pytest.mark.parametrize("tag", ["0.11.1", "v0.11", "cli-v0.11.1", "v0.11.1-rc.1"])
     def test_malformed_tag_fails(self, tmp_path, tag):
-        files = _write_tree(tmp_path, "0.11.1", [("0.11.1", "feature")])
+        files = write_tree(tmp_path, "0.11.1", [("0.11.1", "feature")])
         with pytest.raises(lint.ReleaseLintError, match="tag"):
             lint.plan_release(tag, files["releases"], files["pyproject"])
 
@@ -105,38 +76,38 @@ class TestCheck:
 
 class TestBreaking:
     def test_breaking_release_gets_marker_in_title_and_notes(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "security", True)])
+        files = write_tree(tmp_path, "0.12.0", [("0.12.0", "security", True)])
         plan = lint.plan_release("v0.12.0", files["releases"], files["pyproject"])
         assert plan.breaking is True
         assert plan.title == "v0.12.0 [security] [breaking]"
         assert "[security]" in plan.notes and "[breaking]" in plan.notes
 
     def test_breaking_feature_release_title(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "feature", True)])
+        files = write_tree(tmp_path, "0.12.0", [("0.12.0", "feature", True)])
         plan = lint.plan_release("v0.12.0", files["releases"], files["pyproject"])
         assert plan.title == "v0.12.0 [breaking]"
         assert lint.classify_release(plan.title, plan.notes) == "feature"
 
     def test_non_breaking_release_carries_no_breaking_marker(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.1", [("0.12.1", "security", False)])
+        files = write_tree(tmp_path, "0.12.1", [("0.12.1", "security", False)])
         plan = lint.plan_release("v0.12.1", files["releases"], files["pyproject"])
         assert plan.breaking is False
         assert "[breaking]" not in plan.title.lower() + plan.notes.lower()
 
     def test_breaking_patch_release_fails(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.1", [("0.12.1", "security", True)])
+        files = write_tree(tmp_path, "0.12.1", [("0.12.1", "security", True)])
         with pytest.raises(lint.ReleaseLintError, match="minor"):
             lint.plan_release("v0.12.1", files["releases"], files["pyproject"])
 
     def test_historical_breaking_patch_does_not_block_another_tag(self, tmp_path):
         """The rule judges the tag being released, not earlier entries."""
-        files = _write_tree(tmp_path, "0.10.2", [("0.10.2", "breakfix"),
+        files = write_tree(tmp_path, "0.10.2", [("0.10.2", "breakfix"),
                                                 ("0.10.1", "security", True)])
         plan = lint.plan_release("v0.10.2", files["releases"], files["pyproject"])
         assert plan.release_class == "breakfix"
 
     def test_entry_without_breaking_fails(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "feature")])
+        files = write_tree(tmp_path, "0.12.0", [("0.12.0", "feature")])
         data = json.loads(files["releases"].read_text())
         del data["releases"][0]["breaking"]
         files["releases"].write_text(json.dumps(data))
@@ -146,7 +117,7 @@ class TestBreaking:
     @pytest.mark.parametrize("cls", ["security", "breakfix", "feature"])
     @pytest.mark.parametrize("breaking", [True, False])
     def test_generated_text_reads_back_as_listed(self, tmp_path, cls, breaking):
-        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", cls, breaking)])
+        files = write_tree(tmp_path, "0.12.0", [("0.12.0", cls, breaking)])
         plan = lint.plan_release("v0.12.0", files["releases"], files["pyproject"])
         assert lint.classify_release(plan.title, plan.notes) == cls
         assert lint.is_breaking(plan.title, plan.notes) is breaking
@@ -234,13 +205,13 @@ class TestHeldMarker:
             lint.verify_release(name, body, "security", False)
 
     def test_audit_passes_when_github_holds_exactly_the_named_versions(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.1", [("0.12.1", "security"), ("0.12.0", "feature")])
+        files = write_tree(tmp_path, "0.12.1", [("0.12.1", "security"), ("0.12.0", "feature")])
         held = lint.audit_releases(files["releases"], [
             _gh("0.12.1", "v0.12.1 [security] [held]"), _gh("0.12.0")], held={"0.12.1"})
         assert held == ["v0.12.1"]
 
     def test_audit_reports_a_hold_github_lacks_or_one_nobody_named(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.1", [("0.12.1", "security"), ("0.12.0", "security")])
+        files = write_tree(tmp_path, "0.12.1", [("0.12.1", "security"), ("0.12.0", "security")])
         with pytest.raises(lint.ReleaseLintError) as err:
             lint.audit_releases(files["releases"], [
                 _gh("0.12.1", "v0.12.1 [security]"), _gh("0.12.0", "v0.12.0 [security] [held]")],
@@ -250,19 +221,19 @@ class TestHeldMarker:
         assert "v0.12.0: its GitHub title carries [held]" in message
 
     def test_audit_reports_a_marker_in_the_notes_that_does_nothing(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.1", [("0.12.1", "security")])
+        files = write_tree(tmp_path, "0.12.1", [("0.12.1", "security")])
         with pytest.raises(lint.ReleaseLintError, match="notes"):
             lint.audit_releases(files["releases"], [
                 _gh("0.12.1", "v0.12.1 [security]", body="[held]")], held={"0.12.1"})
 
     def test_audit_refuses_holding_an_unlisted_version(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.1", [("0.12.1", "security")])
+        files = write_tree(tmp_path, "0.12.1", [("0.12.1", "security")])
         with pytest.raises(lint.ReleaseLintError, match="0.9.9"):
             lint.audit_releases(files["releases"], [_gh("0.12.1", "v0.12.1 [security]")],
                                 held={"0.9.9"})
 
     def test_cli_takes_the_held_versions(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.1", [("0.12.1", "security")])
+        files = write_tree(tmp_path, "0.12.1", [("0.12.1", "security")])
         gh = tmp_path / "gh.json"
         gh.write_text(json.dumps([_gh("0.12.1", "v0.12.1 [security] [held]")]))
         args = ("audit", "--github-releases", str(gh), "--releases", str(files["releases"]))
@@ -274,7 +245,7 @@ class TestHeldMarker:
 
 class TestCli:
     def test_check_writes_outputs_and_notes(self, tmp_path):
-        files = _write_tree(tmp_path, "0.11.1", [("0.11.1", "breakfix")])
+        files = write_tree(tmp_path, "0.11.1", [("0.11.1", "breakfix")])
         out, notes = tmp_path / "gh_output", tmp_path / "notes.md"
         proc = _run("check", "--tag", "v0.11.1", "--releases", str(files["releases"]),
                     "--pyproject", str(files["pyproject"]),
@@ -286,7 +257,7 @@ class TestCli:
         assert notes.read_text().startswith("[breakfix]")
 
     def test_check_failure_is_loud(self, tmp_path):
-        files = _write_tree(tmp_path, "0.11.2", [("0.11.1", "feature")])
+        files = write_tree(tmp_path, "0.11.2", [("0.11.1", "feature")])
         proc = _run("check", "--tag", "v0.11.2", "--releases", str(files["releases"]),
                     "--pyproject", str(files["pyproject"]),
                     "--github-output", str(tmp_path / "o"), "--notes-out", str(tmp_path / "n"))
@@ -311,7 +282,7 @@ class TestCli:
         assert proc.returncode == 0, proc.stderr
 
     def test_check_writes_breaking_output(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "feature", True)])
+        files = write_tree(tmp_path, "0.12.0", [("0.12.0", "feature", True)])
         out = tmp_path / "gh_output"
         proc = _run("check", "--tag", "v0.12.0", "--releases", str(files["releases"]),
                     "--pyproject", str(files["pyproject"]),
@@ -353,7 +324,7 @@ class TestWorkflowWiring:
         create = next(i for i, s in enumerate(steps)
                       if "action-gh-release" in (s.get("uses") or ""))
         assert steps[create]["with"]["draft"] is True
-        assert "release-preamble.md" in steps[create]["with"]["body_path"]
+        assert steps[create]["with"]["body_path"] == "dist/release-notes.md"
         verify = self._index(steps, "release-lint.py verify")
         publish = self._index(steps, "--draft=false")
         assert create < verify < publish
@@ -421,13 +392,13 @@ class TestAudit:
     GitHub-fallback boxes would select differently from the service."""
 
     def test_matching_releases_pass(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "security", True),
+        files = write_tree(tmp_path, "0.12.0", [("0.12.0", "security", True),
                                                 ("0.11.0", "feature")])
         lint.audit_releases(files["releases"], [
             _gh("0.12.0", "v0.12.0 [security] [breaking]"), _gh("0.11.0")])
 
     def test_reports_every_mismatch(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.1", [
+        files = write_tree(tmp_path, "0.12.1", [
             ("0.12.1", "breakfix"), ("0.12.0", "feature", True), ("0.11.0", "feature")])
         with pytest.raises(lint.ReleaseLintError) as err:
             lint.audit_releases(files["releases"], [
@@ -438,19 +409,19 @@ class TestAudit:
         assert "v0.11.0" in message and "no published" in message
 
     def test_drafts_do_not_count_as_published(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "feature")])
+        files = write_tree(tmp_path, "0.12.0", [("0.12.0", "feature")])
         with pytest.raises(lint.ReleaseLintError, match="no published"):
             lint.audit_releases(files["releases"], [_gh("0.12.0", draft=True)])
 
     def test_cli_accepts_slurped_pages(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "feature"), ("0.11.0", "feature")])
+        files = write_tree(tmp_path, "0.12.0", [("0.12.0", "feature"), ("0.11.0", "feature")])
         gh = tmp_path / "gh.json"
         gh.write_text(json.dumps([[_gh("0.12.0")], [_gh("0.11.0")]]))
         proc = _run("audit", "--github-releases", str(gh), "--releases", str(files["releases"]))
         assert proc.returncode == 0, proc.stderr
 
     def test_cli_failure_is_loud(self, tmp_path):
-        files = _write_tree(tmp_path, "0.12.0", [("0.12.0", "feature", True)])
+        files = write_tree(tmp_path, "0.12.0", [("0.12.0", "feature", True)])
         gh = tmp_path / "gh.json"
         gh.write_text(json.dumps([_gh("0.12.0")]))
         proc = _run("audit", "--github-releases", str(gh), "--releases", str(files["releases"]))

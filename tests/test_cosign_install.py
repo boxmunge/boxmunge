@@ -62,6 +62,35 @@ def test_each_supported_arch_has_a_pin(arch: str, tmp_path: Path) -> None:
     assert re.fullmatch(r"[0-9a-f]{64}", _pin(arch, tmp_path))
 
 
+@pytest.mark.parametrize("arch", ["amd64", "arm64"])
+def test_the_signing_version_is_pinned_for_each_arch(arch: str, tmp_path: Path) -> None:
+    """The CI rehearsal signs with COSIGN_SIGN_VERSION and verifies with both
+    pins, on both architectures."""
+    proc, _ = _run(tmp_path, f'cosign_sha256 {arch} "$COSIGN_SIGN_VERSION"; echo "$COSIGN_SIGN_VERSION"')
+    assert proc.returncode == 0, proc.stderr
+    sha, version = proc.stdout.split()
+    assert re.fullmatch(r"[0-9a-f]{64}", sha) and sha != _pin(arch, tmp_path / "box")
+    assert re.fullmatch(r"v3\.\d+\.\d+", version)
+
+
+@pytest.mark.parametrize("arch", ["amd64", "arm64"])
+def test_install_takes_another_pinned_version(arch: str, tmp_path: Path) -> None:
+    proc, _ = _run(tmp_path / "pin", f'cosign_sha256 {arch} "$COSIGN_SIGN_VERSION"; echo "$COSIGN_SIGN_VERSION"')
+    pin, version = proc.stdout.split()
+    proc, log = _run(tmp_path, f'install_cosign {arch} "$COSIGN_SIGN_VERSION"')
+    assert proc.returncode == 0, proc.stderr
+    calls = log.read_text()
+    assert f"/{version}/cosign-linux-{arch}\n" in calls
+    assert f"sha256sum {pin}  " in calls
+
+
+def test_a_version_without_a_pin_is_refused(tmp_path: Path) -> None:
+    proc, log = _run(tmp_path, "install_cosign amd64 v9.9.9")
+    assert proc.returncode != 0
+    assert "no cosign v9.9.9 pin" in proc.stderr
+    assert not log.exists()
+
+
 def test_other_archs_have_no_pin(tmp_path: Path) -> None:
     proc, _ = _run(tmp_path, "cosign_sha256 riscv64")
     assert proc.returncode != 0 and proc.stdout == ""
