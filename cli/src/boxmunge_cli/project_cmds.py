@@ -129,7 +129,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                     "shows what it will restore and asks before acting; without one "
                     "(a script, CI), --yes is required.")
     p.add_argument("--yes", action="store_true",
-                   help="Do not ask for confirmation (required without a terminal)")
+                   help="Do not ask for confirmation (required when standard input is not a "
+                        "terminal)")
     p.set_defaults(func=_cmd_rollback)
 
     p = subparsers.add_parser("validate", help="Validate the deployed project on the server",
