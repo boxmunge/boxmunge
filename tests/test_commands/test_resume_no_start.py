@@ -149,7 +149,7 @@ def test_an_open_install(paths, capsys, tmp_path) -> None:
 
 
 def test_it_stays_paused_for_everything_but_a_deploy(paths, capsys) -> None:
-    from boxmunge.commands.check import _check_one
+    from boxmunge.commands.check_all import _check_one
     from boxmunge.health_checks.projects import check_lifecycle_blocked
     from boxmunge.commands.status import collect_status, display_rows
     _paused_v1(paths)
@@ -163,7 +163,7 @@ def test_it_stays_paused_for_everything_but_a_deploy(paths, capsys) -> None:
     assert row["status"] == "PAUSED (awaiting deploy)"
     lifecycle = check_lifecycle_blocked(paths)
     assert lifecycle.status == "warn" and "awaiting a deploy: myapp" in lifecycle.detail
-    with patch("boxmunge.commands.check.update_health_state") as health:
+    with patch("boxmunge.commands.check_all.update_health_state") as health:
         assert _check_one("myapp", paths, read_only=False) == 0
     health.assert_not_called()
     assert "PAUSED (awaiting deploy" in capsys.readouterr().out

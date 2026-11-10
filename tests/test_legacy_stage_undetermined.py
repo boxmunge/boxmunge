@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.backup_source import backup_source
-from boxmunge.commands.check import _check_one
+from boxmunge.commands.check_all import _check_one
 from boxmunge.commands.legacy_stage_cmd import legacy_stage_locked
 from boxmunge.commands.security_enforce import enforce
 from boxmunge.commands.upgrade_steps import check_upgrade
@@ -37,9 +37,9 @@ def _deployed(paths) -> None:
 
 
 def test_check_runs_no_smoke_and_warns(paths, capsys) -> None:
-    with _undetectable("boxmunge.commands.check"), \
+    with _undetectable("boxmunge.commands.check_all"), \
             patch("boxmunge.commands.check.check_with_reason") as smoke, \
-            patch("boxmunge.commands.check.update_health_state") as health:
+            patch("boxmunge.commands.check_all.update_health_state") as health:
         assert _check_one("myapp", paths, read_only=False) == 1
     smoke.assert_not_called()
     assert health.call_args.args[:2] == ("myapp", 1)
@@ -48,8 +48,8 @@ def test_check_runs_no_smoke_and_warns(paths, capsys) -> None:
 
 
 def test_read_only_check_records_nothing(paths) -> None:
-    with _undetectable("boxmunge.commands.check"), \
-            patch("boxmunge.commands.check.update_health_state") as health:
+    with _undetectable("boxmunge.commands.check_all"), \
+            patch("boxmunge.commands.check_all.update_health_state") as health:
         assert _check_one("myapp", paths, read_only=True) == 1
     health.assert_not_called()
 
@@ -111,8 +111,8 @@ RETRY = "fix the permissions (or the error shown), then retry"
 
 
 def test_every_consumer_says_what_to_do(paths, capsys) -> None:
-    with _undetectable("boxmunge.commands.check"), \
-            patch("boxmunge.commands.check.update_health_state") as health:
+    with _undetectable("boxmunge.commands.check_all"), \
+            patch("boxmunge.commands.check_all.update_health_state") as health:
         _check_one("myapp", paths, read_only=False)
     assert RETRY in health.call_args.args[2]
     with _undetectable("boxmunge.backup_source"):

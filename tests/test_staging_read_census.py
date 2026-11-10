@@ -170,13 +170,13 @@ def _security_resume(box, seen, monkeypatch):
 
 
 def _tick(box, seen):
-    from boxmunge.commands.check import _check_one
+    from boxmunge.commands.check_all import _check_one
     assert _check_one("myapp", box.paths, read_only=False) == 0
     assert box.ran
 
 
 def _tick_critical(box, seen):
-    from boxmunge.commands.check import _check_one
+    from boxmunge.commands.check_all import _check_one
     box.smoke = "critical"
     with patch("boxmunge.commands.health_state.notify", return_value=True):
         assert _check_one("myapp", box.paths, read_only=False) == 2

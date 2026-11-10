@@ -11,7 +11,8 @@ import pytest
 import yaml
 
 from boxmunge import compose_inventory
-from boxmunge.commands.check import run_check_all, run_smoke_in_container
+from boxmunge.commands.check import run_smoke_in_container
+from boxmunge.commands.check_all import run_check_all
 from boxmunge.health_checks.projects import check_project_containers
 from boxmunge.paths import BoxPaths
 

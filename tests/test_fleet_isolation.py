@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 from boxmunge.commands import check as check_mod
-from boxmunge.commands.check import run_check_all
+from boxmunge.commands.check_all import run_check_all
 from boxmunge.health_checks.projects import (
     check_config_drift,
     check_lifecycle_blocked,

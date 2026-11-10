@@ -342,7 +342,7 @@ def test_a_corrupt_record_is_a_state_error_naming_the_file(paths, legacy, text) 
 # -- the tick and the quarantine hold ---------------------------------------
 
 def test_tick_runs_no_smoke_for_a_legacy_project(paths, legacy, capsys) -> None:
-    from boxmunge.commands.check import _check_one
+    from boxmunge.commands.check_all import _check_one
     with patch("boxmunge.commands.check.check_with_reason") as check, \
             patch("boxmunge.legacy_stage.notify", return_value=True) as alert:
         assert _check_one("myapp", paths, read_only=False) == 1
@@ -352,7 +352,7 @@ def test_tick_runs_no_smoke_for_a_legacy_project(paths, legacy, capsys) -> None:
 
 
 def test_read_only_tick_sends_no_alert(paths, legacy) -> None:
-    from boxmunge.commands.check import _check_one
+    from boxmunge.commands.check_all import _check_one
     with patch("boxmunge.commands.check.check_with_reason") as check, \
             patch("boxmunge.legacy_stage.notify") as alert:
         assert _check_one("myapp", paths, read_only=True) == 1

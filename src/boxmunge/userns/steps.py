@@ -80,7 +80,7 @@ def crowdsec_tails_caddy() -> str | None:
 
 
 def _final(paths: BoxPaths, j: Journal, results: dict[str, str]) -> None:
-    from boxmunge.commands.check import run_check_all
+    from boxmunge.commands.check_all import run_check_all
     from boxmunge.commands.security_actions import cmd_security_scan
     from boxmunge.commands.self_test_cmd import run_self_test
     checks = {"cve-scan": cmd_security_scan([], paths),
