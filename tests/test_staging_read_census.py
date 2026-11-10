@@ -45,7 +45,7 @@ class Box:
 def box(paths, fake_containers, monkeypatch):
     the_box = Box(paths)
 
-    def smoke_one(container, script, service):
+    def smoke_one(container, script, service, periodic=False):
         the_box.ran.append(script)
         return SmokeResult(status=the_box.smoke, message=f"smoke {the_box.smoke}")
 

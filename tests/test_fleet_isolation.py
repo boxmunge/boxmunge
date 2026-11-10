@@ -116,7 +116,7 @@ class TestCheckAllIsolation:
         checked: list[str] = []
         real = check_mod.check_with_reason
 
-        def _spy(name, paths, verbose=True):
+        def _spy(name, paths, verbose=True, periodic=False):
             checked.append(name)
             return real(name, paths, verbose)
 
