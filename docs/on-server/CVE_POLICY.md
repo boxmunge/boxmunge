@@ -877,8 +877,11 @@ Rules:
   applies through 2026-07-31 and expires on 2026-08-01.
 - A suppression never applies to a CVE on the CISA KEV catalog. `suppress`
   refuses a KEV-listed CVE, and `suppress --current` skips KEV-listed CVEs
-  with a `NOTE:`. An existing suppression whose CVE is later added to KEV
-  stops applying on the next scan (see the decision order above).
+  with a `NOTE:`. Both judge against the cached catalog's CVEs even when it
+  is stale (the message says so): staleness only stops new KEV quarantines,
+  and once the catalog is fresh again such a suppression would not apply.
+  An existing suppression whose CVE is later added to KEV stops applying on
+  the next scan (see the decision order above).
 
 ### Audit trail (v0.7.0)
 
