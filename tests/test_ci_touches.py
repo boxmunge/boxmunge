@@ -232,6 +232,7 @@ NOT_DEPENDENCIES = {
     ("scripts/check-dco.sh", "CONTRIBUTING.md"): "named in its error message",
     ("scripts/release-lint.py", "services/version-check/"):
         "release tooling: the release workflow and its unit test run it, no Docker test does",
+    ("scripts/release-lint.py", "docs/DEVELOPMENT.md"): "named in its error message",
     ("src/boxmunge/api/result.py", "docs/PLUGIN_API.md"): "a docstring reference",
     ("src/boxmunge/api/server.py", "docs/PLUGIN_API.md"): "named in an error message",
     ("src/boxmunge/commands/help.py", "SECURITY.md"): "the on-server doc of that name",
