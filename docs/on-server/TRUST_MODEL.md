@@ -266,7 +266,9 @@ link makes the operation fail with an error naming the path, instead of redirect
 another file. Remove the link and re-run.
 
 A platform rollback restores exactly the stash its upgrade made, never whichever is newest in
-`stashes/`: the shim records the stash's name, size and sha256 root-only, copies that archive
+`stashes/`: the shim records the stash's name, size and sha256 root-only (the size and sha256
+`stash create` prints for the bytes it wrote, since 0.11.6; an upgrade stops before changing
+anything if the file at the name does not match them), copies that archive
 into `upgrade-root/rollback-stash/` (opened without following a link, and only if it is a plain
 file root owns, which deploy cannot write, with the recorded size and sha256, so no other stash
 renamed onto the name passes), and has the previous release restore the copy. A stash with link
