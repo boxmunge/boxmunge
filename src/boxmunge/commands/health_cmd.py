@@ -3,20 +3,28 @@
 
 Checks system configuration, component health, config drift, and
 recent log patterns. No writes, no restarts.
+
+Exit 2 during an upgrade's probation rolls the platform back and blocklists
+the release, and a traceback exits 1, which reads as healthy. So an error is
+either a platform component a probe saw broken, or a defect in this
+release's own code (a check module that cannot be imported, a missing
+name): rolling back is the fix for both. A probe that timed out or could
+not tell, any per-project input, and any other exception a check raises
+warn. Each check runs under run_guarded, so none can take the report down.
 """
 
+import importlib
 import json
+import os
 import subprocess
 import sys
+import time
+import types
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from boxmunge.commands.health_state import is_monitor_stopped
-from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
-from boxmunge.docker import COMPOSE_PROJECT_LABEL, compose_command
+from boxmunge.docker import COMPOSE_PROJECT_LABEL
 from boxmunge.docker_run import docker_env
-from boxmunge.fleet import PROJECT_INPUT_ERRORS
-from boxmunge.lifecycle import is_blocked
-from boxmunge.pause import awaiting_deploy, is_paused, pause_incomplete
 from boxmunge.paths import BoxPaths
 
 
@@ -86,54 +94,101 @@ def check_docker_running() -> HealthCheck:
         if result.returncode == 0:
             return HealthCheck("docker", "ok", "Docker daemon running")
         return HealthCheck("docker", "error", "Docker daemon not responding")
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return HealthCheck("docker", "error", "Docker not found or timed out")
+    except FileNotFoundError:
+        return HealthCheck("docker", "error", "docker CLI not found")
+    # A timeout says the daemon is busy, not that it is down: run_guarded warns.
+
+
+# container-update recreating boxmunge-caddy (or an upgrade, boxmunge-system)
+# leaves it missing or stopped for a few seconds. A container check that
+# finds an error probes once more after this long, and errors only if the
+# second probe agrees: a probation run landing in that window must not roll
+# back. Two such re-probes add at most 10 s to the shim's 60 s/180 s budget.
+REPROBE_DELAY = 5.0
+
+
+def _confirmed(probe: Callable[[], HealthCheck]) -> HealthCheck:
+    """*probe*'s result; an error only if a second probe REPROBE_DELAY later agrees."""
+    first = probe()
+    if first.status != "error":
+        return first
+    time.sleep(REPROBE_DELAY)
+    return probe()
 
 
 def check_caddy_container() -> HealthCheck:
-    """Check if Caddy container is running and healthy.
+    """Check that the platform's Caddy container is running and healthy.
+
+    Error when it is missing, not running or restarting on two probes
+    REPROBE_DELAY apart (_confirmed): no site is served.
+    Warn when it runs but is starting or unhealthy, or `docker inspect`
+    fails for another reason (container-update recreating it, a busy
+    daemon): neither shows Caddy down.
 
     The host's CrowdSec follows boxmunge-caddy by name, so a container of
     that name from any compose project but the platform's own `caddy`
     (caddy/compose.yml) is an error: CrowdSec would read its output as
     Caddy's. Compose sets the project label itself; a service cannot."""
+    return _confirmed(_probe_caddy)
+
+
+def _probe_caddy() -> HealthCheck:
+    fmt = ("{{.State.Running}}|{{.State.Restarting}}|"
+           "{{if .State.Health}}{{.State.Health.Status}}{{end}}|"
+           f'{{{{index .Config.Labels "{COMPOSE_PROJECT_LABEL}"}}}}')
     try:
         result = subprocess.run(
-            ["docker", "inspect", "--format",
-             f'{{{{.State.Health.Status}}}}|{{{{index .Config.Labels "{COMPOSE_PROJECT_LABEL}"}}}}',
-             "boxmunge-caddy"],
+            ["docker", "inspect", "--format", fmt, "boxmunge-caddy"],
             capture_output=True, text=True, check=False, timeout=10,
             env=docker_env(),
         )
-        if result.returncode != 0:
+    except FileNotFoundError:
+        return HealthCheck("caddy", "error", "docker CLI not found, so Caddy cannot be checked")
+    if result.returncode != 0:
+        if "No such object" in result.stderr or "No such container" in result.stderr:
             return HealthCheck("caddy", "error", "Caddy container not found")
-        status, _, project = result.stdout.strip().partition("|")
-        if project != "caddy":
-            return HealthCheck(
-                "caddy", "error",
-                f"boxmunge-caddy belongs to compose project {project!r}, not the "
-                f"platform's caddy: CrowdSec reads its output as Caddy's. Remove it "
-                f"and run: docker compose -f /opt/boxmunge/caddy/compose.yml up -d")
-        if status == "healthy":
-            return HealthCheck("caddy", "ok", "Caddy container healthy")
-        return HealthCheck("caddy", "warn", f"Caddy container status: {status}")
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return HealthCheck("caddy", "error", "Could not check Caddy container")
+        return HealthCheck("caddy", "warn", f"`docker inspect boxmunge-caddy` failed "
+                           f"({result.stderr.strip() or result.returncode}); run `health` again")
+    running, restarting, health, project = (result.stdout.strip().split("|") + [""] * 4)[:4]
+    if project != "caddy":
+        return HealthCheck(
+            "caddy", "error",
+            f"boxmunge-caddy belongs to compose project {project!r}, not the "
+            f"platform's caddy: CrowdSec reads its output as Caddy's. Remove it "
+            f"and run: docker compose -f /opt/boxmunge/caddy/compose.yml up -d")
+    if restarting == "true":
+        return HealthCheck("caddy", "error", "Caddy container is restarting (it keeps exiting); "
+                           "`docker logs boxmunge-caddy` shows why")
+    if running != "true":
+        return HealthCheck("caddy", "error", "Caddy container is not running; "
+                           "`docker logs boxmunge-caddy` shows why")
+    if health == "healthy":
+        return HealthCheck("caddy", "ok", "Caddy container healthy")
+    return HealthCheck("caddy", "warn", f"Caddy container status: {health or 'no healthcheck'}")
 
 
 def check_system_container(paths: BoxPaths) -> HealthCheck:
     """Check boxmunge-system is running with this root's mounts, on an image
     built from the installed definition.
 
-    An error when it is not usable: age and rclone have no host fallback, so
-    backups, restores and backup-sync all fail while it fails. A warning when
+    An error when it is not usable on two probes REPROBE_DELAY apart
+    (_confirmed): age and rclone have no host fallback, so backups, restores
+    and backup-sync all fail while it fails. A warning when
     it runs a previous image (a rebuild failed): backups still work, and an
     error would roll back a platform upgrade in probation.
     """
-    from boxmunge.system_container import connect, stale_image, SystemContainerError
+    return _confirmed(lambda: _probe_system_container(paths))
+
+
+def _probe_system_container(paths: BoxPaths) -> HealthCheck:
+    from boxmunge.system_container import (
+        SystemContainerError, SystemContainerTimeout, connect, stale_image,
+    )
     try:
         connect(paths)
         stale = stale_image(paths)
+    except SystemContainerTimeout as e:  # Docker is busy: it says nothing about the container
+        return HealthCheck("system-container", "warn", str(e))
     except SystemContainerError as e:
         return HealthCheck("system-container", "error", str(e))
     if stale:
@@ -165,196 +220,18 @@ def check_age_key(paths: BoxPaths) -> HealthCheck:
     """Check if the age backup key is valid."""
     if not paths.backup_key.exists():
         return HealthCheck("age-key", "error", "Backup key not found")
-    content = paths.backup_key.read_text()
+    try:
+        content = paths.backup_key.read_text()
+    except (OSError, UnicodeDecodeError) as e:
+        if isinstance(e, PermissionError) and os.geteuid() != 0:
+            raise  # run_guarded: needs root
+        return HealthCheck("age-key", "error", f"cannot read the backup key: {e}")
     if "AGE-SECRET-KEY-" not in content:
         return HealthCheck(
             "age-key", "error",
             "Backup key does not contain an age identity",
         )
     return HealthCheck("age-key", "ok", "Backup key valid")
-
-
-def check_project_containers(paths: BoxPaths) -> HealthCheck:
-    """Check if all deployed projects have running containers.
-
-    Projects in operator/system-blocked lifecycle states (paused,
-    CVE-quarantined, monitor-stopped) are excluded from the container check itself —
-    surfacing them as "no running containers" would mis-attribute an
-    intentional offline state as a health failure. The OK message
-    distinguishes total deployed from actually-checked so the operator
-    can see at a glance whether the all-green claim covers everything.
-    The blocked projects themselves are reported by `lifecycle`.
-    """
-    if not paths.projects.exists():
-        return HealthCheck("project-containers", "ok", "No projects deployed")
-
-    projects = [
-        p.name for p in paths.projects.iterdir()
-        if p.is_dir() and (p / "manifest.yml").exists()
-    ]
-    if not projects:
-        return HealthCheck("project-containers", "ok", "No projects deployed")
-
-    down_projects = []
-    unreadable: list[str] = []
-    blocked_count = 0
-    for name in projects:
-        try:
-            blocked = is_blocked(name, paths) or is_monitor_stopped(name, paths)
-        except PROJECT_INPUT_ERRORS as e:
-            unreadable.append(f"{name} ({e})")
-            continue
-        if blocked:
-            blocked_count += 1
-            continue
-        compose_files = ["compose.yml"]
-        override = paths.project_compose_override(name)
-        if override.exists():
-            compose_files.append("compose.boxmunge.yml")
-        compose_cmd = compose_command(name, compose_files)
-        compose_cmd.extend(["ps", "--format", "json"])
-        result = subprocess.run(
-            compose_cmd,
-            cwd=paths.project_dir(name), capture_output=True, text=True,
-            check=False, timeout=10,
-            env=docker_env(),
-        )
-        if result.returncode != 0 or not result.stdout.strip():
-            down_projects.append(name)
-
-    if unreadable:
-        return HealthCheck(
-            "project-containers", "error",
-            f"Could not read project state: {'; '.join(unreadable)}",
-        )
-    if down_projects:
-        return HealthCheck(
-            "project-containers", "warn",
-            f"Projects with no running containers: {', '.join(down_projects)}",
-        )
-    checked = len(projects) - blocked_count
-    if blocked_count:
-        detail = (
-            f"All {checked} checked project(s) have running containers "
-            f"({blocked_count} blocked — see `lifecycle`)"
-        )
-    else:
-        detail = f"All {checked} project(s) have running containers"
-    return HealthCheck("project-containers", "ok", detail)
-
-
-def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
-    """Surface projects in paused, CVE-quarantined, or monitor-stopped states.
-
-    Quarantined projects warn — they're offline due to an unfixed CVE
-    and may surprise an operator who only glanced at the report.
-    Paused projects pass as OK with a note — that's an intentional
-    operator action, not a problem.
-
-    Without this check the broader health report says nothing about
-    blocked projects; `project-containers` excludes them by design, so
-    a quarantined site can be silently offline while the report reads
-    HEALTHY.
-    """
-    if not paths.projects.exists():
-        return HealthCheck("lifecycle", "ok", "No projects deployed")
-    paused: list[str] = []
-    awaiting: list[str] = []
-    quarantined: list[tuple[str, str]] = []
-    unreadable: list[str] = []
-    stopped: list[str] = []
-    incomplete: list[str] = []
-    for proj_dir in sorted(paths.projects.iterdir()):
-        if not proj_dir.is_dir() or not (proj_dir / "manifest.yml").exists():
-            continue
-        name = proj_dir.name
-        # Mirrors lifecycle.is_blocked precedence: quarantine wins if
-        # both markers exist. A directory whose name is no longer a valid
-        # project name (a legacy `-staging` one) fails the first lookup.
-        try:
-            if is_quarantined(name, paths):
-                qstate = read_quarantine_state(name, paths) or {}
-                quarantined.append((name, qstate.get("cve_id", "?")))
-            elif pause_incomplete(name, paths):
-                incomplete.append(name)
-            elif awaiting_deploy(name, paths):
-                awaiting.append(name)
-            elif is_paused(name, paths):
-                paused.append(name)
-            elif is_monitor_stopped(name, paths):
-                stopped.append(name)
-        except PROJECT_INPUT_ERRORS as e:
-            unreadable.append(f"{name} ({e})")
-    parts = [label + text for label, text, names in (
-        ("unreadable state: ", "; ".join(unreadable), unreadable),
-        ("quarantined: ", ", ".join(f"{n} ({c})" for n, c in quarantined), quarantined),
-        ("monitor-stopped: ", ", ".join(stopped) + " (run `recover <project>` once fixed)",
-         stopped),
-        ("pause incomplete: ", ", ".join(incomplete) + " (may still be serving; run `pause "
-         "<project>` again to finish, or `resume <project>`)", incomplete),
-        ("paused, awaiting a deploy: ", ", ".join(awaiting) + " (down behind the "
-         "maintenance page until `prod-deploy <project>`)", awaiting),
-        ("paused: ", ", ".join(paused), paused),
-    ) if names]
-    if unreadable:
-        return HealthCheck("lifecycle", "error", "; ".join(parts))
-    # Warn, never error: an app's critical stop is not a platform failure,
-    # and `health` exit 2 rolls back a platform upgrade in probation.
-    if quarantined or stopped or incomplete or awaiting:
-        return HealthCheck("lifecycle", "warn", "; ".join(parts))
-    if paused:
-        return HealthCheck("lifecycle", "ok", "; ".join(parts))
-    return HealthCheck("lifecycle", "ok", "No projects in blocked states")
-
-
-def check_config_drift(paths: BoxPaths) -> HealthCheck:
-    """Check if generated configs match what they should be."""
-    from boxmunge.caddy import generate_caddy_config
-    from boxmunge.manifest import load_manifest
-
-    if not paths.projects.exists():
-        return HealthCheck("config-drift", "ok", "No projects to check")
-
-    drifted = []
-    unreadable: list[str] = []
-    for project_dir in sorted(paths.projects.iterdir()):
-        if not project_dir.is_dir():
-            continue
-        manifest_path = project_dir / "manifest.yml"
-        if not manifest_path.exists():
-            continue
-        try:
-            manifest = load_manifest(manifest_path)
-            project_name = manifest.get("project", project_dir.name)
-            # Skip blocked projects: when paused/quarantined the .conf
-            # intentionally holds the maintenance fragment, so comparing
-            # against generate_caddy_config produces a false-positive drift
-            # warning. The blocked state itself is reported by `lifecycle`.
-            blocked = is_blocked(project_name, paths)
-        except PROJECT_INPUT_ERRORS as e:
-            unreadable.append(f"{project_dir.name} ({e})")
-            continue
-        if blocked:
-            continue
-        site_conf = paths.project_caddy_site(project_name)
-        override = paths.project_caddy_override(project_name)
-
-        if site_conf.exists() and not override.exists():
-            expected = generate_caddy_config(manifest)
-            if site_conf.read_text() != expected:
-                drifted.append(project_name)
-
-    if unreadable:
-        return HealthCheck(
-            "config-drift", "error",
-            f"Could not check: {'; '.join(unreadable)}",
-        )
-    if drifted:
-        return HealthCheck(
-            "config-drift", "warn",
-            f"Caddy config drifted for: {', '.join(drifted)}",
-        )
-    return HealthCheck("config-drift", "ok", "All generated configs match")
 
 
 def check_recent_errors(paths: BoxPaths) -> HealthCheck:
@@ -384,98 +261,115 @@ def check_recent_errors(paths: BoxPaths) -> HealthCheck:
     return HealthCheck("recent-errors", "ok", "No errors in last 24h")
 
 
-def collect_health(paths: BoxPaths) -> HealthReport:
-    """Run every health check. `health` and the MCP health tool both use this."""
-    report = HealthReport()
-    report.checks.append(check_docker_running())
-    report.checks.append(check_caddy_container())
-    report.checks.append(check_system_container(paths))
-    report.checks.append(check_file_permissions(paths))
-    report.checks.append(check_age_key(paths))
-    report.checks.append(check_project_containers(paths))
-    report.checks.append(check_lifecycle_blocked(paths))
-    report.checks.append(check_config_drift(paths))
-    report.checks.append(check_recent_errors(paths))
+def timeout_detail(e: subprocess.TimeoutExpired) -> str:
+    """A timed-out probe's warning, naming the command."""
+    cmd = " ".join(map(str, e.cmd)) if isinstance(e.cmd, (list, tuple)) else str(e.cmd)
+    return (f"`{cmd}` did not answer within {e.timeout:g}s, so this could not be checked "
+            f"(a busy host does this); run `health` again, and `doctor` if it repeats")
 
-    from boxmunge.health_checks.operational_log import check_operational_log
-    report.checks.append(check_operational_log(paths))
 
-    from boxmunge.health_checks.alerts import check_alerts
-    report.checks.append(check_alerts(paths))
+def _code_defect(e: Exception) -> str | None:
+    """What is broken, when *e* means this release's own code is: a module
+    that cannot be imported, a missing name or module attribute, a syntax
+    error. None for anything a check's input or the host can cause."""
+    if isinstance(e, ImportError):
+        return f"cannot import {e.name or 'a module'}"
+    if isinstance(e, SyntaxError):
+        return f"syntax error in {e.filename}:{e.lineno}"
+    if isinstance(e, NameError):
+        return f"name {e.name!r} is not defined"
+    if isinstance(e, AttributeError) and isinstance(getattr(e, "obj", None), types.ModuleType):
+        return f"module {e.obj.__name__} has no attribute {e.name!r}"
+    return None
 
-    from boxmunge.health_checks.container_updates import check_container_updates
-    report.checks.append(check_container_updates(paths))
 
-    from boxmunge.health_checks.platform_updates import check_platform_updates
-    report.checks.append(check_platform_updates(paths))
+def run_guarded(name: str, check: Callable[[], HealthCheck], paths: BoxPaths) -> HealthCheck:
+    """Run one check so that nothing it raises takes the report down.
 
-    from boxmunge.health_checks.upgrade_probation import check_upgrade_probation
-    report.checks.append(check_upgrade_probation(paths))
+    A timed-out probe warns, naming the command. A PermissionError from a
+    non-root caller (the deploy shell) is a SKIP: the root health timer gives
+    the verdict. A defect in boxmunge's own code (_code_defect) is an error,
+    so an upgrade's probation rolls the release back. Anything else warns
+    with the exception. Both are logged.
+    """
+    try:
+        return check()
+    except subprocess.TimeoutExpired as e:
+        return HealthCheck(name, "warn", timeout_detail(e))
+    except Exception as e:  # noqa: BLE001 -- reported below, never swallowed
+        if isinstance(e, PermissionError) and os.geteuid() != 0:
+            return HealthCheck(name, "skip", f"needs root ({e}); "
+                               f"`sudo boxmunge-server health` checks it")
+        from boxmunge.log import log_error
+        defect = _code_defect(e)
+        message = (f"the {name} check cannot run: this boxmunge release is broken "
+                   f"({defect}; {type(e).__name__}: {e})" if defect else
+                   f"the {name} check failed unexpectedly ({type(e).__name__}: {e})")
+        log_error("health", message, paths)
+        if defect:
+            return HealthCheck(name, "error", f"{message}; reinstall or roll back the release")
+        return HealthCheck(name, "warn", f"{message}; run `health` again, and report it "
+                           f"with this line if it repeats")
 
-    from boxmunge.health_checks.userns import check_docker_userns
-    report.checks.append(check_docker_userns(paths))
 
-    from boxmunge.health_checks.sshd import check_sshd_deploy_env, check_sshd_hardening
-    report.checks.append(check_sshd_hardening())
-    report.checks.append(check_sshd_deploy_env())
-
-    from boxmunge.health_checks.security import (
-        check_cve_hardening_upcoming,
-        check_cve_scan_freshness,
-        check_security_profiles,
-    )
-    report.checks.append(check_security_profiles(paths))
-    report.checks.append(check_cve_scan_freshness(paths))
-    report.checks.append(check_cve_hardening_upcoming(paths))
-    from boxmunge.health_checks.service_users import check_service_users
-    report.checks.append(check_service_users(paths))
-    from boxmunge.health_checks.registry import check_registry_drift
-    report.checks.append(check_registry_drift(paths))
-
-    # Host hardening checks
-    from boxmunge.health_checks.hardening import (
-        check_aide_status,
-        check_auditd,
-        check_crowdsec,
-        check_sysctl_hardening,
-        check_systemd_timers,
-        check_ufw,
-    )
-    from boxmunge.health_checks.os_updates import check_os_updates
-
+def _ssh_port(paths: BoxPaths) -> int:
     from boxmunge.config import ConfigError, load_config
     from boxmunge.log import log_warning
-
     try:
-        config = load_config(paths)
-        ssh_port = config.get("ssh_port", 922)
+        return load_config(paths).get("ssh_port", 922)
     except ConfigError as e:
-        log_warning(
-            "health",
-            f"could not load config, defaulting ssh_port=922: {e}",
-            paths,
-        )
-        ssh_port = 922
+        log_warning("health", f"could not load config, defaulting ssh_port=922: {e}", paths)
+        return 922
 
-    # Host-hardening probes shell out to system tools and read root-owned
-    # paths, so they are the most likely to raise from a non-root caller
-    # (e.g. the deploy shell). Guard each one: a single check that raises
-    # must never crash the whole health command — surface it as a neutral
-    # SKIP carrying the error instead.
-    def _safe(name: str, fn) -> "HealthCheck":
-        try:
-            return fn()
-        except Exception as e:  # noqa: BLE001 — robustness over precision here
-            return HealthCheck(name, "skip", f"check could not run: {e}")
 
-    report.checks.append(_safe("ufw", lambda: check_ufw(ssh_port=ssh_port)))
-    report.checks.append(_safe("crowdsec", check_crowdsec))
-    report.checks.append(_safe("aide", check_aide_status))
-    report.checks.append(_safe("auditd", check_auditd))
-    report.checks.append(_safe("auto-updates", check_os_updates))
-    report.checks.append(_safe("sysctl", check_sysctl_hardening))
-    report.checks.append(_safe("timers", check_systemd_timers))
-    return report
+def _in(module: str, func: str, *args, **kwargs) -> Callable[[], HealthCheck]:
+    """boxmunge.health_checks.<module>.<func>(*args, **kwargs), imported when
+    the check runs, so a module that cannot be imported fails only its check."""
+    def check() -> HealthCheck:
+        mod = importlib.import_module(f"boxmunge.health_checks.{module}")
+        return getattr(mod, func)(*args, **kwargs)
+    return check
+
+
+def _checks(paths: BoxPaths) -> list[tuple[str, Callable[[], HealthCheck]]]:
+    """(name, check) for every health check, in report order."""
+    return [
+        ("docker", check_docker_running),
+        ("caddy", check_caddy_container),
+        ("system-container", lambda: check_system_container(paths)),
+        ("permissions", lambda: check_file_permissions(paths)),
+        ("age-key", lambda: check_age_key(paths)),
+        ("project-containers", _in("projects", "check_project_containers", paths)),
+        ("lifecycle", _in("projects", "check_lifecycle_blocked", paths)),
+        ("config-drift", _in("projects", "check_config_drift", paths)),
+        ("recent-errors", lambda: check_recent_errors(paths)),
+        ("operational-log", _in("operational_log", "check_operational_log", paths)),
+        ("alerts", _in("alerts", "check_alerts", paths)),
+        ("container-updates", _in("container_updates", "check_container_updates", paths)),
+        ("platform-updates", _in("platform_updates", "check_platform_updates", paths)),
+        ("upgrade-probation", _in("upgrade_probation", "check_upgrade_probation", paths)),
+        ("docker-userns", _in("userns", "check_docker_userns", paths)),
+        ("sshd-hardening", _in("sshd", "check_sshd_hardening")),
+        ("sshd-deploy-env", _in("sshd", "check_sshd_deploy_env")),
+        ("security-profiles", _in("security", "check_security_profiles", paths)),
+        ("cve-scan", _in("security", "check_cve_scan_freshness", paths)),
+        ("cve-hardening", _in("security", "check_cve_hardening_upcoming", paths)),
+        ("service-users", _in("service_users", "check_service_users", paths)),
+        ("registry", _in("registry", "check_registry_drift", paths)),
+        ("ufw", lambda: _in("hardening", "check_ufw", ssh_port=_ssh_port(paths))()),
+        ("crowdsec", _in("hardening", "check_crowdsec")),
+        ("aide", _in("hardening", "check_aide_status")),
+        ("auditd", _in("hardening", "check_auditd")),
+        ("auto-updates", _in("os_updates", "check_os_updates")),
+        ("sysctl", _in("hardening", "check_sysctl_hardening")),
+        ("timers", _in("hardening", "check_systemd_timers")),
+    ]
+
+
+def collect_health(paths: BoxPaths) -> HealthReport:
+    """Run every health check. `health` and the MCP health tool both use this."""
+    return HealthReport(checks=[run_guarded(name, check, paths)
+                                for name, check in _checks(paths)])
 
 
 def run_health(paths: BoxPaths, *, as_json: bool = False) -> int:

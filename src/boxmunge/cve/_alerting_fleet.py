@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 
 from boxmunge.cve._alerting_types import Alert
+from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
 from boxmunge.cve.suppressions import Suppression
 
@@ -18,38 +19,71 @@ _MAX_LINES = 20
 
 
 def format_kev_stale_alert(
-    fetched_at: datetime | None, *, stale: bool = True, rejected: str | None = None,
+    kev: KevCatalog, *, stale_reason: str | None, tried: Sequence[str],
 ) -> Alert:
-    """The CISA KEV catalog is stale/missing, or this run's refresh was
-    rejected by the sanity floor.
+    """The CISA KEV catalog is stale/missing, or this run's refresh failed
+    in a way that needs the operator (a rejected catalog, a bad config).
+
+    ``stale_reason`` says which freshness condition fired (None if the
+    cached catalog is still fresh); ``tried`` is one line per source this
+    run tried, with its error or that it answered.
 
     Priority 1 because a degraded KEV feed silently disables the only
     quarantine trigger of relaxed and balanced (the default) — the operator
     must know the exploitation-signal protection is at risk.
     """
-    when = fetched_at.isoformat() if fetched_at else "never fetched"
-    if stale:
+    if stale_reason is not None:
         title = "CISA KEV feed stale — exploitation defense degraded"
-        state = "The cached CISA Known Exploited Vulnerabilities catalog is stale or missing."
+        lines = ["The cached CISA Known Exploited Vulnerabilities catalog is stale "
+                 "or missing.", f"Why: {stale_reason}."]
     else:
         title = "CISA KEV refresh rejected — previous catalog kept"
-        state = (
-            "The cached CISA Known Exploited Vulnerabilities catalog is still "
-            "fresh, but it will go stale if the feed stays broken."
-        )
-    lines = [state, f"Last good fetch: {when}"]
-    if rejected:
-        lines.append(f"This run's refresh was rejected: {rejected}.")
+        lines = ["The cached CISA Known Exploited Vulnerabilities catalog is still "
+                 "fresh, but it will go stale if the sources stay broken."]
+    lines.append(
+        f"Cached catalog: released {_iso(kev.released_at, 'unknown')}, last fetched "
+        f"{_iso(kev.fetched_at, 'never fetched')}, from {kev.source or 'no source'} "
+        f"({len(kev.cve_ids)} CVEs).")
+    if tried:
+        lines.append("Sources tried this run, in order:")
+        lines += [f"- {line}" for line in tried]
     lines += [
         "",
         "KEV-based quarantine is fail-safe (sites stay up), so actively-"
         "exploited CVEs will NOT be auto-quarantined once the catalog is "
         "stale. Under posture relaxed and balanced (the default) KEV is the "
         "only quarantine trigger: until the catalog is fresh again, nothing "
-        "can quarantine those projects. Check egress to cisa.gov and the "
-        "cve-scan log.",
+        "can quarantine those projects. Check egress to the sources above "
+        "(kev.sources in boxmunge.yml sets them) and the cve-scan log.",
     ]
     return Alert(kind="kev_stale", title=title, body="\n".join(lines), priority=1)
+
+
+def format_kev_withdrawn_alert(source: str | None, withdrawn: Sequence[str]) -> Alert:
+    """The refreshed KEV catalog no longer lists a few CVEs the cached one
+    did. Accepted (CISA does withdraw the odd entry). Normal priority: a
+    quarantine held for one of them is kept with its own P1, and more
+    withdrawals than that are rejected with a P1 instead."""
+    n = len(withdrawn)
+    return Alert(
+        kind="kev_withdrawn",
+        title=f"CISA KEV no longer lists {n} CVE{'s' if n != 1 else ''}",
+        body="\n".join([
+            f"The KEV catalog from {source} no longer lists:",
+            *(f"- {cve}" for cve in withdrawn),
+            "",
+            "They no longer count as actively exploited. A quarantine held for one "
+            "of them is not lifted automatically while its images still contain it: "
+            "scans and deploys keep it, a priority-1 alert names the project, and "
+            "`boxmunge security resume <project>` accepts the withdrawal. Check "
+            "CISA's KEV page if this is unexpected.",
+        ]),
+        priority=0,
+    )
+
+
+def _iso(value: datetime | None, missing: str) -> str:
+    return value.isoformat() if value else missing
 
 
 def format_scan_failure_alert(problems: dict[str, list[str]]) -> Alert:

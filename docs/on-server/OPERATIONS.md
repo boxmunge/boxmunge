@@ -1551,28 +1551,37 @@ health
 health --json
 ```
 
-Exit codes: 0 = healthy, 1 = warnings, 2 = issues requiring attention. `health` is not run on a
-schedule; run it after any change to the box and whenever an alert arrives. A check that cannot run
-(for example one that needs root, run from the deploy shell) reports `SKIP`, which does not affect
-the exit code. The MCP `health` tool runs the same checks.
+Exit codes: 0 = healthy, 1 = warnings, 2 = issues requiring attention. Run it after any change to
+the box and whenever an alert arrives. A check that cannot run (for example one that needs root,
+run from the deploy shell) reports `SKIP`, which does not affect the exit code. The MCP `health`
+tool runs the same checks.
+
+Outside an upgrade nothing runs `health` on a schedule: the 5-minute health timer runs `check-all`
+(the per-project checks and alerts). A platform upgrade runs `health` as root twice over: once
+right after it switches to the new release (60-second budget), then on every health-timer fire for
+the 6-hour probation that follows (`boxmunge-upgrade check-probation`, 180-second budget). An exit
+of 2 from either rolls the platform back to the previous release and blocklists the new one, so
+auto-update does not retry it (`sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist <version>`
+forgets it). Exit 0 or 1 keeps the release; a `health` that runs past its budget is retried on the
+next fire, not rolled back.
 
 | Check | Warns (or errors) when | What to do |
 |---|---|---|
-| `docker`, `caddy`, `system-container` | Docker, the Caddy container or the boxmunge-system container is not running (error) | `doctor`, then the supervisor user restarts the component |
+| `docker`, `caddy`, `system-container` | Docker, the Caddy container or the boxmunge-system container is missing or not running, or Caddy is restarting, on two probes 5 seconds apart (error; a container being recreated, as container-update does to Caddy, passes the second probe); Caddy runs but is starting or unhealthy, or a probe timed out or failed for another reason (warning) | `doctor`, then the supervisor user restarts the component |
 | `system-container` | boxmunge-system runs an image built from an older definition than `/opt/boxmunge/system` (an upgrade's rebuild failed, so it still has the previous Alpine, age and rclone; warning, backups still work) | fix what stopped the build (the upgrade's output says), then the supervisor user runs `sudo docker compose -f /opt/boxmunge/system/compose.yml up -d --build`; the next upgrade also retries it |
 | `permissions`, `age-key` | the backup key or host secrets have the wrong mode, or the backup key is missing or invalid | fix as the supervisor user |
-| `project-containers`, `lifecycle` | a deployed project has no running containers, or is quarantined or stopped by the health monitor | `check <project>`, `logs <project>`, `recover <project>` |
-| `config-drift` | a project's Caddy site config differs from what its manifest generates | redeploy the project |
+| `project-containers`, `lifecycle` | a deployed project has no running containers, or is quarantined or stopped by the health monitor, or its state cannot be read (warning; the detail names the file and the fix) | `check <project>`, `logs <project>`, `recover <project>` |
+| `config-drift` | a project's Caddy site config differs from what its manifest generates, or its manifest cannot be read | redeploy the project; `validate <project>` names a manifest problem |
 | `recent-errors` | more than 10 errors in the log in the last 24 hours, or torn lines in the log that may have been errors | `log --level error --since 24h --all` (`log --since 24h` lists torn lines) |
 | `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
-| `platform-updates` | a security or break-fix release cannot be installed automatically | see [Upgrading the Platform](#upgrading-the-platform) |
+| `platform-updates` | a security or break-fix release cannot be installed automatically, or the version-check service has given no usable answer for 48 hours | see [Upgrading the Platform](#upgrading-the-platform) |
 | `upgrade-probation` | a platform upgrade's probation expired more than 30 minutes ago and the health timer has not promoted it, or `probation.json` cannot be read | the supervisor user runs `sudo /opt/boxmunge/bin/boxmunge-upgrade check-probation` to see why; `sudo rm /opt/boxmunge/upgrade-state/probation.json` accepts the release, as does `backup <project>` from the deploy shell when it can read the file |
 | `docker-userns` | Docker does not remap user namespaces yet, remaps them with another identity, or a source cannot be read on a box boxmunge has not remapped (warning; deploys go on); or the record or `daemon.json` claims boxmunge's remap and a source disagrees, or a remapped box's `caddy/Caddyfile` is not a world-readable regular file (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
 | `security-profiles` | a service runs with `profile: off` | review the reason in its manifest |
 | `service-users` | a deployed project's services have no recorded user yet (its next deploy decides them, and refuses an undeclared root registry image) | `doctor` lists the lines to add; see [Service Users After an Upgrade](#service-users-after-an-upgrade) |
 | `registry` | a registered project's directory is gone but its deploy, scan or health state is not (a removal that did not finish); a name never deployed is ok | the supervisor user runs `sudo boxmunge-server project-forget <project>` |
-| `sshd-hardening`, `sshd-deploy-env` | `00-boxmunge.conf` is missing or changed, or a later sshd setting widens what deploy accepts (error; `sshd-deploy-env` needs root) | the supervisor user re-runs the installer, or removes the widening setting |
+| `sshd-hardening`, `sshd-deploy-env` | `00-boxmunge.conf` is missing or changed, or `sshd -T` shows a later setting widening what deploy accepts (error; `sshd-deploy-env` needs root); `sshd -T` itself fails or times out (warning) | the supervisor user re-runs the installer, or removes the widening setting; `sudo sshd -t` names a config error |
 | `operational-log` | the active log file's first line is not a log entry, which stops all logging | move the file aside (see [Reading Logs](#reading-logs)) |
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
 | `cve-hardening` | under posture `strict` or `paranoid`, a finding will quarantine from 0.12 because a compose-only service lacks `read_only: true` (or the manifest adds `cap_add` / `no_new_privileges: false`); not quarantined now | add `read_only: true` in compose.yml, or declare the service in the manifest; to accept the risk instead, suppress the CVE after review or choose `security.posture: balanced` (KEV-only quarantine); `security <project>` names it |
@@ -1580,9 +1589,25 @@ the exit code. The MCP `health` tool runs the same checks.
 | `auto-updates` | OS security updates are not being fetched or installed | see [OS security updates](#os-security-updates) |
 | `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, container-update, cve-scan) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
 
-`health` exiting 2 during the probation after a platform upgrade rolls the upgrade back, so only a
-broken platform reports an error: Docker, Caddy, the system container, the backup key, sshd, the
-firewall, the userns remap, or state boxmunge cannot read. Every other check warns.
+Because exit 2 during probation rolls the upgrade back, only two things report an error. One is a
+platform component a probe saw broken: Docker not running (`docker info` fails) or its CLI
+missing, Caddy missing, stopped, restarting or from another compose project, the system container
+missing or wrong (a missing, stopped or restarting container only if a second probe 5 seconds later
+agrees), the backup key missing or unreadable, sshd's drop-in changed or widened, the
+firewall off or not installed, or the userns remap inconsistent. The other is a defect in the
+release's own code: a check whose module cannot be imported, or that hits a missing name or module
+attribute or a syntax error, is an error naming what is broken, so the release is rolled back.
+Everything else warns:
+
+- a project whose files cannot be read (its manifest, a torn quarantine or pause marker, a
+  directory named `<x>-staging` from before 0.10.1) is named under `lifecycle`,
+  `project-containers` or `config-drift` with the cause and the fix, and the rest of the report
+  still runs;
+- a probe that does not answer in time (`docker info`, `docker inspect`, `ufw status`, `sshd -T`,
+  `docker compose ps`) warns, naming the command: a busy host is not a broken platform. So does
+  `ufw status` failing (often a held xtables lock), since it says nothing about the firewall;
+- any other exception from a check (bad data it did not expect, say) warns with the exception and
+  is logged (`log --component health`) instead of crashing the report.
 
 ### User-namespace remapping
 
@@ -1852,13 +1877,30 @@ that fails is rolled back and blocklisted on this box. The auto-update log
 entry names the class that was applied (`log --component auto-update`).
 
 Releases are discovered through the version-check service at boxmunge.dev.
-If it is unreachable or answers in an unexpected shape, auto-update falls
-back to the GitHub releases list, applying the same rules to the markers in
-each release's title or notes (`[security]`, `[breakfix]`, `[breaking]`), and
-logs a warning. A failed upgrade is also reported there (see "What boxmunge
-sends home" below). Reporting is best-effort: if it cannot be sent the upgrade
-log says so and the upgrade outcome is unchanged. `BOXMUNGE_VERSION_CHECK_URL`
-points both calls at another service (the test suites use it to stay offline).
+Its answer also names any release its circuit breaker holds (withdrawn as
+broken). A held release is never installed automatically, and auto-update
+logs the hold; `upgrade --target <version>` still installs it deliberately.
+
+If the service cannot be reached at all (DNS, connection or timeout
+failure), auto-update falls back to the GitHub releases list, applying the
+same rules to the markers in each release's title or notes (`[security]`,
+`[breakfix]`, `[breaking]`), and logs a warning. If the service answers but
+the answer cannot be used (an HTTP error such as its rate limit's 429, a
+redirect to somewhere unreachable, or an unexpected shape), nothing is
+installed and the check fails with the reason: GitHub cannot know about
+holds, so its answer could install a held release. The next run (every 6
+hours) tries again. A security release can therefore wait while the service
+answers with errors; that is the price of never installing a release the
+maintainer has held. So it is never silent: once the service has gone 48
+hours without a usable answer, `health` reports `platform-updates` as
+`WARN`, naming the last error (state in
+`/opt/boxmunge/state/update-discovery.json`).
+
+A failed upgrade is also reported to the version-check service (see "What
+boxmunge sends home" below). Reporting is best-effort: if it cannot be sent
+the upgrade log says so and the upgrade outcome is unchanged.
+`BOXMUNGE_VERSION_CHECK_URL` points both calls at another service (the test
+suites use it to stay offline).
 (The version-check service's stats page is for its maintainer only: browsers sign in
 with a passkey, and scripts read the JSON counts with an `Authorization: Bearer` header.
 No secret ever travels in a URL, so none reaches the proxy's access log.)
@@ -2178,7 +2220,7 @@ Scan cadence:
 Inspect state:
 
 ```
-boxmunge security                    # fleet summary
+boxmunge security                    # fleet summary (incl. KEV catalog source and freshness)
 boxmunge security myapp              # per-project view
 boxmunge security --json             # machine-readable
 ```

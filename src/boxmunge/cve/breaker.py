@@ -12,7 +12,7 @@ priority 1, and left running — until an operator applies them with
 
 KEV-triggered quarantines are never held: active exploitation is exactly
 when blast radius is acceptable. A bad KEV feed is caught earlier, by the
-refresh sanity floor in kev.py.
+refresh checks in kev_refresh.py.
 
 Held state lives in ``state/cve-breaker.json`` so later scans — including
 single-project scans, which see N=1 and can never trip — keep holding a

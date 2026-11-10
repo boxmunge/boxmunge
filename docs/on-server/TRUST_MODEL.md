@@ -420,7 +420,12 @@ included) is breaking, and never into a new major version. A box that
 cannot reach a security or break-fix release for that reason alerts its
 operator and reports a `platform-updates` health warning instead. The
 version-check circuit breaker can hold a broken security or break-fix
-release fleet-wide.
+release fleet-wide. A box honours a hold whenever the service answers: a
+held release is never installed. GitHub is consulted only when the service
+cannot be reached at all; an error answer from the service (a 429, a 5xx, a
+malformed body) fails the check instead, because GitHub cannot know about
+holds. While the service is unreachable a hold cannot be seen, so a held
+release could still arrive through the GitHub fallback until it returns.
 
 The class and the breaking flag are decided from `releases.json` alone. The
 release workflow refuses to build a tag that is not listed there with a
@@ -545,7 +550,7 @@ The trust-model assumptions for this layer are explicit:
 
 - **Trivy's vulnerability database is correct.** False negatives in the DB pass through silently; false positives produce noise but never an unsafe outcome.
 - **Suppressions are honest operator decisions.** A suppression is a signed-off declaration that a CVE has been reviewed and judged not exploitable in the deployed config. boxmunge does not second-guess it, with one exception: a suppression never applies to a CVE on the KEV catalog (`suppress` refuses one, and an older suppression stops applying on the first scan after CISA lists the CVE). Otherwise the audit trail, the `until` date (at most 90 days ahead) and the expiry alert are the controls.
-- **The CISA KEV catalog is current.** It is refreshed before every scan; a stale or rejected catalog is alerted at priority 1, and while it is stale the KEV gate is off (fail toward uptime, never toward quarantine).
+- **The CISA KEV catalog is current.** It is refreshed before every scan, from CISA's feed or, if that fails, CISA's GitHub mirror (an ordered list of trusted sources, `kev.sources` in `boxmunge.yml`). It is stale when no catalog has been accepted for 8 days, or when its own release date is over 21 days old (a lagging mirror). A stale or rejected catalog is alerted at priority 1 with each source's error, and while it is stale the KEV gate is off (fail toward uptime, never toward quarantine).
 - **The operator is responsible for revisiting suppressions before they expire.** boxmunge enforces expiry mechanically (the finding becomes active again on the next scan after `until`) and emits a high-priority Pushover alert; what it cannot do is decide whether the CVE has actually been mitigated upstream or in the deployed code.
 
 Like the rest of the trust model, this layer assumes a single trusted operator. There is no per-project review delegation and no multi-party approval for suppressions; the audit log is the only record of who signed off on what. See `agent-help cve` for the policy reference and `agent-help cve-incident` for the response playbook.

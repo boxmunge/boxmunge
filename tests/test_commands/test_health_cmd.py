@@ -10,10 +10,9 @@ from boxmunge.commands.health_cmd import (
     HealthCheck,
     HealthReport,
     check_age_key,
-    check_config_drift,
     check_file_permissions,
-    check_lifecycle_blocked,
 )
+from boxmunge.health_checks.projects import check_config_drift, check_lifecycle_blocked
 from boxmunge.paths import BoxPaths
 
 
@@ -52,8 +51,9 @@ class TestHealthReport:
         def boom(*a, **k):
             raise PermissionError(13, "Permission denied")
 
-        # Make one hardening probe explode.
+        # Make one hardening probe explode, as the non-root deploy shell.
         monkeypatch.setattr(hardening, "check_aide_status", boom)
+        monkeypatch.setattr("os.geteuid", lambda: 1000)
 
         paths = BoxPaths(root=tmp_path / "bm")
         # Should return an int exit code, not raise.
@@ -295,7 +295,7 @@ class TestCheckProjectContainersSkipsQuarantined:
         self, tmp_path: Path,
     ) -> None:
         from unittest.mock import patch
-        from boxmunge.commands.health_cmd import check_project_containers
+        from boxmunge.health_checks.projects import check_project_containers
         paths = BoxPaths(root=tmp_path / "bm")
         for d in ["config"]:
             (paths.root / d).mkdir(parents=True, exist_ok=True)
@@ -309,7 +309,7 @@ class TestCheckProjectContainersSkipsQuarantined:
         # If subprocess.run gets called, it means we did NOT skip the
         # quarantined project. Make it explode if invoked.
         with patch(
-            "boxmunge.commands.health_cmd.subprocess.run",
+            "boxmunge.health_checks.projects.subprocess.run",
             side_effect=AssertionError(
                 "subprocess.run must not be called for a quarantined project",
             ),
@@ -347,8 +347,8 @@ class TestSshPortLookup:
                 "boxmunge.commands.health_cmd.check_system_container",
                 "boxmunge.commands.health_cmd.check_file_permissions",
                 "boxmunge.commands.health_cmd.check_age_key",
-                "boxmunge.commands.health_cmd.check_project_containers",
-                "boxmunge.commands.health_cmd.check_config_drift",
+                "boxmunge.health_checks.projects.check_project_containers",
+                "boxmunge.health_checks.projects.check_config_drift",
                 "boxmunge.commands.health_cmd.check_recent_errors",
             ]:
                 stack.enter_context(patch(t, return_value=ok_check))

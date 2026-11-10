@@ -2543,6 +2543,8 @@ def test_resume_lift_section_holds_project_lock(monkeypatch, tmp_path) -> None:
     # Pre-render the caddy site to avoid prepare_caddy_config errors.
     paths.project_caddy_site("demo").parent.mkdir(parents=True, exist_ok=True)
     paths.project_caddy_site("demo").write_text("dummy")
+    from tests.test_commands.cve_helpers import fresh_kev
+    fresh_kev(monkeypatch)
     monkeypatch.setattr(
         "boxmunge.commands.quarantine_lift.prepare_caddy_config",
         render_site,
@@ -2714,6 +2716,8 @@ def test_resume_audit_only_does_not_write_scan_state(
     _wire_resume_lift_stubs(monkeypatch)
 
     write_calls: list = []
+    from tests.test_commands.cve_helpers import fresh_kev
+    fresh_kev(monkeypatch)
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.write_scan_state",
         lambda *a, **k: write_calls.append((a, k)),
@@ -2741,6 +2745,8 @@ def test_resume_audit_only_does_not_emit_scan_alerts(
     _wire_resume_lift_stubs(monkeypatch)
 
     emit_calls: list = []
+    from tests.test_commands.cve_helpers import fresh_kev
+    fresh_kev(monkeypatch)
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.emit_scan_alerts",
         lambda **kwargs: emit_calls.append(kwargs),
@@ -3062,6 +3068,7 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
     kev = KevCatalog(
         cve_ids=frozenset({"CVE-2023-45853"}),
         fetched_at=datetime(2026, 7, 1, tzinfo=timezone.utc),
+        released_at=datetime(2026, 7, 1, tzinfo=timezone.utc), source="test",
     )
 
     # Pin the scan's notion of "today" to the catalog's fetch date so the KEV
@@ -3102,9 +3109,10 @@ def test_fleet_scan_fires_priority1_kev_stale_alert(
     stale_kev = KevCatalog(
         cve_ids=frozenset(),
         fetched_at=datetime(2020, 1, 1, tzinfo=timezone.utc),
+        released_at=datetime(2020, 1, 1, tzinfo=timezone.utc), source="test",
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.load_kev",
+        "boxmunge.commands.security_kev.load_kev",
         lambda paths: stale_kev,
     )
 
@@ -3131,6 +3139,9 @@ def test_fleet_scan_fires_priority1_kev_stale_alert(
         return len(alerts)
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.send_alerts", fake_send_alerts,
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_kev.send_alerts", fake_send_alerts,
     )
 
     rc = cmd_security_scan([], paths)

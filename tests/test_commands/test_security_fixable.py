@@ -17,7 +17,7 @@ _XZ = "CVE-2024-3094"
 
 
 def _kev(*ids: str) -> KevCatalog:
-    return KevCatalog(frozenset(ids), datetime.now(timezone.utc))
+    return KevCatalog(frozenset(ids), datetime.now(timezone.utc), datetime.now(timezone.utc), 'test')
 
 
 @pytest.fixture

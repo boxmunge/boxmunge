@@ -131,7 +131,7 @@ def test_discovery_reports_a_planted_blocklist_as_an_error_action(
     with patch("boxmunge.commands.discover_update_cmd.BoxPaths", return_value=paths), \
             patch("boxmunge.upgrade_discovery.read_installed_version", return_value="0.3.5"), \
             patch("boxmunge.upgrade_discovery._check_endpoint", return_value={}), \
-            patch("boxmunge.upgrade_discovery._read_endpoint", return_value=(candidate, None)):
+            patch("boxmunge.upgrade_discovery._read_endpoint", return_value=(candidate, None, [])):
         with pytest.raises(SystemExit) as exc:
             _within(lambda: cmd_discover_update(["--json"]), fifo)
     assert exc.value.code == 0

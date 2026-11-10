@@ -236,19 +236,21 @@ def _no_kev_network(monkeypatch):
     _fresh_empty = KevCatalog(
         cve_ids=frozenset(),
         fetched_at=datetime.now(timezone.utc),
+        released_at=datetime.now(timezone.utc),
+        source="test",
     )
 
-    monkeypatch.setattr(
-        "boxmunge.cve.kev.refresh_kev", lambda paths: None,
-    )
-    from boxmunge.cve.kev import KevRefresh
+    from boxmunge.cve.kev_refresh import KevRefresh
 
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.refresh_kev",
-        lambda paths: KevRefresh(updated=False),
+        "boxmunge.cve.kev_refresh.refresh_kev", lambda paths: KevRefresh(source=None),
     )
     monkeypatch.setattr(
-        "boxmunge.commands.security_actions.load_kev", lambda paths: _fresh_empty,
+        "boxmunge.commands.security_kev.refresh_kev",
+        lambda paths: KevRefresh(source=None),
+    )
+    monkeypatch.setattr(
+        "boxmunge.commands.security_kev.load_kev", lambda paths: _fresh_empty,
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.load_kev", lambda paths: _fresh_empty,
@@ -324,6 +326,12 @@ def tmp_root(tmp_path: Path) -> Path:
 def paths(tmp_root: Path) -> BoxPaths:
     """BoxPaths pointing at a temporary root."""
     return BoxPaths(root=tmp_root)
+
+
+@pytest.fixture(autouse=True)
+def _no_container_reprobe_wait(monkeypatch):
+    """health re-probes a missing Caddy or system container after 5 s; not in tests."""
+    monkeypatch.setattr("boxmunge.commands.health_cmd.REPROBE_DELAY", 0)
 
 
 @pytest.fixture(autouse=True)

@@ -95,7 +95,7 @@ def test_health_and_doctor_include_the_check() -> None:
     import inspect
 
     from boxmunge.commands import check, doctor, health_cmd
-    assert "check_docker_userns" in inspect.getsource(health_cmd.collect_health)
+    assert "check_docker_userns" in inspect.getsource(health_cmd._checks)
     assert "check_docker_userns" in inspect.getsource(doctor.run_doctor)
     assert "alert_docker_userns" in inspect.getsource(check.run_check_all)
 
