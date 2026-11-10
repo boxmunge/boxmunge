@@ -3,7 +3,8 @@
 """CI's `ci-ok` job: pass only if every job it needs succeeded.
 
 The one check main's ruleset requires, so the ruleset need not name each job
-(the userns-dind matrix names carry image digests Dependabot changes). Reads
+(the sharded matrix jobs' names carry their shard and daemon, and change with
+them; `needs` reports each matrix as one job). Reads
 the `needs` context as JSON from NEEDS and the event name from EVENT. A job
 may be skipped only where its workflow skips it on purpose: dco runs on pull
 requests only. Anything else, including cancelled, fails.

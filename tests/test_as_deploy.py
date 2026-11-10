@@ -11,11 +11,13 @@ from boxmunge.as_deploy import run_as_deploy
 
 
 def test_a_timeout_kills_everything_the_command_started(tmp_path: Path) -> None:
+    # The timeout leaves the shell ample time to start its child, also on a
+    # machine whose every CPU is busy running the suite in parallel.
     with pytest.raises(subprocess.TimeoutExpired):
         run_as_deploy(["sh", "-c", "sleep 300 & echo $! > child.pid; wait"], tmp_path,
-                      supplementary_groups=False, timeout=1)
+                      supplementary_groups=False, timeout=10)
     child = int((tmp_path / "child.pid").read_text())
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         try:
             os.kill(child, 0)

@@ -57,8 +57,8 @@ def test_build_refuses_a_loader_that_misses_a_library(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("needle", [
-    "python3 scripts/build-shim.py scripts/boxmunge-upgrade dist/.stage/boxmunge/scripts/boxmunge-upgrade",
-    "rm -rf dist/.stage/boxmunge/scripts/boxmunge-upgrade.d",
+    "python3 scripts/build-shim.py scripts/boxmunge-upgrade $(STAGE)/boxmunge/scripts/boxmunge-upgrade",
+    "rm -rf $(STAGE)/boxmunge/scripts/boxmunge-upgrade.d",
 ])
 def test_bundle_ships_the_built_shim(needle: str) -> None:
     assert needle in (REPO / "Makefile").read_text()

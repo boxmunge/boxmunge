@@ -54,17 +54,20 @@ def _read_version() -> str:
 
 
 @pytest.fixture(scope="module")
-def bundle_path() -> Path:
+def bundle_path(tmp_path_factory: pytest.TempPathFactory) -> Path:
     if shutil.which("make") is None:
         pytest.skip("make not available")
+    # Built outside the checkout, so parallel test workers (and a developer's
+    # own `make bundle`) never share dist/.stage.
+    dist = tmp_path_factory.mktemp("dist")
     subprocess.run(
-        ["make", "bundle"],
+        ["make", "bundle", f"DIST={dist}"],
         cwd=REPO_ROOT,
         check=True,
         capture_output=True,
     )
     version = _read_version()
-    path = REPO_ROOT / "dist" / f"boxmunge-{version}.tar.gz"
+    path = dist / f"boxmunge-{version}.tar.gz"
     assert path.is_file(), f"bundle not built at {path}"
     return path
 
