@@ -436,9 +436,10 @@ release between the box's version and the candidate (the candidate
 included) is breaking, and never into a new major version. A box that
 cannot reach a security or break-fix release for that reason alerts its
 operator and reports a `platform-updates` health warning instead. The
-version-check circuit breaker can hold a broken security or break-fix
-release fleet-wide. A box honours a hold whenever the service answers: a
-held release is never installed. GitHub is consulted only when the service
+version-check circuit breaker can hold a broken release fleet-wide. A box
+honours a hold whenever the service answers: a held release (a feature
+release too) is never installed, automatically or by a plain `upgrade`;
+only `upgrade --target` installs it, deliberately. GitHub is consulted only when the service
 cannot be reached at all; an error answer from the service (a 429, a 5xx, a
 malformed body) fails the check instead. On GitHub a hold is the `[held]`
 marker in a release's title, which only someone with write access to the

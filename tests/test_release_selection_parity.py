@@ -175,7 +175,18 @@ def test_shipped_catalog_agrees_for_every_listed_caller():
 
 # (releases, caller, held versions): the service's circuit-breaker holds
 # against the same versions marked [held] in their GitHub titles.
+# A feature release on top of a break-fix one: held as `latest`.
+FEATURE_TOP = [
+    ("0.30.0", "feature", False),
+    ("0.30.1", "breakfix", False),
+    ("0.31.0", "feature", False),
+]
+
 HOLD_SCENARIOS = [
+    (FEATURE_TOP, "0.30.0", {"0.31.0"}),
+    (FEATURE_TOP, "0.30.1", {"0.31.0"}),
+    (FEATURE_TOP, "0.30.0", {"0.30.1", "0.31.0"}),
+    (LINES, "0.12.2", {"1.0.1"}),
     (LINES, "0.10.3", {"0.11.2"}),
     (LINES, "0.12.0", {"0.12.2"}),
     (LINES, "0.12.0", {"0.12.1", "0.12.2"}),
@@ -208,3 +219,20 @@ def test_holds_agree_via_endpoint_and_via_github(tmp_path, mode, releases, calle
     assert _outcome(via_github) == _outcome(via_endpoint)
     assert via_github.get("source", "github") == "github"
     assert via_github["action"] != "upgrade" or via_github["version"] not in held
+
+
+@pytest.mark.parametrize("caller, expected", [("0.30.0", "upgrade"), ("0.30.1", "error")])
+def test_a_held_feature_release_is_never_installed_by_upgrade(tmp_path, caller, expected):
+    """`latest` held: a manual upgrade takes the newest unheld release, or
+    refuses, naming the deliberate route; never the held release."""
+    entries = _service_entries(FEATURE_TOP)
+    offers, held = catalog.apply_holds(catalog.select_offers(entries, caller),
+                                       {"0.31.0"}.__contains__)
+    body = catalog.check_response(offers, held, catalog.find_blocked(entries, caller))
+    with patch("urllib.request.OpenerDirector.open", return_value=_response(body)):
+        result = discover_update(_box(tmp_path, caller), mode="latest")
+    assert result["action"] == expected
+    if expected == "upgrade":
+        assert result["version"] == "0.30.1"
+    else:
+        assert "upgrade --target 0.31.0" in result["message"]

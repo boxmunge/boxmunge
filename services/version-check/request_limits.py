@@ -3,8 +3,8 @@
 - client_key: the rate-limit key for a client address (IPv6 by /64, since one
   host commonly owns a whole /64).
 - RateLimiter: fixed-window per-client request limit with bounded memory.
-- RequestLimiter: the service-wide limit, per client, then per network once
-  the client table is full.
+- RequestLimiter: a per-client limit, then per network once the client
+  table is full (the service-wide request limit and STATS_SECRET guesses).
 - CheckCounter: aggregates /v1/check counts in memory and flushes them to
   SQLite periodically, so an unauthenticated request never waits on a write.
 
@@ -27,6 +27,7 @@ import db
 
 # Why RateLimiter.admit refused a request.
 LIMITED = "limited"
+NETWORK_LIMITED = "network_limited"  # RequestLimiter: the client's network used its limit
 FULL = "full"
 
 
@@ -116,17 +117,18 @@ class RateLimiter:
 
 
 class RequestLimiter:
-    """The service-wide request limit: per client, overflowing to per network.
+    """A per-client limit, overflowing to per network.
 
     Each client (client_key: an IPv4 address or IPv6 /64) gets `per_client`
     requests per window. The client table is bounded, and one IPv6 /48 alone
     holds 65,536 /64s, so one network could fill it and, were a full table
-    the end of it, shut out every box that has not yet checked in this
-    window: their checks would get 429 and no update would be installed
-    until the flood stopped. So a client the full table cannot track is
-    limited by its network instead (`network_of`: the /24 or /48), in a
-    second bounded table, `per_network` requests per window. A flood from a
-    few networks then exhausts only those networks; refusing a box on any
+    the end of it, shut out every client not yet seen in this window: for
+    the service-wide limit, every box's check would get 429 and no update
+    would be installed until the flood stopped; for STATS_SECRET guesses,
+    the maintainer could not sign in. So a client the full table cannot
+    track is limited by its network instead (`network_of`: the /24 or /48),
+    in a second bounded table, `per_network` per window. A flood from a few
+    networks then exhausts only those networks; refusing a client on any
     other network takes `max_clients` distinct networks in one window.
     Like every limit here, it is per worker.
     """
@@ -138,11 +140,30 @@ class RequestLimiter:
         self._networks = RateLimiter(per_network, window, max_clients, clock)
         self._network_of = network_of
 
-    def allow(self, remote_addr: str | None) -> bool:
+    def admit(self, remote_addr: str | None) -> str | None:
+        """Count one request: None if allowed, else LIMITED (the client's own
+        limit), NETWORK_LIMITED (its network's, the client table being full)
+        or FULL (both tables full)."""
         refused = self._clients.admit(client_key(remote_addr))
-        if refused == FULL:
-            return self._networks.allow(self._network_of(remote_addr))
-        return refused is None
+        if refused != FULL:
+            return refused
+        refused = self._networks.admit(self._network_of(remote_addr))
+        return NETWORK_LIMITED if refused == LIMITED else refused
+
+    def allow(self, remote_addr: str | None) -> bool:
+        return self.admit(remote_addr) is None
+
+    def refusal(self, remote_addr: str | None) -> str | None:
+        """What admit() would answer now, counting nothing."""
+        key = client_key(remote_addr)
+        if self._clients.exhausted(key):
+            return LIMITED
+        if not self._clients.full_for(key):
+            return None
+        network = self._network_of(remote_addr)
+        if self._networks.exhausted(network):
+            return NETWORK_LIMITED
+        return FULL if self._networks.full_for(network) else None
 
 
 OVERFLOW_VERSION = "unlisted"

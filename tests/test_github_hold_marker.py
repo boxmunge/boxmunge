@@ -82,3 +82,17 @@ class TestFallbackHonoursIt:
         result = _via_github(tmp_path, releases, "latest")
         assert (result["action"], result["version"]) == ("upgrade", "0.3.5")
         assert result["url"] == f"{GH}v0.3.5"
+
+
+    def test_a_held_feature_release_is_refused_naming_the_deliberate_route(self, tmp_path):
+        releases = [_gh_release("0.4.0", title="v0.4.0 [held]")]
+        result = _via_github(tmp_path, releases, "latest")
+        assert result["action"] == "error"
+        assert "upgrade --target 0.4.0" in result["message"]
+
+    def test_auto_update_lists_a_held_feature_release(self, tmp_path):
+        releases = [_gh_release("0.4.0", title="v0.4.0 [held]"),
+                    _gh_release("0.3.5", title="v0.3.5 [security]")]
+        result = _via_github(tmp_path, releases, "security")
+        assert (result["action"], result["version"]) == ("upgrade", "0.3.5")
+        assert result["held"] == ["0.4.0"]
