@@ -1,5 +1,9 @@
 # Runtime dependencies of the version-check service.
 # Regenerate with: make lock
+# The service runs on Python 3.13 only (its Dockerfile's python:3.13 image;
+# CI tests it there), and the lock is compiled on 3.13, so it is not meant to
+# install below 3.13: pip-compile drops what pyopenssl needs only there
+# (typing-extensions). Moving the image off 3.13 means compiling on that Python.
 flask==3.1.*
 gunicorn==26.*
 webauthn==3.0.*
