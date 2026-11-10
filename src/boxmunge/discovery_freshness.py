@@ -4,7 +4,8 @@
 Discovery installs nothing when the service answers with an error (a 429, a
 5xx, a malformed body), because the GitHub fallback cannot see
 circuit-breaker holds (boxmunge.upgrade_discovery); when the service cannot
-be reached at all it falls back to GitHub, where holds are invisible. Either
+be reached at all it falls back to GitHub, which sees only the holds the
+maintainer has also marked ``[held]`` in a release title. Either
 way a long run of failures must not go unnoticed: auto-update records each
 discovery here, and the ``platform-updates`` health check warns (never
 errors) once the service has gone ``STALE_AFTER`` without a usable answer.
@@ -101,5 +102,6 @@ def stale_discovery_warning(paths: BoxPaths, *, now: datetime | None = None) -> 
             f"usable answer since {state['failing_since'].isoformat()} ({last}); last error: "
             f"{state['last_error']}. While it answers with errors no automatic update is "
             f"installed, and while it is unreachable releases come from GitHub, which "
-            f"cannot see circuit-breaker holds. A connection error means this box cannot "
-            f"reach it (check DNS, firewall, proxy); an HTTP 5xx is on the service's side")
+            f"sees a circuit-breaker hold only once it is marked there too. A connection "
+            f"error means this box cannot reach it (check DNS, firewall, proxy); an HTTP "
+            f"5xx is on the service's side")
