@@ -14,6 +14,12 @@ A container that can write the directory holding a bind source can swap
 that source for a symlink, and Docker follows it the next time the
 container starts, including a start by its restart policy, which no
 boxmunge check sees. So no bind source may lie inside a read-write one.
+The same holds for a build's local inputs (context, Dockerfile, additional
+contexts): the builder resolves a context root through a symlink, so a
+container that swaps `./data/ctx` for a link to another project bakes that
+project's files into an image it then runs. The rule is judged on the
+declared paths, not on what exists at validation: a bundle is validated
+before its `./data` exists.
 (Between production and staging, `stage` refuses any bind source either
 one shares with or nests inside the other: staging_isolation.)
 
@@ -26,6 +32,7 @@ import os
 from pathlib import Path
 from typing import Any, Iterable
 
+from boxmunge.compose_build import local_build_inputs
 from boxmunge.compose_mounts import host_path_forms, is_bind_entry, volume_source
 
 # Project entries boxmunge reads or runs, relative to the project directory.
@@ -69,24 +76,27 @@ def _read_only(entry: Any) -> bool:
 
 
 def service_binds(doc: dict[str, Any], base_dir: Path) -> list[tuple[str, str, str, bool]]:
-    """(user, raw source, absolute source, read-write) for every host path
-    the model mounts: service bind mounts, and the files of top-level
-    secrets and configs (mounted read-only)."""
+    """(user, what, absolute source, read-write) for every host path the
+    model mounts or builds from: service bind mounts, the files of top-level
+    secrets and configs (mounted read-only), and each service's local build
+    inputs (read, never written, by the builder)."""
     binds = []
     for svc_name, svc in (doc.get("services") or {}).items():
-        if not isinstance(svc, dict) or not isinstance(svc.get("volumes"), list):
+        if not isinstance(svc, dict):
             continue
-        for entry in svc["volumes"]:
+        for entry in svc.get("volumes") if isinstance(svc.get("volumes"), list) else ():
             src = volume_source(entry)
             if src is not None and is_bind_entry(entry):
-                binds.append((f"service {svc_name}", src,
+                binds.append((f"service {svc_name}", "bind source",
                               host_path_forms(src, base_dir)[0], not _read_only(entry)))
+        for what, path in local_build_inputs(svc.get("build"), base_dir):
+            binds.append((f"service {svc_name}", what, path, False))
     for section in ("secrets", "configs"):
         entries = doc.get(section)
         for key, decl in (entries.items() if isinstance(entries, dict) else ()):
             path = decl.get("file") if isinstance(decl, dict) else None
             if isinstance(path, str):
-                binds.append((f"{section} {key}", path,
+                binds.append((f"{section} {key}", "bind source",
                               host_path_forms(path, base_dir)[0], False))
     return binds
 
@@ -107,18 +117,15 @@ def _own_file_hit(src: str, rels: set[str], protected: set[str]) -> str | None:
 
 
 def _bind_problems(
-    binds: list[tuple[str, str, bool]], base_dir: Path, project_dir: Path,
-    protected: set[str], nesting_binds: list[tuple[str, str, bool]],
+    binds: list[tuple[str, str, str, bool]], base_dir: Path, project_dir: Path,
+    protected: set[str],
 ) -> list[str]:
-    """`binds`: (user, absolute source, read-write) checked against the
-    control files. `nesting_binds`: the full set every rw source is checked
-    for nesting against (production + staging, existing containers, ...)."""
-    located = [(user, src, rw, _project_rels(src, base_dir, project_dir))
-               for user, src, rw in binds]
-    nesting = [(user, src, rw, _project_rels(src, base_dir, project_dir))
-               for user, src, rw in nesting_binds]
+    """`binds`: (user, what, absolute source, read-write), checked against
+    the control files and for nesting inside each other."""
+    located = [(user, what, src, rw, _project_rels(src, base_dir, project_dir))
+               for user, what, src, rw in binds]
     problems: list[str] = []
-    for user, src, rw, rels in located:
+    for user, _what, src, rw, rels in located:
         if not rw:
             continue
         hit = _own_file_hit(src, rels, protected)
@@ -131,20 +138,21 @@ def _bind_problems(
                 f"':ro'), and mount a data subdirectory such as ./data "
                 f"read-write instead."
             )
-    for user, src, rw, rels in nesting:
+    for user, _what, src, rw, rels in located:
         if not rw:
             continue
-        for other_user, other_src, _, other_rels in nesting:
+        for other_user, other_what, other_src, _, other_rels in located:
             if any(o != r and _within(o, r) for o in other_rels for r in rels):
                 problems.append(
-                    f"{other_user}: bind source {other_src} lies inside "
+                    f"{other_user}: {other_what} {other_src} lies inside "
                     f"{src}, which {user} mounts read-write, so that "
                     f"container could replace it with a symlink to any host "
-                    f"path, which Docker would mount the next time it starts "
-                    f"the container. Mount sibling directories (./data, "
-                    f"./uploads) instead of one inside another, and keep a "
-                    f"secrets/configs file outside every directory a service "
-                    f"mounts read-write."
+                    f"path, which Docker would follow the next time it starts "
+                    f"the container or builds the image. Mount sibling "
+                    f"directories (./data, ./uploads) instead of one inside "
+                    f"another, and keep a secrets/configs file outside every "
+                    f"directory a service mounts read-write, and every build "
+                    f"context, Dockerfile and additional context too."
                 )
     return problems
 
@@ -163,8 +171,7 @@ def own_file_problems(
     `.releases`), so every path is located where it really lies."""
     stand_in = project_dir if in_place else base_dir
     protected = _protected(stand_in, project_dir, read_files)
-    binds = [(user, abs_src, rw) for user, _raw, abs_src, rw in service_binds(doc, base_dir)]
-    return _bind_problems(binds, stand_in, project_dir, protected, binds)
+    return _bind_problems(service_binds(doc, base_dir), stand_in, project_dir, protected)
 
 
 def container_bind_problems(
@@ -177,5 +184,5 @@ def container_bind_problems(
     project directory (or a control file) read-write: the record alone would
     bless that mount, so the running state is inspected directly."""
     protected = _protected(project_dir, project_dir, read_files)
-    binds = [("an existing container", src, rw) for src, rw in container_binds]
-    return _bind_problems(binds, project_dir, project_dir, protected, binds)
+    binds = [("an existing container", "bind source", src, rw) for src, rw in container_binds]
+    return _bind_problems(binds, project_dir, project_dir, protected)
