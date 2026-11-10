@@ -182,8 +182,9 @@ sudo grep -l /var/log/caddy /opt/boxmunge/projects/*/caddy.override.conf
 - `ports:` is refused unless the manifest declares the port under `security.published_ports`
   (from the code: see PROJECT_CONVENTIONS.md and SECURITY.md, "Published ports").
 - A project `caddy.override.conf` that writes a log under `/var/log/caddy` stops the
-  upgrade: replace its log block (OPERATIONS.md, "Caddy access log"). The site files
-  boxmunge generates itself in `caddy/sites/` are rewritten for you.
+  upgrade. Replace its log block (OPERATIONS.md, "Caddy access log"). No output, or
+  `No such file or directory`, means you have none. The site files boxmunge generates
+  itself in `caddy/sites/` are rewritten for you.
 
 You can fix these after the upgrade instead. Such a project keeps running as it is, but it
 is not restarted (`REFUSED`, below) until you fix it and redeploy.
@@ -299,6 +300,11 @@ deploy> log --tail 60
   `--discard` gives you that. If not, run it and then straight away `prod-deploy myapp` with
   production's bundle, which puts production's release back. This is why step 3 says to
   finish these stages first.
+
+  From 0.11.6 on, such a stage shows as
+  `a release staged by a boxmunge release before 0.10.1 (pre0101)`. There, `--discard` stops
+  staging and starts nothing. Production keeps running its release, but every start of the
+  project is refused until you upload production's bundle and `prod-deploy myapp`.
 - **`named the images myapp's containers run: boxmunge.invalid/myapp/web`.** Informational:
   0.11 renames the images it builds.
 
