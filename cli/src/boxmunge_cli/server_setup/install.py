@@ -41,7 +41,8 @@ class InstallError(Exception):
 def make_remote_workdir(target: Target) -> str:
     """Create a private temp dir on the server, owned by the login user."""
     argv = ["sh", "-c", "umask 077 && mktemp -d /tmp/boxmunge-setup.XXXXXXXX"]
-    result = subprocess.run(target.ssh(argv), capture_output=True, text=True, check=False)
+    result = subprocess.run(target.ssh(argv), stdin=subprocess.DEVNULL, capture_output=True,
+                            text=True, check=False)
     workdir = result.stdout.strip()
     if result.returncode != 0 or not _REMOTE_TMP.fullmatch(workdir):
         raise InstallError(f"Could not create a temp dir on the server: "
@@ -57,7 +58,7 @@ def upload_verified_installer(target: Target, installer: VerifiedInstaller) -> l
     """
     workdir = make_remote_workdir(target)
     scp = target.scp(str(installer.path), f"{workdir}/{INSTALLER}")
-    if subprocess.run(scp, check=False).returncode != 0:
+    if subprocess.run(scp, stdin=subprocess.DEVNULL, check=False).returncode != 0:
         raise InstallError("Failed to upload the installer.")
     return ["sh", "-c", _RUN_VERIFIED, "sh", workdir, installer.sha256]
 
@@ -68,14 +69,15 @@ def upload_local_bundle(target: Target, bundle: str) -> list[str]:
           "Use it only for development.", file=sys.stderr)
     workdir = make_remote_workdir(target)
     if subprocess.run(target.scp(bundle, f"{workdir}/release.tar.gz"),
-                      check=False).returncode != 0:
+                      stdin=subprocess.DEVNULL, check=False).returncode != 0:
         raise InstallError("Failed to upload the local bundle.")
     return ["sh", "-c", _RUN_LOCAL_BUNDLE, "sh", workdir]
 
 
 def run_with_progress(argv: list[str]) -> int:
     """Run the install over ssh, rendering progress markers; dump the log on failure."""
-    proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True)
     log_buffer: list[str] = []
     last_bar = ""
     for line in proc.stdout:  # type: ignore[union-attr]
