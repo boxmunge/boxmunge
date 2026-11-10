@@ -56,6 +56,7 @@ LOCK_FILE="$UPGRADE_ROOT_DIR/upgrade.lock"
 LEGACY_LOCK_FILE="$STATE_DIR/upgrade.lock"
 INTERRUPTED_FILE="$UPGRADE_ROOT_DIR/interrupted.json"
 PIP_FAILURES_FILE="$UPGRADE_ROOT_DIR/pip-failures.json"
+COSIGN_FAILURES_FILE="$UPGRADE_ROOT_DIR/cosign-failures"
 # Written by install.sh; see system_upgrade in system.sh.
 INSTALLER_HASH_FILE="$UPGRADE_ROOT_DIR/installer.sha256"
 # The last release whose bundle has no requirements-mcp.txt. Every install
@@ -121,15 +122,16 @@ for lib in state slots probation health release system userns; do
 done
 # <<< boxmunge-upgrade.d
 
-# preflight_fail <version> <from_version> <blocklist_reason> <message> [stage]
+# preflight_fail <version> <from_version> <blocklist_reason> <message> [stage] [detail]
 #
 # Abort before the slot swap: drop the half-built standby venv, blocklist
-# the version so auto-update stops retrying it, and report the failure.
+# the version so auto-update stops retrying it, and report the failure, with
+# <detail> (by default the blocklist reason) as the report's reason.
 preflight_fail() {
     log "$4"
     remove_slot "$(standby_slot)"
     add_blocklist "$1" "$3"
-    report_failure "$1" "$2" "${5:-preflight}" "$3"
+    report_failure "$1" "$2" "${5:-preflight}" "${6:-$3}"
     exit 1
 }
 
@@ -260,6 +262,7 @@ upgrade_to() {
     local tmp_download="$TMP_DOWNLOAD"
     if ! fetch_release "$version" "$tmp_download"; then
         [[ "$FETCH_STEP" != bundle_extract ]] || extract_failed "$version" "$FETCH_ERROR"
+        [[ "$FETCH_STEP" != cosign_verify ]] || cosign_verify_failed "$version" "$from_version"
         preflight_fail "$version" "$from_version" "preflight_failed: $FETCH_STEP" "$FETCH_ERROR"
     fi
 

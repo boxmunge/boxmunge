@@ -1995,14 +1995,17 @@ How an upgrade is applied and undone:
 1. The new release is downloaded, its signature and checksum verified, and it is installed
    into the standby venv, built from scratch with every hash-pinned dependency the release
    ships (MCP included); the upgrade needs 250MB free under `/opt/boxmunge`.
-   `upgrade --dry-run` runs against it as a pre-flight. A failed download, signature, checksum
-   or dry run drops the standby and blocklists the version. A bundle that passes its checksum but
+   `upgrade --dry-run` runs against it as a pre-flight. A failed download, checksum or dry run
+   drops the standby and blocklists the version. A bundle that passes its checksum but
    does not extract (a full disk where it is downloaded) drops the standby and sends a local
    alert without blocklisting, so auto-update retries it. If pip cannot install the
    dependencies (a network blip, a full disk), the standby is dropped and a local alert sent.
    The first such failure of a version is not blocklisted or reported, so auto-update retries
    it; a second in a row blocklists it. A successful install and `clear-blocklist` reset the
-   count.
+   count. A signature cosign refuses is treated the same way, since an unreachable Sigstore
+   looks like a bad signature: the first refusal of a version drops the standby and sends a
+   local alert with cosign's reason, auto-update retries it with a fresh download, and a second
+   refusal in a row blocklists and reports it. A verified signature resets that count.
 2. Platform state is stashed: config, deploy state, and each project's manifest, compose file,
    env files and `boxmunge-scripts/`, with their modes and owners. A git project's
    `manifest.yml` and `compose.yml` links into `repo/` are left out, and a restore never

@@ -19,10 +19,13 @@ COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
 #
 # Hard-requires cosign on PATH; aborts noisily if missing. Returns 0 on success
 # and non-zero on any failure (cosign missing, signature/cert files missing,
-# verification failed).
+# verification failed), with COSIGN_REASON saying why: cosign's own error
+# output, as cosign_reason cleans it.
+COSIGN_REASON=""
 verify_release_signature() {
     local download_dir="${1:?usage: verify_release_signature <download_dir>}"
     if ! command -v cosign >/dev/null 2>&1; then
+        COSIGN_REASON="cosign is not installed"
         log "ERROR: cosign required for upgrade verification but not installed."
         log "       Re-run install.sh on this host, or install cosign manually."
         return 1
@@ -31,16 +34,68 @@ verify_release_signature() {
     local sig="$download_dir/SHA256SUMS.sig"
     local cert="$download_dir/SHA256SUMS.cert"
     if [[ ! -f "$sig" || ! -f "$cert" ]]; then
+        COSIGN_REASON="the release has no SHA256SUMS.sig or SHA256SUMS.cert"
         log "ERROR: cosign signature/certificate not found in release artifacts"
         log "       missing: $([[ -f "$sig" ]] || echo "SHA256SUMS.sig") $([[ -f "$cert" ]] || echo "SHA256SUMS.cert")"
         return 1
     fi
-    cosign verify-blob \
+    local err rc=0
+    err="$(cosign verify-blob \
         --certificate-identity-regexp "$COSIGN_CERT_IDENTITY_REGEXP" \
         --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
         --signature "$sig" \
         --certificate "$cert" \
-        "$sums" >/dev/null 2>&1
+        "$sums" 2>&1 >/dev/null)" || rc=$?
+    [[ "$rc" -ne 0 ]] || return 0
+    COSIGN_REASON="$(cosign_reason "$rc" "$err")"
+    return 1
+}
+
+# cosign_reason <exit code> <stderr>: cosign's error output as one line of
+# printable ASCII, cut to 300 characters. It goes into the log, an alert and
+# the fleet failure report, so no control character or escape reaches them:
+# line breaks and tabs become spaces, anything else unprintable a '?'. The
+# warnings cosign 3 prints first for the detached flags are left out, so the
+# error itself fits in the 200 characters a failure report carries.
+cosign_reason() {
+    local reason
+    reason="$(printf '%s\n' "${2:0:4096}" | { grep -v '^Flag --[a-z-]* has been deprecated' || true; } \
+        | LC_ALL=C tr '\n\r\t' '   ' | LC_ALL=C tr -c '[:print:]' '?' | LC_ALL=C tr -s ' ')"
+    reason="${reason# }"
+    reason="${reason% }"
+    reason="${reason:-cosign exited $1 and said nothing}"
+    printf '%s' "${reason:0:300}"
+}
+
+# cosign_verify_failed <version> <from_version>: an upgrade's fetch_release
+# failed at cosign_verify. A bad signature and an unreachable Sigstore (cosign
+# searches Rekor online) look alike, and cosign's error text is not a stable
+# interface to tell them apart. So, as for a pip failure, the first refusal of
+# a version is alerted and logged with cosign's reason but not blocklisted or
+# reported, and auto-update retries it on its next run, with a fresh download;
+# a second in a row blocklists and reports it. The count lives in root-only
+# upgrade-root/ (deploy can neither reset nor raise it), names the version it
+# counts, and a verified signature clears it (fetch_release).
+cosign_verify_failed() {
+    local version="$1" from_version="$2" seen="" count=0
+    refuse_symlink "$COSIGN_FAILURES_FILE"
+    read -r seen count < "$COSIGN_FAILURES_FILE" 2>/dev/null || true
+    [[ "$seen" == "$version" && "$count" =~ ^[0-9]+$ ]] || count=0
+    count=$((count + 1))
+    if [[ "$count" -ge 2 ]]; then
+        rm -f "$COSIGN_FAILURES_FILE"
+        local detail="preflight_failed: cosign_verify: $COSIGN_REASON"
+        preflight_fail "$version" "$from_version" "preflight_failed: cosign_verify" \
+            "$FETCH_ERROR ($count times in a row); blocklisting $version" preflight "${detail:0:200}"
+    fi
+    write_root_file "$COSIGN_FAILURES_FILE" "$version $count"
+    log "$FETCH_ERROR; $version not blocklisted: auto-update retries it, and a second failure in a row blocklists it"
+    remove_slot "$(standby_slot)"
+    bm_log warn upgrade "signature verification of $version failed (not blocklisted; a second failure in a row blocklists it): $COSIGN_REASON" \
+        "{\"version\": \"$version\", \"failures\": $count}"
+    send_notification "boxmunge upgrade failed" \
+        "Cosign could not verify the signature of $version: $COSIGN_REASON (not blocklisted; auto-update retries it, and a second failure in a row blocklists it)"
+    exit 1
 }
 
 # require_free_space: an upgrade or a repair needs 250MB under BOXMUNGE_ROOT.
@@ -107,7 +162,8 @@ fetch_release() {
     #
     # cosign is hard-required: if the host is missing it, abort.
     verify_release_signature "$dir" \
-        || { fetch_failed cosign_verify "Cosign verification of SHA256SUMS FAILED — refusing to install."; return 1; }
+        || { fetch_failed cosign_verify "Cosign verification of SHA256SUMS FAILED, refusing to install: $COSIGN_REASON"; return 1; }
+    rm -f "$COSIGN_FAILURES_FILE"
     log "Cosign signature on SHA256SUMS verified (release-workflow identity)"
     bm_log info upgrade "signature verified" "{\"version\": \"$version\"}"
 
