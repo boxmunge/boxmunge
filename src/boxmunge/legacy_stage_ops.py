@@ -411,6 +411,16 @@ def resolve(paths: BoxPaths, project: str, stage: LegacyStage, ev: Evidence | No
     finish_apply(paths, project)
 
 
+def alert_awaiting_deploy(paths: BoxPaths, project: str) -> None:
+    """The priority-1 alert naming the deploy a discarded pre0101 stage
+    needs, recorded as last_alert so a rerun of the command (after a crash
+    before step 8, say) sends it once."""
+    if notify(paths, f"{project}: deploy production's release",
+               awaiting_deploy_text(project) + ".", component=COMPONENT, project=project,
+               priority=1):
+        update_record(paths, project, last_alert=datetime.now(timezone.utc).isoformat())
+
+
 def report_resolved(paths: BoxPaths, project: str, choice: str) -> None:
     """Step 8. A discarded pre0101 stage keeps its record, which refuses
     starts until a deploy replaces the staged files; it alerts the fix."""
@@ -419,9 +429,7 @@ def report_resolved(paths: BoxPaths, project: str, choice: str) -> None:
     log_operation(COMPONENT, f"Resolved the release staged by {by}: --{choice}",
                   paths, project=project, detail={"choice": choice})
     if kind == "pre0101":
-        notify(paths, f"{project}: deploy production's release",
-               awaiting_deploy_text(project) + ".", component=COMPONENT, project=project,
-               priority=1)
+        alert_awaiting_deploy(paths, project)
         return
     drop_record(paths, project)
     notify(paths, f"{project}: 0.10.1 stage resolved",

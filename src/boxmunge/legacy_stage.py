@@ -95,8 +95,19 @@ def legacy_stage(paths: BoxPaths, project: str) -> LegacyStage | None:
         return LegacyStage("git")
     # Every 0.10.1 deploy writes live.json; the releases before it kept no
     # .releases/ at all, and their stage wrote over production's files.
-    live = _present(project_dir / ".releases" / "live.json")
+    live = live_json_present(paths, project)
     return LegacyStage("leftover" if live else "pre0101")
+
+
+def live_json_present(paths: BoxPaths, project: str) -> bool:
+    """Whether a deploy's live.json is there: a regular file, never a link
+    or anything else planted under that name (OSError other than absence
+    is raised)."""
+    try:
+        st = os.lstat(paths.project_releases(project) / "live.json")
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return stat.S_ISREG(st.st_mode)
 
 
 def real_dir_problem(path: Path) -> str | None:
@@ -139,12 +150,14 @@ def awaiting_deploy_text(project: str) -> str:
 
 def awaiting_deploy_refusal(paths: BoxPaths, project: str) -> str | None:
     """Why a start of `project` is refused after a pre0101 stage was
-    discarded, until a deploy installs a release (and writes live.json)."""
+    discarded, until a deploy installs a release (and writes live.json).
+    A --discard an earlier release recorded as "leftover" counts too: a
+    genuine 0.10.1 leftover always has live.json."""
     try:
         rec = get_record(paths, project) or {}
-        if rec.get("kind") != "pre0101" or rec.get("choice") != "discard":
+        if rec.get("kind") not in ("pre0101", "leftover") or rec.get("choice") != "discard":
             return None
-        if _present(paths.project_releases(project) / "live.json"):
+        if live_json_present(paths, project):
             return None
     except (StateError, OSError) as e:
         return f"cannot tell whether {project}'s files are a discarded stage's: {e}"

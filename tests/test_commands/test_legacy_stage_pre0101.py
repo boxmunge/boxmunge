@@ -155,3 +155,63 @@ def test_upgrade_dry_run_and_apply_name_the_kind(paths, stage09, capsys) -> None
         notify_exclusions(paths, Exclusions(legacy={P: "pre0101"}))
     title, body = sent.call_args.args[1:3]
     assert "before 0.10.1" in title + body and "holds the staged files" in body
+
+
+def test_dry_run_and_apply_agree_after_discard(paths, stage09) -> None:
+    from boxmunge.commands.upgrade_steps import check_upgrade
+    from boxmunge.upgrade_exclusions import apply_projects
+    with patch("boxmunge.legacy_stage_ops.finish_apply"):
+        assert legacy_run(paths, "discard") == 0
+    expected = awaiting_deploy_refusal(paths, P)
+    lines = [line for line in check_upgrade(paths) if line.startswith(f"{P}:")]
+    assert len(lines) == 1 and "would be refused" in lines[0] and expected in lines[0]
+    with patch("boxmunge.compose_guard.notify"):
+        _migration, regen, excluded = apply_projects(paths)
+    assert P not in excluded.names() and P not in regen.processed
+    assert expected in regen.refused[P]
+
+
+def _discard_recorded_by_0115(paths, pdir, kind: str) -> None:
+    """What 0.11.5 left when its --discard of a 0.9 stage crashed after
+    dropping the stage (step 6) and before finish_apply: the record names
+    the choice, the staging files are gone, and no deploy wrote live.json."""
+    from boxmunge.legacy_stage import update_record
+    for name in ("compose.staging-base.yml", "compose.boxmunge-staging.yml"):
+        (pdir / name).unlink()
+    legacy_staging_state(paths, P).unlink()
+    update_record(paths, P, kind=kind, choice="discard")
+
+
+@pytest.mark.parametrize("kind", ["leftover", "pre0101"])
+def test_a_discard_an_earlier_release_recorded_never_reaches_finish_apply(
+        paths, stage09, capsys, kind) -> None:
+    _discard_recorded_by_0115(paths, stage09, kind)
+    assert legacy_stage(paths, P) is None
+    assert awaiting_deploy_refusal(paths, P) is not None
+    with patch("boxmunge.legacy_stage_ops.finish_apply",
+               side_effect=AssertionError("must not recreate from the staged files")):
+        assert legacy_run(paths, None) == 0
+        assert legacy_run(paths, "discard") == 0
+    assert capsys.readouterr().out.count(f"prod-deploy {P}") == 2
+    with patch("boxmunge.compose_guard.notify"), pytest.raises(ComposeRefused,
+                                                               match=f"prod-deploy {P}"):
+        check_start(paths, P, component="resume", compose_files=PROD)
+
+
+def test_a_rerun_sends_the_alert_a_crash_before_step_8_lost(paths, stage09) -> None:
+    _discard_recorded_by_0115(paths, stage09, "pre0101")
+    with patch("boxmunge.legacy_stage_ops.finish_apply"):
+        assert legacy_run(paths, None) == 0
+        assert legacy_run.sent.call_count == 1
+        assert f"prod-deploy {P}" in legacy_run.sent.call_args.args[2]
+        assert get_record(paths, P)["last_alert"]
+        assert legacy_run(paths, None) == 0
+        legacy_run.sent.assert_not_called()           # sent once, not on every rerun
+
+
+def test_check_all_names_the_deploy_after_discard(paths, stage09, capsys) -> None:
+    from boxmunge.commands.check import _check_one
+    with patch("boxmunge.legacy_stage_ops.finish_apply"):
+        assert legacy_run(paths, "discard") == 0
+    assert _check_one(P, paths, True) == 1
+    assert f"prod-deploy {P}" in capsys.readouterr().out

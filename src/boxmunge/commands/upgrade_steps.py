@@ -27,7 +27,9 @@ from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.release_txn import InstallTxn, load_txn, stale_reason, start_refusal
 from boxmunge.docker import DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
-from boxmunge.legacy_stage import LegacyStage, cannot_tell_left_as_is, legacy_stage, staged_by
+from boxmunge.legacy_stage import (
+    LegacyStage, awaiting_deploy_refusal, cannot_tell_left_as_is, legacy_stage, staged_by,
+)
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import (
@@ -361,6 +363,11 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
         left = _left_as_is_line(paths, name)
         if left is not None:
             report.append(left)
+            continue
+        awaiting = awaiting_deploy_refusal(paths, name)
+        if awaiting is not None:   # the apply's check_kept_files refuses it the same way
+            report.append(f"{name}: would be refused and left on its current configs and "
+                          f"containers, not restarted: {awaiting}")
             continue
         manifest = load_manifest_as_written(require_manifest(project_dir))
         migrated = _migrated(project_dir, manifest)

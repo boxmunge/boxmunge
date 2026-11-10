@@ -19,7 +19,7 @@ from boxmunge.legacy_stage import (
     cannot_tell, drop_record, evidence, get_record, legacy_stage, staged_by, update_record,
 )
 from boxmunge.legacy_stage_ops import (
-    LegacyStageError, allowed_choices, drop_stage_record, finish_apply,
+    LegacyStageError, alert_awaiting_deploy, allowed_choices, drop_stage_record, finish_apply,
     platform_rollback_possible, predeploy_snapshots, report_resolved, resolve,
 )
 from boxmunge.lifecycle import migration_refusal
@@ -117,8 +117,12 @@ def _finish_resolved(paths: BoxPaths, project: str, choice: str | None,
     if not recorded:
         print(f"ERROR: '{project}' has no release staged by boxmunge 0.10.1 or earlier.", file=sys.stderr)
         return 1
+    # A --discard whose files no deploy has replaced is a pre0101 one,
+    # whatever an earlier release recorded (a genuine 0.10.1 leftover always
+    # has live.json): it must never reach finish_apply.
     if (recorded == "discard" and choice in (None, "discard")
-            and (get_record(paths, project) or {}).get("kind") == "pre0101"):
+            and ((get_record(paths, project) or {}).get("kind") == "pre0101"
+                 or awaiting_deploy_refusal(paths, project) is not None)):
         return _awaiting_deploy(paths, project)
     if choice != recorded:
         message = (f"{project}'s 0.10.1 stage was resolved with --{recorded} up to its last "
@@ -141,6 +145,8 @@ def _awaiting_deploy(paths: BoxPaths, project: str) -> int:
     awaiting = awaiting_deploy_refusal(paths, project)
     if awaiting:
         print(f"{awaiting}.")
+        if (get_record(paths, project) or {}).get("last_alert") is None:
+            alert_awaiting_deploy(paths, project)
         return 0
     try:
         drop_record(paths, project)

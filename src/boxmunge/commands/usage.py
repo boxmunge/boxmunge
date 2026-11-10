@@ -110,7 +110,9 @@ flag, shows what production runs and the choices, and changes nothing.
 files); --keep-staged treats it as promoted. A stage made before 0.10.1
 (pre0101) wrote over production's files and kept no copy: its --discard
 stops staging and starts nothing, and every start is refused until a
-prod-deploy of production's release. Refused while a platform rollback is
+prod-deploy of production's release (or a stage and promote of the staged
+one, which needs no copy_data: production's data stays where it is).
+Refused while a platform rollback is
 still possible (probation). If interrupted, run the same command again.
 Operator-only: run it as root, as boxmunge-server.""",
     "staging-teardown-all": """\
