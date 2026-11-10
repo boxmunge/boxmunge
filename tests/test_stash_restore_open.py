@@ -33,7 +33,7 @@ def box(tmp_path: Path) -> tuple[BoxPaths, Path]:
     # An archive "deploy" made, carrying its own config.
     paths.config_file.write_text("hostname: planted\nadmin_email: t@t\n")
     elsewhere = tmp_path / "deploy-owned.tar.gz"
-    shutil.move(create_stash(paths), elsewhere)
+    shutil.move(create_stash(paths).path, elsewhere)
     paths.config_file.write_text("hostname: real\nadmin_email: t@t\n")
     create_stash(paths)
     paths.config_file.write_text("hostname: current\nadmin_email: t@t\n")

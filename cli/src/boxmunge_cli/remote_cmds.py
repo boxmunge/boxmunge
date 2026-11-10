@@ -38,18 +38,20 @@ def _handshake(config: dict[str, Any], manifest_schema: int | None = None,
     )
     try:
         info = check_server_compatibility(config, manifest_schema, batch=batch)
-        require_server_flags(info, flags)
+        require_server_flags(info, flags, config.get("project"))
         for feature in features:
             require_server_feature(info, feature)
     except HandshakeError as e:
         raise CliExit(e.exit_code, str(e)) from e
 
 
-def connect(features: tuple[str, ...] = ()) -> dict[str, Any]:
+def connect(features: tuple[str, ...] = (),
+            flags: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
     """Load .boxmunge and confirm the server is compatible, and new enough
-    for `features` (handshake.FEATURE_SINCE); CliExit if not."""
+    for `features` (handshake.FEATURE_SINCE) and `flags` (FLAG_SINCE);
+    CliExit if not."""
     config, _ = _load_project_config()
-    _handshake(config, features=features)
+    _handshake(config, flags=flags, features=features)
     return config
 
 
@@ -93,26 +95,29 @@ def _cmd_stage(args: argparse.Namespace) -> int:
                                             *(["--no-pull"] if args.no_pull else [])])
 
 
+_PROD_DEPLOY_FLAGS = (("dry_run", "--dry-run"), ("no_snapshot", "--no-snapshot"),
+                      ("no_pull", "--no-pull"), ("accept_stale_kev", "--accept-stale-kev"))
+
+
 def _cmd_prod_deploy(args: argparse.Namespace) -> int:
+    flags = [flag for attr, flag in _PROD_DEPLOY_FLAGS if getattr(args, attr)]
     if args.abandon:
-        return _abandon_install(args)
-    flags = []
-    if args.dry_run:
-        flags.append("--dry-run")
-    if args.no_snapshot:
-        flags.append("--no-snapshot")
-    if args.no_pull:
-        flags.append("--no-pull")
+        if flags:
+            raise CliExit(USAGE, "--abandon takes no other options.")
+        return _deploy_without_upload(["--abandon"], [])
+    if args.redeploy:
+        return _deploy_without_upload(["--redeploy"], flags)
+    if args.ref is not None:
+        return _deploy_without_upload(["--ref", args.ref], flags)
     return _bundle_upload_and_run("prod-deploy", flags)
 
 
-def _abandon_install(args: argparse.Namespace) -> int:
-    """Undo the open install on the server; nothing is bundled or uploaded."""
+def _deploy_without_upload(mode: list[str], flags: list[str]) -> int:
+    """prod-deploy of what the server already has (--abandon, --redeploy,
+    --ref): nothing is bundled or uploaded."""
     from boxmunge_cli.ssh import run_ssh
-    if args.dry_run or args.no_snapshot or args.no_pull:
-        raise CliExit(USAGE, "--abandon takes no other options.")
-    config = connect()
-    return run_ssh(config, "prod-deploy", config["project"], "--abandon")
+    config = connect(flags=[mode[0], *flags])
+    return run_ssh(config, "prod-deploy", config["project"], *mode, *flags)
 
 
 def _cmd_promote(args: argparse.Namespace) -> int:
@@ -131,15 +136,14 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 def _cmd_logs(args: argparse.Namespace) -> int:
     from boxmunge_cli.ssh import run_ssh
-    config = connect()
+    flags = [*(["--follow"] if args.follow else []), *(["--staging"] if args.staging else [])]
+    config = connect(flags=flags)
     server_args = [config["project"]]
     if args.service:
         server_args.append(args.service)
     if args.tail is not None:
         server_args += ["--tail", str(args.tail)]
-    if args.follow:
-        server_args.append("--follow")
-    return run_ssh(config, "logs", *server_args)
+    return run_ssh(config, "logs", *server_args, *flags)
 
 
 def _mcp_config(args: argparse.Namespace) -> dict[str, Any]:
@@ -187,23 +191,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                         "checking their registries for newer digests")
     p.set_defaults(func=_cmd_stage)
 
-    p = subparsers.add_parser(
-        "prod-deploy", help="Bundle, upload, and deploy straight to production",
-        description="Bundle the project, upload it, and run "
-                    "'prod-deploy <project>' on the server (skips staging).")
-    p.add_argument("--dry-run", action="store_true",
-                   help="Upload and validate on the server without deploying")
-    p.add_argument("--no-snapshot", action="store_true",
-                   help="Skip the pre-deploy backup snapshot")
-    p.add_argument("--no-pull", action="store_true",
-                   help="Build from the base images in the server's image store instead of "
-                        "checking their registries for newer digests")
-    p.add_argument("--abandon", action="store_true",
-                   help="Undo an interrupted install whose pre-deploy hook has not "
-                        "run: the previous release's files go back (a first "
-                        "deploy's code is removed); containers and data were never "
-                        "touched. Uploads nothing; rerun it if it is interrupted")
-    p.set_defaults(func=_cmd_prod_deploy)
+    _register_prod_deploy(subparsers)
 
     p = subparsers.add_parser("promote", help="Promote staging to production",
                               description="Run 'promote <project>' on the server.")
@@ -225,6 +213,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--tail", type=_positive_int, metavar="N",
                    help="Number of lines (server default 100)")
     p.add_argument("--follow", action="store_true", help="Stream new log lines")
+    p.add_argument("--staging", action="store_true",
+                   help="Staging's logs instead of production's (boxmunge-server 0.11.4 "
+                        "or newer)")
     p.set_defaults(func=_cmd_logs)
 
     p = subparsers.add_parser(
@@ -241,3 +232,40 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("--port", type=_positive_int, help="SSH port with --server (default 922)")
     p.add_argument("--user", help="SSH user with --server (default deploy)")
     p.set_defaults(func=_cmd_mcp_serve)
+
+
+def _register_prod_deploy(subparsers: argparse._SubParsersAction) -> None:
+    p = subparsers.add_parser(
+        "prod-deploy", help="Bundle, upload, and deploy straight to production",
+        description="Bundle the project, upload it, and run "
+                    "'prod-deploy <project>' on the server (skips staging). "
+                    "--redeploy, --ref and --abandon upload nothing: they act on "
+                    "what the server already has.")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Validate on the server without deploying (the bundle is still "
+                        "uploaded, unless --redeploy or --ref)")
+    p.add_argument("--no-snapshot", action="store_true",
+                   help="Skip the pre-deploy backup snapshot")
+    p.add_argument("--no-pull", action="store_true",
+                   help="Build from the base images in the server's image store instead of "
+                        "checking their registries for newer digests")
+    p.add_argument("--accept-stale-kev", action="store_true",
+                   help="Let a CVE-quarantined project's fix through although the server "
+                        "has no usable CISA KEV catalog; logged and alerted. Never "
+                        "overrides a catalog that lists a CVE still in the release's "
+                        "images (boxmunge-server 0.11.5 or newer)")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--redeploy", action="store_true",
+                      help="Deploy the release already installed again, as strictly "
+                           "checked as a new deploy; uploads nothing (boxmunge-server "
+                           "0.11.4 or newer)")
+    mode.add_argument("--ref", metavar="REF",
+                      help="Deploy REF, a bundle already in the server's inbox or a git "
+                           "project's commit, or finish the open install of REF; "
+                           "uploads nothing")
+    mode.add_argument("--abandon", action="store_true",
+                      help="Undo an interrupted install whose pre-deploy hook has not "
+                           "run: the previous release's files go back (a first "
+                           "deploy's code is removed); containers and data were never "
+                           "touched. Uploads nothing; rerun it if it is interrupted")
+    p.set_defaults(func=_cmd_prod_deploy)

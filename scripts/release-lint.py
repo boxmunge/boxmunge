@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Release class gate for .github/workflows/release.yml.
 
-Three subcommands, each exits 1 with an ERROR: line on any violation:
+Four subcommands, each exits 1 with an ERROR: line on any violation:
 
   check  --tag vX.Y.Z --github-output FILE --notes-out FILE
          [--releases PATH] [--pyproject PATH]
@@ -15,12 +15,20 @@ Three subcommands, each exits 1 with an ERROR: line on any violation:
       ([security] or [breakfix], and [breaking]) are generated from
       releases.json, so the notes cannot disagree with it.
 
+  notes  --preamble FILE --generated-json FILE --out FILE
+      Before creating the draft: writes the release notes, the preamble from
+      `check` followed by GitHub's generated changelog (FILE is the answer of
+      the releases/generate-notes API). The changelog quotes PR titles, so
+      every class marker in it is neutralised first ("[held]" becomes
+      "(held)"): a contributor's PR title can neither reclassify a release
+      for boxes on the GitHub fallback nor trip `verify`.
+
   verify --release-json FILE --class CLASS --breaking true|false
       After creating the draft release: FILE is `gh release view --json
       name,body`. Boxes that fall back to the GitHub API classify a release,
       and decide whether it is breaking, by the markers in its title and
-      notes, so the draft must read exactly as CLASS and BREAKING. This
-      catches auto-generated notes that quote a PR title containing a marker.
+      notes, so the draft must read exactly as CLASS and BREAKING: this
+      catches a wrong title or preamble, and any marker `notes` missed.
 
   audit --github-releases FILE [--releases PATH] [--held X.Y.Z ...]
       Maintenance check, run by hand: FILE is
@@ -60,6 +68,8 @@ TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+)$")
 MARKERS = {"security": "[security]", "breakfix": "[breakfix]"}
 BREAKING_MARKER = "[breaking]"
 HELD_MARKER = "[held]"
+# Any marker as a box would read it (case-insensitively), in quoted text.
+_QUOTED_MARKER = re.compile(r"\[(security|breakfix|breaking|held)\]", re.IGNORECASE)
 _REACH = ("Boxes on {major}.x apply it automatically when no breaking release (this one "
           "included) lies between their version and this one")
 PREAMBLE = {
@@ -116,6 +126,23 @@ def is_held(name: str) -> bool:
     """Whether a box reads a GitHub release as held: [held] in the title only.
     Mirrors boxmunge.release_selection.github_release_held (tests cross-check)."""
     return HELD_MARKER in (name or "").lower()
+
+
+def neutralise_markers(text: str) -> str:
+    """Quoted text with each class or hold marker turned into plain text:
+    "[held] x" becomes "(held) x". Other brackets are left alone."""
+    return _QUOTED_MARKER.sub(r"(\1)", text)
+
+
+def compose_notes(preamble: str, changelog: str) -> str:
+    """The release notes: the generated preamble, verbatim, then the
+    changelog with its markers neutralised."""
+    quoted = neutralise_markers(changelog)
+    if (classify_release("", quoted) != "feature" or is_breaking("", quoted)
+            or HELD_MARKER in quoted.lower()):
+        raise ReleaseLintError(
+            f"the changelog still reads as a marker after neutralising: {quoted!r}")
+    return f"{preamble.rstrip()}\n\n{quoted}"
 
 
 def plan_release(tag: str, releases_path: Path, pyproject_path: Path) -> ReleasePlan:
@@ -242,6 +269,17 @@ def _cmd_check(args: argparse.Namespace) -> None:
           f"title {plan.title!r}")
 
 
+def _cmd_notes(args: argparse.Namespace) -> None:
+    generated = json.loads(Path(args.generated_json).read_text())
+    if not isinstance(generated, dict) or not isinstance(generated.get("body"), str):
+        raise ReleaseLintError(
+            f"{args.generated_json}: no release notes body in the generate-notes answer: "
+            f"{json.dumps(generated)[:300]}")
+    Path(args.out).write_text(compose_notes(Path(args.preamble).read_text(),
+                                            generated["body"]))
+    print(f"release notes written to {args.out}")
+
+
 def _cmd_verify(args: argparse.Namespace) -> None:
     view = json.loads(Path(args.release_json).read_text())
     breaking = args.breaking == "true"
@@ -272,6 +310,10 @@ def main(argv: list[str]) -> int:
     check.add_argument("--pyproject", default=str(PYPROJECT))
     check.add_argument("--github-output", required=True)
     check.add_argument("--notes-out", required=True)
+    notes = sub.add_parser("notes")
+    notes.add_argument("--preamble", required=True)
+    notes.add_argument("--generated-json", required=True)
+    notes.add_argument("--out", required=True)
     verify = sub.add_parser("verify")
     verify.add_argument("--release-json", required=True)
     verify.add_argument("--class", dest="release_class", required=True,
@@ -284,7 +326,8 @@ def main(argv: list[str]) -> int:
                        help="a version the circuit breaker holds (repeat for each)")
     args = parser.parse_args(argv)
     try:
-        {"check": _cmd_check, "verify": _cmd_verify, "audit": _cmd_audit}[args.command](args)
+        {"check": _cmd_check, "notes": _cmd_notes, "verify": _cmd_verify,
+         "audit": _cmd_audit}[args.command](args)
     except ReleaseLintError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

@@ -41,7 +41,7 @@ class TestModes:
         smoke.write_text("#!/bin/sh\nexit 0\n")
         smoke.chmod(0o755)
         paths.project_compose("myapp").chmod(0o644)
-        archive = create_stash(paths)
+        archive = create_stash(paths).path
 
         for f in (paths.backup_key, smoke, paths.project_compose("myapp")):
             f.write_text("changed\n")
@@ -98,7 +98,7 @@ class TestLifecycleMarkers:
         paths = self._paths(tmp_path)
         paths.project_paused_state("myapp").write_text("{}")
         paths.project_quarantine_state("myapp").write_text("{}")
-        archive = create_stash(paths)
+        archive = create_stash(paths).path
         paths.project_paused_state("myapp").unlink()
         paths.project_quarantine_state("myapp").unlink()
         paths.project_deploy_state("myapp").write_text("{}")
@@ -111,7 +111,7 @@ class TestLifecycleMarkers:
 
     def test_new_markers_survive(self, tmp_path: Path) -> None:
         paths = self._paths(tmp_path)
-        archive = create_stash(paths)
+        archive = create_stash(paths).path
         paths.project_paused_state("myapp").write_text('{"reason": "now"}')
         restore_stash(paths, archive)
         assert paths.project_paused_state("myapp").read_text() == '{"reason": "now"}'
@@ -123,7 +123,7 @@ class TestLifecycleMarkers:
         paths = self._paths(tmp_path)
         for staging in (False, True):
             paths.project_users_record("myapp", staging=staging).write_text("old\n")
-        archive = create_stash(paths)
+        archive = create_stash(paths).path
         for staging in (False, True):
             paths.project_users_record("myapp", staging=staging).write_text("chowned\n")
         restore_stash(paths, archive)

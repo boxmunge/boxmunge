@@ -567,6 +567,7 @@ Smoke tests are **per-service**. Each service that declares a `smoke` field in t
 - Every running container of the service (each replica) is tested. A script that runs longer than 60 seconds counts as a warning.
 - Scripts are invoked via `sh` with the **service name as `$1`** (e.g., `web`, `api`). This lets a shared smoke script branch on which service it is testing.
 - Use `#!/bin/sh` shebangs (not `#!/bin/bash`) unless you know bash is in the container.
+- The periodic health check (`check-all`, every 5 minutes) alone runs the script with `BOXMUNGE_CHECK=periodic` in its environment. Every other smoke run gates an operation (deploy, recover, a quarantine lift, resume, userns bring-up), so a check that should only ever alert, and never hold one up, runs only when that is set, and exits `1`, never `2`.
 
 ### Exit Codes
 
