@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from boxmunge.caddy import generate_caddy_config, prepare_caddy_config
+from boxmunge.caddy import generate_caddy_config, override_refusal, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.upgrade_offline import (
     PutBackError, offline_dry_run_line, regenerate_offline, render_overlay,
@@ -36,7 +36,7 @@ from boxmunge.manifest import (
 from boxmunge.git_layout import relink_advice, repo_ownership_advice, unlinked_files
 from boxmunge.migration import migrate_manifest, MigrationError
 from boxmunge.pause import is_paused, render_maintenance_caddy_config
-from boxmunge.redeploy_hint import deploy_from_pause
+from boxmunge.redeploy_hint import deploy_from_pause, redeploy_command
 from boxmunge.fleet import report_project_failure
 from boxmunge.paths import BoxPaths, InvalidProjectName, validate_project_name
 from boxmunge.security_overlay import services_with_off_profile
@@ -259,6 +259,13 @@ def _regenerate_project(
     if block:
         _regenerate_offline(paths, name, manifest, block.reason.value, regen)
         return
+    refusal = override_refusal(paths, name)  # the project's fault, not the upgrade's
+    if refusal is not None:
+        regen.refused[name] = refusal
+        log_error("upgrade", f"{refusal} {name}'s configs and running containers are "
+                  f"left as they were and it is not restarted; fix the override, "
+                  f"then {redeploy_command(paths, name)}.", paths, project=name)
+        return
     try:
         prepare_caddy_config(paths, manifest)
         prepare_compose_override(paths, manifest, component="upgrade")
@@ -386,6 +393,11 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
             continue
         if block:
             report.append(offline_dry_run_line(paths, name, manifest, block.reason.value))
+            continue
+        refusal = override_refusal(paths, name)
+        if refusal is not None:
+            report.append(f"{name}: would be left on its current configs and containers, "
+                          f"not restarted: {refusal}")
             continue
         if not paths.project_caddy_override(name).exists():
             generate_caddy_config(manifest)

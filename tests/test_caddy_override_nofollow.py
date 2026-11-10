@@ -43,7 +43,7 @@ def test_a_linked_override_is_refused_without_reading_it(paths, override, tmp_pa
     secret = tmp_path / "root-only"
     secret.write_text("ROOT SECRET\n")
     override.symlink_to(secret)
-    with pytest.raises(OSError, match="symlink") as caught:
+    with pytest.raises(OSError, match="outside the project") as caught:
         site_config(paths, "myapp", _MANIFEST)
     assert "ROOT SECRET" not in str(caught.value)
     assert "remove it" in str(caught.value)
@@ -58,4 +58,26 @@ def test_a_fifo_override_is_refused_without_blocking(paths, override) -> None:
 def test_an_oversized_override_is_refused(paths, override) -> None:
     override.write_text("#" * (MAX_SITE_BYTES + 1))
     with pytest.raises(OSError, match="larger than"):
+        site_config(paths, "myapp", _MANIFEST)
+
+
+def test_a_link_that_stays_in_the_project_is_followed(paths, override) -> None:
+    """A git project may keep its override in repo/ and link it, as
+    boxmunge links compose.yml."""
+    repo = override.parent / "repo"
+    repo.mkdir()
+    (repo / "caddy.override.conf").write_text("myapp.example.com {\n    respond repo\n}\n")
+    override.symlink_to("repo/caddy.override.conf")
+    content, used = site_config(paths, "myapp", _MANIFEST)
+    assert used == override and "respond repo" in content
+
+
+def test_a_link_through_a_linked_directory_out_of_the_project_is_refused(
+        paths, override, tmp_path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "o.conf").write_text("SECRET\n")
+    (override.parent / "repo").symlink_to(outside)
+    override.symlink_to("repo/o.conf")
+    with pytest.raises(OSError, match="outside the project"):
         site_config(paths, "myapp", _MANIFEST)
