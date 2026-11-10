@@ -1099,7 +1099,12 @@ marked complete once the maintenance page is live, the containers are stopped an
 policies are held. If a step fails (Caddy cannot reload, `docker compose stop` errors), `pause`
 exits 1 with `ERROR: Pausing 'myapp' is incomplete: ...`: the project counts as paused, but may
 still be serving or running. Fix the cause and run `pause myapp` again to finish it (an incomplete
-pause is the one case where pausing a paused project is accepted), or `resume myapp`. Until then
+pause is the one case where pausing a paused project is accepted), or `resume myapp`. The pause
+record names its `prepause` snapshot, so the run that finishes it still pairs that snapshot with
+the deploy that ends the pause, as long as Docker shows the backup service has not run since. If
+the service is still running (the stop failed), it takes a new snapshot instead; if it ran and
+stopped again, the first snapshot stays in `backups/` for a manual restore and nothing is paired,
+which it says. Until then
 `status` shows it as `PAUSED (incomplete)`, `health` warns about it under `lifecycle`, and
 `container-update` logs that it may still be serving on images it does not update while paused.
 
