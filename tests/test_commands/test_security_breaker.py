@@ -148,3 +148,42 @@ def test_apply_held_is_in_the_usage_and_help_text():
 def test_deploy_shell_refuses_apply_held(capsys):
     assert run_command("security", ["scan", "--apply-held"]) == 1
     assert "operator-only" in capsys.readouterr().err
+
+
+# A dangling link at a quarantine record's name is a record that cannot be
+# read: it must not pass for "already quarantined" and skip the quarantine
+# without a word (#176 review P2).
+
+def _dangling_quarantine(paths, name: str) -> None:
+    record = paths.project_quarantine_state(name)
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.symlink_to(paths.root / "gone.json")
+
+
+def test_a_dangling_quarantine_record_is_an_error_not_a_skip(tmp_path) -> None:
+    from types import SimpleNamespace
+    from boxmunge.commands.security_fleet_enforce import apply_new_quarantines
+    paths = make_box(tmp_path, projects=("demo",))
+    _dangling_quarantine(paths, "demo")
+    result = apply_new_quarantines(
+        paths, {"demo": SimpleNamespace(headline="CVE-1", decisions=())}, in_grace=False)
+    assert result.applied == [] and "quarantine" in result.errors["demo"].lower()
+    assert "symlink" in result.errors["demo"]
+
+
+def test_a_dangling_quarantine_record_is_reported_by_the_scan(fleet, capsys) -> None:
+    paths, _ = fleet
+    _dangling_quarantine(paths, "aaa")
+    assert cmd_security_scan(["aaa"], paths) != 0
+    out = capsys.readouterr()
+    assert "aaa: ERROR" in out.out and "symlink" in out.out + out.err
+
+
+def test_apply_held_reports_a_dangling_quarantine_record(fleet) -> None:
+    from boxmunge.commands.security_fleet_enforce import apply_held
+    paths, _ = fleet
+    cmd_security_scan([], paths)
+    _dangling_quarantine(paths, "aaa")
+    result = apply_held(paths)
+    assert "symlink" in result.errors["aaa"] and "aaa" in result.held
+    assert sorted(result.applied) == ["bbb", "ccc"]
