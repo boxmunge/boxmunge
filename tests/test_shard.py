@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -56,32 +57,60 @@ def test_the_committed_weights_are_seconds_per_existing_file() -> None:
         assert isinstance(seconds, (int, float)) and seconds >= 0
 
 
-# The two CI tiers that are sharded, as CI selects them.
-TIERS = {
-    "integration": ["tests/integration", "--ignore=tests/integration/userns",
-                    "-m", "integration and not userns_dind"],
-    "userns-dind": ["tests/integration/userns", "-m", "userns_dind"],
-}
+CI = REPO / ".github" / "workflows" / "ci.yml"
+DIND = REPO / "tests" / "integration" / "userns" / "run-in-dind.sh"
+SHARD = re.compile(r"--shard \$\{\{ matrix\.shard \}\}/(\d+)")
+
+
+def _tier(job: str) -> tuple[list[str], int]:
+    """The pytest selection and shard count CI's sharded `job` runs, read
+    from ci.yml (and, for userns-dind, from run-in-dind.sh, which adds its
+    own `-m`), so these tests check the selection CI really makes."""
+    run = next(step["run"] for step in yaml.safe_load(CI.read_text())["jobs"][job]["steps"]
+               if SHARD.search(step.get("run", "")))
+    shards = int(SHARD.search(run).group(1))
+    words = shlex.split(SHARD.sub("", run))
+    if job == "userns-dind":
+        line = next(ln for ln in DIND.read_text().splitlines() if ' -m pytest "$@" ' in ln)
+        added = shlex.split(line.split('"$@"', 1)[1].split("||")[0])
+        args = words[words.index("/src/tests/integration/userns/run-in-dind.sh") + 1:] + added
+    else:
+        args = words[words.index("pytest") + 1:]
+    keep = [a for a in args if a not in ("-q", "-p", "no:cacheprovider")
+            and not a.startswith("--durations")]
+    return keep, shards
+
+
+TIERS = ["integration", "userns-dind"]
 
 
 def _selected(tier: str, *args: str) -> list[str]:
+    selection, _ = _tier(tier)
     out = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q", "-p", "no:cacheprovider",
-         *TIERS[tier], *args],
+         *selection, *args],
         cwd=REPO, capture_output=True, text=True, check=True).stdout
     return [line for line in out.splitlines() if "::" in line]
+
+
+def test_the_tiers_are_read_as_ci_runs_them() -> None:
+    assert _tier("integration") == (
+        ["tests/", "--ignore=tests/vm", "-m", "integration and not userns_dind"], 3)
+    assert _tier("userns-dind") == (["tests/integration/userns", "-m", "userns_dind"], 3)
 
 
 @pytest.mark.parametrize("tier", TIERS)
 def test_the_shards_of_a_run_partition_its_tests(tier: str) -> None:
     everything = _selected(tier)
-    shards = [_selected(tier, "--shard", f"{k}/3") for k in (1, 2, 3)]
+    n = _tier(tier)[1]
+    shards = [_selected(tier, "--shard", f"{k}/{n}") for k in range(1, n + 1)]
     assert all(shards)
     assert sorted(t for shard in shards for t in shard) == sorted(everything)
 
 
 def test_a_shard_by_test_module_is_split_and_every_other_kept_whole() -> None:
-    shards = [_selected("userns-dind", "--shard", f"{k}/3") for k in (1, 2, 3)]
+    n = _tier("userns-dind")[1]
+    shards = [_selected("userns-dind", "--shard", f"{k}/{n}") for k in range(1, n + 1)]
     homes: dict[str, set[int]] = {}
     for k, shard in enumerate(shards):
         for test in shard:
