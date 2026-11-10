@@ -403,19 +403,20 @@ try:
     d = json.load(sys.stdin)
     if not isinstance(d, dict):
         raise ValueError(f"a JSON {type(d).__name__}, not an object")
-    words = [d.get("action"), d.get("version", "") if d.get("action") == "upgrade" else "",
+    words = [d.get("action"), d.get("version") if d.get("action") == "upgrade" else "",
              d.get("class") or ""]
-    if not all(isinstance(w, str) for w in words) or not words[0]:
-        raise ValueError("its action, version and class must be strings, with an action")
     if d.get("action") == "upgrade" and not words[1]:
         raise ValueError("an upgrade with no version")
-    if any(c in w for w in words for c in "\n\x1f"):
+    if not all(isinstance(w, str) for w in words) or not words[0]:
+        raise ValueError("its action, version and class must be strings, with an action")
+    if any(c in w for w in words for c in "\n\r\x1f"):
         raise ValueError("a line break in its action, version or class (or a \\x1f)")
 except (ValueError, RecursionError) as e:  # json.JSONDecodeError is a ValueError
-    sys.exit(str(e))
+    print(e)  # the reason, on stdout; stderr goes to the shim and is never a field
+    sys.exit(1)
 message = d.get("message")
 message = str(message).strip() if message is not None else ""
-print("\x1f".join(words), message or "(no message given)", sep="\n")' 2>&1)" \
+print("\x1f".join(words), message or "(no message given)", sep="\n")')" \
         || die_logged "_discover-update gave an answer the shim cannot read ($fields): $(printable "$result")"
     IFS=$'\x1f' read -r action version class <<<"${fields%%$'\n'*}"
     msg="${fields#*$'\n'}"

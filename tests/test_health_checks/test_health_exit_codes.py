@@ -239,7 +239,7 @@ def test_a_data_driven_exception_still_warns(paths, exc):
                          ids=["check-module", "module-it-imports"])
 @pytest.mark.usefixtures("docker_down", "platform_ok")
 def test_an_unimportable_module_fails_its_check_with_exit_2(paths, monkeypatch, capsys, broken):
-    monkeypatch.delitem(sys.modules, "boxmunge.health_checks.alerts")
+    monkeypatch.delitem(sys.modules, "boxmunge.health_checks.alerts", raising=False)
     monkeypatch.setitem(sys.modules, broken, None)   # import of it raises ImportError
     rc = run_health(paths, as_json=True)
     checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)["checks"]}

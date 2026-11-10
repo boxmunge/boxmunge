@@ -154,6 +154,8 @@ run_shim auto
 expect 0 "blocklisted on this box" "an empty last field does not cut the answer short"
 rm -f "$BOXMUNGE_ROOT/calls"
 for bad in '{"action": "upgrade"}|an upgrade with no version' \
+           '{"action": "upgrade", "version": null}|an upgrade with no version' \
+           '{"action": "upgrade", "version": "1.5.0\rsecurity"}|a line break in its action' \
            'not json|Expecting value' \
            '["upgrade", "1.5.0"]|a JSON list, not an object' \
            '|Expecting value' \
@@ -166,10 +168,18 @@ for bad in '{"action": "upgrade"}|an upgrade with no version' \
         || fail "a traceback for ${bad%%|*}: $OUT"
 done
 [[ "$(grep -c "^bm_log error _discover-update gave an answer the shim cannot read" \
-        "$BOXMUNGE_ROOT/calls")" == 5 ]] && pass "each malformed answer reaches the operational log" \
+        "$BOXMUNGE_ROOT/calls")" == 7 ]] && pass "each malformed answer reaches the operational log" \
     || fail "malformed answers were not all logged: $(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)"
 rm -f "$BOXMUNGE_ROOT/calls"
 mock_python a
+# Python's stderr is never read as a field: a python3 that warns there still parses.
+WARNPY="$(mktemp -d)"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "DeprecationWarning: something" >&2' \
+    "exec $(printf %q "$REAL_PYTHON3_FOR_VENV") \"\$@\"" > "$WARNPY/python3"
+chmod +x "$WARNPY/python3"
+answers '{"action": "up_to_date"}'
+PATH="$WARNPY:$PATH" run_shim auto
+expect 0 "Already on latest version" "a warning on the parser's stderr is not read as the action"
 # The release class discovery gives names the success alert; anything else stops.
 mock_server a 'echo "{\"action\": \"upgrade\", \"version\": \"1.5.0\", \"url\": \"x\", \"class\": \"urgent\"}"'
 run_shim auto
