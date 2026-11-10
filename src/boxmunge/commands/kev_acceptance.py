@@ -55,12 +55,12 @@ def prod_deploy_acceptance(paths: BoxPaths, project: str, accepted: bool) -> Ite
     token = _CURRENT.set(acceptance)
     try:
         yield
-    finally:
+    finally:  # also when the command exits from inside
         _CURRENT.reset(token)
-    if accepted and not acceptance.consulted:
-        why = ("the deploy stopped before the quarantine's KEV check" if
-               is_quarantined(project, paths) else f"{project} is not CVE-quarantined")
-        print(f"  {ACCEPT_FLAG}: nothing to accept: {why}.")
+        if accepted and not acceptance.consulted:
+            why = ("the deploy stopped before the quarantine's KEV check" if
+                   is_quarantined(project, paths) else f"{project} is not CVE-quarantined")
+            print(f"  {ACCEPT_FLAG}: nothing to accept: {why}.")
 
 
 def accept_at_gate(project: str, check: KevLiftCheck, paths: BoxPaths) -> str | None:
