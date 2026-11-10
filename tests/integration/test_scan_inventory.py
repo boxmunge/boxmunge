@@ -260,9 +260,9 @@ def test_compose_profiles_in_the_env_file_make_a_profiled_service_expected(tmp_p
     project_dir.mkdir()
     (project_dir / "compose.yml").write_text(
         "services:\n"
-        "  web:\n    image: busybox:1\n"
-        "  dev:\n    image: busybox:1\n    profiles: [dev]\n"
-        "  tools:\n    image: busybox:1\n    profiles: [tools]\n")
+        "  web:\n    image: busybox:1.36\n"
+        "  dev:\n    image: busybox:1.36\n    profiles: [dev]\n"
+        "  tools:\n    image: busybox:1.36\n    profiles: [tools]\n")
     (project_dir / ".env").write_text("COMPOSE_PROFILES=dev\n")
     inventory = load_deployed_inventory(project_dir, ["compose.yml"], name)
     assert {n: s.expected for n, s in inventory.services.items()} == {
