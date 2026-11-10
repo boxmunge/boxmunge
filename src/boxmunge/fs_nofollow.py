@@ -96,11 +96,11 @@ def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600, *,
                      dir_fd=dir_fd)
     except OSError as e:
         # ENXIO: a write-only open of a FIFO (or socket) nobody reads.
-        what = {errno.ELOOP: "a symlink", errno.ENXIO: "a FIFO or socket"}.get(e.errno)
-        if what is None:
-            raise
-        raise OSError(e.errno, f"{path} is {what}, not a plain regular file; refusing "
-                      "to use it. Remove it so it can be recreated.") from e
+        for code, what in ((errno.ELOOP, "a symlink"), (errno.ENXIO, "a FIFO or socket")):
+            if e.errno == code:
+                raise OSError(code, f"{path} is {what}, not a plain regular file; "
+                              "refusing to use it. Remove it so it can be recreated.") from e
+        raise
     st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
         os.close(fd)
@@ -172,6 +172,19 @@ def read_text_nofollow(path: Path, *, limit: int = READ_LIMIT_BYTES) -> str:
     return read_bytes_nofollow(path, limit=limit).decode("utf-8")
 
 
+def read_text_nofollow_or_none(path: Path, *, limit: int = READ_LIMIT_BYTES) -> str | None:
+    """read_text_nofollow, or None when nothing is at the name: the one
+    existence rule for root's readers of deploy-writable records. Anything
+    there, a link whose target is gone included, is read or refused, never
+    taken for "no record" (Path.exists() follows the link, so it would be).
+    Absence is the no-follow open's own ENOENT, so there is no window
+    between a check and the read."""
+    try:
+        return read_text_nofollow(path, limit=limit)
+    except FileNotFoundError:
+        return None
+
+
 def chmod_nofollow(path: Path, mode: int | None = None, add: int = 0) -> None:
     """chmod that refuses a symlink rather than following it.
 
@@ -180,8 +193,9 @@ def chmod_nofollow(path: Path, mode: int | None = None, add: int = 0) -> None:
     permission, so a 0000 file of the caller's own still works) and chmod'd
     through its /proc/self/fd entry. Elsewhere lchmod does the same job.
     """
-    if hasattr(os, "O_PATH"):
-        fd = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+    o_path: int | None = getattr(os, "O_PATH", None)  # Linux only
+    if o_path is not None:
+        fd = os.open(path, o_path | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             st = os.fstat(fd)
             if stat.S_ISLNK(st.st_mode):

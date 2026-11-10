@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from boxmunge.state import read_state
+from boxmunge.state import StateError, read_state
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -29,6 +29,17 @@ def redeploy_command(paths: BoxPaths, project: str) -> str:
     if not isinstance(installed, str) or not installed:
         return f"prod-deploy {project}"  # never deployed: its ref is what there is
     return f"prod-deploy {project} --ref {installed}"
+
+
+def redeploy_or_bare(paths: BoxPaths, project: str) -> str:
+    """redeploy_command, for a message that must not fail on the deploy
+    record: a git project whose record cannot be read gets its bare
+    deploy, the newest commit on its ref (it has no inbox). Only a git
+    project reads the record."""
+    try:
+        return redeploy_command(paths, project)
+    except StateError:
+        return f"prod-deploy {project}"
 
 
 def deploy_ways(paths: BoxPaths, project: str) -> str:

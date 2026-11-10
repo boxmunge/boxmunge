@@ -402,7 +402,7 @@ def check_containers_start(paths: BoxPaths, project_name: str, names: list[str],
         bind_sources.check_sources(project_dir, sources, rec["sources"])
     except (BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
-    if paths.project_users_record(project_name).exists():
+    if os.path.lexists(paths.project_users_record(project_name)):
         starting = {c.service for c in docker_containers.project_containers(project_name)
                     if c.name in names}
         created = {svc: user for svc, user in

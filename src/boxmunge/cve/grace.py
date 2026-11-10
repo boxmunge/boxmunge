@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from boxmunge.fileutil import atomic_write_text
-from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -126,12 +126,12 @@ def read_grace_state(paths: "BoxPaths") -> GraceState | None:
     JSON or missing/invalid fields.
     """
     path = grace_state_path(paths)
-    if not path.exists():
-        return None
     try:
-        raw = read_text_nofollow(path)
+        raw = read_text_nofollow_or_none(path)
     except OSError as e:
         raise GraceError(f"failed to read grace state file {path}: {e}") from e
+    if raw is None:
+        return None
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:

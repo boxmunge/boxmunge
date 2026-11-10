@@ -37,7 +37,7 @@ from boxmunge.data_dirs import (
 )
 from boxmunge.fileutil import atomic_write_text, discard_dir, fsync_dir, sync_entries
 from boxmunge.fs_nofollow import (
-    chmod_nofollow, chown_tree_deploy, mkdir_p_deploy, read_text_nofollow,
+    chmod_nofollow, chown_tree_deploy, mkdir_p_deploy, read_text_nofollow_or_none,
 )
 from boxmunge.staged_release import SLOT, release_dir
 
@@ -45,9 +45,14 @@ if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 
-def _read_meta(path: Path) -> dict:
+def _read_meta(path: Path) -> dict | None:
+    """The record at ``path``; None when nothing is there. Raises
+    ReleaseStateError for anything else it cannot read, a link included."""
     try:
-        meta = json.loads(read_text_nofollow(path))
+        raw = read_text_nofollow_or_none(path)
+        if raw is None:
+            return None
+        meta = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise ReleaseStateError(f"Cannot read {path}: {e}") from e
     if not isinstance(meta, dict):
@@ -346,8 +351,9 @@ def install_release(tree: Path, project_dir: Path,
 def live_ref(paths: BoxPaths, project_name: str) -> str:
     """The ref of the release code currently installed in the project dir."""
     meta = _live_meta(paths, project_name)
-    if meta.exists():
-        ref = _read_meta(meta).get("ref")
+    live = _read_meta(meta)
+    if live is not None:
+        ref = live.get("ref")
         if not isinstance(ref, str) or not ref:
             raise ReleaseStateError(f"{meta} has no ref")
         return ref
@@ -387,9 +393,11 @@ def load_previous_release(paths: BoxPaths, project_name: str) -> PreviousRelease
     """The kept previous release, or None if there is none."""
     tree = previous_dir(paths, project_name)
     meta_path = _previous_meta(paths, project_name)
-    if not tree.is_dir() or not meta_path.exists():
+    if not tree.is_dir():
         return None
     meta = _read_meta(meta_path)
+    if meta is None:
+        return None
     try:
         return PreviousRelease(
             tree=tree, ref=meta["ref"], data_snapshot=meta["data_snapshot"],

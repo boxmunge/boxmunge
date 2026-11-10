@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -21,7 +22,7 @@ from boxmunge.cve.policy import (
 from boxmunge.cve.scanner import AttackVector, Finding, PkgClass, Severity, VulnStatus
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.state import StateError, read_state
-from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 
 # The scan runs daily (03:00-03:30); 36h tolerates one late or missed run's
 # worth of jitter without crying wolf, and catches a second missed night.
@@ -133,10 +134,11 @@ def last_scanned_at(path: Path) -> str | None:
 def scan_problem(path: Path, project: str, now: datetime) -> str | None:
     """Why the project has no current, complete scan result at ``path``, or
     None when it has one: recorded within SCAN_MAX_AGE, nothing unscanned."""
-    if not path.exists():
-        return f"{project}: never scanned"
     try:
-        state = json.loads(read_text_nofollow(path))
+        raw = read_text_nofollow_or_none(path)
+        if raw is None:
+            return f"{project}: never scanned"
+        state = json.loads(raw)
         scanned_at = datetime.fromisoformat(state["scanned_at"])
     except (OSError, ValueError, KeyError, TypeError) as e:
         return f"{project}: scan state unreadable ({e})"
@@ -158,7 +160,7 @@ def read_scan_state(path: Path) -> dict[str, Any] | None:
     signal). Raises StateError, naming the file, when it is unreadable or
     not a JSON object — fail loud.
     """
-    if not path.exists():
+    if not os.path.lexists(path):
         return None
     return read_state(path)
 

@@ -27,7 +27,7 @@ from boxmunge.fileutil import atomic_write_text
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
-from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 
 COMPONENT = "auto-update"
 REMIND_AFTER = timedelta(hours=24)
@@ -42,10 +42,11 @@ class BlockedStateError(ValueError):
 def read_blocked_state(paths: BoxPaths) -> dict[str, Any] | None:
     """The last recorded discovery, or None if auto-update never recorded one."""
     path = paths.platform_update_state
-    if not path.exists():
-        return None
     try:
-        state = json.loads(read_text_nofollow(path))
+        raw = read_text_nofollow_or_none(path)
+        if raw is None:
+            return None
+        state = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise BlockedStateError(f"{path}: unreadable: {e}") from e
     if not isinstance(state, dict) or set(state) != _STATE_KEYS:

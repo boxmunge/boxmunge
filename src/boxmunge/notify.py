@@ -31,7 +31,7 @@ from boxmunge.fileutil import atomic_write_text
 from boxmunge.log import log_error, log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.pushover import send_notification
-from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 
 UNCONFIGURED_LOG_INTERVAL = timedelta(hours=24)
 
@@ -54,10 +54,11 @@ def _now() -> datetime:
 
 def _unconfigured_logged_recently(paths: BoxPaths, now: datetime) -> bool:
     path = paths.alerts_unconfigured_state
-    if not path.exists():
-        return False
     try:
-        logged_at = datetime.fromisoformat(json.loads(read_text_nofollow(path))["logged_at"])
+        raw = read_text_nofollow_or_none(path)
+        if raw is None:
+            return False
+        logged_at = datetime.fromisoformat(json.loads(raw)["logged_at"])
         if logged_at.tzinfo is None:
             raise ValueError("logged_at has no timezone")
     except (OSError, UnicodeDecodeError, ValueError, KeyError, TypeError) as e:
