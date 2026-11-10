@@ -36,7 +36,8 @@ def _staging(cmd: list[str], cwd: str) -> bool:
     return named or SLOT in cwd or any(SLOT in arg for arg in cmd)
 
 
-def _smoke(container: str, script: str, service: str) -> SmokeResult:
+def _smoke(container: str, script: str, service: str,
+           periodic: bool = False) -> SmokeResult:
     if container.startswith("myapp-staging-"):
         return SmokeResult(status="critical", message="staging smoke failed")
     return SmokeResult(status="ok", message="")
