@@ -1,9 +1,12 @@
 """Generate Caddy site configuration from a project manifest."""
 
+import errno
+import os
 from pathlib import Path
 from typing import Any
 
-from boxmunge.caddy_journal import write_site
+from boxmunge.caddy_journal import MAX_SITE_BYTES, write_site
+from boxmunge.fs_nofollow import open_regular_nofollow
 from boxmunge.docker import caddy_config_lock
 from boxmunge.log import log_operation
 from boxmunge.manifest import get_all_routes
@@ -103,9 +106,37 @@ def site_config(paths: BoxPaths, project: str,
     generated from ``manifest``; ``override`` is the file used, or None.
     prepare_caddy_config writes this, and diff previews it."""
     override = paths.project_caddy_override(project)
-    if override.exists():
-        return override.read_text(), override
+    text = read_override(override)
+    if text is not None:
+        return text, override
     return generate_caddy_config(manifest), None
+
+
+def read_override(override: Path) -> str | None:
+    """The text of a project's caddy.override.conf, or None if there is
+    none. The project directory is deploy-writable and root reads this under
+    sudo deploy/promote/rollback/resume, so it is read without following a
+    link or blocking on a FIFO, and capped at the size of a site file.
+    Raises OSError naming the fix."""
+    def unusable(what: str) -> OSError:
+        return OSError(f"{override} {what}. Make it a regular file holding the site "
+                       f"block, or remove it to use the generated site config, then "
+                       f"run the command again.")
+    try:
+        fd = open_regular_nofollow(override, os.O_RDONLY)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise unusable("is a symlink, which boxmunge does not follow"
+                       if e.errno == errno.ELOOP else "is not a regular file") from e
+    with os.fdopen(fd, "rb") as f:
+        data = f.read(MAX_SITE_BYTES + 1)
+    if len(data) > MAX_SITE_BYTES:
+        raise unusable(f"is larger than {MAX_SITE_BYTES} bytes")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise unusable("is not UTF-8 text") from e
 
 
 def prepare_caddy_config(paths: BoxPaths, manifest: dict[str, Any]) -> None:
