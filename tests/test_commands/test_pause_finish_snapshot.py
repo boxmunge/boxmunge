@@ -109,3 +109,23 @@ def test_a_service_that_ran_since_is_not_paired(failed_stop, monkeypatch, capsys
     out = capsys.readouterr().out
     assert f"{name} taken when this pause began stays in backups/ for a manual restore" in out
     assert "has run since" in out
+
+
+def test_a_snapshot_taken_with_the_service_not_running_says_one_thing(
+        live_v1, monkeypatch, capsys) -> None:  # noqa: F811
+    """Review of #159 (P3-1): with no containers recorded, the finishing run
+    printed "kept: web has not run since", then "stays in backups/"."""
+    from boxmunge.pause import write_paused_state
+    paths = live_v1
+    name = "myapp-2026-11-01T100099-prepause.tar.gz.age"
+    (paths.project_backups("myapp") / name).parent.mkdir(parents=True, exist_ok=True)
+    (paths.project_backups("myapp") / name).write_text("prepause")
+    write_paused_state("myapp", paths, snapshot={"name": name, "service": "web",
+                                                 "containers": [], "at": BEFORE.isoformat()})
+    _web(monkeypatch, running=False)
+    capsys.readouterr()
+    assert _pause(paths, service_running=False) == 0
+    out = capsys.readouterr().out
+    assert pending(paths, "myapp") is None
+    assert f"{name} taken when this pause began stays in backups/" in out
+    assert "is kept" not in out and "is the pre-deploy snapshot" not in out

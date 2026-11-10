@@ -169,7 +169,12 @@ def for_finishing(paths: BoxPaths, project: str, no_snapshot: bool) -> PauseSnap
     if recorded is None:
         return None
     first = PauseSnapshot.from_record(recorded, where)
-    stale = has_run_since(project, first.as_record()) if first.containers else None
+    if not first.containers:
+        print(f"  The snapshot {first.name} taken when this pause began stays in backups/ "
+              f"for a manual restore: {first.service} was not running when it was taken, "
+              f"so whether it runs before the next deploy cannot be told.")
+        return None
+    stale = has_run_since(project, first.as_record())
     if stale is None:
         print(f"  The snapshot {first.name} taken when this pause began is kept: "
               f"{first.service} has not run since.")
