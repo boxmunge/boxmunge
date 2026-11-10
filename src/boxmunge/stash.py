@@ -6,12 +6,14 @@ deploy state, and platform version. Used automatically during
 boxmunge upgrade; not a user-facing command.
 """
 
+import hashlib
 import io
 import json
 import os
 import pwd
 import tarfile
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,6 +31,16 @@ META_FILENAME = "boxmunge-stash-meta.json"
 
 class StashError(Exception):
     """Raised when stash creation or restoration fails safety checks."""
+
+
+@dataclass(frozen=True)
+class CreatedStash:
+    """The archive create_stash wrote, with the size and sha256 of the bytes
+    written: read back through the descriptor that wrote them, never by
+    reopening the name, which stashes/ (deploy-writable) can have replaced."""
+    path: Path
+    size: int
+    sha256: str
 
 
 def _meta_payload(paths: BoxPaths) -> dict:
@@ -102,11 +114,11 @@ def _stash_set(paths: BoxPaths) -> list[tuple[Path, str]]:
     return found
 
 
-def create_stash(paths: BoxPaths) -> Path:
+def create_stash(paths: BoxPaths) -> CreatedStash:
     """Create a stash archive of the current platform state.
 
-    Returns the path to the created archive. Raises StashError, writing
-    nothing, if the state includes a symlink it cannot hold (_stash_set).
+    Raises StashError, writing nothing, if the state includes a symlink it
+    cannot hold (_stash_set).
     """
     members = _stash_set(paths)
     paths.stashes.mkdir(parents=True, exist_ok=True)
@@ -119,18 +131,22 @@ def create_stash(paths: BoxPaths) -> Path:
     # stashes/ is deploy-writable (root:deploy 770), and root creates stashes
     # too: never follow a planted symlink at this predictable name.
     raw = os.fdopen(open_regular_nofollow(
-        archive_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb")
-    os.fchmod(raw.fileno(), 0o600)
-    with raw, tarfile.open(fileobj=raw, mode="w:gz") as tar:
-        for path, arcname in members:
-            tar.add(path, arcname=arcname)
+        archive_path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600), "w+b")
+    with raw:
+        os.fchmod(raw.fileno(), 0o600)
+        with tarfile.open(fileobj=raw, mode="w:gz") as tar:
+            for path, arcname in members:
+                tar.add(path, arcname=arcname)
 
-        # Schema-version marker — must be last so partial archives lack it
-        # and are detected as legacy/corrupt by restore_stash.
-        meta_bytes = json.dumps(_meta_payload(paths), indent=2).encode()
-        meta_info = tarfile.TarInfo(name=META_FILENAME)
-        meta_info.size = len(meta_bytes)
-        tar.addfile(meta_info, io.BytesIO(meta_bytes))
+            # Schema-version marker — must be last so partial archives lack it
+            # and are detected as legacy/corrupt by restore_stash.
+            meta_bytes = json.dumps(_meta_payload(paths), indent=2).encode()
+            meta_info = tarfile.TarInfo(name=META_FILENAME)
+            meta_info.size = len(meta_bytes)
+            tar.addfile(meta_info, io.BytesIO(meta_bytes))
+        raw.seek(0)
+        digest = hashlib.file_digest(raw, "sha256")
+        size = raw.tell()
 
     log_operation(
         "stash",
@@ -138,7 +154,7 @@ def create_stash(paths: BoxPaths) -> Path:
         paths,
         detail={"format_version": STASH_FORMAT_VERSION},
     )
-    return archive_path
+    return CreatedStash(archive_path, size, digest.hexdigest())
 
 
 def list_stashes(paths: BoxPaths) -> list[Path]:
