@@ -315,8 +315,8 @@ Recurring operations run via systemd timers:
 | `boxmunge-health.timer` | Every 5 minutes | `check-all` |
 | `boxmunge-backup.timer` | Daily at 02:00 | `backup-all` |
 | `boxmunge-backup-sync.timer` | Daily at 03:00 | `backup-sync` |
-| `boxmunge-cve-scan.timer` | Daily at 03:00 (up to 30 min jitter) | `security scan` |
-| `boxmunge-container-update.timer` | Daily at 03:00 (up to 60 min jitter) | `container-update` |
+| `boxmunge-cve-scan.timer` | Daily at 03:00 (up to 30 min jitter), after any container update still running | `security scan` |
+| `boxmunge-container-update.timer` | Daily at 02:30 (up to 30 min jitter) | `container-update` |
 | `boxmunge-auto-update.timer` | Every 6 hours (up to 30 min jitter) | `auto-update` |
 
 All timers use `Persistent=true` so a missed run (e.g., server was rebooted) executes on next start rather than being silently skipped.
