@@ -73,22 +73,20 @@ cosign_reason() {
 # interface to tell them apart. So, as for a pip failure, the first refusal of
 # a version is alerted and logged with cosign's reason but not blocklisted or
 # reported, and auto-update retries it on its next run, with a fresh download;
-# a second in a row blocklists and reports it. The count lives in root-only
-# upgrade-root/ (deploy can neither reset nor raise it), names the version it
-# counts, and a verified signature clears it (fetch_release).
+# a second in a row blocklists and reports it. The count (cosign_failures,
+# per version) lives in root-only upgrade-root/, so deploy can neither reset
+# nor raise it; a verified signature of that same version clears it
+# (fetch_release), and blocklisting forgets it.
 cosign_verify_failed() {
-    local version="$1" from_version="$2" seen="" count=0
-    refuse_symlink "$COSIGN_FAILURES_FILE"
-    if [[ -e "$COSIGN_FAILURES_FILE" ]]; then read -r seen count < "$COSIGN_FAILURES_FILE" || true; fi
-    [[ "$seen" == "$version" && "$count" =~ ^[0-9]+$ ]] || count=0
-    count=$((count + 1))
+    local version="$1" from_version="$2" count
+    count=$(( $(cosign_failures "$version") + 1 ))
     if [[ "$count" -ge 2 ]]; then
-        rm -f "$COSIGN_FAILURES_FILE"
+        cosign_failures "$version" 0
         local detail="preflight_failed: cosign_verify: $COSIGN_REASON"
         preflight_fail "$version" "$from_version" "preflight_failed: cosign_verify" \
             "$FETCH_ERROR ($count times in a row); blocklisting $version" preflight "${detail:0:200}"
     fi
-    write_root_file "$COSIGN_FAILURES_FILE" "$version $count"
+    cosign_failures "$version" "$count"
     log "$FETCH_ERROR; $version not blocklisted: auto-update retries it, and a second failure in a row blocklists it"
     remove_slot "$(standby_slot)"
     bm_log warn upgrade "signature verification of $version failed (not blocklisted; a second failure in a row blocklists it): $COSIGN_REASON" \
@@ -163,7 +161,7 @@ fetch_release() {
     # cosign is hard-required: if the host is missing it, abort.
     verify_release_signature "$dir" \
         || { fetch_failed cosign_verify "Cosign verification of SHA256SUMS FAILED, refusing to install: $COSIGN_REASON"; return 1; }
-    rm -f "$COSIGN_FAILURES_FILE"
+    cosign_failures "$version" 0
     log "Cosign signature on SHA256SUMS verified (release-workflow identity)"
     bm_log info upgrade "signature verified" "{\"version\": \"$version\"}"
 

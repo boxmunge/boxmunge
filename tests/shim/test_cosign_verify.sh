@@ -79,8 +79,19 @@ esac >> "$BOXMUNGE_ROOT/calls"'
     : > "$BOXMUNGE_ROOT/calls"
 }
 
-COUNTER_REL="upgrade-root/cosign-failures"
+COUNTER_REL="upgrade-root/cosign-failures.json"
 counter() { cat "$BOXMUNGE_ROOT/$COUNTER_REL" 2>/dev/null || echo none; }
+# count_of <version>: the refusals in a row counted for <version> (0: none).
+count_of() {
+    python3 -c 'import json, os, sys
+p = sys.argv[1]
+print(json.load(open(p)).get(sys.argv[2], 0) if os.path.exists(p) else 0)' "$BOXMUNGE_ROOT/$COUNTER_REL" "$1"
+}
+# seed_count <version> <count>: a count an earlier run left.
+seed_count() {
+    [[ -d "$BOXMUNGE_ROOT/upgrade-root" ]] || mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+    printf '{"%s": %s}\n' "$1" "$2" > "$BOXMUNGE_ROOT/$COUNTER_REL"
+}
 calls() { cat "$BOXMUNGE_ROOT/calls"; }
 blocklisted() { grep -q "^blocklist " "$BOXMUNGE_ROOT/calls"; }
 reported() { grep -q "^report " "$BOXMUNGE_ROOT/calls"; }
@@ -97,11 +108,10 @@ REASON_RAW_ESC=$'\033'
 # --- a verified signature -----------------------------------------------------
 
 box 1.4.0
-mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
-echo "1.5.0 1" > "$BOXMUNGE_ROOT/$COUNTER_REL"
+seed_count 1.5.0 1
 run_shim target 1.5.0
 expect 0 "probation started" "a verified signature installs"
-[[ "$(counter)" == none ]] && pass "a verified signature clears the failure count" || fail "count left: $(counter)"
+[[ "$(count_of 1.5.0)" == 0 ]] && pass "a verified signature clears its version's failure count" || fail "count left: $(counter)"
 drop_root
 
 # --- the first refusal: alerted with cosign's reason, not blocklisted ----------
@@ -119,7 +129,7 @@ grep -qF "$REASON" <(grep "^log level=warn " "$BOXMUNGE_ROOT/calls") \
     && pass "the operational log carries cosign's reason" || fail "log: $(calls)"
 ! grep -q "$REASON_RAW_ESC" "$BOXMUNGE_ROOT/calls" && [[ "$OUT" != *"$REASON_RAW_ESC"* ]] \
     && pass "no terminal escape reaches the log, the alert or the output" || fail "escape passed through"
-[[ "$(counter)" == "1.5.0 1" ]] && pass "the first refusal is counted for 1.5.0" || fail "count: $(counter)"
+[[ "$(count_of 1.5.0)" == 1 ]] && pass "the first refusal is counted for 1.5.0" || fail "count: $(counter)"
 [[ "$(file_mode "$BOXMUNGE_ROOT/upgrade-root")" == 700 && "$(file_mode "$BOXMUNGE_ROOT/$COUNTER_REL")" == 600 ]] \
     && pass "the count is root-only" || fail "modes: $(file_mode "$BOXMUNGE_ROOT/upgrade-root") $(file_mode "$BOXMUNGE_ROOT/$COUNTER_REL")"
 untouched "first refusal"
@@ -140,25 +150,24 @@ detail="$(sed -n 's/^report stage=preflight detail=//p' "$BOXMUNGE_ROOT/calls")"
 [[ "$detail" == "preflight_failed: cosign_verify: Error: searching log:"* ]] \
     && pass "the failure report carries cosign's reason" || fail "report: $(calls)"
 [[ "$OUT" == *"$REASON"* ]] && pass "the blocklisting log line carries cosign's reason" || fail "out: $OUT"
-[[ "$(counter)" == none ]] && pass "blocklisting forgets the count" || fail "count: $(counter)"
+[[ "$(count_of 1.5.0)" == 0 ]] && pass "blocklisting forgets the count" || fail "count: $(counter)"
 untouched "second refusal"
 drop_root
 
 # --- only refusals in a row of the same version count --------------------------
 
 box 1.4.0
-mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
-echo "1.6.0 1" > "$BOXMUNGE_ROOT/$COUNTER_REL"
+seed_count 1.6.0 1
 RC=0; OUT="$(FAIL_COSIGN=1 bash "$SHIM" target 1.5.0 2>&1)" || RC=$?
 expect 1 "1.5.0 not blocklisted" "another version's refusal does not count against 1.5.0"
-! blocklisted && [[ "$(counter)" == "1.5.0 1" ]] && pass "1.5.0's refusal replaces 1.6.0's count" \
+! blocklisted && [[ "$(count_of 1.5.0)" == 1 && "$(count_of 1.6.0)" == 1 ]] && pass "each version keeps its own count" \
     || fail "count: $(counter) calls: $(calls)"
 drop_root
 
 # deploy can write upgrade-state/, not upgrade-root/: a count planted there is
 # not read.
 box 1.4.0
-echo "1.5.0 1" > "$BOXMUNGE_ROOT/upgrade-state/cosign-failures"
+echo '{"1.5.0": 1}' > "$BOXMUNGE_ROOT/upgrade-state/cosign-failures.json"
 RC=0; OUT="$(FAIL_COSIGN=1 bash "$SHIM" target 1.5.0 2>&1)" || RC=$?
 expect 1 "1.5.0 not blocklisted" "a count planted in deploy-writable upgrade-state/ is ignored"
 ! blocklisted && pass "the planted count blocklists nothing" || fail "calls: $(calls)"
@@ -167,8 +176,7 @@ drop_root
 # --- cosign's reason is bounded -------------------------------------------------
 
 box 1.4.0
-mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
-echo "1.5.0 1" > "$BOXMUNGE_ROOT/$COUNTER_REL"
+seed_count 1.5.0 1
 RC=0; OUT="$(FAIL_COSIGN=long bash "$SHIM" target 1.5.0 2>&1)" || RC=$?
 expect 1 "blocklisting 1.5.0" "a long reason still blocklists on the second refusal"
 [[ "$OUT" != *"$(head -c 400 /dev/zero | tr '\0' x)"* ]] && pass "a long reason is cut short in the log" \
@@ -184,8 +192,21 @@ box 1.5.0
 RC=0; OUT="$(FAIL_COSIGN=1 bash "$SHIM" repair-deps 2>&1)" || RC=$?
 expect 1 "(nothing was changed)" "repair-deps refuses an unverified bundle"
 [[ "$OUT" == *"$REASON"* ]] && pass "repair-deps says cosign's reason" || fail "out: $OUT"
-[[ "$(counter)" == none ]] && ! blocklisted && pass "repair-deps neither counts nor blocklists" \
+[[ "$(count_of 1.5.0)" == 0 ]] && ! blocklisted && pass "repair-deps neither counts nor blocklists" \
     || fail "count: $(counter) calls: $(calls)"
+drop_root
+
+# deploy may sudo repair-deps. Verifying the installed release must not clear
+# a pending release's count, or deploy could keep a release whose signature
+# is always refused from ever being blocklisted.
+box 1.5.0
+stub "$BOXMUNGE_ROOT/env-a/bin/pip" 'exit 0'
+seed_count 1.6.0 1
+run_shim repair-deps
+expect 0 "Installed every hash-pinned dependency of 1.5.0" "repair-deps verifies the installed release"
+[[ "$(count_of 1.6.0)" == 1 ]] && pass "repair-deps leaves a pending release's count alone" || fail "count: $(counter)"
+RC=0; OUT="$(FAIL_COSIGN=1 bash "$SHIM" target 1.6.0 2>&1)" || RC=$?
+expect 1 "blocklisting 1.6.0" "the pending release's next refusal still blocklists it"
 drop_root
 
 rm -rf "$FIXTURE" "$RELEASE"

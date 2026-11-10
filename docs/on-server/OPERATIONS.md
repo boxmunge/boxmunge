@@ -2005,7 +2005,8 @@ How an upgrade is applied and undone:
    count. A signature cosign refuses is treated the same way, since an unreachable Sigstore
    looks like a bad signature: the first refusal of a version drops the standby and sends a
    local alert with cosign's reason, auto-update retries it with a fresh download, and a second
-   refusal in a row blocklists and reports it. A verified signature resets that count.
+   refusal in a row blocklists and reports it. A verified signature of that version resets its
+   count.
 2. Platform state is stashed: config, deploy state, and each project's manifest, compose file,
    env files and `boxmunge-scripts/`, with their modes and owners. A git project's
    `manifest.yml` and `compose.yml` links into `repo/` are left out, and a restore never

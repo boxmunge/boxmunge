@@ -56,7 +56,7 @@ LOCK_FILE="$UPGRADE_ROOT_DIR/upgrade.lock"
 LEGACY_LOCK_FILE="$STATE_DIR/upgrade.lock"
 INTERRUPTED_FILE="$UPGRADE_ROOT_DIR/interrupted.json"
 PIP_FAILURES_FILE="$UPGRADE_ROOT_DIR/pip-failures.json"
-COSIGN_FAILURES_FILE="$UPGRADE_ROOT_DIR/cosign-failures"
+COSIGN_FAILURES_FILE="$UPGRADE_ROOT_DIR/cosign-failures.json"
 # Written by install.sh; see system_upgrade in system.sh.
 INSTALLER_HASH_FILE="$UPGRADE_ROOT_DIR/installer.sha256"
 # The last release whose bundle has no requirements-mcp.txt. Every install

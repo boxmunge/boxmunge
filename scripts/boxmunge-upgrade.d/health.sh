@@ -113,7 +113,7 @@ health_unjudged() {
             return 0
         fi
     fi
-    read -r seen count < "$HEALTH_UNJUDGED_FILE" 2>/dev/null || true
+    [[ ! -e "$HEALTH_UNJUDGED_FILE" ]] || read -r seen count < "$HEALTH_UNJUDGED_FILE" || true
     [[ "$seen" == "$ACTIVE_SLOT" && "$count" =~ ^[0-9]+$ ]] || count=0
     count=$((count + 1))
     if [[ "$count" -lt "$needed" ]]; then
