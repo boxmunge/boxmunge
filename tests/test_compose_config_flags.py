@@ -7,6 +7,7 @@ project whose compose names them. Validation never needs their values.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from unittest.mock import patch
@@ -78,3 +79,26 @@ def test_no_placeholder_through_a_linked_directory(tmp_path: Path) -> None:
     real.mkdir()
     (tmp_path / "conf").symlink_to(real)
     assert _resolve_recording(tmp_path, "conf/app.env", real / "app.env") == [False]
+
+
+def test_no_placeholder_through_a_link_higher_up(tmp_path: Path) -> None:
+    """O_NOFOLLOW on the env file's own directory checks its last component
+    only: with proj/data -> ../outside, root made outside/sub/x.env. The
+    walk from the base refuses a link at any depth."""
+    from boxmunge.compose_resolve import _placeholder
+
+    base, outside = tmp_path / "proj", tmp_path / "outside"
+    (outside / "sub").mkdir(parents=True)
+    base.mkdir()
+    (base / "data").symlink_to("../outside")
+    assert _placeholder(base, base / "data" / "sub" / "x.env") is None
+    assert not (outside / "sub" / "x.env").exists()
+
+
+def test_a_placeholder_in_a_real_subdirectory_is_made(tmp_path: Path) -> None:
+    from boxmunge.compose_resolve import _placeholder
+
+    (tmp_path / "conf" / "env").mkdir(parents=True)
+    made = _placeholder(tmp_path, tmp_path / "conf" / "env" / "x.env")
+    assert made is not None and (tmp_path / "conf" / "env" / "x.env").exists()
+    os.close(made[0])
