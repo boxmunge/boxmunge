@@ -16,13 +16,13 @@ from typing import Any, Iterator
 from boxmunge.caddy import generate_caddy_config, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.upgrade_offline import (
-    PutBackError, offline_dry_run_line, regenerate_offline, render_overlay,
+    PutBackError, UnreadableRecord, offline_dry_run_line, offline_exit, regenerate_offline,
+    render_overlay, unreadable_record,
 )
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.user_entries import USER_ENTRIES, split_user_entries
 from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
-from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.release_txn import InstallTxn, load_txn, stale_reason, start_refusal
 from boxmunge.docker import DockerError
@@ -35,8 +35,7 @@ from boxmunge.manifest import (
 )
 from boxmunge.git_layout import relink_advice, repo_ownership_advice, unlinked_files
 from boxmunge.migration import migrate_manifest, MigrationError
-from boxmunge.pause import is_paused, render_maintenance_caddy_config
-from boxmunge.redeploy_hint import deploy_from_pause
+from boxmunge.pause import render_maintenance_caddy_config
 from boxmunge.fleet import report_project_failure
 from boxmunge.paths import BoxPaths, InvalidProjectName, validate_project_name
 from boxmunge.security_overlay import services_with_off_profile
@@ -75,11 +74,13 @@ def require_manifest(project_dir: Path) -> Path:
     return path
 
 
-def exclusion(paths: BoxPaths, name: str) -> LegacyStage | InstallTxn | ReleaseStateError | OSError | None:
+def exclusion(paths: BoxPaths, name: str) -> (
+        LegacyStage | InstallTxn | ReleaseStateError | OSError | UnreadableRecord | None):
     """Why the upgrade leaves `name` exactly as it is, or None: a stage left by
     0.10.1, an OSError when it cannot be told whether one is on disk, an
-    open install, or an install record this release cannot read. Read-only;
-    the one decision behind the dry run and the apply."""
+    open install, an install record this release cannot read, or a pause or
+    quarantine record it cannot read. Read-only; the one decision behind the
+    dry run and the apply."""
     try:
         stage = legacy_stage(paths, name)
     except OSError as e:
@@ -87,9 +88,10 @@ def exclusion(paths: BoxPaths, name: str) -> LegacyStage | InstallTxn | ReleaseS
     if stage is not None:
         return stage
     try:
-        return load_txn(paths, name)
+        txn = load_txn(paths, name)
     except ReleaseStateError as e:
         return e
+    return txn if txn is not None else unreadable_record(paths, name)
 
 
 def _unreadable_release_files(paths: BoxPaths, name: str, txn: InstallTxn) -> tuple[str | None, str | None]:
@@ -285,24 +287,13 @@ def _regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any], re
                                f"previous ones could not be put back: {e}") from e
     if refusal is not None:
         regen.refused[name] = refusal
-        log_error("upgrade", f"{name} ({reason}): {refusal}. Fix the cause, then "
-                  f"{_offline_exit(paths, name)}.", paths, project=name)
+        log_error("upgrade", f"{name} ({reason}): {refusal}. To bring it back, "
+                  f"{offline_exit(paths, name)}.", paths, project=name)
         return
     log_operation("upgrade", f"{name} is {reason}: it keeps its maintenance page and is not "
                   f"restarted; its overlay was regenerated and recorded for when it comes "
                   f"back", paths, project=name)
     regen.processed.append(name)
-
-
-def _offline_exit(paths: BoxPaths, name: str) -> str:
-    """The command that brings a paused or quarantined project back. A
-    deploy is refused while it is paused, so where only a deploy fixes the
-    refusal (a changed control file), resume hands the pause to it."""
-    if not is_quarantined(name, paths):
-        return f"run `boxmunge resume {name}`, or {deploy_from_pause(paths, name)}"
-    if is_paused(name, paths):
-        return f"run `boxmunge security resume {name}`, then `boxmunge resume {name}`"
-    return f"run `boxmunge security resume {name}`, or deploy a fixed release"
 
 
 def _in_memory_line(name: str, written: object) -> str:
@@ -332,6 +323,8 @@ def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
         return line if unreadable is None else f"{line} ({unreadable})"
     if isinstance(why, OSError):
         return f"{name}: the project will be left as is: {cannot_tell_left_as_is(name, why)}"
+    if isinstance(why, UnreadableRecord):
+        return f"{name}: the project will be left as is: {why.text}"
     return f"{name}: {why}; the project will be left as is"
 
 

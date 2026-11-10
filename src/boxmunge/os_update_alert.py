@@ -28,7 +28,7 @@ from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
 from boxmunge.os_updates import OsUpdateStatus
 from boxmunge.paths import BoxPaths
-from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 
 COMPONENT = "auto-update"
 REMIND_AFTER = timedelta(hours=24)
@@ -47,10 +47,11 @@ def _is_key_list(value: Any) -> bool:
 def read_os_update_state(paths: BoxPaths) -> dict[str, Any] | None:
     """The last recorded check, or None if auto-update never recorded one."""
     path = paths.os_update_state
-    if not path.exists():
-        return None
     try:
-        state = json.loads(read_text_nofollow(path))
+        raw = read_text_nofollow_or_none(path)
+        if raw is None:
+            return None
+        state = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise OsUpdateStateError(f"{path}: unreadable: {e}") from e
     if not isinstance(state, dict) or set(state) != _STATE_KEYS:

@@ -412,8 +412,13 @@ def _try_source(
         # After the cache: the history never names a date the cache did not reach.
         note_served(paths, url, released, disagreed=False)
     except KevHistoryError as e:
-        # The catalog is cached; the next refresh refuses every source until
-        # the history is readable again (refresh_from), and alerts.
+        # The catalog is cached. A failed write is atomic: the history from
+        # before this run stays, readable, so the next refresh goes ahead
+        # with this source's entry one catalog behind until it serves
+        # another. That entry is only consulted for a source ranked above
+        # the cache's, and the cache is this source's own, which holds it
+        # (LAGGING) instead. Only a history that cannot be read stops the
+        # next refresh: refresh_from then refuses every source, and alerts.
         _LOGGER.warning("KEV catalog from %s cached, but %s", url, e,
                         extra=_extra({"source": url, "error": str(e)}))
     return None, withdrawn, frozenset()
