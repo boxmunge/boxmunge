@@ -1,6 +1,9 @@
-# Security-sensitive paths require review from a maintainer before merge.
-# Branch protection enforces this ("Require review from Code Owners").
-# See CONTRIBUTING.md, "Paths that need maintainer review".
+# Security-sensitive paths. GitHub asks the listed owner to review any pull
+# request that touches one. boxmunge has a single maintainer, so this routes
+# review rather than gating merges: main's ruleset requires only the ci-ok
+# check, not a code-owner approval (GitHub does not let an author approve
+# their own pull request). See CONTRIBUTING.md, "Paths that need maintainer
+# review".
 
 # Restricted shell, bundle and SFTP reception, MCP entry points
 /src/boxmunge/shell.py                @jdlondon

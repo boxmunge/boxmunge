@@ -1,7 +1,7 @@
 name: CI
 
-# Runs on every pull request and on every push to main. Branch protection
-# requires these jobs before a PR can merge (see CONTRIBUTING.md).
+# Runs on every pull request and on every push to main. main's ruleset
+# requires the ci-ok job, which passes only when every other job did.
 #
 # Security notes for maintainers reviewing changes to this file:
 # - Trigger is `pull_request`, never `pull_request_target`: fork PRs run with a
