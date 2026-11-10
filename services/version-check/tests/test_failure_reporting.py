@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+CB = "circuit-breaker-secret-0123456789abcdef"
+
 
 @pytest.fixture
 def app(tmp_path, migrated_db):
@@ -107,20 +109,21 @@ class TestFailureQuery:
 
 
 class TestCircuitBreaker:
-    def test_trip_requires_auth(self, client):
+    def test_trip_requires_auth(self, client, app):
+        app.config["CB_SECRET"] = CB
         resp = client.post("/v1/circuit-breaker/trip?version=0.2.1")
         assert resp.status_code == 401
 
     def test_trip_with_valid_auth(self, client, app):
-        app.config["CB_SECRET"] = "test-secret"
+        app.config["CB_SECRET"] = CB
         resp = client.post("/v1/circuit-breaker/trip?version=0.2.1",
-            headers={"Authorization": "Bearer test-secret"})
+            headers={"Authorization": f"Bearer {CB}"})
         assert resp.status_code == 200
 
     def test_tripped_version_excluded_from_check(self, client, app):
-        app.config["CB_SECRET"] = "test-secret"
+        app.config["CB_SECRET"] = CB
         client.post("/v1/circuit-breaker/trip?version=0.2.1",
-            headers={"Authorization": "Bearer test-secret"})
+            headers={"Authorization": f"Bearer {CB}"})
         resp = client.get("/v1/check?v=0.2.0")
         data = resp.get_json()
         assert data["security"] is None
@@ -128,17 +131,18 @@ class TestCircuitBreaker:
         assert data["held"] == [{"version": "0.2.1", "reason": "circuit_breaker"}]
 
     def test_reset_re_enables_version(self, client, app):
-        app.config["CB_SECRET"] = "test-secret"
+        app.config["CB_SECRET"] = CB
         client.post("/v1/circuit-breaker/trip?version=0.2.1",
-            headers={"Authorization": "Bearer test-secret"})
+            headers={"Authorization": f"Bearer {CB}"})
         client.post("/v1/circuit-breaker/reset?version=0.2.1",
-            headers={"Authorization": "Bearer test-secret"})
+            headers={"Authorization": f"Bearer {CB}"})
         resp = client.get("/v1/check?v=0.2.0")
         data = resp.get_json()
         assert data["security"]["version"] == "0.2.1"
         assert data.get("held") is None
 
-    def test_reset_requires_auth(self, client):
+    def test_reset_requires_auth(self, client, app):
+        app.config["CB_SECRET"] = CB
         resp = client.post("/v1/circuit-breaker/reset?version=0.2.1")
         assert resp.status_code == 401
 
@@ -185,13 +189,13 @@ class TestCircuitBreakerBreakfix:
             from app import create_app
             application = create_app()
             application.config["TESTING"] = True
-            application.config["CB_SECRET"] = "s"
+            application.config["CB_SECRET"] = CB
             yield application
 
     def test_tripped_breakfix_is_held(self, bf_app):
         client = bf_app.test_client()
         client.post("/v1/circuit-breaker/trip?version=0.2.2",
-                    headers={"Authorization": "Bearer s"})
+                    headers={"Authorization": f"Bearer {CB}"})
         data = client.get("/v1/check?v=0.2.1").get_json()
         assert data["breakfix"] is None
         assert data["held"] == [{"version": "0.2.2", "reason": "circuit_breaker"}]
@@ -200,7 +204,7 @@ class TestCircuitBreakerBreakfix:
     def test_tripped_breakfix_falls_back_to_security(self, bf_app):
         client = bf_app.test_client()
         client.post("/v1/circuit-breaker/trip?version=0.2.2",
-                    headers={"Authorization": "Bearer s"})
+                    headers={"Authorization": f"Bearer {CB}"})
         data = client.get("/v1/check?v=0.2.0").get_json()
         assert data["security"]["version"] == "0.2.1"
         assert data["breakfix"]["version"] == "0.2.1"

@@ -5,8 +5,8 @@ Serves:
                                             auto-update) for the given version
 2. POST /v1/report-failure               — record an upgrade failure
 3. GET  /v1/failures?version=X           — query failure summary for a version
-4. POST /v1/circuit-breaker/trip?version=X   — suppress a broken release (auth required)
-5. POST /v1/circuit-breaker/reset?version=X  — re-enable a release (auth required)
+4. POST /v1/circuit-breaker/trip?version=X   — hold a release (Bearer CB_SECRET)
+5. POST /v1/circuit-breaker/reset?version=X  — release a hold (Bearer CB_SECRET)
 6. GET  /v1/admin/version-checks?last=N  — daily check counts by version (Bearer
                                             STATS_SECRET)
 7. GET  /v1/admin/stats?last=N           — the same as an HTML page, plus the network
@@ -127,14 +127,6 @@ def _warn_removed_auto_trip() -> None:
           "from the service's environment.", file=sys.stderr)
 
 
-def _check_cb_auth(app_config):
-    secret = app_config.get("CB_SECRET") or os.environ.get("CB_SECRET", "")
-    if not secret:
-        return False
-    auth = request.headers.get("Authorization", "")
-    return admin_auth.eq(auth, f"Bearer {secret}")
-
-
 def _query_version_checks(db_path: Path, days: int, listed: set[str]) -> dict:
     """Aggregate the version_checks table for the last `days` days.
 
@@ -219,6 +211,7 @@ def create_app() -> Flask:
     releases = load_releases(RELEASES_PATH)
     listed_versions = {r["version"] for r in releases}
     _warn_removed_auto_trip()
+    admin_auth.refuse_short_cb_secret()
     limiter = RequestLimiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_NETWORK_REQUESTS,
                              RATE_LIMIT_WINDOW_SECONDS, RATE_LIMIT_MAX_CLIENTS,
                              prefix_store.network_prefix)
@@ -268,10 +261,9 @@ def create_app() -> Flask:
             return jsonify({"error": "missing or malformed version parameter (want X.Y.Z)"}), 400
         prefix = prefix_store.network_prefix(request.remote_addr)
 
-        offers, held = apply_holds(
-            select_offers(releases, version),
-            lambda v: circuit_breaker.is_tripped(DB_PATH, v),
-        )
+        # One query per check, whatever the number of candidates.
+        tripped = circuit_breaker.tripped_versions(DB_PATH)
+        offers, held = apply_holds(select_offers(releases, version), tripped.__contains__)
         result = check_response(offers, held, find_blocked(releases, version))
         # The real version, listed or not (a dev build, a dropped release): it is
         # valid X.Y.Z, and the counter caps distinct versions per day.
@@ -331,7 +323,7 @@ def create_app() -> Flask:
 
     @app.route("/v1/circuit-breaker/trip", methods=["POST"])
     def cb_trip():
-        if not _check_cb_auth(app.config):
+        if not admin_auth.bearer_authorized(admin_auth.cb_secret()):
             return jsonify({"error": "unauthorized"}), 401
         version = _version_arg("version")
         if version is None:
@@ -341,7 +333,7 @@ def create_app() -> Flask:
 
     @app.route("/v1/circuit-breaker/reset", methods=["POST"])
     def cb_reset():
-        if not _check_cb_auth(app.config):
+        if not admin_auth.bearer_authorized(admin_auth.cb_secret()):
             return jsonify({"error": "unauthorized"}), 401
         version = _version_arg("version")
         if version is None:
@@ -365,7 +357,7 @@ def create_app() -> Flask:
         # Bearer STATS_SECRET only: the passkey session cookie does not open
         # this. A leaked STATS_SECRET is read-only over check counts; CB_SECRET
         # (which can suppress releases fleetwide) is separate.
-        if not admin_auth.bearer_authorized():
+        if not admin_auth.bearer_authorized(admin_auth.stats_secret()):
             return jsonify({"error": "unauthorized"}), 401
         counter.flush()
         days = _parse_last_param(request.args.get("last"))

@@ -280,8 +280,15 @@ cannot reach the service (and fall back to the GitHub releases list) hold it too
 ```bash
 curl -X POST -H "Authorization: Bearer $CB_SECRET" \
   'https://boxmunge.dev/v1/circuit-breaker/trip?version=X.Y.Z'
-gh release edit vX.Y.Z --title "vX.Y.Z [security] [held]"   # keep any class marker
+gh release edit vX.Y.Z --title "$(gh release view vX.Y.Z --json name -q .name) [held]"
 ```
+
+`CB_SECRET` (set through the deploy shell, like `STATS_SECRET`) must be at least 32
+characters (`openssl rand -hex 32`): a shorter one stops the service from starting, naming
+it, and with none set the trip and reset endpoints refuse with 503. Wrong guesses of it share
+`STATS_SECRET`'s limit (10 per client per gunicorn worker in 15 minutes); past it, even the
+right secret is refused with 429 until the window passes, so trip from a client that has not
+been guessing.
 
 Boxes read `[held]` from the release title only, never from the notes (auto-generated notes
 quote contributors' PR titles), so only someone with write access to the repository can set
@@ -298,8 +305,8 @@ a few networks (IPv4 /24s, or IPv6 /48s, which are cheap) could send them, and o
 maintainer trips the breaker. They alert instead. When reports for a release come from two or
 more distinct networks in six hours (`ALERT_NETWORKS` in `failure_alert.py`), and the release
 is not held, the service's smoke script fails as a warning with one line naming the release
-and the two commands above for it (the curl trip and the `gh release edit` that appends
-`[held]` to the current title, keeping its markers). boxmunge's health check on the box that
+and the two commands above for it (the `gh release edit` appends `[held]` to the current
+title, keeping its class and breaking markers). boxmunge's health check on the box that
 runs the service turns that into a Pushover alert after `health.alert_threshold` checks in a
 row, once per distinct message: the line carries no counts, so further reports do not alert
 again. The warning clears, with a recovery alert, at the first check after the release is held, or

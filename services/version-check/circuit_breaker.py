@@ -1,7 +1,7 @@
 """The circuit breaker: releases the maintainer holds back from every box.
 
-Only the maintainer trips it, through the authenticated
-/v1/circuit-breaker/trip endpoint. Failure reports never do: they are
+Only the maintainer trips it, through /v1/circuit-breaker/trip with the
+Bearer CB_SECRET (admin_auth). Failure reports never do: they are
 unauthenticated, so they only alert (failure_alert).
 """
 
@@ -10,22 +10,13 @@ from pathlib import Path
 
 import db
 
-TRIPPED_SQL = "SELECT version FROM circuit_breaker WHERE tripped = 1"
-
-
-def is_tripped(db_path: Path, version: str) -> bool:
-    conn = db.connect(db_path)
-    try:
-        row = conn.execute(TRIPPED_SQL + " AND version = ?", (version,)).fetchone()
-    finally:
-        conn.close()
-    return row is not None
-
 
 def tripped_versions(db_path: Path) -> set[str]:
+    """Every version held now, in one query."""
     conn = db.connect(db_path)
     try:
-        return {row[0] for row in conn.execute(TRIPPED_SQL)}
+        return {row[0] for row in conn.execute(
+            "SELECT version FROM circuit_breaker WHERE tripped = 1")}
     finally:
         conn.close()
 
