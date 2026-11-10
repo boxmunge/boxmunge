@@ -9,6 +9,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import stat
 from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -178,6 +179,8 @@ def _flock(path: Path) -> Iterator[None]:
             raise UpgradeStateError(f"{path} is owned by uid {owner}, not {os.geteuid()}, so "
                                     "another user may be holding it to stall upgrades; refusing "
                                     "to lock it. Remove it so it can be recreated.")
+        if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+            os.fchmod(fd, 0o600)  # shims up to 0.10.1 made the legacy one 0644: deploy could lock it
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as e:

@@ -161,3 +161,13 @@ def test_upgrade_lock_refuses_a_lock_file_of_another_user(paths, monkeypatch, wh
     monkeypatch.setattr(os, "fstat", fstat)
     with pytest.raises(UpgradeStateError, match=f"{lock} is owned by uid {foreign.st_uid + 1}.*Remove it"):
         _lock(paths)
+
+
+def test_upgrade_lock_makes_a_0644_legacy_lock_0600(paths) -> None:
+    """Shims up to 0.10.1 created the legacy lock 0644: deploy could open it
+    read-only and hold a flock on it. Taking the locks closes it to others."""
+    paths.legacy_upgrade_lock.parent.mkdir(parents=True, exist_ok=True)
+    paths.legacy_upgrade_lock.touch()
+    os.chmod(paths.legacy_upgrade_lock, 0o644)
+    _lock(paths)
+    assert os.stat(paths.legacy_upgrade_lock).st_mode & 0o777 == 0o600

@@ -101,12 +101,12 @@ record_bm_log
 mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
 echo 10 > "$BOXMUNGE_ROOT/upgrade-root/lock-skips"
 PATH="$BUSYLOCK:$PATH" run_shim check-probation
-expect 0 "skipping (11 in a row)" "a skip is counted"
+expect 0 "skipping (11 in a row: upgrade.lock is held)" "a skip is counted"
 [[ "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" != *"bm_log error"* ]] && pass "eleven skips are not an error yet" \
     || fail "logged too early: $(cat "$BOXMUNGE_ROOT/calls")"
 PATH="$BUSYLOCK:$PATH" run_shim check-probation
-expect 0 "skipping (12 in a row)" "the twelfth skip is counted"
-[[ "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" == *"bm_log error check-probation found upgrade.lock held 12 times in a row"*"lslocks"* ]] \
+expect 0 "skipping (12 in a row" "the twelfth skip is counted"
+[[ "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" == *"bm_log error check-probation could not take upgrade.lock 12 times in a row"*"lslocks"* ]] \
     && pass "an hour of skips is an error naming how to find the holder" || fail "not logged: $(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)"
 run_shim check-probation
 expect 0 "" "check-probation runs once the lock is free"
@@ -134,6 +134,73 @@ if [[ "$(id -u)" -eq 0 ]]; then
         && pass "the replacement is in the operational log" || fail "not logged: $(cat "$BOXMUNGE_ROOT/calls")"
     exec 6>&-
     drop_root
+
+    # Root's own 0644 legacy lock (as a 0.10.1 shim left it) is made 0600, so
+    # deploy can no longer open it to lock it.
+    new_root a
+    : > "$BOXMUNGE_ROOT/$LEGACY_LOCK"
+    chmod 0644 "$BOXMUNGE_ROOT/$LEGACY_LOCK"
+    chmod 0711 "$BOXMUNGE_ROOT"; chmod 0777 "$BOXMUNGE_ROOT/upgrade-state"
+    run_shim check-probation
+    if su -s /bin/bash nobody -c "exec 7<'$BOXMUNGE_ROOT/$LEGACY_LOCK'" 2>/dev/null; then
+        fail "deploy can still open the legacy lock"
+    else
+        pass "deploy can no longer open root's legacy lock"
+    fi
+    drop_root
+
+    # A deploy loop re-creating its own lock file as root replaces it: every
+    # run either takes the lock or counts a skip; none dies uncounted.
+    new_root a
+    chmod 0711 "$BOXMUNGE_ROOT"; chmod 0777 "$BOXMUNGE_ROOT/upgrade-state"
+    racer="$(mktemp -d)"
+    chmod 0777 "$racer"
+    su -s /bin/bash nobody -c "echo \$\$ > '$racer/pid'; while :; do [[ -e '$BOXMUNGE_ROOT/$LEGACY_LOCK' ]] || : > '$BOXMUNGE_ROOT/$LEGACY_LOCK' 2>/dev/null; done" \
+        </dev/null >/dev/null 2>&1 &
+    until [[ -s "$racer/pid" ]]; do sleep 0.1; done
+    fatal=0
+    for _ in 1 2 3 4 5; do
+        run_shim check-probation
+        [[ "$RC" -eq 0 && "$OUT" != *FATAL* ]] || fatal=$((fatal + 1))
+    done
+    kill -9 "$(cat "$racer/pid")"
+    wait 2>/dev/null || true
+    rm -rf "$racer"
+    [[ "$fatal" -eq 0 ]] && pass "a racing deploy never makes check-probation die uncounted" \
+        || fail "$fatal runs died: $OUT"
+    drop_root
 fi
+
+# Shims up to 0.10.1 created the legacy lock 0644, which deploy can open
+# read-only and lock. Every entry point that takes the lock makes it 0600, so
+# deploy cannot newly open it.
+for args in "check-probation" "run 1.2.3 ignored-url" "target 1.2.3"; do
+    new_root a
+    : > "$BOXMUNGE_ROOT/$LEGACY_LOCK"
+    chmod 0644 "$BOXMUNGE_ROOT/$LEGACY_LOCK"
+    # shellcheck disable=SC2086  # word-split the subcommand on purpose
+    PATH="$FAILVISUDO:$PATH" run_shim $args
+    [[ "$(mode_of "$BOXMUNGE_ROOT/$LEGACY_LOCK")" == 600 ]] && pass "${args%% *} makes a 0644 legacy lock 0600" \
+        || fail "${args%% *} left the legacy lock $(mode_of "$BOXMUNGE_ROOT/$LEGACY_LOCK")"
+    drop_root
+done
+
+# Deploy can win the race between root replacing a lock file that is not
+# root's and opening it again. The opener then says so, and check-probation
+# counts it like a held lock (so an hour of it is an error), rather than
+# dying where nothing counts it; an upgrade refuses, logged.
+new_root a
+record_bm_log
+RC=0
+OUT="$(BM_UPGRADE_LOCK_FOREIGN="$BOXMUNGE_ROOT/$LEGACY_LOCK" bash "$SHIM" check-probation 2>&1)" || RC=$?
+expect 0 "skipping (1 in a row: $BOXMUNGE_ROOT/$LEGACY_LOCK was not root's when opened)" \
+    "a lock deploy swapped in as root opened it is a counted skip"
+[[ "$(cat "$BOXMUNGE_ROOT/upgrade-root/lock-skips")" == 1 ]] && pass "the skip is counted" || fail "not counted"
+RC=0
+OUT="$(BM_UPGRADE_LOCK_FOREIGN="$BOXMUNGE_ROOT/$LEGACY_LOCK" bash "$SHIM" target 1.2.3 2>&1)" || RC=$?
+expect 1 "was replaced by a file that is not root's as it was opened" "an upgrade refuses it"
+[[ "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" == *"bm_log error"*"not root's as it was opened"* ]] \
+    && pass "and logs the refusal" || fail "not logged: $(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)"
+drop_root
 
 finish

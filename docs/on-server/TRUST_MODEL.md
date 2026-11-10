@@ -253,11 +253,14 @@ the shim, `auto-update`, `check-probation` and `legacy-stage` all hold that
 lock, which deploy cannot replace. Shims up to 0.10.1 locked
 `upgrade-state/upgrade.lock` instead, and the one that installs this release
 keeps running until its upgrade ends, so every taker locks that file too (after
-the root-only one). Deploy can unlink that legacy file and hold a lock on a
-file of its own at the name: root replaces a lock file that is not root's with
-its own, with a warning, and an hour of `check-probation` runs that find the
-lock held is an error in the operational log. The legacy lock goes once no box
-can run a 0.10.1 shim or venv.
+the root-only one). Deploy could hold that legacy lock to stall upgrades and
+probation checks, so every lock taker makes it root-only (0600; shims up to
+0.10.1 created it 0644), and root replaces a lock file there that is not
+root's with its own, with a warning: deploy cannot newly open it. A deploy
+process that opened it before that keeps its lock (an open descriptor is not
+revoked); that is reported, not prevented: an hour of `check-probation` runs
+that cannot take the lock is an error in the operational log, repeated every
+hour it lasts. 0.11.7 removes the legacy lock.
 
 ### Files root writes in deploy-writable directories
 
