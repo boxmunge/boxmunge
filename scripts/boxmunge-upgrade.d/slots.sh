@@ -218,6 +218,7 @@ complete_rollback() {
     # Any probation ended with this rollback. Left behind, it would name the
     # now-live slot as previous_slot.
     rm -f "$PROBATION_FILE"
+    clear_probation_markers
 
     # 1. Stash restore returns config + state to the pre-upgrade snapshot.
     local output rc=0

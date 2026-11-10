@@ -8,9 +8,9 @@
 # so the probation never ended and every upgrade entry point refused.
 #
 # A healthy release must not be rolled back and blocklisted for a blip, so it
-# takes two health-timer runs in a row that find the live slot dead, and a
-# `--version` killed by a signal does not count. When nothing can take over,
-# the once-only alert is marked sent only once it really went out.
+# takes two health-timer runs in a row that find the live slot dead, or four
+# when `--version` only timed out. When nothing can take over, the once-only
+# alert is marked sent only once it really went out.
 # pass() always returns 0, so "cond && pass || fail" is a safe if/else here.
 # shellcheck disable=SC2015,SC2016  # SC2016: mock bodies are literal bash
 set -euo pipefail
@@ -76,6 +76,8 @@ for expiry in "$SOON" "$EXPIRED"; do
     [[ "$(live)" == "$BOXMUNGE_ROOT/env-b" ]] && pass "env-b, the previous release, is live again" \
         || fail "still live: $(live)"
     probation_left && fail "probation.json left behind" || pass "the rollback ends the probation"
+    [[ ! -e "$BOXMUNGE_ROOT/upgrade-root/live-slot-failed" ]] && pass "the rollback clears the failure count" \
+        || fail "live-slot-failed survived the rollback"
     [[ "$OUT" == *"ROLLBACK reason: live_venv_dead: env-a/bin/boxmunge-server --version exited 1: ImportError: broken venv"* ]] \
         && pass "the reason, with the server's own error, is logged after the swap" || fail "no reason given: $OUT"
     [[ "$(calls)" == *"bm_log b warn rolling back 1.5.0: live_venv_dead: "*"ImportError: broken venv"* ]] \
@@ -97,11 +99,27 @@ expect 0 "the live slot does not run" "a failure after a working run is a first 
 [[ "$(live)" == "$BOXMUNGE_ROOT/env-a" ]] && pass "no rollback for failures that were not in a row" || fail "rolled back"
 drop_root
 
-# A --version killed by a signal (or timed out) is not counted at all.
-box 'kill -9 $$' "$SOON"
-for _ in 1 2 3; do run_shim check-probation; done
-expect 0 "did not answer" "a --version killed by a signal is not counted"
-[[ "$(live)" == "$BOXMUNGE_ROOT/env-a" ]] && probation_left && pass "no rollback after three such runs" || fail "rolled back"
+# A --version that crashes (a broken C extension: SIGSEGV) counts like any
+# other failure.
+box 'kill -SEGV $$' "$SOON"
+run_shim check-probation
+expect 0 "the live slot does not run" "a crashing --version is a first failure"
+run_shim check-probation
+expect 1 "Rollback complete" "a crashing --version rolls back on the second run"
+drop_root
+
+# One that only times out needs four runs in a row, but is never skipped.
+box 'exit 124' "$EXPIRED"
+for n in 1 2 3; do
+    run_shim check-probation
+    expect 0 "the live slot did not answer" "timed-out --version, run $n: waits"
+done
+[[ "$(calls)" == *"bm_log a warn live slot did not answer"* ]] && pass "each timeout reaches the operational log" \
+    || fail "timeouts not logged: $(calls)"
+[[ "$(live)" == "$BOXMUNGE_ROOT/env-a" ]] && probation_left && pass "no rollback or promotion after three timeouts" \
+    || fail "acted after three timeouts"
+run_shim check-probation
+expect 1 "Rollback complete" "the fourth timed-out run in a row rolls back"
 drop_root
 
 # --- a health check that cannot run: the live slot is checked again ----------
@@ -171,6 +189,23 @@ expect 1 "cannot be rolled back" "both servers dead: refused"
 alerted_marker && pass "and marked sent" || fail "not marked sent"
 drop_root
 
+# The live python can alert but not write the log (a full disk): the alert
+# goes out once, and only the log entry is retried.
+box "$DEAD" "$SOON" gone
+printf '%s\n' '#!/usr/bin/env bash' \
+    'if [[ "$1" == "-" ]]; then cat >/dev/null; exit 1; fi' \
+    'if [[ -n "${BM_TITLE:-}" ]]; then echo "notify a $BM_TITLE" >> "$BOXMUNGE_ROOT/calls"; exit 0; fi' \
+    'exit 0' > "$BOXMUNGE_ROOT/env-a/bin/python"
+run_shim check-probation
+run_shim check-probation
+[[ "$(calls)" == *"notify a boxmunge rollback needed but impossible"* ]] && pass "the alert is sent although the log write failed" \
+    || fail "no alert: $(calls)"
+expect 1 "ALERT NOT DELIVERED (to the operational log): 1.5.0 is broken" "the missing log entry is said"
+: > "$BOXMUNGE_ROOT/calls"
+run_shim check-probation
+[[ "$(calls)" != *notify* ]] && pass "the alert is not repeated on the next run" || fail "alert repeated: $(calls)"
+drop_root
+
 # Pushover not configured: the log entry is the delivery.
 box "$DEAD" "$SOON" gone
 python_mock a 3
@@ -186,8 +221,9 @@ for how in dead pushover_down; do
     if [[ "$how" == dead ]]; then python_dead a; else python_mock a 1; fi
     run_shim check-probation
     run_shim check-probation
-    expect 1 "ALERT NOT DELIVERED: 1.5.0 is broken" "an alert that did not go out says so ($how)"
-    [[ "$(calls)" == *"journal -t boxmunge-upgrade -p user.crit -- ALERT NOT DELIVERED: 1.5.0"* ]] \
+    expect 1 "ALERT NOT DELIVERED (" "an alert that did not go out says so ($how)"
+    [[ "$OUT" == *"ALERT NOT DELIVERED ("*"as an alert): 1.5.0 is broken"* ]] && pass "it says the alert is what failed ($how)" || fail "out: $OUT"
+    [[ "$(calls)" == *"journal -t boxmunge-upgrade -p user.crit -- ALERT NOT DELIVERED ("*"): 1.5.0"* ]] \
         && pass "it reaches the system journal ($how)" || fail "not in the journal: $(calls)"
     alerted_marker && fail "marked sent although it was not ($how)" || pass "not marked sent ($how)"
     : > "$BOXMUNGE_ROOT/calls"

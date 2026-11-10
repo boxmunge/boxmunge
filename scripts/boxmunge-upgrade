@@ -331,6 +331,7 @@ from boxmunge.upgrade_state import write_probation
 from boxmunge.paths import BoxPaths
 write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT'], hours=int(os.environ['BM_HOURS']))
 "
+    clear_probation_markers
     bm_log info upgrade "probation entered" "{\"version\": \"$version\", \"prev_slot\": \"$prev_slot\", \"hours\": $PROBATION_HOURS}"
     rm -f "$(inflight_marker "$ACTIVE_SLOT")"
     refresh_docs_for_slot "$ACTIVE_SLOT"

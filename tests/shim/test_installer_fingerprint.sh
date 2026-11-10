@@ -68,9 +68,14 @@ root_print() { mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"; echo "$BUNDLE_HASH" 
 
 box
 root_print
+echo "1.5.0 1" > "$BOXMUNGE_ROOT/upgrade-root/live-slot-failed"
 run_shim target 1.5.0
 expect 0 "install.sh unchanged" "a matching root-only fingerprint skips install.sh"
 [[ "$(calls)" != *"install.sh ran"* ]] && pass "install.sh did not run" || fail "install.sh ran: $(calls)"
+# Not about the fingerprint, but this is a whole upgrade: a new probation
+# starts with no failure count left by an earlier one of the same version.
+[[ ! -e "$BOXMUNGE_ROOT/upgrade-root/live-slot-failed" ]] && pass "entering probation clears the live-slot failure count" \
+    || fail "live-slot-failed survived into the new probation"
 drop_root
 
 box
