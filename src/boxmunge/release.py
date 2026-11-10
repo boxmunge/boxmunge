@@ -36,7 +36,9 @@ from boxmunge.data_dirs import (
     refuse_container_owned, start_record, warn_retained,
 )
 from boxmunge.fileutil import atomic_write_text, discard_dir, fsync_dir, sync_entries
-from boxmunge.fs_nofollow import chmod_nofollow, chown_tree_deploy, mkdir_p_deploy
+from boxmunge.fs_nofollow import (
+    chmod_nofollow, chown_tree_deploy, mkdir_p_deploy, read_text_nofollow,
+)
 from boxmunge.staged_release import SLOT, release_dir
 
 if TYPE_CHECKING:
@@ -45,8 +47,8 @@ if TYPE_CHECKING:
 
 def _read_meta(path: Path) -> dict:
     try:
-        meta = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError) as e:
+        meta = json.loads(read_text_nofollow(path))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise ReleaseStateError(f"Cannot read {path}: {e}") from e
     if not isinstance(meta, dict):
         raise ReleaseStateError(f"{path} is not a JSON object")
