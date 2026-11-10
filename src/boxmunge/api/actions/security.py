@@ -45,10 +45,6 @@ SUMMARY = obj({
     "active_suppressions_host": INTEGER,
     "host_suppressions": arr(obj({"cve_id": STRING, "until": STRING, "reason": STRING})),
     "last_fleet_scan": NULLABLE_STRING,
-    "grace": nullable(obj({
-        "active": BOOLEAN, "installed_at": NULLABLE_STRING, "expires_at": NULLABLE_STRING,
-        "heads_up_sent": BOOLEAN, "error": STRING,
-    }, optional=("error",))),
     "held_by_breaker": obj({
         "projects": arr(obj({"project": STRING, "cves": arr(STRING)})),
         "error": NULLABLE_STRING,
@@ -114,10 +110,6 @@ def _security_summary(params: dict[str, Any], ctx: ActionContext) -> dict[str, A
     for key in ("released_at", "fetched_at"):
         summary["kev"][key] = utc_timestamp(summary["kev"][key],
                                             f"{ctx.paths.kev_catalog} {key}")
-    grace = summary["grace"]
-    if grace is not None:
-        for key in ("installed_at", "expires_at"):
-            grace[key] = utc_timestamp(grace[key], f"the migration grace state {key}")
     return summary
 
 

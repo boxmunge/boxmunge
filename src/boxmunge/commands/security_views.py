@@ -319,25 +319,6 @@ def format_fleet_text(summary: dict[str, Any]) -> str:
     lines = ["boxmunge security — fleet summary"]
     lines.append("─" * 33)
 
-    # Migration grace line (only when a marker file exists). We surface
-    # active vs expired explicitly so the operator can see whether they're
-    # still in the post-upgrade window.
-    grace = summary.get("grace")
-    if grace is not None:
-        when = _format_iso_compact(grace.get("expires_at"))
-        if grace.get("error"):
-            lines.append(
-                f"Migration grace: ERROR — {grace['error']}",
-            )
-        elif grace.get("active"):
-            sent = "true" if grace.get("heads_up_sent") else "false"
-            lines.append(
-                f"Migration grace: ACTIVE — full enforcement begins {when} "
-                f"(heads_up_sent: {sent})",
-            )
-        else:
-            lines.append(f"Migration grace: expired (since {when})")
-
     lines.append(f"Projects: {summary['projects_count']}")
     lines.append("")
     lines.append("Posture distribution:")

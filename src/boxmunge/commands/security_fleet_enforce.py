@@ -63,7 +63,7 @@ def _apply(paths: BoxPaths, project: str, decisions: tuple[ProjectDecision, ...]
             meta = load_project_meta(paths, project)
             outcome = enforce(
                 paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
-                policy=meta.policy(), headline=headline, in_grace=False,
+                policy=meta.policy(), headline=headline, defer_new=False,
             )
     except LockError:
         return "held by another operation; the next scan quarantines it"
@@ -75,7 +75,7 @@ def _apply(paths: BoxPaths, project: str, decisions: tuple[ProjectDecision, ...]
 
 
 def apply_new_quarantines(
-    paths: BoxPaths, scans: Mapping[str, ProjectScan], *, in_grace: bool,
+    paths: BoxPaths, scans: Mapping[str, ProjectScan],
 ) -> PhaseTwo:
     """Weigh this run's new quarantines together and act on the verdict.
 
@@ -85,9 +85,6 @@ def apply_new_quarantines(
     result = PhaseTwo()
     already = read_held(paths)
     pending = alert_pending(paths)
-    if in_grace:
-        result.held = already
-        return result
     candidates = {
         name: _candidate(scan.decisions) for name, scan in scans.items()
         if scan.headline is not None and not is_quarantined(name, paths)

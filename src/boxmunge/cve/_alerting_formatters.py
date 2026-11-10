@@ -7,7 +7,7 @@ dozens of findings at once, and a storm of pushes trains operators to
 ignore the channel that carries quarantine alerts.
 
 Pure functions: take in-memory values, return ``Alert`` instances. No I/O,
-no logging. Fleet-level formatters (grace heads-up, KEV, scan failure)
+no logging. Fleet-level formatters (KEV, scan failure)
 live in ``_alerting_fleet``; consumers import from ``boxmunge.cve.alerting``.
 """
 

@@ -26,7 +26,7 @@ Module layout
 -------------
 * ``Alert`` / ``AlertKind`` / ``Hit`` live in ``_alerting_types``.
 * Per-project formatters live in ``_alerting_formatters``; fleet-level
-  ones (grace heads-up, KEV, scan failure, host suppression expiry) in
+  ones (KEV, scan failure, host suppression expiry) in
   ``_alerting_fleet``. Both are re-exported here.
 """
 
@@ -39,7 +39,6 @@ from datetime import date
 
 from boxmunge.cve._alerting_fleet import (
     format_breaker_held_alert,
-    format_grace_heads_up_alert,
     format_host_suppression_expired_alert,
     format_kev_sources_disagree_alert,
     format_kev_stale_alert,
@@ -85,7 +84,6 @@ __all__ = [
     "format_hardening_upcoming_alert",
     "format_suppression_expired_alert",
     "format_host_suppression_expired_alert",
-    "format_grace_heads_up_alert",
     "format_breaker_held_alert",
     "format_kev_sources_disagree_alert",
     "format_kev_stale_alert",

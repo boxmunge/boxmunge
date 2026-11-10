@@ -169,7 +169,7 @@ def test_lift_scan_after_the_upgrade_brings_it_back(box) -> None:
     paths, p, image_id = box
     seed_quarantine(paths, p)
     _upgrade(paths)
-    scan = scan_one_project(paths, p, in_grace=False, kev=_kev())
+    scan = scan_one_project(paths, p, kev=_kev())
     assert scan.complete
     assert not is_quarantined(p, paths)
     _back_on_the_0_11_overlay(paths, p, image_id)
@@ -200,7 +200,7 @@ def test_the_upgrade_repairs_what_a_failed_lift_left(box) -> None:
     assert _sources(paths, p) == {".releases/live-scripts": "dir", "data": "dir"}
 
     _upgrade(paths)
-    scan_one_project(paths, p, in_grace=False, kev=_kev())
+    scan_one_project(paths, p, kev=_kev())
     assert not is_quarantined(p, paths)
     _back_on_the_0_11_overlay(paths, p, image_id)
 
@@ -214,7 +214,7 @@ def test_a_refused_lift_leaves_the_maintenance_page_live(box) -> None:
     paths.project_caddy_site(p).write_text("# maintenance page\n")
     check_start(paths, p, component="upgrade", compose_files=FILES, record=True)
     with pytest.raises(RuntimeError, match="bind source boxmunge-scripts was not mounted"):
-        scan_one_project(paths, p, in_grace=False, kev=_kev())
+        scan_one_project(paths, p, kev=_kev())
     assert is_quarantined(p, paths)
     paths.caddy_reload.assert_not_called()
     assert paths.project_caddy_site(p).read_text() == "# maintenance page\n"
@@ -252,7 +252,7 @@ def test_the_upgrade_still_refuses_a_bind_source_it_cannot_record(box) -> None:
     assert paths.project_compose_override(p).read_text() == _OVERLAY_0101
     assert not paths.project_bind_record(p).exists()
     try:
-        scan_one_project(paths, p, in_grace=False, kev=_kev())
+        scan_one_project(paths, p, kev=_kev())
     except RuntimeError as e:  # the lift's own refusal, when the scan gets that far
         assert "no record of the bind sources" in str(e)
     assert is_quarantined(p, paths)

@@ -48,11 +48,11 @@ def test_failed_quarantine_step_is_retried_until_complete(
     docker.fail[failing] = 1
 
     with pytest.raises(RuntimeError, match="quarantine action failed"):
-        scan_one_project(paths, "demo", in_grace=False)
+        scan_one_project(paths, "demo")
     assert q.is_quarantined("demo", paths)
     assert not q.quarantine_action_complete("demo", paths)
 
-    scan_one_project(paths, "demo", in_grace=False)
+    scan_one_project(paths, "demo")
     assert docker.calls.count("compose_stop") == (2 if failing == "compose_stop" else 1)
     assert q.quarantine_action_complete("demo", paths)
 
@@ -69,7 +69,7 @@ def test_quarantine_is_reasserted_even_when_findings_are_gone(
     paths = make_box(tmp_path)
     seed_quarantine(paths, action_complete=False)
     _scan_returns(monkeypatch, [])
-    scan_one_project(paths, "demo", in_grace=False, kev=KevCatalog(frozenset(), None, None, None))
+    scan_one_project(paths, "demo", kev=KevCatalog(frozenset(), None, None, None))
     assert docker.calls == ["caddy_reload", "compose_stop"]
     assert q.quarantine_action_complete("demo", paths)
 
@@ -85,7 +85,7 @@ def test_quarantine_is_reasserted_when_every_image_fails(
 
     monkeypatch.setattr(security_scan_core, "scan_image", boom)
     with pytest.raises(RuntimeError, match="All images failed"):
-        scan_one_project(paths, "demo", in_grace=False)
+        scan_one_project(paths, "demo")
     assert docker.calls == ["caddy_reload", "compose_stop"]
     assert q.quarantine_action_complete("demo", paths)
 
@@ -95,7 +95,7 @@ def test_complete_quarantine_is_reasserted_to_undo_drift(tmp_path, monkeypatch, 
     paths = make_box(tmp_path)
     seed_quarantine(paths)
     _scan_returns(monkeypatch, [CRIT])
-    scan_one_project(paths, "demo", in_grace=False)
+    scan_one_project(paths, "demo")
     assert docker.calls == ["caddy_reload", "compose_stop"]
 
 
@@ -116,14 +116,14 @@ def test_audit_only_scan_never_acts(tmp_path, monkeypatch, docker):
     assert docker.calls == []
 
 
-def test_grace_reasserts_existing_quarantine_but_fires_no_new_one(
+def test_deferred_scan_reasserts_existing_quarantine_but_fires_no_new_one(
     tmp_path, monkeypatch, docker,
 ):
     paths = make_box(tmp_path, projects=("aaa", "bbb"))
     seed_quarantine(paths, "aaa", action_complete=False)
     _scan_returns(monkeypatch, [CRIT])
-    scan_one_project(paths, "aaa", in_grace=True)
-    scan_one_project(paths, "bbb", in_grace=True)
+    scan_one_project(paths, "aaa", defer_new=True)
+    scan_one_project(paths, "bbb", defer_new=True)
     assert q.quarantine_action_complete("aaa", paths)
     assert not q.is_quarantined("bbb", paths)
 
@@ -135,16 +135,16 @@ def _quarantined_alerts(pushover: Pushover) -> list[tuple[str, str, int]]:
     return [s for s in pushover.sent if "QUARANTINED" in s[0]]
 
 
-def test_first_enforcing_scan_after_grace_alerts(tmp_path, monkeypatch, docker):
-    """Audit B-17: grace persisted QUARANTINE dispositions, so the first
-    enforcing scan saw no disposition change and stopped the site silently."""
+def test_first_enforcing_scan_after_a_deferred_one_alerts(tmp_path, monkeypatch, docker):
+    """Audit B-17: a deferred scan persists QUARANTINE dispositions, so the
+    next enforcing scan sees no disposition change; it must still alert."""
     paths = make_box(tmp_path)
     pushover = Pushover(monkeypatch, paths)
     _scan_returns(monkeypatch, [CRIT])
-    scan_one_project(paths, "demo", in_grace=True)
-    assert pushover.sent == [] and not q.is_quarantined("demo", paths)
+    scan_one_project(paths, "demo", defer_new=True)
+    assert _quarantined_alerts(pushover) == [] and not q.is_quarantined("demo", paths)
 
-    scan_one_project(paths, "demo", in_grace=False)
+    scan_one_project(paths, "demo")
     assert q.is_quarantined("demo", paths)
     [(title, body, priority)] = _quarantined_alerts(pushover)
     assert priority == 1
@@ -158,12 +158,12 @@ def test_completing_a_partial_quarantine_alerts_once(tmp_path, monkeypatch, dock
     _scan_returns(monkeypatch, [CRIT])
     docker.fail["compose_stop"] = 1
     with pytest.raises(RuntimeError):
-        scan_one_project(paths, "demo", in_grace=False)
+        scan_one_project(paths, "demo")
     assert _quarantined_alerts(pushover) == []
 
-    scan_one_project(paths, "demo", in_grace=False)
+    scan_one_project(paths, "demo")
     assert len(_quarantined_alerts(pushover)) == 1
     pushover.clear()
-    scan_one_project(paths, "demo", in_grace=False)
+    scan_one_project(paths, "demo")
     assert pushover.sent == []
 

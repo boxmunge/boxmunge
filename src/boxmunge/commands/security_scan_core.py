@@ -3,7 +3,7 @@
 
 Runs under the per-project lock. Inputs (manifest meta, image
 identification, suppressions) come from security_scan_inputs.py; fleet
-orchestration (grace heads-up, exit codes, lock-skip handling) lives in
+orchestration (exit codes, lock-skip handling) lives in
 security_actions.py.
 """
 from __future__ import annotations
@@ -36,7 +36,6 @@ from boxmunge.commands.security_enforce import (
     raise_enforcement_error,
 )
 from boxmunge.cve.alerting import emit_scan_alerts
-from boxmunge.cve.grace import GraceError, init_grace_if_missing
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
     FindingDisposition,
@@ -148,7 +147,6 @@ def _today() -> date:
 
 def scan_one_project(
     paths: BoxPaths, project: str, *,
-    in_grace: bool | None = None,
     audit_only: bool = False,
     kev: KevCatalog | None = None,
     defer_new: bool = False,
@@ -158,12 +156,8 @@ def scan_one_project(
     ``ProjectScan.headline`` is the first (decision, finding) pair that
     requires quarantine, or None if nothing quarantines.
 
-    ``in_grace=True`` suppresses new quarantines and transition alerts but
-    still writes scan_state; ``None`` (direct callers) lazily bootstraps
-    the grace state and derives it (audit F-2).
-
     ``audit_only=True`` (the resume re-scan, audit A-3) only evaluates: no
-    scan_state write, no alerts, no action, no grace bootstrap.
+    scan_state write, no alerts, no action.
 
     When ``defer_new`` is True, an existing quarantine is still re-asserted
     but a NEW quarantine is not taken here: the fleet scan decides it for
@@ -175,29 +169,14 @@ def scan_one_project(
         LockError: when another operation holds the project lock.
         TrivyNotInstalledError: when the Trivy binary is missing.
         RuntimeError: on irrecoverable failures (manifest unreadable, all
-            images failed to scan, quarantine action raised, grace state
-            corrupt).
+            images failed to scan, quarantine action raised).
     """
-    if in_grace is None:
-        if audit_only:
-            in_grace = False
-        else:
-            try:
-                grace = init_grace_if_missing(
-                    paths, now=datetime.now(timezone.utc),
-                )
-            except GraceError as e:
-                raise RuntimeError(
-                    f"CVE migration grace state is corrupt: {e}"
-                ) from e
-            in_grace = grace.is_active(now=datetime.now(timezone.utc))
     # Direct callers use the cached catalog without a refresh (no network).
     if kev is None:
         kev = load_kev(paths)
     with project_lock(project, paths):
         return scan_one_project_locked(
-            paths, project, in_grace=in_grace, audit_only=audit_only, kev=kev,
-            defer_new=defer_new,
+            paths, project, audit_only=audit_only, kev=kev, defer_new=defer_new,
         )
 
 
@@ -339,7 +318,6 @@ def audit_targets(
 
 def scan_one_project_locked(
     paths: BoxPaths, project: str, *,
-    in_grace: bool,
     kev: KevCatalog,
     audit_only: bool = False,
     defer_new: bool = False,
@@ -370,7 +348,7 @@ def scan_one_project_locked(
         # Audit-only (resume re-scan, audit A-3) leaves the prior alone.
         record_error = None
         if not audit_only:
-            outcome = _enforce(paths, project, meta, None, in_grace=in_grace)
+            outcome = _enforce(paths, project, meta, None, defer_new=defer_new)
             record_error = _record(
                 scan_state_path, decisions=(),
                 unscanned=tuple(_unscanned(unidentified=unidentified)), **basis,
@@ -390,15 +368,15 @@ def scan_one_project_locked(
     headline = headline_of(decisions)
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow
     # itself and never act. Everyone else enforces: an existing quarantine
-    # is re-asserted on every scan (B-03) unless this scan cleared it, a new
-    # one fires outside grace.
+    # is re-asserted on every scan (B-03) unless this scan cleared it, and a
+    # new one fires here unless the fleet run decides it (defer_new).
     outcome = Enforcement()
     if not audit_only:
         cleared = clears_quarantine(
             meta.posture, decisions, complete=not (failed or skipped or unidentified),
             kev_fresh=not kev.is_stale(_today()))
         outcome = _enforce(
-            paths, project, meta, headline, in_grace=in_grace or defer_new,
+            paths, project, meta, headline, defer_new=defer_new,
             cleared=tuple(decisions) if cleared else None,
         )
 
@@ -417,11 +395,10 @@ def scan_one_project_locked(
             unscanned=tuple(_unscanned(failed, skipped, unidentified)), **basis,
         )
 
-    # Transition alerts are best-effort; during grace the operator gets the
-    # single fleet-level heads-up instead, and audit-only callers (resume)
-    # must not push alerts.
+    # Transition alerts are best-effort; audit-only callers (resume) must not
+    # push alerts.
     host_expired: tuple[Suppression, ...] = ()
-    if not in_grace and not audit_only:
+    if not audit_only:
         if outcome.landed:
             announce_quarantine(paths, project, decisions)
         host_expired = _emit_transition_alerts(
@@ -460,11 +437,11 @@ def _record(path, **kwargs) -> str | None:
 def _enforce(
     paths: BoxPaths, project: str, meta: ProjectMeta,
     headline: tuple[ProjectDecision, FindingDisposition] | None,
-    *, in_grace: bool, cleared: tuple[ProjectDecision, ...] | None = None,
+    *, defer_new: bool, cleared: tuple[ProjectDecision, ...] | None = None,
 ) -> Enforcement:
     return enforce(
         paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
-        policy=meta.policy(), headline=headline, in_grace=in_grace, cleared=cleared,
+        policy=meta.policy(), headline=headline, defer_new=defer_new, cleared=cleared,
     )
 
 
