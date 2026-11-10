@@ -9,7 +9,6 @@ from __future__ import annotations
 import pytest
 
 from boxmunge.commands import deploy_checks
-from boxmunge.docker_containers import ImageFacts
 from boxmunge.paths import BoxPaths
 from boxmunge.release_target import ReleaseTarget
 from boxmunge.run_as import SOURCE_CHOWN, ServiceUser, write_users
