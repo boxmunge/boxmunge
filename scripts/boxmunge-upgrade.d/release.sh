@@ -79,7 +79,7 @@ cosign_reason() {
 cosign_verify_failed() {
     local version="$1" from_version="$2" seen="" count=0
     refuse_symlink "$COSIGN_FAILURES_FILE"
-    read -r seen count < "$COSIGN_FAILURES_FILE" 2>/dev/null || true
+    if [[ -e "$COSIGN_FAILURES_FILE" ]]; then read -r seen count < "$COSIGN_FAILURES_FILE" || true; fi
     [[ "$seen" == "$version" && "$count" =~ ^[0-9]+$ ]] || count=0
     count=$((count + 1))
     if [[ "$count" -ge 2 ]]; then

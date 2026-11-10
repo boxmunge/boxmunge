@@ -111,6 +111,7 @@ RC=0; OUT="$(FAIL_COSIGN=1 bash "$SHIM" run 1.5.0 https://example.invalid/ignore
 expect 1 "Cosign verification of SHA256SUMS FAILED" "the first refusal fails the upgrade"
 [[ "$OUT" == *"$REASON"* ]] && pass "the log line carries cosign's reason, on one line" || fail "no reason: $OUT"
 [[ "$OUT" == *"1.5.0 not blocklisted"* ]] && pass "the log says it is not blocklisted" || fail "out: $OUT"
+[[ "$OUT" != *"No such file"* ]] && pass "a first refusal finds no count without complaint" || fail "out: $OUT"
 ! blocklisted && ! reported && pass "the first refusal is neither blocklisted nor reported" || fail "calls: $(calls)"
 grep -qF "alert title=boxmunge upgrade failed msg=Cosign could not verify the signature of 1.5.0: $REASON" "$BOXMUNGE_ROOT/calls" \
     && pass "the alert carries cosign's reason" || fail "alert: $(calls)"
