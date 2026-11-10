@@ -18,10 +18,12 @@ end a quarantine judge the catalog first, the same way:
 
 `security resume <project> --accept-stale-kev` is the audited way past the
 no-usable-catalog refusal, for an operator who has judged the risk
-(security_resume). It never overrides a stale catalog that lists a CVE
-still in the images: a fresh catalog could not lift that either, and a
-release without the CVE already gets through. Every refusal names the
-exits that work from where the operator is.
+(security_resume); `prod-deploy <project> --accept-stale-kev` is the same
+for the release a deploy ships (commands/kev_acceptance). Neither ever
+overrides a stale catalog that lists a CVE still in the images: a fresh
+catalog could not lift that either, and a release without the CVE already
+gets through. Every refusal names the exits that work from where the
+operator is.
 
 The scan's automatic lift is unattended, so it takes only the fresh case
 (security_enforce.clears_quarantine). Staging lifts nothing, so the deploy
@@ -76,25 +78,6 @@ def resume_exits(project: str, check: KevLiftCheck) -> list[str]:
                      f"scanned first). {ACCEPT_FLAG} does not apply: a fresh catalog would "
                      f"refuse this lift too.")
     return exits
-
-
-def gate_exits(project: str, check: KevLiftCheck) -> list[str]:
-    """What gets a fix deploy the gate refused through."""
-    if not check.acceptable:
-        return ["Ship a release without those CVEs.",
-                f"Or: {fresh_data_advice()}; then deploy again."]
-    return [
-        f"{fresh_data_advice()}; then deploy again.",
-        f"Or lift the quarantine first with `boxmunge security resume {project} "
-        f"{ACCEPT_FLAG}` (logged and alerted), then deploy again. That resume brings the "
-        f"images the project ran when it was quarantined back online until this release "
-        f"replaces them.",
-        f"Under strict or paranoid, if that resume refuses a finding that is still "
-        f"quarantine-level in those images: `boxmunge security suppress <CVE> --project "
-        f"{project} --until <YYYY-MM-DD> --reason <text>`, then the resume with "
-        f"{ACCEPT_FLAG}, then this deploy, then `boxmunge security unsuppress <CVE> "
-        f"--project {project}`.",
-    ]
 
 
 def check_kev_for_lift(quarantined_cve: str, decisions: Sequence[ProjectDecision],

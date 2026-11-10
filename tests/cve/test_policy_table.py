@@ -64,6 +64,9 @@ _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
     ("fix-available+kev+ddq", _f(fix="2"), {"kev": True, "ddq": True},
      {R: SR, B: SR, S: SR, P: SR}),
     ("unknown-severity", _f(sev=Severity.UNKNOWN, vendor={}), {}, {R: I, B: I, S: I, P: I}),
+    # KEV never depends on severity: an unrated KEV CVE quarantines everywhere.
+    ("unknown-severity+kev", _f(sev=Severity.UNKNOWN, vendor={}), {"kev": True},
+     {R: Q, B: Q, S: Q, P: Q}),
     # Balanced quarantines only on KEV: an unfixable distro-High AV:N finding
     # is alerted (AWAITING_FIX); strict's >= Medium gate takes it down.
     ("high-avn-affected", _f(), {}, {R: I, B: AF, S: Q, P: Q}),

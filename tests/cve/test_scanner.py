@@ -119,12 +119,26 @@ class TestScanImageParsing:
         cmd = mock_run.call_args[0][0]
         assert cmd[:2] == ["trivy", "image"]
         assert "--format" in cmd and cmd[cmd.index("--format") + 1] == "json"
-        assert "--severity" in cmd
-        assert cmd[cmd.index("--severity") + 1] == "LOW,MEDIUM,HIGH,CRITICAL"
+        # Every severity: a KEV CVE no source has rated yet (UNKNOWN) must
+        # still reach the KEV check, which never looks at severity.
+        assert cmd[cmd.index("--severity") + 1] == "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL"
+        assert cmd[cmd.index("--scanners") + 1] == "vuln"
+        # refresh_db ran once for the run; no per-image DB update.
+        assert "--skip-db-update" in cmd
         assert "--no-progress" in cmd
         assert "--quiet" in cmd
-        assert cmd[-1] == "alpine:3.18"
+        # An image ref starting with "-" cannot be read as an option.
+        assert cmd[-2:] == ["--", "alpine:3.18"]
         assert mock_run.call_args.kwargs["timeout"] == 60
+
+    @patch("boxmunge.cve.scanner.subprocess.run")
+    def test_an_unrated_finding_is_kept_as_unknown(self, mock_run: MagicMock) -> None:
+        payload = {"Results": [{"Target": "x", "Class": "os-pkgs", "Vulnerabilities": [{
+            "VulnerabilityID": "CVE-2026-4242", "PkgName": "libnew",
+            "InstalledVersion": "1", "Severity": "UNKNOWN"}]}]}
+        mock_run.return_value = _make_completed(json.dumps(payload))
+        [f] = scan_image("img:1").findings
+        assert (f.cve_id, f.severity) == ("CVE-2026-4242", Severity.UNKNOWN)
 
     @patch("boxmunge.cve.scanner.subprocess.run")
     def test_scan_image_no_vulnerabilities(self, mock_run: MagicMock) -> None:
