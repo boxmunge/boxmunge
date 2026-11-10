@@ -44,7 +44,7 @@ health_judge() {
         126|127) echo "not_run $1"; return 0 ;;
     esac
     [[ "$1" -lt 124 ]] || { echo "unanswered $1"; return 0; }
-    BM_RC="$1" BM_REPORT="$2" BM_BASELINE="$3" python3 - <<'PYHEALTH'
+    printf '%s' "$2" | BM_RC="$1" BM_BASELINE="$3" python3 -c '
 import json, os, re, sys
 rc, baseline = int(os.environ["BM_RC"]), os.environ["BM_BASELINE"].split()
 
@@ -53,7 +53,7 @@ def no_report(why):
     sys.exit(0)
 
 try:
-    report = json.loads(os.environ["BM_REPORT"])
+    report = json.loads(sys.stdin.read())
 except ValueError:
     no_report(f"exit {rc} without a JSON report")
 checks = report.get("checks") if isinstance(report, dict) else None
@@ -69,7 +69,7 @@ errors = sorted({c["name"] for c in checks if c["status"] == "error"})
 known = set(baseline[1:]) if baseline[:1] == ["report"] else set()
 new = [e for e in errors if e not in known]
 print(" ".join(["failed", *new] if new else ["ok", *errors]))
-PYHEALTH
+'
 }
 
 # health_baseline_line: the baseline (without the slot) that HEALTH_VERDICT

@@ -95,6 +95,23 @@ expect 1 "is a symlink" "symlinked upgrade.lock is refused"
 rm -f "$victim"
 drop_root
 
+# Large files reach Python on stdin: one environment variable is capped at
+# 128 KiB on Linux, past which the shim itself would fail to run Python.
+new_root a
+python3 -c 'import json; print(json.dumps({f"0.0.{i}": {"reason": "x" * 30} for i in range(5000)}))' \
+    > "$BOXMUNGE_ROOT/upgrade-state/blocklist.json"
+PATH="$FAILVISUDO:$PATH" run_shim target 1.5.0
+expect 1 "failed visudo" "a blocklist over 128 KiB is read"
+drop_root
+new_root a
+record_probation 1.2.3
+python3 -c 'import json; print(json.dumps({"version": "1.2.3", "previous_slot": "b", "expires_at": "2999-01-01T00:00:00+00:00", "pad": "x" * 140000}))' \
+    > "$BOXMUNGE_ROOT/upgrade-state/probation.json"
+run_shim check-probation
+expect 0 "" "a probation.json over 128 KiB is read"
+[[ -f "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] && pass "and its probation goes on" || fail "out: $OUT"
+drop_root
+
 # --- probation.json -------------------------------------------------------
 
 for bad_slot in "../env-a" "a/../../etc" "c" "a"; do

@@ -239,10 +239,10 @@ is_blocklisted() {
     refuse_symlink "$BLOCKLIST_FILE"
     [[ -e "$BLOCKLIST_FILE" ]] || return 1
     content="$(read_untrusted "$BLOCKLIST_FILE")" || exit 1
-    BM_VERSION="$1" BM_BLOCKLIST="$content" BM_SEMVER_RE="$SEMVER_RE" python3 - <<'PYBL' || rc=$?
+    printf '%s' "$content" | BM_VERSION="$1" BM_SEMVER_RE="$SEMVER_RE" python3 -c '
 import json, os, re, sys
 try:
-    bl = json.loads(os.environ["BM_BLOCKLIST"])
+    bl = json.loads(sys.stdin.read())
 except ValueError as e:
     print(f"blocklist unreadable: {e}", file=sys.stderr)
     sys.exit(3)
@@ -251,7 +251,7 @@ if not isinstance(bl, dict) or not all(isinstance(k, str) and pattern.fullmatch(
     print("blocklist is not an object keyed by semver versions", file=sys.stderr)
     sys.exit(3)
 sys.exit(0 if os.environ["BM_VERSION"] in bl else 1)
-PYBL
+' || rc=$?
     case "$rc" in
         0|1) return "$rc" ;;
         *) die "$BLOCKLIST_FILE is malformed; inspect it and repair or remove it" ;;

@@ -40,7 +40,7 @@ record_probation() {
 # record to keep) and PROB_RECORDED (the record as found). It changes nothing:
 # settle_probation acts on the result.
 read_probation() {
-    local out content valid='^([ab] [^ ]+ [0-9]+|[ab] [0-9]+|none)$'
+    local out content installed valid='^([ab] [^ ]+ [0-9]+|[ab] [0-9]+|none)$'
     refuse_symlink "$PROBATION_FILE"
     content="$(read_untrusted "$PROBATION_FILE")" || exit 1
     refuse_symlink "$PROBATION_EXPIRY_FILE"
@@ -48,11 +48,12 @@ read_probation() {
     [[ ! -e "$PROBATION_EXPIRY_FILE" ]] || PROB_RECORDED="$(cat "$PROBATION_EXPIRY_FILE")"
     [[ -z "$PROB_RECORDED" || "$PROB_RECORDED" =~ $valid ]] \
         || die_logged "$PROBATION_EXPIRY_FILE is malformed. As supervisor, remove it and $PROBATION_FILE: that ends the probation, keeping the live release"
-    out="$(BM_PROBATION="$content" BM_RECORDED="$PROB_RECORDED" BM_SLOT="$ACTIVE_SLOT" BM_HOURS="$PROBATION_HOURS" \
-        BM_INSTALLED="$(installed_version)" BM_ENV_ACTIVE="$BOXMUNGE_ROOT/env-active" python3 - <<'PYPROB'
+    installed="$(installed_version)"
+    out="$(printf '%s' "$content" | BM_RECORDED="$PROB_RECORDED" BM_SLOT="$ACTIVE_SLOT" BM_HOURS="$PROBATION_HOURS" \
+        BM_INSTALLED="$installed" BM_ENV_ACTIVE="$BOXMUNGE_ROOT/env-active" python3 -c '
 import json, os, sys
 from datetime import datetime, timedelta, timezone
-d = json.loads(os.environ["BM_PROBATION"])
+d = json.loads(sys.stdin.read())
 keys = ("version", "previous_slot", "expires_at")
 if not isinstance(d, dict) or not all(isinstance(d.get(k), str) and "\n" not in d[k] for k in keys):
     sys.exit("probation.json must hold string version, previous_slot and expires_at")
@@ -81,7 +82,7 @@ print(ends.strftime("%Y-%m-%d %H:%M UTC"))
 print(status)
 print(note)
 print(int(recorded.timestamp()))
-PYPROB
+'
 )" || die_logged "$PROBATION_FILE is malformed; refusing to act on it"
     PROB_VERSION="$(echo "$out" | sed -n '1p')"
     PROB_PREV_SLOT="$(echo "$out" | sed -n '2p')"
