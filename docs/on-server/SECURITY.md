@@ -217,7 +217,7 @@ active or not: a profiled service still starts when something names it
 | `use_api_socket: true` | Hands the container the Docker daemon's API, which can start privileged containers with any host path mounted. Remove it. |
 | `privileged` on a `post_start` or `pre_stop` hook, or on a `develop.watch` `exec` hook | The hook regains every capability the hardening drops. Remove `privileged:`; hooks run with the service's own privileges. |
 | `cap_add` of a denied capability | See the denylist below. |
-| `security_opt` with `unconfined`, `label:disable`, `no-new-privileges:false`, or a custom `seccomp` profile file | Disables a kernel confinement layer. `seccomp=runtime/default` (or `builtin`) is fine. |
+| `security_opt` with `unconfined`, any `label` option (`label:disable`, `label=type:spc_t`, `user`, `role`, `level`), `no-new-privileges:false`, or a custom `seccomp` profile file | Disables a kernel confinement layer. `seccomp=runtime/default` (or `builtin`) is fine. |
 | `devices`, `device_cgroup_rules`, `gpus`, `deploy.resources.reservations.devices` | Exposes host devices. |
 | `cgroup_parent` that is absolute or contains `..` | Escapes the container cgroup. |
 | A bind mount of a protected host path, anything inside one, or any parent of one (refused under every profile) | Protected: the Docker and containerd sockets and state, `/proc`, `/sys`, `/dev`, `/etc`, `/boot`, `/root`, `/home`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, and the boxmunge root outside `projects/`. Paths are compared after `~` expansion, joining relative paths to the project directory, collapsing `..` and `//`, and resolving symlinks, so `/run` (the parent of `/run/docker.sock`), `/tmp/../etc`, and `../../config` are all refused. |
