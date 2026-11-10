@@ -25,11 +25,15 @@ def is_paused(project_name: str, paths: BoxPaths) -> bool:
 
 def write_paused_state(
     project_name: str, paths: BoxPaths, reason: str | None = None,
+    snapshot: dict[str, Any] | None = None,
 ) -> None:
     """Mark the project as paused. Records UTC timestamp; reason optional.
 
     The record says ``action_complete: false`` until mark_pause_complete:
     the maintenance page, the stop and the restart-policy hold all landed.
+    ``snapshot`` is the one the pause took before its stop, kept here so the
+    run that finishes an incomplete pause can still pair it
+    (commands/pause_snapshot).
     """
     data: dict[str, Any] = {
         "paused_at": datetime.now(timezone.utc).isoformat(),
@@ -37,6 +41,8 @@ def write_paused_state(
     }
     if reason is not None:
         data["reason"] = reason
+    if snapshot is not None:
+        data["snapshot"] = snapshot
     paths.project_paused_state(project_name).parent.mkdir(
         parents=True, exist_ok=True,
     )
@@ -68,6 +74,11 @@ def pause_incomplete(project_name: str, paths: BoxPaths) -> bool:
     """True if the project is marked paused but the pause did not finish:
     it may still be serving, or running."""
     return is_paused(project_name, paths) and not pause_action_complete(project_name, paths)
+
+
+def record_pause_snapshot(project_name: str, paths: BoxPaths, snapshot: dict[str, Any]) -> None:
+    """The snapshot a run finishing the pause took in place of the first."""
+    _update_paused_state(project_name, paths, snapshot=snapshot)
 
 
 def mark_pause_complete(project_name: str, paths: BoxPaths) -> None:

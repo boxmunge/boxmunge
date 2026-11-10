@@ -18,9 +18,29 @@ Checks per source (audit B-06 and #121). A catalog is rejected when it:
   back; logged, but not alerted while the cache is fresh). A source earlier
   in the list than the cache's own is not held to the cached date, so a
   later source stamping a newer date (a compromised mirror, an internal
-  mirror stamping its sync time) cannot lock the earlier ones out; the
-  removal check still guards what it drops;
+  mirror stamping its sync time) cannot lock the earlier ones out;
 - holds fewer than KEV_MIN_ENTRIES IDs (an error page, a truncated file);
+- is older than the cached one AND lacks any of its IDs AND is no newer
+  than the catalog the same source served last time (cve.kev_source_history),
+  from a source earlier in the list than the cache's own (CVE-03): the
+  sources disagree. That source has not caught up; taking its catalog
+  would roll back the newest KEV CVEs. The later sources are tried
+  instead; the first that passes (held to the cached date, so it agrees
+  with the cache or is newer) is cached and the disagreement is reported
+  for a notice. If none passes, the cache is kept and the disagreement
+  alerts like a rejection. While an earlier source disagrees, a later one
+  may not drop a CVE the earlier one still lists (rejected), until that
+  stall passes the override bound below (a mirror that stopped syncing
+  must not freeze the catalog for good). CISA's own feed never expires the
+  guard: a later source may never drop a CVE CISA still lists. An earlier
+  source that has moved on (newer than its last catalog, or never seen
+  before) or drops nothing wins by rank, and what it drops is a withdrawal:
+  otherwise a later source that invented an ID would lock it out for good
+  (#157 review). The first source in the list, and CISA's own feed
+  wherever it is listed, passed over on KEV_OVERRIDE_RUNS runs since it
+  last served a catalog that was not passed over (runs it did not answer
+  do not count either way), or against a cache released over
+  KEV_OVERRIDE_DAYS ago, is ``overridden``, and alerts at priority 1;
 - drops more than KEV_MAX_REMOVALS of the cached IDs (a poisoned or
   rolled-back list: dropping a KEV CVE would lift its quarantines).
 Up to KEV_MAX_REMOVALS dropped IDs are accepted (CISA does withdraw the odd
@@ -33,12 +53,13 @@ import json
 import logging
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from boxmunge.config import ConfigError, load_config
 from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, KevCatalog, load_kev
+from boxmunge.cve.kev_source_history import KevHistoryError, load_history, note_served
 from boxmunge.cve.kev_withdrawals import KevWithdrawalsError, record_withdrawals
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
@@ -57,6 +78,13 @@ KEV_MAX_BYTES = 16 * 1024 * 1024
 # A dateReleased further ahead than this is bogus, not clock skew: CISA
 # stamps the catalog when it publishes it.
 KEV_MAX_FUTURE_RELEASE = timedelta(hours=1)
+# A source passed over as stalled on this many runs since it last served a
+# catalog that was not (runs it did not answer do not count), or at once
+# against a cache released this long ago, is past the bound: an override of
+# the first source (or CISA's feed) alerts at priority 1, and its list stops
+# guarding later sources' withdrawals.
+KEV_OVERRIDE_RUNS = 2
+KEV_OVERRIDE_DAYS = 7
 _FETCH_TIMEOUT = 30
 _MAX_LISTED = 10
 
@@ -64,10 +92,11 @@ _MAX_LISTED = 10
 UNREACHABLE = "unreachable"  # no catalog came back (HTTP error, timeout, DNS)
 REJECTED = "rejected"        # a catalog came back but failed a check
 LAGGING = "lagging"          # a catalog came back, older than the cached one
+DISAGREES = "disagrees"      # an earlier source's older catalog lacks cached IDs
 CONFIG = "config"            # kev.sources in boxmunge.yml is unreadable or invalid
 # Kinds that need the operator even while the cached catalog is fresh: a
 # broken catalog or config would otherwise go unnoticed until it aged out.
-_ALERTING_KINDS = (REJECTED, CONFIG)
+_ALERTING_KINDS = (REJECTED, CONFIG, DISAGREES)
 
 
 def _extra(detail: dict[str, Any]) -> dict[str, Any]:
@@ -79,6 +108,7 @@ class SourceFailure:
     source: str
     kind: str
     error: str
+    overridden: bool = False  # a DISAGREES of the first source, past the bound
 
     def line(self) -> str:
         return f"{self.source}: {self.error}"
@@ -102,6 +132,16 @@ class KevRefresh:
         return self.source is not None
 
     @property
+    def disagreements(self) -> tuple[SourceFailure, ...]:
+        """Earlier sources passed over because they lag the cached catalog."""
+        return tuple(f for f in self.failures if f.kind == DISAGREES)
+
+    @property
+    def overridden(self) -> tuple[SourceFailure, ...]:
+        """Disagreements of the first source (or CISA's) past the bound."""
+        return tuple(f for f in self.failures if f.overridden)
+
+    @property
     def needs_alert(self) -> bool:
         """True when nothing was cached and a failure needs the operator."""
         return not self.updated and any(f.kind in _ALERTING_KINDS for f in self.failures)
@@ -110,9 +150,11 @@ class KevRefresh:
 class _Failed(Exception):
     """A source answered with a catalog that cannot be used."""
 
-    def __init__(self, kind: str, reason: str) -> None:
+    def __init__(self, kind: str, reason: str, ids: frozenset[str] = frozenset()) -> None:
         super().__init__(reason)
         self.kind = kind
+        self.ids = ids  # a disagreeing source's IDs, which later ones may not drop
+        self.released: datetime | None = None  # set once the catalog's date is known
 
 
 def _listed(ids: list[str]) -> str:
@@ -233,18 +275,38 @@ def _held_to_cache(url: str, sources: tuple[str, ...], cached: KevCatalog) -> bo
     return sources.index(url) >= cache_rank
 
 
+@dataclass(frozen=True)
+class _Context:
+    """What a source's catalog is judged against, beyond the cache."""
+    held_to_cache: bool
+    last_served: datetime | None   # what this source served last time, if seen
+    contradicting: dict[str, frozenset[str]]  # earlier disagreeing source: its IDs
+
+
 def _validate(
-    payload: Any, cached: KevCatalog, now: datetime, paths: BoxPaths, *,
-    held_to_cache: bool,
+    payload: Any, cached: KevCatalog, now: datetime, paths: BoxPaths, ctx: _Context,
 ) -> tuple[list[str], datetime, list[str]]:
     """The catalog's sorted IDs, its release time and the cached IDs it
-    drops, or _Failed."""
+    drops, or _Failed (carrying the release time once it is known)."""
     # The feed may return valid JSON that is not an object (e.g. [] or null
     # from an error page).
     vulns = payload.get("vulnerabilities") if isinstance(payload, dict) else None
     if not isinstance(vulns, list):
         raise _Failed(REJECTED, "feed payload malformed (no 'vulnerabilities' list)")
     released = _released_at(payload, now)
+    try:
+        cve_ids, withdrawn = _check_content(vulns, released, cached, now, paths, ctx)
+    except _Failed as e:
+        e.released = released
+        raise
+    return cve_ids, released, withdrawn
+
+
+def _check_content(
+    vulns: list[Any], released: datetime, cached: KevCatalog, now: datetime,
+    paths: BoxPaths, ctx: _Context,
+) -> tuple[list[str], list[str]]:
+    held_to_cache = ctx.held_to_cache
     baseline = _baseline(cached, now, held_to_cache=held_to_cache)
     # Before the content checks: a lagging catalog also lacks the entries
     # added since, which would otherwise read as mass withdrawal.
@@ -260,36 +322,81 @@ def _validate(
         raise _Failed(REJECTED, f"feed returned {len(cve_ids)} entries, below the floor "
                                 f"of {KEV_MIN_ENTRIES} (the catalog only grows)")
     withdrawn = sorted(cached.cve_ids - set(cve_ids))
+    # Not held to the cache, so not refused above: older, missing cached IDs
+    # and no newer than its own last catalog means it has not caught up
+    # (CVE-03). Before the removal limit, so a source far behind is not
+    # misread as a mass withdrawal.
+    newer = _baseline(cached, now, held_to_cache=True)
+    stalled = ctx.last_served is not None and released <= ctx.last_served
+    if withdrawn and newer is not None and released < newer and stalled:
+        raise _Failed(DISAGREES, (
+            f"catalog released {released.isoformat()} is older than the cached one "
+            f"released {newer.isoformat()} (from {cached.source}), lacks "
+            f"{len(withdrawn)} of its CVEs ({_listed(withdrawn)}) and is no newer than "
+            f"the last one it served: the source is lagging, so the catalog was not "
+            f"rolled back"), frozenset(cve_ids))
+    for other, listed in ctx.contradicting.items():
+        still = [c for c in withdrawn if c in listed]
+        if still:
+            raise _Failed(REJECTED, (
+                f"it drops {_listed(still)}, which {other}, ranked above it, still lists: "
+                f"the sources disagree, so neither catalog was cached"))
     if len(withdrawn) > KEV_MAX_REMOVALS:
         raise _Failed(REJECTED, (
             f"{len(withdrawn)} cached CVEs are missing from it (more than "
             f"{KEV_MAX_REMOVALS}): {_listed(withdrawn)}. If CISA really withdrew them, "
             f"remove the cache as root (rm {paths.kev_catalog}) and the next scan "
             f"accepts the catalog"))
-    return cve_ids, released, withdrawn
+    return cve_ids, withdrawn
+
+
+def _failed(paths: BoxPaths, url: str, e: _Failed, cached: KevCatalog, now: datetime, *,
+            protected: bool) -> tuple[SourceFailure, frozenset[str]]:
+    """The failure of a source whose catalog failed a check, and the IDs
+    later sources may not drop (a young disagreement's). One that came with
+    a release date is recorded as served."""
+    failure = SourceFailure(url, e.kind, f"{'rejected: ' if e.kind == REJECTED else ''}{e}")
+    if e.released is None:
+        return failure, frozenset()
+    try:
+        served = note_served(paths, url, e.released, disagreed=e.kind == DISAGREES)
+    except KevHistoryError as h:
+        return SourceFailure(url, REJECTED, f"{failure.error}; and {h}. Repair or remove "
+                                            f"it as root"), frozenset()
+    old = cached.released_at is not None and (
+        now - cached.released_at > timedelta(days=KEV_OVERRIDE_DAYS))
+    # Past the bound, a stalled mirror's list no longer guards withdrawals: a
+    # mirror that stopped syncing must not freeze the catalog for good. CISA's
+    # own list never expires: a later source may never drop a CVE CISA still
+    # lists, so if cisa.gov answers but stays frozen while a mirror withdraws
+    # one, every refresh is refused at priority 1 until CISA publishes again.
+    long = e.kind == DISAGREES and (served.disagreed_runs >= KEV_OVERRIDE_RUNS or old)
+    expired = long and url != KEV_DEFAULT_SOURCES[0]
+    return replace(failure, overridden=long and protected), frozenset() if expired else e.ids
 
 
 def _try_source(
-    paths: BoxPaths, url: str, cached: KevCatalog, *, held_to_cache: bool,
-) -> tuple[SourceFailure | None, list[str]]:
-    """Fetch, check and cache one source's catalog: (failure, withdrawn IDs)."""
+    paths: BoxPaths, url: str, cached: KevCatalog, ctx: _Context, *, protected: bool,
+) -> tuple[SourceFailure | None, list[str], frozenset[str]]:
+    """Fetch, check and cache one source's catalog: (failure, withdrawn IDs,
+    the IDs of a disagreeing catalog)."""
     now = datetime.now(timezone.utc)
     try:
         cve_ids, released, withdrawn = _validate(
-            _parse(_download(url)), cached, now, paths, held_to_cache=held_to_cache)
+            _parse(_download(url)), cached, now, paths, ctx)
     except _Failed as e:
-        prefix = "rejected: " if e.kind == REJECTED else ""
-        return SourceFailure(url, e.kind, f"{prefix}{e}"), []
+        failure, listed = _failed(paths, url, e, cached, now, protected=protected)
+        return failure, [], listed
     except (OSError, http.client.HTTPException) as e:
         # HTTPError/URLError and socket errors are OSErrors; a body cut
         # short is an http.client.IncompleteRead.
-        return SourceFailure(url, UNREACHABLE, _describe(e)), []
+        return SourceFailure(url, UNREACHABLE, _describe(e)), [], frozenset()
     try:
         # Before the cache: a withdrawal must outlive the catalog that made it.
         record_withdrawals(paths, url, withdrawn, cve_ids)
     except KevWithdrawalsError as e:
         return SourceFailure(url, REJECTED, f"fetched, but not cached: {e}. Repair or "
-                                            f"remove it as root"), []
+                                            f"remove it as root"), [], frozenset()
     doc = {
         "source": url,
         "released_at": released.isoformat(),
@@ -299,17 +406,45 @@ def _try_source(
     try:
         atomic_write_text(paths.kev_catalog, json.dumps(doc, indent=2) + "\n")
     except OSError as e:
-        return SourceFailure(url, REJECTED, f"fetched, but the cache write failed: {e}"), []
-    return None, withdrawn
+        return (SourceFailure(url, REJECTED, f"fetched, but the cache write failed: {e}"),
+                [], frozenset())
+    try:
+        # After the cache: the history never names a date the cache did not reach.
+        note_served(paths, url, released, disagreed=False)
+    except KevHistoryError as e:
+        # The catalog is cached; the next refresh refuses every source until
+        # the history is readable again (refresh_from), and alerts.
+        _LOGGER.warning("KEV catalog from %s cached, but %s", url, e,
+                        extra=_extra({"source": url, "error": str(e)}))
+    return None, withdrawn, frozenset()
+
+
+def _protected(url: str, sources: tuple[str, ...]) -> bool:
+    """The first source, and CISA's own feed wherever it is listed: an
+    override of either by a later source escalates."""
+    return url == sources[0] or url == KEV_DEFAULT_SOURCES[0]
 
 
 def refresh_from(paths: BoxPaths, sources: tuple[str, ...]) -> KevRefresh:
     """Try ``sources`` in order; cache the first catalog that passes."""
     cached = load_kev(paths)
+    try:
+        history = load_history(paths)
+    except KevHistoryError as e:
+        _LOGGER.warning("KEV refresh skipped: %s", e, extra=_extra({"error": str(e)}))
+        return KevRefresh(source=None, failures=(SourceFailure(
+            str(paths.kev_sources), REJECTED,
+            f"{e}. Repair or remove it as root; until then no catalog is accepted"),))
     failures: list[SourceFailure] = []
+    contradicting: dict[str, frozenset[str]] = {}
     for url in sources:
-        failure, withdrawn = _try_source(
-            paths, url, cached, held_to_cache=_held_to_cache(url, sources, cached))
+        seen = history.get(url)
+        ctx = _Context(_held_to_cache(url, sources, cached),
+                       seen.released_at if seen else None, dict(contradicting))
+        failure, withdrawn, listed = _try_source(paths, url, cached, ctx,
+                                                 protected=_protected(url, sources))
+        if listed:
+            contradicting[url] = listed
         if failure is None:
             if withdrawn:
                 _LOGGER.warning(

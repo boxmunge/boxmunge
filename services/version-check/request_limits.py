@@ -3,6 +3,8 @@
 - client_key: the rate-limit key for a client address (IPv6 by /64, since one
   host commonly owns a whole /64).
 - RateLimiter: fixed-window per-client request limit with bounded memory.
+- RequestLimiter: a per-client limit, then per network once the client
+  table is full (the service-wide request limit and STATS_SECRET guesses).
 - CheckCounter: aggregates /v1/check counts in memory and flushes them to
   SQLite periodically, so an unauthenticated request never waits on a write.
 
@@ -21,6 +23,12 @@ from pathlib import Path
 from typing import Callable
 
 import db
+
+
+# Why RateLimiter.admit refused a request.
+LIMITED = "limited"
+NETWORK_LIMITED = "network_limited"  # RequestLimiter: the client's network used its limit
+FULL = "full"
 
 
 def utc_today() -> date:
@@ -48,7 +56,7 @@ class RateLimiter:
 
     Memory is bounded: expired windows are swept once per window, and when
     `max_clients` are already tracked a new client is refused (fail closed)
-    until the sweep frees room.
+    until the sweep frees room. admit() says which of the two refused.
     """
 
     def __init__(self, limit: int, window: float, max_clients: int,
@@ -61,22 +69,38 @@ class RateLimiter:
         self._windows: dict[str, tuple[float, int]] = {}
         self._last_sweep = clock()
 
-    def allow(self, key: str) -> bool:
+    def _sweep(self, now: float) -> None:
+        """Drop expired windows, at most once per window. Call with the lock held."""
+        if now - self._last_sweep >= self.window:
+            self._windows = {k: v for k, v in self._windows.items()
+                             if now - v[0] < self.window}
+            self._last_sweep = now
+
+    def _no_room(self, key: str) -> bool:
+        """True if `key` is not tracked and the table is full. Call with the lock held."""
+        return key not in self._windows and len(self._windows) >= self.max_clients
+
+    def admit(self, key: str) -> str | None:
+        """Count one request for `key`: None if allowed, else why not.
+
+        LIMITED: `key` used its whole limit in this window. FULL: `key` is not
+        tracked and `max_clients` others are.
+        """
         now = self._clock()
         with self._lock:
-            if now - self._last_sweep >= self.window:
-                self._windows = {k: v for k, v in self._windows.items()
-                                 if now - v[0] < self.window}
-                self._last_sweep = now
+            self._sweep(now)
             started, count = self._windows.get(key, (now, 0))
             if now - started >= self.window:
                 started, count = now, 0
-            if key not in self._windows and len(self._windows) >= self.max_clients:
-                return False
+            if self._no_room(key):
+                return FULL
             if count >= self.limit:
-                return False
+                return LIMITED
             self._windows[key] = (started, count + 1)
-            return True
+            return None
+
+    def allow(self, key: str) -> bool:
+        return self.admit(key) is None
 
     def exhausted(self, key: str) -> bool:
         """True if `key` has used its whole limit in the current window; counts nothing."""
@@ -84,6 +108,62 @@ class RateLimiter:
         with self._lock:
             started, count = self._windows.get(key, (now, 0))
             return now - started < self.window and count >= self.limit
+
+    def full_for(self, key: str) -> bool:
+        """True if admit(key) would refuse `key` because the table is full; counts nothing."""
+        with self._lock:
+            self._sweep(self._clock())
+            return self._no_room(key)
+
+
+class RequestLimiter:
+    """A per-client limit, overflowing to per network.
+
+    Each client (client_key: an IPv4 address or IPv6 /64) gets `per_client`
+    requests per window. The client table is bounded, and one IPv6 /48 alone
+    holds 65,536 /64s, so one network could fill it and, were a full table
+    the end of it, shut out every client not yet seen in this window: for
+    the service-wide limit, every box's check would get 429 and no update
+    would be installed until the flood stopped; for STATS_SECRET guesses,
+    the maintainer could not sign in. So a client the full table cannot
+    track is limited by its network instead (`network_of`: the /24 or /48),
+    in a second bounded table, `per_network` per window. A flood from a few
+    networks then exhausts only those networks; refusing a client on any
+    other network takes `max_clients` distinct networks in one window.
+    Like every limit here, it is per worker.
+    """
+
+    def __init__(self, per_client: int, per_network: int, window: float, max_clients: int,
+                 network_of: Callable[[str | None], str],
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._clients = RateLimiter(per_client, window, max_clients, clock)
+        self._networks = RateLimiter(per_network, window, max_clients, clock)
+        self._network_of = network_of
+
+    def admit(self, remote_addr: str | None) -> str | None:
+        """Count one request: None if allowed, else LIMITED (the client's own
+        limit), NETWORK_LIMITED (its network's, the client table being full)
+        or FULL (both tables full)."""
+        refused = self._clients.admit(client_key(remote_addr))
+        if refused != FULL:
+            return refused
+        refused = self._networks.admit(self._network_of(remote_addr))
+        return NETWORK_LIMITED if refused == LIMITED else refused
+
+    def allow(self, remote_addr: str | None) -> bool:
+        return self.admit(remote_addr) is None
+
+    def refusal(self, remote_addr: str | None) -> str | None:
+        """What admit() would answer now, counting nothing."""
+        key = client_key(remote_addr)
+        if self._clients.exhausted(key):
+            return LIMITED
+        if not self._clients.full_for(key):
+            return None
+        network = self._network_of(remote_addr)
+        if self._networks.exhausted(network):
+            return NETWORK_LIMITED
+        return FULL if self._networks.full_for(network) else None
 
 
 OVERFLOW_VERSION = "unlisted"

@@ -24,7 +24,8 @@ from urllib.parse import quote
 
 from flask import current_app, make_response, redirect, request
 
-from request_limits import RateLimiter, client_key
+from prefix_store import network_prefix
+from request_limits import FULL, LIMITED, NETWORK_LIMITED, RequestLimiter
 
 SESSION_COOKIE = "bm_admin"
 SESSION_SECONDS = 8 * 3600
@@ -33,11 +34,18 @@ LOGIN_PATH = "/v1/admin/login"
 MIN_SECRET_LENGTH = 32
 # Wrong STATS_SECRET guesses per client (IPv4 address or IPv6 /64) per
 # worker, before that client is refused outright for the rest of the window.
+# Per worker: gunicorn runs several (Dockerfile), and each counts on its own,
+# so a client gets GUESS_FAILURES per worker. Past GUESS_LIMITER_CLIENTS
+# tracked clients, a new client is limited by its network (IPv4 /24, IPv6
+# /48) instead, GUESS_FAILURES_PER_NETWORK per window, so one network's
+# flood locks out only that network; past GUESS_LIMITER_CLIENTS networks
+# too, every new client is refused until the window frees room.
 GUESS_FAILURES = 10
+GUESS_FAILURES_PER_NETWORK = 20
 GUESS_WINDOW_SECONDS = 15 * 60
 GUESS_LIMITER_CLIENTS = 10_000
 SESSION_KEY = "admin_session_key"   # app.extensions: the database's random key
-GUESSES = "admin_secret_guesses"    # app.extensions: the shared RateLimiter
+GUESSES = "admin_secret_guesses"    # app.extensions: the shared RequestLimiter
 
 _SESSION_KEY_LABEL = b"boxmunge version-check: admin session signing key v1"
 _CODE_MAC_LABEL = b"boxmunge version-check: passkey registration code v1"
@@ -52,16 +60,28 @@ class AdminNotConfigured(RuntimeError):
     """STATS_SECRET is unset or too short, so no admin method can be checked."""
 
 
-class TooManyGuesses(RuntimeError):
-    """This client guessed STATS_SECRET wrong GUESS_FAILURES times in the window."""
+_GUESS_REFUSALS = {
+    LIMITED: "too many wrong secrets from this client",
+    NETWORK_LIMITED: "too many wrong secrets from this network",
+    FULL: "too many clients are guessing the admin secret",
+}
 
-    def __init__(self) -> None:
-        super().__init__(f"too many wrong secrets from this client; try again in "
+
+class TooManyGuesses(RuntimeError):
+    """This client may not try STATS_SECRET now. `reason` is the guess
+    limiter's refusal: this client (LIMITED) or its network
+    (NETWORK_LIMITED) used its guesses, or both tables are full (FULL) and
+    its guesses could not be counted."""
+
+    def __init__(self, reason: str = LIMITED) -> None:
+        super().__init__(f"{_GUESS_REFUSALS[reason]}; try again in "
                          f"{GUESS_WINDOW_SECONDS // 60} minutes")
 
 
-def guess_limiter() -> RateLimiter:
-    return RateLimiter(GUESS_FAILURES, GUESS_WINDOW_SECONDS, GUESS_LIMITER_CLIENTS)
+def guess_limiter(max_clients: int = GUESS_LIMITER_CLIENTS,
+                  per_network: int = GUESS_FAILURES_PER_NETWORK) -> RequestLimiter:
+    return RequestLimiter(GUESS_FAILURES, per_network, GUESS_WINDOW_SECONDS, max_clients,
+                          network_prefix)
 
 
 def now_unix() -> int:
@@ -90,16 +110,21 @@ def check_secret(candidate: str) -> bool:
     """Compare a guess with STATS_SECRET in constant time, within the client's guess limit.
 
     A client past the limit is refused before the comparison, so even the
-    right secret does not get through until the window rolls over.
+    right secret does not get through until the window rolls over. A client
+    the full client table cannot track is counted by its network instead;
+    one neither table has room for is refused (fail closed): a guess that
+    could not be counted would be a free one.
     """
     secret = stats_secret()
     limiter = current_app.extensions[GUESSES]
-    client = client_key(request.remote_addr)
-    if limiter.exhausted(client):
-        raise TooManyGuesses()
+    refused = limiter.refusal(request.remote_addr)
+    if refused is not None:
+        raise TooManyGuesses(refused)
     if eq(candidate, secret):
         return True
-    limiter.allow(client)  # records the failure
+    refused = limiter.admit(request.remote_addr)  # records the failure
+    if refused is not None:  # another request used the last guess or slot meanwhile
+        raise TooManyGuesses(refused)
     return False
 
 

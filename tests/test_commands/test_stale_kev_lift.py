@@ -210,6 +210,11 @@ def _manifest(security=None):
 
 @pytest.fixture
 def gate_box(tmp_path, monkeypatch):
+    return make_gate_box(tmp_path, monkeypatch)
+
+
+def make_gate_box(tmp_path, monkeypatch):
+    """A quarantined box whose deploy gate scans `paths.scan_findings`."""
     paths = make_box(tmp_path)
     seed_quarantine(paths)
     web = "sha256:" + "a" * 64

@@ -27,6 +27,7 @@ from boxmunge.fileutil import atomic_write_text
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
+from boxmunge.fs_nofollow import read_text_nofollow
 
 COMPONENT = "auto-update"
 REMIND_AFTER = timedelta(hours=24)
@@ -44,7 +45,7 @@ def read_blocked_state(paths: BoxPaths) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        state = json.loads(path.read_text())
+        state = json.loads(read_text_nofollow(path))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise BlockedStateError(f"{path}: unreadable: {e}") from e
     if not isinstance(state, dict) or set(state) != _STATE_KEYS:

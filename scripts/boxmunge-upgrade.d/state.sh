@@ -68,6 +68,17 @@ replace_file() {
     python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$1" "$2"
 }
 
+# write_root_file <file> <line>: replace a file in root-only upgrade-root/
+# (created if missing) by rename, so a reader never sees half of it.
+write_root_file() {
+    local tmp
+    refuse_symlink "$UPGRADE_ROOT_DIR"
+    [[ -d "$UPGRADE_ROOT_DIR" ]] || mkdir -m 0700 "$UPGRADE_ROOT_DIR"
+    tmp="$(mktemp "$UPGRADE_ROOT_DIR/.$(basename "$1").XXXXXX")"
+    printf '%s\n' "$2" > "$tmp"
+    replace_file "$tmp" "$1"
+}
+
 # load_active_slot: set ACTIVE_SLOT from the root-owned env-active symlink and
 # the deploy-writable active-slot file. Both must name a or b, and they must
 # agree: a forged active-slot would otherwise make the live venv look like

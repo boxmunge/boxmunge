@@ -41,7 +41,7 @@ stub "$FIXTURE/venv/bin/pip" 'exit 0'
 stub "$FIXTURE/venv/bin/boxmunge-server" 'case "$1 ${2:-}" in
     "--version "*) echo "boxmunge 1.5.0" ;;
     "upgrade --apply") [[ "${KILL_AT:-}" != apply ]] || { '"$kill_shim"'; }; [[ -z "${FAIL_APPLY:-}" ]] || exit 1 ;;
-    "health "*) [[ "${KILL_AT:-}" != health ]] || { '"$kill_shim"'; }; [[ -z "${FAIL_HEALTH:-}" ]] || exit 2 ;;
+    "health "*) [[ "${KILL_AT:-}" != health ]] || { '"$kill_shim"'; }; [[ -z "${FAIL_HEALTH:-}" ]] || exec health-report 2 ;;
 esac
 exit 0'
 stub "$FIXTURE/venv/bin/python" 'if [[ "$1" == "-" ]]; then
@@ -76,10 +76,14 @@ installed() {
     echo "proven" > "$BOXMUNGE_ROOT/env-a/known-good"
     mock_server a 'echo "a: $*" >> "$BOXMUNGE_ROOT/calls"; [[ "$1" != --version ]] || echo "boxmunge 1.4.0"
 case "$1 ${2:-}" in
-    "stash restore") [[ "${KILL_AT:-}" != restore ]] || { '"$kill_shim"'; } ;;
     "upgrade --apply") [[ "${KILL_AT:-}" != reapply ]] || { '"$kill_shim"'; } ;;
 esac'
     stub "$BOXMUNGE_ROOT/env-a/bin/python.new" 'if [[ "$1" == "-" ]]; then cat >/dev/null; echo "bm_log $BM_MSG" >> "$BOXMUNGE_ROOT/calls"; exit 0; fi
+if [[ -n "${BM_STASH:-}" ]]; then
+    echo "a: stash restore ${BM_STASH##*/}" >> "$BOXMUNGE_ROOT/calls"
+    [[ "${KILL_AT:-}" != restore ]] || { '"$kill_shim"'; }
+    exit 0
+fi
 printf "a-python: stage=%s msg=%s %s\n" "${BM_STAGE:-}" "${BM_MESSAGE:-}" "$*" >> "$BOXMUNGE_ROOT/calls"'
     mv "$BOXMUNGE_ROOT/env-a/bin/python.new" "$BOXMUNGE_ROOT/env-a/bin/python"
     : > "$BOXMUNGE_ROOT/calls"
@@ -111,7 +115,7 @@ expect_rolled_back() {
     proven_intact "$1"
     [[ "$(live)" == a && "$(cat "$BOXMUNGE_ROOT/upgrade-state/active-slot")" == a ]] \
         && pass "$1: proven release is live again" || fail "$1: live slot is $(live)"
-    grep -q "a: stash restore --latest" "$BOXMUNGE_ROOT/calls" && grep -q "a: upgrade --apply" "$BOXMUNGE_ROOT/calls" \
+    grep -q "a: stash restore boxmunge-stash-" "$BOXMUNGE_ROOT/calls" && grep -q "a: upgrade --apply" "$BOXMUNGE_ROOT/calls" \
         && pass "$1: stash restored and previous release re-applied" || fail "$1: rollback steps missing: $(cat "$BOXMUNGE_ROOT/calls")"
     ! blocklisted && pass "$1: a first interruption is not blocklisted" \
         || fail "$1: a first interruption blocklisted the version"
@@ -238,7 +242,7 @@ for point in sync3 link2 sync4 restore reapply; do
     expect 1 "Resuming the interrupted rollback of 1.5.0 (stage apply)" "rollback $point: check-probation resumes it"
     [[ "$(live)" == a && ! -e "$BOXMUNGE_ROOT/env-a/rollback-inflight" ]] \
         && pass "rollback $point: proven release live, marker cleared" || fail "rollback $point: live=$(live) $OUT"
-    grep -q "a: stash restore --latest" "$BOXMUNGE_ROOT/calls" && grep -q "a: upgrade --apply" "$BOXMUNGE_ROOT/calls" \
+    grep -q "a: stash restore boxmunge-stash-" "$BOXMUNGE_ROOT/calls" && grep -q "a: upgrade --apply" "$BOXMUNGE_ROOT/calls" \
         && pass "rollback $point: stash restore and re-apply redone" || fail "rollback $point: steps: $(cat "$BOXMUNGE_ROOT/calls")"
     blocklisted && grep -q "a-python: stage=apply" "$BOXMUNGE_ROOT/calls" \
         && pass "rollback $point: the failed apply is blocklisted and reported" || fail "rollback $point: bookkeeping missing"
@@ -264,7 +268,7 @@ run_shim check-probation
 expect 1 "Resuming the interrupted rollback of 1.5.0 (stage health_probation)" "probation rollback: check-probation resumes it"
 [[ "$(live)" == a && "$(cat "$BOXMUNGE_ROOT/upgrade-state/active-slot")" == a ]] \
     && pass "probation rollback: env-active and active-slot agree on the proven slot" || fail "probation rollback: live=$(live)"
-grep -q "a: stash restore --latest" "$BOXMUNGE_ROOT/calls" && grep -q "a: upgrade --apply" "$BOXMUNGE_ROOT/calls" \
+grep -q "a: stash restore boxmunge-stash-" "$BOXMUNGE_ROOT/calls" && grep -q "a: upgrade --apply" "$BOXMUNGE_ROOT/calls" \
     && pass "probation rollback: stash restore and re-apply ran" || fail "probation rollback: steps: $(cat "$BOXMUNGE_ROOT/calls")"
 run_shim check-probation
 expect 0 "orphan venv in inactive slot b" "probation rollback: the next check-probation clears the failed slot"

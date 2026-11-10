@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from boxmunge.config import load_config, ConfigError
+from boxmunge.config import load_config, ConfigError, version_check_enabled
 from boxmunge.docker_run import docker_env
 from boxmunge.paths import BoxPaths
 
@@ -87,6 +87,11 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
             check("Pushover configured", True)
         else:
             warn("Pushover configured", "Credentials empty — alerts won't work")
+
+    # Update discovery: the version-check opt-out costs every automatic update.
+    if config and not version_check_enabled(config):
+        from boxmunge.version_check_optout import OFF
+        warn("Update discovery", OFF)
 
     # Backup remote
     if config:

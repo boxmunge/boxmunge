@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from boxmunge.backup import (
-    SNAPSHOT_RETENTION, BackupError, BackupKind, decrypted_snapshot, prune_backups,
+    SNAPSHOT_RETENTION, BackupError, BackupKind, decrypted_snapshot,
     resolve_backup_service,
 )
 from boxmunge.commands.backup_cmd import list_snapshots, sweep_stale_dumps
@@ -51,6 +51,7 @@ from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.release_txn import load_txn, refuse_if_install_open
 from boxmunge.restore_safety import RestoreError, take_safety_snapshot, verify_plaintext
 from boxmunge.service_exec import ServiceCommandTimeout, run_in_service
+from boxmunge.snapshot_pairings import prune_unpaired
 
 RESTORE_COMMAND_TIMEOUT = 600  # seconds; matches the backup dump budget
 _READY_ATTEMPTS = 30
@@ -368,10 +369,8 @@ def _replace_data(
     if not started:
         return 1
     log_operation("restore", f"Restored from {snapshot_path.name}", paths, project=project_name)
-    prune_backups(
-        paths.project_backups(project_name), project_name,
-        BackupKind.PRERESTORE, SNAPSHOT_RETENTION[BackupKind.PRERESTORE],
-    )
+    prune_unpaired(paths, project_name, BackupKind.PRERESTORE,
+                   SNAPSHOT_RETENTION[BackupKind.PRERESTORE])
     print(f"{project_name}: restore complete")
     if leave_stopped and not is_paused(project_name, paths):
         print(f"  It is still stopped by the health monitor: run 'recover "

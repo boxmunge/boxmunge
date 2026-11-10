@@ -96,18 +96,39 @@ def _record_write(op: str, key: str, inv: Inventory, paths: BoxPaths,
     _warn_unvouched(inv, project)
 
 
+def _value_from_stdin(key: str) -> str | None:
+    """KEY's value for `secrets set <scope> KEY`: a no-echo prompt at a
+    terminal, else all of stdin less one trailing newline, so the value is
+    in no process's argv. A second line stays in the value, which set_key
+    refuses, rather than being dropped. None, after saying why, when stdin
+    holds nothing at all: an empty value is sent as an empty line."""
+    if sys.stdin is not None and sys.stdin.isatty():
+        import getpass
+        return getpass.getpass(f"Value for {key}: ")
+    text = sys.stdin.read() if sys.stdin is not None else ""
+    if not text:
+        print(f"ERROR: no value for {key} on stdin; nothing was changed. Send it as one "
+              f"line on stdin, or use KEY=VALUE.", file=sys.stderr)
+        return None
+    return text[:-1] if text.endswith("\n") else text
+
+
 def _cmd_set(args: list[str], paths: BoxPaths) -> int:
     secrets, rest, project = _resolve_secrets(args, paths)
     if secrets is None:
         return 1
     if not rest:
-        print("ERROR: Missing KEY=VALUE argument", file=sys.stderr)
+        print("ERROR: Missing KEY or KEY=VALUE argument", file=sys.stderr)
         return 1
-    assignment = rest[0]
-    if "=" not in assignment:
-        print(f"ERROR: Expected KEY=VALUE, got: {assignment!r}", file=sys.stderr)
-        return 1
-    key, _, value = assignment.partition("=")
+    key, sep, value = rest[0].partition("=")
+    if not sep:
+        if not valid_key(key):
+            print(f"ERROR: Expected KEY or KEY=VALUE, got: {key!r}", file=sys.stderr)
+            return 1
+        read = _value_from_stdin(key)
+        if read is None:
+            return 1
+        value = read
     try:
         inv = set_key(secrets, key, value)
     except QuoteSpanError as e:

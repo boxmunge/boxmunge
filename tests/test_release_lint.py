@@ -10,7 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from boxmunge.release_selection import github_release_breaking, github_release_class
+from boxmunge.release_selection import (
+    github_release_breaking, github_release_class, github_release_held,
+)
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "scripts" / "release-lint.py"
@@ -210,6 +212,64 @@ class TestVerify:
     def test_breaking_rule_matches_box_side_rule(self, name, body):
         assert lint.is_breaking(name, body) == github_release_breaking(
             {"name": name, "body": body})
+
+
+class TestHeldMarker:
+    """[held] in a release title is the GitHub twin of a circuit-breaker hold.
+    It is the maintainer's edit after publishing, never part of a draft."""
+
+    @pytest.mark.parametrize("name,body", [
+        ("v0.11.5 [security] [held]", ""), ("v0.11.5 [security]", "notes"),
+        ("v0.11.5", "* [held] quoted from a PR title"), ("x [HELD]", ""),
+    ])
+    def test_held_rule_matches_box_side_rule(self, name, body):
+        assert lint.is_held(name) == github_release_held({"name": name, "body": body})
+
+    @pytest.mark.parametrize("name,body", [
+        ("v0.11.5 [security] [held]", "[security] x"),
+        ("v0.11.5 [security]", "[security] x\n* [held] by @dev"),
+    ])
+    def test_a_draft_carrying_the_marker_fails(self, name, body):
+        with pytest.raises(lint.ReleaseLintError, match=r"\[held\]"):
+            lint.verify_release(name, body, "security", False)
+
+    def test_audit_passes_when_github_holds_exactly_the_named_versions(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.1", [("0.12.1", "security"), ("0.12.0", "feature")])
+        held = lint.audit_releases(files["releases"], [
+            _gh("0.12.1", "v0.12.1 [security] [held]"), _gh("0.12.0")], held={"0.12.1"})
+        assert held == ["v0.12.1"]
+
+    def test_audit_reports_a_hold_github_lacks_or_one_nobody_named(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.1", [("0.12.1", "security"), ("0.12.0", "security")])
+        with pytest.raises(lint.ReleaseLintError) as err:
+            lint.audit_releases(files["releases"], [
+                _gh("0.12.1", "v0.12.1 [security]"), _gh("0.12.0", "v0.12.0 [security] [held]")],
+                held={"0.12.1"})
+        message = str(err.value)
+        assert "v0.12.1: held, but its GitHub title lacks [held]" in message
+        assert "v0.12.0: its GitHub title carries [held]" in message
+
+    def test_audit_reports_a_marker_in_the_notes_that_does_nothing(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.1", [("0.12.1", "security")])
+        with pytest.raises(lint.ReleaseLintError, match="notes"):
+            lint.audit_releases(files["releases"], [
+                _gh("0.12.1", "v0.12.1 [security]", body="[held]")], held={"0.12.1"})
+
+    def test_audit_refuses_holding_an_unlisted_version(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.1", [("0.12.1", "security")])
+        with pytest.raises(lint.ReleaseLintError, match="0.9.9"):
+            lint.audit_releases(files["releases"], [_gh("0.12.1", "v0.12.1 [security]")],
+                                held={"0.9.9"})
+
+    def test_cli_takes_the_held_versions(self, tmp_path):
+        files = _write_tree(tmp_path, "0.12.1", [("0.12.1", "security")])
+        gh = tmp_path / "gh.json"
+        gh.write_text(json.dumps([_gh("0.12.1", "v0.12.1 [security] [held]")]))
+        args = ("audit", "--github-releases", str(gh), "--releases", str(files["releases"]))
+        assert _run(*args).returncode == 1
+        proc = _run(*args, "--held", "0.12.1")
+        assert proc.returncode == 0, proc.stderr
+        assert "held on GitHub: v0.12.1" in proc.stdout
 
 
 class TestCli:

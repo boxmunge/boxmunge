@@ -111,6 +111,31 @@ class TestSecretGuessing:
                                  headers={"X-Forwarded-For": "198.51.100.3", **BEARER})
         assert other.status_code == 200
 
+    def test_a_flood_from_one_network_exhausts_only_that_network(self, admin_app):
+        """VC-2 / review P3-1: one IPv6 /48 holds 65,536 /64 client keys, enough
+        to fill the guess table. Clients it cannot track are then limited by
+        their network, so the flood locks out its own network, not the
+        maintainer's; only a full network table refuses everyone (fail closed)."""
+        admin_app.extensions[admin_auth.GUESSES] = admin_auth.guess_limiter(
+            max_clients=2, per_network=2)
+        client = admin_app.test_client(use_cookies=False)
+
+        def guess(addr, secret="wrong"):
+            return client.get("/v1/admin/version-checks", headers={
+                "X-Forwarded-For": addr, "Authorization": f"Bearer {secret}"})
+
+        flood = [guess(f"2001:db8:aa:{n:x}::1").status_code for n in range(5)]
+        assert flood == [401, 401, 401, 401, 429], flood
+        refused = guess("2001:db8:aa:9::1", ADMIN_SECRET)
+        assert refused.status_code == 429, "refused before the comparison"
+        assert "this network" in refused.get_json()["error"]
+        assert guess("203.0.113.9", ADMIN_SECRET).status_code == 200, "another network signs in"
+        assert guess("203.0.113.9").status_code == 401
+        full = guess("198.51.100.1")
+        assert full.status_code == 429
+        assert "too many clients" in full.get_json()["error"]
+        assert guess("2001:db8:aa::1").status_code == 401, "tracked clients keep their budget"
+
     def test_correct_bearer_requests_do_not_use_up_the_limit(self, admin_client):
         for _ in range(admin_auth.GUESS_FAILURES + 2):
             assert admin_client.get("/v1/admin/version-checks",

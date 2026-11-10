@@ -46,6 +46,7 @@ Inbox & secrets:
   inbox [project]         List uploaded bundles
   inbox clean [project]   Remove bundles from the inbox (asks unless --yes)
   secrets set <p> KEY=VAL Set a project secret
+  secrets set <p> KEY     Same, value from stdin or a no-echo prompt
   secrets set --host K=V  Set a host-level secret
   secrets list <p|--host> List secret keys
   secrets get <p|--host> K  Read a secret value

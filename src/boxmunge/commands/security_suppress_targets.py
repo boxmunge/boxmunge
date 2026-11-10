@@ -138,17 +138,21 @@ def drop_kev_listed(
 
     A suppression never hides a KEV-listed CVE (audit B-07), so writing one
     would record a review that has no effect. A named CVE is refused; a
-    --current batch skips the KEV entries and suppresses the rest.
+    --current batch skips the KEV entries and suppresses the rest. The
+    cached IDs decide even when the catalog is stale (CVE-04): staleness
+    only stops new KEV quarantines, and once the catalog is fresh again the
+    suppression would not apply.
     """
     kev = load_kev(paths)
-    today = utc_today()
-    listed = [c for c in cve_ids if kev.is_known_exploited(c, today=today)]
+    stale = kev.stale_reason(utc_today())
+    listed = [c for c in cve_ids if c in kev.cve_ids]
     for cve in listed:
         print(
             f"{'ERROR' if positional else 'NOTE'}: {cve} is on the CISA Known "
-            f"Exploited Vulnerabilities catalog. Suppressions do not apply to "
-            f"KEV-listed CVEs; fix or rebuild the image instead."
-            + ("" if positional else " Skipping it."),
+            f"Exploited Vulnerabilities catalog"
+            + (f" (the cached catalog is stale: {stale})" if stale else "")
+            + ". Suppressions do not apply to KEV-listed CVEs; fix or rebuild the image "
+              "instead." + ("" if positional else " Skipping it."),
             file=sys.stderr,
         )
         log_error(

@@ -40,7 +40,7 @@ from boxmunge import restart_hold
 from boxmunge.compose_guard import compose_up_checked
 from boxmunge.docker import DockerError, caddy_reload, compose_stop
 from boxmunge.fileutil import atomic_write_text
-from boxmunge.fs_nofollow import mkdir_p_deploy
+from boxmunge.fs_nofollow import mkdir_p_deploy, read_text_nofollow
 from boxmunge.pause import (
     hand_over_restart_policies, is_paused, render_maintenance_caddy_config,
 )
@@ -102,7 +102,7 @@ def read_quarantine_state(
     if not path.exists():
         return None
     try:
-        state = json.loads(path.read_text())
+        state = json.loads(read_text_nofollow(path))
     except (OSError, json.JSONDecodeError) as e:
         raise QuarantineError(f"Cannot read quarantine state {path}: {e}") from e
     if not isinstance(state, dict):

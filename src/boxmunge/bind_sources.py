@@ -28,7 +28,7 @@ from typing import Any, Iterable
 from boxmunge.compose_mounts import host_path_forms, is_bind_entry, volume_source
 from boxmunge.compose_own_files import CONTROL_ENTRIES
 from boxmunge.fileutil import atomic_write_text
-from boxmunge.fs_nofollow import open_regular_nofollow
+from boxmunge.fs_nofollow import open_regular_nofollow, read_text_nofollow
 
 DIR = "dir"
 FILE = "file"
@@ -246,7 +246,7 @@ def read_record(path: Path) -> dict[str, Any]:
     """The bind sources, kinds and control hashes deploy recorded. Raises
     BindSourceError when there is no readable record."""
     try:
-        doc = json.loads(path.read_text())
+        doc = json.loads(read_text_nofollow(path))
     except FileNotFoundError:
         raise BindSourceError(
             f"no record of the bind sources this project was deployed with "

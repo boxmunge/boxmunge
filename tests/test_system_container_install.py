@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""install.sh's boxmunge-system step (bootstrap/system-container.sh, and the
-policy around it in install.sh).
+"""install.sh's boxmunge-system and Caddy steps (bootstrap/system-container.sh,
+and the policy around them in install.sh).
 
 The image is rebuilt unless the running one carries the installed definition
 in its label, so a failed build is retried by the next run even though the
 new files are already in place, and a rebuild by hand counts. A build is
 tried three times. A failed build is recorded and the rest of the install
 carries on; a fresh install or an operator's re-run then stops at the end,
-naming the rebuild. Run by the upgrade shim it only warns (the shim would
-blocklist the release), keeps the previous container, and leaves the
+naming the rebuild. A current image whose container did not start is named
+as that (exit 3), with a start, not a rebuild, as the fix. Caddy's `up` is
+treated the same way. Run by the upgrade shim each only warns (the shim
+would blocklist the release), keeps the previous container, and leaves the
 installer fingerprint unrecorded so the next upgrade runs install.sh again."""
 from __future__ import annotations
 
@@ -110,6 +112,17 @@ def test_a_changed_dockerfile_rebuilds(box: Box) -> None:
     assert box.calls("up -d --build") == 2
 
 
+def test_a_current_image_whose_container_does_not_start_exits_3(box: Box) -> None:
+    """Not reported as a build failure: install.sh names the start instead."""
+    box.run()
+    docker = box.bin / "docker"
+    docker.write_text(docker.read_text().replace("*) exit 0 ;;", "*) exit 1 ;;"))
+    proc = box.run()
+    assert proc.returncode == 3
+    assert "did not start (its image is current)" in proc.stderr
+    assert box.calls("up -d --build") == 1
+
+
 def test_a_container_built_by_an_older_install_rebuilds(box: Box) -> None:
     box.label.write_text("\n")  # no label: built before this check existed
     assert box.run().returncode == 0
@@ -147,12 +160,20 @@ def _function_body(name: str) -> str:
     return m.group(0)
 
 
-def _policy(tmp: Path, *, from_shim: int, script_rc: int) -> subprocess.CompletedProcess:
-    """Run the build step, a stand-in for the rest of the install, and the
-    final check, as install.sh orders them."""
+def _policy(tmp: Path, *, from_shim: int, script_rc: int, caddy_rc: int = 0) -> subprocess.CompletedProcess:
+    """Run the Caddy and boxmunge-system steps, a stand-in for the rest of
+    the install, and the final check, as install.sh orders them. The Caddy
+    container exists; its `up` exits <caddy_rc>."""
     (tmp / "bootstrap").mkdir()
     (tmp / "bootstrap" / "system-container.sh").write_text(f"exit {script_rc}\n")
     shutil.copy(REPO / "bootstrap" / "installer-fingerprint.sh", tmp / "bootstrap")
+    (tmp / "caddy").mkdir()
+    (tmp / "caddy" / "compose.yml").write_text("services: {}\n")
+    (tmp / "root" / "caddy").mkdir(parents=True)
+    stubs = tmp / "stubs"
+    stubs.mkdir()
+    _stub(stubs / "chown", "exit 0\n")
+    _stub(stubs / "docker", f'[ "$1" = inspect ] && exit 0\nexit {caddy_rc}\n')
     fingerprint = tmp / "root" / "upgrade-root" / "installer.sha256"
     fingerprint.parent.mkdir(parents=True, mode=0o700)
     fingerprint.write_text("0" * 64 + "\n")
@@ -160,59 +181,89 @@ def _policy(tmp: Path, *, from_shim: int, script_rc: int) -> subprocess.Complete
     script.write_text(
         "set -euo pipefail\n"
         f"SCRIPT_DIR={tmp}\nBOXMUNGE_ROOT={tmp / 'root'}\nFROM_UPGRADE_SHIM={from_shim}\n"
-        "SYSTEM_IMAGE_STALE=0\n"
-        'SYSTEM_REBUILD="sudo docker compose -f /opt/boxmunge/system/compose.yml up -d --build"\n'
+        'INCOMPLETE=""\n'
+        f'SYSTEM_REBUILD="{REBUILD}"\n'
+        + _function_body("note_incomplete")
+        + _function_body("refresh_caddy")
         + _function_body("refresh_system_container")
-        + _function_body("fail_if_system_image_stale")
-        + 'refresh_system_container\necho "rest of the install"\n'
-        + 'fail_if_system_image_stale\necho "stale=${SYSTEM_IMAGE_STALE}"\n')
+        + _function_body("fail_if_incomplete")
+        + 'refresh_caddy\nrefresh_system_container\necho "rest of the install"\n'
+        + 'fail_if_incomplete\necho "incomplete=[${INCOMPLETE}]"\n')
     return subprocess.run([shutil.which("bash"), str(script)], capture_output=True, text=True,
-                          env={"PATH": "/usr/bin:/bin"})
+                          env={"PATH": f"{stubs}:/usr/bin:/bin"})
 
 
 REBUILD = "sudo docker compose -f /opt/boxmunge/system/compose.yml up -d --build"
 
 
+def _fingerprint_kept(tmp: Path) -> bool:
+    return (tmp / "root" / "upgrade-root" / "installer.sha256").exists()
+
+
 def test_a_failed_build_finishes_a_fresh_install_then_fails_it(tmp_path: Path) -> None:
     proc = _policy(tmp_path, from_shim=0, script_rc=1)
     assert proc.returncode == 1
-    assert "rest of the install" in proc.stdout and "stale=" not in proc.stdout
+    assert "rest of the install" in proc.stdout and "incomplete=" not in proc.stdout
     error = proc.stderr[proc.stderr.index("ERROR"):]
-    assert REBUILD in error and "boxmunge doctor" in error
+    assert "did not build" in error and REBUILD in error and "boxmunge doctor" in error
     # Forgotten before the exit, so the next upgrade re-runs install.sh.
-    assert not (tmp_path / "root" / "upgrade-root" / "installer.sha256").exists()
+    assert not _fingerprint_kept(tmp_path)
 
 
-def test_a_failed_build_under_the_upgrade_shim_warns_and_marks_the_image_stale(tmp_path: Path) -> None:
+def test_a_failed_build_under_the_upgrade_shim_warns_and_is_noted(tmp_path: Path) -> None:
     proc = _policy(tmp_path, from_shim=1, script_rc=1)
     assert proc.returncode == 0, proc.stderr
-    assert "stale=1" in proc.stdout
+    assert "incomplete=[  - the boxmunge-system image did not build" in proc.stdout
     assert "WARNING" in proc.stderr and REBUILD in proc.stderr and "ERROR" not in proc.stderr
-    assert not (tmp_path / "root" / "upgrade-root" / "installer.sha256").exists()
+    assert not _fingerprint_kept(tmp_path)
 
 
 @pytest.mark.parametrize("from_shim", [0, 1])
-def test_a_successful_build_is_not_stale(tmp_path: Path, from_shim: int) -> None:
+def test_a_container_that_did_not_start_is_named_as_such(tmp_path: Path, from_shim: int) -> None:
+    """system-container.sh exits 3 when the image is current but `up` failed:
+    not a build failure, and the fix is a start, not a rebuild."""
+    proc = _policy(tmp_path, from_shim=from_shim, script_rc=3)
+    assert proc.returncode == (0 if from_shim else 1)
+    assert "boxmunge-system container did not start" in proc.stderr
+    assert "did not build" not in proc.stderr and REBUILD not in proc.stderr
+    assert "compose.yml up -d" in proc.stderr
+    assert not _fingerprint_kept(tmp_path)
+
+
+@pytest.mark.parametrize("from_shim", [0, 1])
+def test_a_failed_caddy_start_is_noted_not_fatal_at_once(tmp_path: Path, from_shim: int) -> None:
+    """Under the shim a failed `up` (a transient pull of the pinned image)
+    must not fail install.sh, which would blocklist the release."""
+    proc = _policy(tmp_path, from_shim=from_shim, script_rc=0, caddy_rc=1)
+    assert "rest of the install" in proc.stdout
+    assert proc.returncode == (0 if from_shim else 1), proc.stderr
+    assert "Caddy was not started from the new caddy/compose.yml" in proc.stderr
+    assert "caddy/compose.yml up -d" in proc.stderr
+    assert not _fingerprint_kept(tmp_path)
+
+
+@pytest.mark.parametrize("from_shim", [0, 1])
+def test_a_successful_run_is_complete(tmp_path: Path, from_shim: int) -> None:
     proc = _policy(tmp_path, from_shim=from_shim, script_rc=0)
     assert proc.returncode == 0, proc.stderr
-    assert "stale=0" in proc.stdout
-    assert (tmp_path / "root" / "upgrade-root" / "installer.sha256").exists()
+    assert "incomplete=[]" in proc.stdout
+    assert _fingerprint_kept(tmp_path)
 
 
 def test_the_install_fails_after_everything_else_and_before_the_fingerprint() -> None:
-    final = INSTALL_SH.index("\nfail_if_system_image_stale\n")
-    assert INSTALL_SH.index("\nrefresh_system_container\n") < final
-    for step in ('install-sudoers\n', "systemctl enable --now", 'install-docs "${SCRIPT_DIR}/on-server"'):
+    final = INSTALL_SH.index("\nfail_if_incomplete\n")
+    for step in ("\nrefresh_caddy\n", "\nrefresh_system_container\n", 'install-sudoers\n',
+                 "systemctl enable --now", 'install-docs "${SCRIPT_DIR}/on-server"'):
         assert INSTALL_SH.index(step) < final, step
     assert final < INSTALLER_WRITE.search(INSTALL_SH).start()
     assert final < INSTALL_SH.index('installed successfully"\n')
 
 
-def test_a_stale_image_leaves_the_installer_fingerprint_unrecorded() -> None:
-    """So the upgrade shim runs install.sh, and so the build, again next time."""
+def test_an_incomplete_run_leaves_the_installer_fingerprint_unrecorded() -> None:
+    """So the upgrade shim runs install.sh, and the noted steps, again next time."""
     write = INSTALLER_WRITE.search(INSTALL_SH)
     assert write, "install.sh no longer records the installer fingerprint"
-    guard = INSTALL_SH.rindex('if [[ "${SYSTEM_IMAGE_STALE}" -eq 0 ]]; then', 0, write.start())
+    guard = INSTALL_SH.rindex('if [[ -z "${INCOMPLETE}" ]]; then', 0, write.start())
     assert "fi\n" not in INSTALL_SH[guard:write.start()]
 
 

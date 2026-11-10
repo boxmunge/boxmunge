@@ -8,20 +8,18 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 # probation_failure <stash rc> <apply rc>: active a (new release) fails its
-# probation health check; b is the previous release, whose boxmunge-server
-# records every call and exits with the given codes.
+# probation health check; b is the previous release, whose boxmunge-server and
+# stash restore record every call and exit with the given codes.
 probation_failure() {
     new_root a
-    mock_server a 'if [[ "$1" == "health" ]]; then exit 2; fi; exit 0'
+    mock_server a 'if [[ "$1" == "health" ]]; then exec health-report 2; fi; exit 0'
     mock_server b "echo \"\$*\" >> \"$BOXMUNGE_ROOT/calls\"
 case \"\$1 \$2\" in
-    'stash restore') exit $1 ;;
     'upgrade --apply') exit $2 ;;
 esac
 exit 0"
-    rm "$BOXMUNGE_ROOT/env-b/bin/python"
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$BOXMUNGE_ROOT/env-b/bin/python"
-    chmod +x "$BOXMUNGE_ROOT/env-b/bin/python"
+    printf '#!/usr/bin/env bash\n[[ -z "${BM_STASH:-}" ]] || { echo "stash restore ${BM_STASH##*/}" >> "$BOXMUNGE_ROOT/calls"; exit %s; }\nexit 0\n' \
+        "$1" > "$BOXMUNGE_ROOT/env-b/bin/python"
     write_probation "1.2.3" "b" "$SOON"
     run_shim check-probation
 }
@@ -30,7 +28,7 @@ calls() { grep -v -- '--version' "$BOXMUNGE_ROOT/calls" | tr '\n' ';'; }
 
 probation_failure 0 0
 expect 1 "Rollback complete" "clean rollback exits 1"
-[[ "$(calls)" == "stash restore --latest;upgrade --apply;" ]] \
+[[ "$(calls)" == "stash restore $OLD_STASH;upgrade --apply;" ]] \
     && pass "rollback restores the stash, then re-applies the previous release" \
     || fail "unexpected rollback calls: $(calls)"
 [[ "$(readlink "$BOXMUNGE_ROOT/env-active")" == "$BOXMUNGE_ROOT/env-b" ]] \
@@ -50,7 +48,7 @@ drop_root
 
 probation_failure 1 0
 expect 2 "stash restore failed" "a failed stash restore is a partial rollback"
-[[ "$(calls)" == "stash restore --latest;" ]] && pass "no re-apply after a failed restore" \
+[[ "$(calls)" == "stash restore $OLD_STASH;" ]] && pass "no re-apply after a failed restore" \
     || fail "re-apply ran after a failed restore: $(calls)"
 drop_root
 
@@ -59,16 +57,16 @@ drop_root
 # (restarting every project) again.
 probation_failure_setup() {
     new_root a
-    mock_server a 'if [[ "$1" == "health" ]]; then exit 2; fi; exit 0'
+    mock_server a 'if [[ "$1" == "health" ]]; then exec health-report 2; fi; exit 0'
     mock_server b 'echo "$*" >> "$BOXMUNGE_ROOT/calls"; exit 0'
     rm "$BOXMUNGE_ROOT/env-b/bin/python"
-    printf '#!/usr/bin/env bash\n[[ "$*" != *add_to_blocklist* ]] || exit 1\nexit 0\n' > "$BOXMUNGE_ROOT/env-b/bin/python"
+    printf '#!/usr/bin/env bash\n[[ -z "${BM_STASH:-}" ]] || echo "stash restore ${BM_STASH##*/}" >> "$BOXMUNGE_ROOT/calls"\n[[ "$*" != *add_to_blocklist* ]] || exit 1\nexit 0\n' > "$BOXMUNGE_ROOT/env-b/bin/python"
     chmod +x "$BOXMUNGE_ROOT/env-b/bin/python"
     write_probation "1.2.3" "b" "$SOON"
 }
 probation_failure_setup
 run_shim check-probation
-[[ "$RC" -ne 0 && "$(calls)" == "stash restore --latest;upgrade --apply;" ]] \
+[[ "$RC" -ne 0 && "$(calls)" == "stash restore $OLD_STASH;upgrade --apply;" ]] \
     && pass "rollback whose blocklist write fails still restored and re-applied" \
     || fail "unexpected: rc=$RC calls=$(calls)"
 : > "$BOXMUNGE_ROOT/calls"
@@ -85,7 +83,7 @@ printf '1.5.0\ninterrupted\n1\n' > "$BOXMUNGE_ROOT/env-a/rollback-inflight"
 mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
 echo 'not json' > "$BOXMUNGE_ROOT/upgrade-root/interrupted.json"
 run_shim check-probation
-[[ "$RC" -ne 0 && "$OUT" == *"interrupted.json is malformed"* && "$(calls)" == *"stash restore --latest;upgrade --apply;"* ]] \
+[[ "$RC" -ne 0 && "$OUT" == *"interrupted.json is malformed"* && "$(calls)" == *"stash restore $OLD_STASH;upgrade --apply;"* ]] \
     && pass "a corrupt interruption count fails the bookkeeping after restore and re-apply" \
     || fail "unexpected: rc=$RC calls=$(calls) $OUT"
 : > "$BOXMUNGE_ROOT/calls"

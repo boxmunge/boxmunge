@@ -8,7 +8,7 @@ from pathlib import Path
 import boxmunge.backup as _backup
 from boxmunge.backup_source import backup_source
 from boxmunge.backup import (
-    SNAPSHOT_RETENTION, BackupError, BackupKind, backup_filename, prune_backups,
+    SNAPSHOT_RETENTION, BackupError, BackupKind, backup_filename,
     resolve_backup_service,
 )
 from boxmunge.backup_dump import execute_dump, remove_stale_dumps
@@ -23,6 +23,7 @@ from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.release import ReleaseStateError
+from boxmunge.snapshot_pairings import prune_unpaired
 
 # Total wall-clock budget for retrying lock-held projects in run_backup_all.
 # Bounded so a stuck deploy doesn't keep nightly backup running forever.
@@ -234,7 +235,7 @@ def _run_backup_inner(
     finally:
         raw_path.unlink(missing_ok=True)
 
-    pruned = prune_backups(paths.project_backups(project_name), project_name, kind, retention)
+    pruned = prune_unpaired(paths, project_name, kind, retention)
     if pruned:
         print(f"  Pruned {len(pruned)} old {kind.value} backup(s)")
 
