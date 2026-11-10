@@ -444,7 +444,9 @@ release between the box's version and the candidate (the candidate
 included) is breaking, and never into a new major version. A box that
 cannot reach a security or break-fix release for that reason alerts its
 operator and reports a `platform-updates` health warning instead. The
-version-check circuit breaker can hold a broken release fleet-wide. A box
+version-check circuit breaker can hold a broken release fleet-wide. Only
+the maintainer trips it: the failure reports boxes send are unauthenticated,
+so they never hold a release, and only alert the maintainer. A box
 honours a hold whenever the service answers: a held release (a feature
 release too) is never installed, automatically or by a plain `upgrade`;
 only `upgrade --target` installs it, deliberately. GitHub is consulted only when the service

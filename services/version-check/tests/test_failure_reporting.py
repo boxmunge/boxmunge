@@ -1,7 +1,6 @@
 # services/version-check/tests/test_failure_reporting.py
 import json
 import sqlite3
-import os
 import sys
 import pytest
 from pathlib import Path
@@ -142,56 +141,6 @@ class TestCircuitBreaker:
     def test_reset_requires_auth(self, client):
         resp = client.post("/v1/circuit-breaker/reset?version=0.2.1")
         assert resp.status_code == 401
-
-
-class TestAutoTrip:
-    def test_auto_trip_disabled_by_default(self, client, app, tmp_path):
-        with patch("app.DB_PATH", tmp_path / "checks.db"):
-            for i in range(5):
-                client.post("/v1/report-failure", json={
-                    "version": "0.2.1", "installed_from": "0.2.0",
-                    "stage": "apply", "timestamp": "2024-01-15T14:30:00Z"},
-                    environ_base={"REMOTE_ADDR": f"10.0.{i + 1}.1"})
-            # Should not be tripped (auto-trip disabled)
-            resp = client.get("/v1/check?v=0.2.0")
-            data = resp.get_json()
-        assert data["security"]["version"] == "0.2.1"
-        assert data.get("held") is None
-
-    def test_auto_trip_when_threshold_reached(self, tmp_path, migrated_db):
-        releases_file = tmp_path / "threshold-releases.json"
-        releases_file.write_text(json.dumps({"releases": [
-            {"version": "0.2.1", "class": "security", "breaking": False,
-             "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1"},
-        ]}))
-        with patch("app.RELEASES_PATH", releases_file), \
-             patch("app.DB_PATH", tmp_path / "checks.db"), \
-             patch.dict(os.environ, {"CIRCUIT_BREAKER_AUTO_THRESHOLD": "3"}):
-            from app import create_app
-            client = create_app().test_client()
-            for i in range(3):
-                client.post("/v1/report-failure", json={
-                    "version": "0.2.1", "installed_from": "0.2.0",
-                    "stage": "apply", "timestamp": "2024-01-15T14:30:00Z"},
-                    environ_base={"REMOTE_ADDR": f"10.0.{i + 1}.1"})
-            resp = client.get("/v1/check?v=0.2.0")
-            data = resp.get_json()
-        assert data["security"] is None
-        assert data["held"] == [{"version": "0.2.1", "reason": "circuit_breaker"}]
-
-    @pytest.mark.parametrize("value", ["three", "-1", "2.5"])
-    def test_invalid_threshold_stops_startup(self, tmp_path, migrated_db, value):
-        releases_file = tmp_path / "threshold-releases.json"
-        releases_file.write_text(json.dumps({"releases": [
-            {"version": "0.2.1", "class": "security", "breaking": False,
-             "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.2.1"},
-        ]}))
-        with patch("app.RELEASES_PATH", releases_file), \
-             patch("app.DB_PATH", tmp_path / "checks.db"), \
-             patch.dict(os.environ, {"CIRCUIT_BREAKER_AUTO_THRESHOLD": value}):
-            from app import create_app
-            with pytest.raises(ValueError, match="CIRCUIT_BREAKER_AUTO_THRESHOLD"):
-                create_app()
 
 
 class TestShimStages:

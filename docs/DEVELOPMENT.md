@@ -293,15 +293,26 @@ that GitHub matches the service with
 per held version, none when nothing is held); it fails on a hold missing on either side and
 on a `[held]` left in release notes, where it does nothing.
 
-Auto-trip (`CIRCUIT_BREAKER_AUTO_THRESHOLD`, a number of distinct reporting networks in six
-hours) is off (`0`) and should stay off. Failure reports are unauthenticated, so with it set
-to N, anyone with addresses in N networks (N IPv4 /24s, or N IPv6 /48s, which are cheap)
-holds the newest security release back from the whole fleet until the breaker is reset. The
-service prints that warning at every start while it is set. Only the network a report comes
-from counts; nothing in a report's body, a box ID least of all, may ever count towards the
-threshold, because the sender writes it. Failure reports stay useful without it: the stats
-page lists them, every distinct failure a network reports is kept, and
+Failure reports never hold a release: they are unauthenticated, so anyone with addresses in
+a few networks (IPv4 /24s, or IPv6 /48s, which are cheap) could send them, and only the
+maintainer trips the breaker. They alert instead. When reports for a release come from two or
+more distinct networks in six hours (`ALERT_NETWORKS` in `failure_alert.py`), and the release
+is not held, the service's smoke script fails as a warning with one line naming the release
+and the two commands above for it (the curl trip and the `gh release edit` that appends
+`[held]` to the current title, keeping its markers). boxmunge's health check on the box that
+runs the service turns that into a Pushover alert after `health.alert_threshold` checks in a
+row, once per distinct message: the line carries no counts, so further reports do not alert
+again. The warning clears, with a recovery alert, at the first check after the release is held, or
+once its reports are older than six hours; a later crossing alerts again. While it shows, a
+`prod-deploy` of the service reports the failing smoke test (the new release still runs).
+Only the network a report comes from counts; nothing in a report's body, a box ID least of
+all, may ever count, because the sender writes it. Before holding, read the reports: the
+stats page lists them, every distinct failure a network reports is kept, and
 `/v1/failures?version=X.Y.Z` counts the reports (by stage) and the networks that sent them.
+The `CIRCUIT_BREAKER_AUTO_THRESHOLD` setting that used to let reports trip the breaker was
+removed in 0.11.6; a service started with it still set prints a warning saying so at every
+start, and it should be taken out of the service's environment.
+
 For sizing the `check-data` volume: a network stores at most 10 rows (about 200 bytes each)
 per listed version per six-hour window, so at most 40 a day per network and version, kept
 90 days.
