@@ -438,7 +438,9 @@ kept`) names the source that lags and what it lacks. If no later source
 answers, the cached catalog is kept and the run alerts at priority 1, as
 for a rejected catalog. While an earlier source disagrees, a later source
 may not drop a CVE the earlier one still lists: that catalog is rejected
-too.
+too, until the earlier source's stall passes the bound below. From then
+on its list no longer holds back a withdrawal, so a mirror that stopped
+syncing cannot freeze the catalog for good.
 
 Each refresh records the release date of the catalog every source served
 (`state/kev/sources.json`). An earlier source that has moved on (its
@@ -448,9 +450,10 @@ the withdrawal rules above (up to 3 accepted and recorded, more rejected).
 Otherwise a later source that listed one CVE of its own, stamped a little
 ahead, would keep CISA locked out for good. So would an earlier catalog
 that drops nothing, which is always accepted. When the first source in
-`kev.sources`, or CISA's own feed wherever it is listed, is passed over 2
-runs in a row, or against a cached catalog released over 7 days ago, the
-notice becomes a priority-1 alert: `CISA KEV first source overridden by
+`kev.sources`, or CISA's own feed wherever it is listed, is passed over on
+2 runs since it last served a catalog that was used (runs it does not
+answer do not count), or against a cached catalog released over 7 days
+ago, the notice becomes a priority-1 alert: `CISA KEV first source overridden by
 <source>`. If `sources.json` cannot be read, no catalog is accepted
 (priority 1) until root repairs or removes the file.
 

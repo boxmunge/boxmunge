@@ -89,7 +89,7 @@ def format_kev_sources_disagree_alert(
     the cached one lists, and a later source's catalog was cached instead
     (kev_refresh, CVE-03). Normal priority while that is a source catching
     up; priority 1 once it has ``overridden`` the first source (or CISA's
-    feed) for runs in a row or against an old cache: then the later source,
+    feed) on repeated runs or against an old cache: then the later source,
     not the operator's first choice, decides what counts as exploited."""
     cisa = KEV_DEFAULT_SOURCES[0]
     if overridden:
@@ -102,8 +102,9 @@ def format_kev_sources_disagree_alert(
     else:
         advice = ("If the earlier source is a mirror you run, check that it syncs; if this "
                   f"repeats once it has caught up, check what {source} serves.")
-    lead = (f"{', '.join(overridden)} has been passed over for {source} on several runs in "
-            f"a row (or against an old cache):" if overridden else
+    lead = (f"{', '.join(overridden)} has been passed over for {source} on more than one "
+            f"run since it last served a catalog that was used (or against an old cache):"
+            if overridden else
             "A source ranked earlier in kev.sources served an older KEV catalog that "
             "lacks CVEs the cached one lists:")
     return Alert(

@@ -29,14 +29,17 @@ Checks per source (audit B-06 and #121). A catalog is rejected when it:
   with the cache or is newer) is cached and the disagreement is reported
   for a notice. If none passes, the cache is kept and the disagreement
   alerts like a rejection. While an earlier source disagrees, a later one
-  may not drop a CVE the earlier one still lists (rejected). An earlier
+  may not drop a CVE the earlier one still lists (rejected), until that
+  stall passes the override bound below (a mirror that stopped syncing
+  must not freeze the catalog for good). An earlier
   source that has moved on (newer than its last catalog, or never seen
   before) or drops nothing wins by rank, and what it drops is a withdrawal:
   otherwise a later source that invented an ID would lock it out for good
   (#157 review). The first source in the list, and CISA's own feed
-  wherever it is listed, passed over KEV_OVERRIDE_RUNS runs in a row or
-  against a cache released over KEV_OVERRIDE_DAYS ago is ``overridden``,
-  and alerts at priority 1;
+  wherever it is listed, passed over on KEV_OVERRIDE_RUNS runs since it
+  last served a catalog that was not passed over (runs it did not answer
+  do not count either way), or against a cache released over
+  KEV_OVERRIDE_DAYS ago, is ``overridden``, and alerts at priority 1;
 - drops more than KEV_MAX_REMOVALS of the cached IDs (a poisoned or
   rolled-back list: dropping a KEV CVE would lift its quarantines).
 Up to KEV_MAX_REMOVALS dropped IDs are accepted (CISA does withdraw the odd
@@ -74,9 +77,11 @@ KEV_MAX_BYTES = 16 * 1024 * 1024
 # A dateReleased further ahead than this is bogus, not clock skew: CISA
 # stamps the catalog when it publishes it.
 KEV_MAX_FUTURE_RELEASE = timedelta(hours=1)
-# An override of the first source (or CISA's feed) by a later one alerts at
-# priority 1 from this many runs in a row, or at once against a cache
-# released this long ago.
+# A source passed over as stalled on this many runs since it last served a
+# catalog that was not (runs it did not answer do not count), or at once
+# against a cache released this long ago, is past the bound: an override of
+# the first source (or CISA's feed) alerts at priority 1, and its list stops
+# guarding later sources' withdrawals.
 KEV_OVERRIDE_RUNS = 2
 KEV_OVERRIDE_DAYS = 7
 _FETCH_TIMEOUT = 30
@@ -345,21 +350,24 @@ def _check_content(
 
 
 def _failed(paths: BoxPaths, url: str, e: _Failed, cached: KevCatalog, now: datetime, *,
-            protected: bool) -> SourceFailure:
-    """The failure of a source whose catalog failed a check; one that came
-    with a release date is recorded as served."""
+            protected: bool) -> tuple[SourceFailure, frozenset[str]]:
+    """The failure of a source whose catalog failed a check, and the IDs
+    later sources may not drop (a young disagreement's). One that came with
+    a release date is recorded as served."""
     failure = SourceFailure(url, e.kind, f"{'rejected: ' if e.kind == REJECTED else ''}{e}")
     if e.released is None:
-        return failure
+        return failure, frozenset()
     try:
         served = note_served(paths, url, e.released, disagreed=e.kind == DISAGREES)
     except KevHistoryError as h:
         return SourceFailure(url, REJECTED, f"{failure.error}; and {h}. Repair or remove "
-                                            f"it as root")
+                                            f"it as root"), frozenset()
     old = cached.released_at is not None and (
         now - cached.released_at > timedelta(days=KEV_OVERRIDE_DAYS))
-    return replace(failure, overridden=e.kind == DISAGREES and protected and (
-        served.disagreed_runs >= KEV_OVERRIDE_RUNS or old))
+    # Past the bound, a stalled source's list no longer guards withdrawals:
+    # a mirror that stopped syncing must not freeze the catalog for good.
+    long = e.kind == DISAGREES and (served.disagreed_runs >= KEV_OVERRIDE_RUNS or old)
+    return replace(failure, overridden=long and protected), frozenset() if long else e.ids
 
 
 def _try_source(
@@ -372,7 +380,8 @@ def _try_source(
         cve_ids, released, withdrawn = _validate(
             _parse(_download(url)), cached, now, paths, ctx)
     except _Failed as e:
-        return _failed(paths, url, e, cached, now, protected=protected), [], e.ids
+        failure, listed = _failed(paths, url, e, cached, now, protected=protected)
+        return failure, [], listed
     except (OSError, http.client.HTTPException) as e:
         # HTTPError/URLError and socket errors are OSErrors; a body cut
         # short is an http.client.IncompleteRead.

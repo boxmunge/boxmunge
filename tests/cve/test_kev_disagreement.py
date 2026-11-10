@@ -220,6 +220,30 @@ def test_a_later_source_cannot_withdraw_what_an_earlier_one_still_lists(
     assert set(_ids()) <= load_kev(paths).cve_ids
 
 
+def test_a_dead_first_mirror_does_not_freeze_the_catalog_for_good(tmp_path, monkeypatch):
+    """A first-ranked mirror stops syncing; CISA's newer catalog is cached
+    on a night the mirror is down; then CISA withdraws an ID the frozen
+    mirror still lists. The guard refuses that withdrawal while the mirror's
+    stall is young, and stops trusting the mirror's list once it is
+    overridden (#157 re-review), so the catalog moves on."""
+    dead = "https://dead-mirror.example/kev.json"
+    paths = BoxPaths(root=tmp_path)
+    base, d0 = _ids(), (NOW - timedelta(days=10)).isoformat()
+    d1, d2 = (NOW - timedelta(days=3)).isoformat(), (NOW - timedelta(days=1)).isoformat()
+    for answers in ({dead: _feed(base, d0), CISA: _feed(base, d0)},
+                    {dead: urllib.error.URLError(TimeoutError("t")),
+                     CISA: _feed(base + NEW, d1)}):
+        _serve(monkeypatch, answers)
+        assert refresh_from(paths, (dead, CISA)).updated
+    assert load_kev(paths).source == CISA
+    _serve(monkeypatch, {dead: _feed(base, d0), CISA: _feed(base[1:] + NEW, d2)})
+    young = refresh_from(paths, (dead, CISA))
+    assert young.source is None and [f.kind for f in young.failures] == [DISAGREES, REJECTED]
+    healed = refresh_from(paths, (dead, CISA))
+    assert healed.source == CISA and healed.withdrawn == (base[0],)
+    assert [f.kind for f in healed.failures] == [DISAGREES]
+
+
 # ---------- the scan run's alerts ----------
 
 

@@ -7,7 +7,8 @@ IDs may not have caught up (it serves what it served last time), or it
 may have moved on without them (a newer catalog than its last one), while
 the later source the cache came from invented them. Only the first is a
 disagreement; the second is ranking, and its drops are withdrawals. It
-also counts how many runs in a row a source was passed over that way, so
+also counts the runs a source was passed over that way since it last served
+a catalog that was not (runs it did not answer do not count), so
 an override of the first source cannot go on quietly.
 
 File: state/kev/sources.json, beside the cache and the withdrawals, with
@@ -31,7 +32,8 @@ class KevHistoryError(Exception):
 @dataclass(frozen=True)
 class Served:
     released_at: datetime   # the dateReleased of the last catalog it served
-    disagreed_runs: int     # consecutive runs it was passed over as disagreeing
+    disagreed_runs: int     # runs passed over as stalled since it last served one
+                            # that was not (runs it did not answer do not count)
 
 
 def _entries(paths: BoxPaths) -> dict[str, dict[str, Any]]:
