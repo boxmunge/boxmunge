@@ -18,9 +18,18 @@ Checks per source (audit B-06 and #121). A catalog is rejected when it:
   back; logged, but not alerted while the cache is fresh). A source earlier
   in the list than the cache's own is not held to the cached date, so a
   later source stamping a newer date (a compromised mirror, an internal
-  mirror stamping its sync time) cannot lock the earlier ones out; the
-  removal check still guards what it drops;
+  mirror stamping its sync time) cannot lock the earlier ones out;
 - holds fewer than KEV_MIN_ENTRIES IDs (an error page, a truncated file);
+- is older than the cached one AND lacks any of its IDs, from a source
+  earlier in the list than the cache's own (CVE-03): the sources disagree.
+  An older catalog missing entries is one that has not caught up, not CISA
+  withdrawing them, so taking it would roll back the newest KEV CVEs. The
+  later sources are tried instead; the first that passes (it is held to the
+  cached date, so it agrees with the cache or is newer) is cached and the
+  disagreement is reported for a notice. If none passes, the cache is kept
+  and the disagreement alerts like a rejection. An older earlier source
+  that drops nothing is accepted: the sources agree on content, and ranking
+  wins, so a later source cannot lock it out by date alone;
 - drops more than KEV_MAX_REMOVALS of the cached IDs (a poisoned or
   rolled-back list: dropping a KEV CVE would lift its quarantines).
 Up to KEV_MAX_REMOVALS dropped IDs are accepted (CISA does withdraw the odd
@@ -64,10 +73,11 @@ _MAX_LISTED = 10
 UNREACHABLE = "unreachable"  # no catalog came back (HTTP error, timeout, DNS)
 REJECTED = "rejected"        # a catalog came back but failed a check
 LAGGING = "lagging"          # a catalog came back, older than the cached one
+DISAGREES = "disagrees"      # an earlier source's older catalog lacks cached IDs
 CONFIG = "config"            # kev.sources in boxmunge.yml is unreadable or invalid
 # Kinds that need the operator even while the cached catalog is fresh: a
 # broken catalog or config would otherwise go unnoticed until it aged out.
-_ALERTING_KINDS = (REJECTED, CONFIG)
+_ALERTING_KINDS = (REJECTED, CONFIG, DISAGREES)
 
 
 def _extra(detail: dict[str, Any]) -> dict[str, Any]:
@@ -100,6 +110,11 @@ class KevRefresh:
     @property
     def updated(self) -> bool:
         return self.source is not None
+
+    @property
+    def disagreements(self) -> tuple[SourceFailure, ...]:
+        """Earlier sources passed over because they lag the cached catalog."""
+        return tuple(f for f in self.failures if f.kind == DISAGREES)
 
     @property
     def needs_alert(self) -> bool:
@@ -260,6 +275,16 @@ def _validate(
         raise _Failed(REJECTED, f"feed returned {len(cve_ids)} entries, below the floor "
                                 f"of {KEV_MIN_ENTRIES} (the catalog only grows)")
     withdrawn = sorted(cached.cve_ids - set(cve_ids))
+    # Not held to the cache, so not refused above: older and missing cached
+    # IDs means it has not caught up (CVE-03). Before the removal limit, so a
+    # source far behind is not misread as a mass withdrawal.
+    newer = _baseline(cached, now, held_to_cache=True)
+    if withdrawn and newer is not None and released < newer:
+        raise _Failed(DISAGREES, (
+            f"catalog released {released.isoformat()} is older than the cached one "
+            f"released {newer.isoformat()} (from {cached.source}) and lacks "
+            f"{len(withdrawn)} of its CVEs ({_listed(withdrawn)}): the source is lagging, "
+            f"so the catalog was not rolled back"))
     if len(withdrawn) > KEV_MAX_REMOVALS:
         raise _Failed(REJECTED, (
             f"{len(withdrawn)} cached CVEs are missing from it (more than "

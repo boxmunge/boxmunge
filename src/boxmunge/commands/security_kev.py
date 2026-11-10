@@ -7,12 +7,13 @@ from datetime import datetime
 
 from boxmunge.cve.alerting import (
     Alert,
+    format_kev_sources_disagree_alert,
     format_kev_stale_alert,
     format_kev_withdrawn_alert,
     send_alerts,
 )
 from boxmunge.cve.kev import KevCatalog, load_kev
-from boxmunge.cve.kev_refresh import LAGGING, KevRefresh, refresh_kev
+from boxmunge.cve.kev_refresh import DISAGREES, LAGGING, KevRefresh, refresh_kev
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
 
@@ -26,12 +27,17 @@ def refresh_kev_and_alert(paths: BoxPaths, now: datetime) -> KevCatalog:
     either fires ONE priority-1 alert per run naming each source's error.
     Entries CISA withdrew (a few, accepted) get a normal-priority notice;
     the refresh recorded them (cve.kev_withdrawals), so a quarantine held
-    for one is kept, not lifted (kev_withdrawal).
+    for one is kept, not lifted (kev_withdrawal). An earlier source passed
+    over because it lags the cache (sources disagree) gets a normal notice
+    when a later source was cached, and the priority-1 alert when none was.
     """
     refresh = refresh_kev(paths)
     kev = load_kev(paths)
     if refresh.withdrawn:
         _send(paths, format_kev_withdrawn_alert(refresh.source, refresh.withdrawn))
+    if refresh.updated and refresh.disagreements:
+        _send(paths, format_kev_sources_disagree_alert(
+            refresh.source, [f.line() for f in refresh.disagreements]))
     stale_reason = kev.stale_reason(now.date())
     if stale_reason is None and not refresh.needs_alert:
         return kev
@@ -51,7 +57,8 @@ def refresh_kev_and_alert(paths: BoxPaths, now: datetime) -> KevCatalog:
 
 
 def _all_lagging(refresh: KevRefresh) -> bool:
-    return bool(refresh.failures) and all(f.kind == LAGGING for f in refresh.failures)
+    return bool(refresh.failures) and all(
+        f.kind in (LAGGING, DISAGREES) for f in refresh.failures)
 
 
 def _tried(refresh: KevRefresh) -> list[str]:

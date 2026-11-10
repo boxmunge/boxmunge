@@ -414,12 +414,28 @@ fresh:
   the list. A source earlier in the list than the cache's own is not held
   to the cached date. Otherwise a later source stamping a newer date (a
   compromised mirror, or an internal mirror stamping its own sync time)
-  would lock the earlier ones out for good. The missing-ID check still
-  guards what such a catalog drops. A cache from a source no longer on the
-  list ranks below every listed one. The lagging check runs before the
-  missing-ID check, because a lagging catalog also lacks the entries added
-  since. A cached release date that is in the future is not used as the
-  baseline.
+  would lock the earlier ones out for good. A cache from a source no longer
+  on the list ranks below every listed one. The lagging check runs before
+  the missing-ID check, because a lagging catalog also lacks the entries
+  added since. A cached release date that is in the future is not used as
+  the baseline.
+
+When the sources disagree, the catalog is not rolled back either. Say
+`kev.sources` lists a mirror you run first and CISA second, and one night
+the mirror was down, so CISA's newer catalog was cached. If the mirror
+comes back with an older catalog that lacks CVEs the cached one lists,
+those CVEs were not withdrawn: the mirror has not caught up. Taking that
+catalog would drop the newest KEV entries, and a project not yet
+quarantined for one of them never would be. So the mirror is passed over
+and the later sources are tried. Each of them is held to the cached date,
+so the first that passes agrees with the cache or is newer. It is cached,
+and a normal-priority notice (`CISA KEV sources disagree — newer catalog
+kept`) names the source that lags and what it lacks. If no later source
+answers, the cached catalog is kept and the run alerts at priority 1, as
+for a rejected catalog. An older catalog from an earlier source that drops
+none of the cached CVEs is still accepted: the sources agree on content,
+the ranking wins, and a later source cannot lock the earlier one out by
+date alone.
 
 **Fail-safe: toward uptime, never toward quarantine.** When the catalog is
 missing or stale, `is_known_exploited` returns `False`. The site is not taken

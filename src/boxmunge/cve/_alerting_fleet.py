@@ -82,6 +82,27 @@ def format_kev_withdrawn_alert(source: str | None, withdrawn: Sequence[str]) -> 
     )
 
 
+def format_kev_sources_disagree_alert(source: str | None, lines: Sequence[str]) -> Alert:
+    """An earlier source in kev.sources served an older catalog lacking CVEs
+    the cached one lists, and a later source's catalog was cached instead
+    (kev_refresh, CVE-03). Normal priority: the catalog is current; the
+    operator's preferred source is not what it is current from."""
+    return Alert(
+        kind="kev_sources_disagree",
+        title="CISA KEV sources disagree — newer catalog kept",
+        body="\n".join([
+            "A source ranked earlier in kev.sources served an older KEV catalog that "
+            "lacks CVEs the cached one lists:",
+            *(f"- {line}" for line in lines),
+            "",
+            f"The catalog from {source} was cached instead, so those CVEs still count as "
+            f"actively exploited. If the earlier source is a mirror you run, check that it "
+            f"syncs; if this repeats once it has caught up, check what {source} serves.",
+        ]),
+        priority=0,
+    )
+
+
 def _iso(value: datetime | None, missing: str) -> str:
     return value.isoformat() if value else missing
 
