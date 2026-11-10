@@ -1288,7 +1288,10 @@ does not page every run); the refusal is logged every time:
   env/label file) is not what deploy recorded. A tampered manifest
   (`security.profile: off`) or compose is caught here even when it still
   validates. Redeploy to run the new content (for a staged copy, stage
-  again).
+  again). A platform upgrade refuses such a project too, and leaves it as
+  it was: it renews the record only for the overlay it regenerates (and a
+  manifest it migrates from the one deployed), never for a file changed
+  since the deploy.
 - **"control file ... is newly tracked"** — this boxmunge reads a file
   the project's record does not cover yet (for example the `.env` of an
   included file's directory). Redeploy (or stage again) to record it.

@@ -109,7 +109,7 @@ def _project(paths: BoxPaths, project: str, services: list[str], component: str)
     prepare_compose_override(paths, manifest, component=component)
     if services:
         compose_up_checked(paths, project, component=component, compose_files=PROJECT_FILES,
-                           record=True, services=services)
+                           record=True, regenerated=True, services=services)
         if not smoke_ok(project, paths, paths.project_dir(project), manifest, PROJECT_FILES):
             raise BringUpError("its smoke tests failed (see above and the log)")
     prepare_caddy_config(paths, manifest)

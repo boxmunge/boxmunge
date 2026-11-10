@@ -436,7 +436,8 @@ def test_regenerating_the_overlay_refreshes_its_recorded_hash(box) -> None:
     (project_dir / "compose.boxmunge.yml").write_text("services: {}\n")
     _deploy(paths)
     (project_dir / "compose.boxmunge.yml").write_text("services: {web: {init: true}}\n")
-    bind_sources.refresh_overlay_hash(project_dir, paths.project_bind_record(NAME))
+    bind_sources.refresh_control_hash(project_dir, paths.project_bind_record(NAME),
+                                      bind_sources.OVERLAY)
     _restart(paths)
 
 

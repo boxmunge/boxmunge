@@ -213,7 +213,7 @@ def _record_bind_sources(paths: BoxPaths, name: str) -> str | None:
     """
     try:
         check_start(paths, name, component="upgrade",
-                    compose_files=_compose_files(paths, name), record=True)
+                    compose_files=_compose_files(paths, name), record=True, regenerated=True)
     except ComposeRefused as e:
         return str(e)
     return None

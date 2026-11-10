@@ -168,7 +168,7 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
 def check_start(
     paths: BoxPaths, project_name: str, *, component: str,
     compose_files: list[str] | None = None, staging: bool = False, record: bool = False,
-    deploying: bool = False, txn: str | None = None,
+    deploying: bool = False, txn: str | None = None, regenerated: bool = False,
 ) -> None:
     """Re-validate the project and check every bind source it would mount.
 
@@ -183,7 +183,12 @@ def check_start(
     `record` (deploy, stage, upgrade) records the sources' kinds and the
     sha256 of every file boxmunge reads (those the reference walk found and
     the env files of the resolved model), instead of comparing them with the
-    record; missing sources are created first.
+    record; missing sources are created first. Deploy, stage and rollback
+    record a release they have just installed and validated. `regenerated`
+    (the upgrade, the user-namespace switch) renews the record in place,
+    from configs boxmunge regenerated: every control file it did not write
+    must still match the record first (bind_sources.check_kept_control), so
+    only a redeploy re-blesses a file a container rewrote.
 
     Unless `deploying`, the project's EXISTING containers' bind mounts are
     inspected too (stale_containers): a project deployed before these rules
@@ -205,6 +210,8 @@ def check_start(
         return
     if compose_files is None:
         raise ValueError("a production start check needs compose_files")
+    if regenerated and not record:
+        raise ValueError("`regenerated` renews a record: pass record=True with it")
     project_dir = paths.project_dir(project_name)
     record_path = paths.project_bind_record(project_name)
     _refuse_if_install_open(paths, project_name, component, txn)
@@ -223,6 +230,9 @@ def check_start(
             project_dir, compose_files, project_name, all_profiles=True)
         read_files = [*read_files, *compose_resolve.model_env_files(model, project_dir)]
         sources = bind_sources.model_sources(model, project_dir)
+        if regenerated:
+            bind_sources.check_kept_control(project_dir, read_files, record_path,
+                                            redo=redeploy_command(paths, project_name))
         if record:
             bind_sources.record(project_dir, sources, read_files, record_path)
         else:
@@ -268,7 +278,7 @@ def compose_up_checked(
     compose_files: list[str] | None = None, staging: bool = False, record: bool = False,
     deploying: bool = False,
     force_recreate: bool = False, services: list[str] | None = None, start: bool = True,
-    txn: str | None = None,
+    txn: str | None = None, regenerated: bool = False,
 ) -> None:
     """check_start, then `docker compose up` (`start=False`: create without
     starting, which still mounts nothing yet but fixes every bind source in
@@ -286,7 +296,8 @@ def compose_up_checked(
     (compose_up_steps). Raises ComposeRefused, compose_up_steps.ComposeUpFailed once
     the up has run, or DockerError before it."""
     check_start(paths, project_name, component=component, compose_files=compose_files,
-                staging=staging, record=record, deploying=deploying, txn=txn)
+                staging=staging, record=record, deploying=deploying, txn=txn,
+                regenerated=regenerated)
     if staging:
         target = staging_target(paths, project_name)
         where = {"project_dir": target.cwd, "project_directory": target.project_directory,
