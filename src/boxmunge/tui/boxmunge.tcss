@@ -86,3 +86,29 @@ VerticalScroll {
     color: $text-muted;
     padding: 0 1;
 }
+
+ConfirmScreen {
+    align: center middle;
+}
+
+#confirm-dialog {
+    width: 64;
+    height: auto;
+    padding: 1 2;
+    border: thick $error;
+    background: $surface;
+}
+
+#confirm-question {
+    margin-top: 1;
+    text-style: bold;
+}
+
+#confirm-buttons {
+    height: auto;
+    margin-top: 1;
+}
+
+#confirm-buttons Button {
+    margin-right: 2;
+}
