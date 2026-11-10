@@ -28,8 +28,15 @@ GRANT_MATRIX = [
 ]
 
 
-@pytest.mark.parametrize("principal,agent_allowed,allowed", GRANT_MATRIX,
-                         ids=lambda v: getattr(v, "id", repr(v)))
+def _grant_id(v) -> str:
+    """A stable id: a set's order changes with the hash seed, and xdist's
+    workers must all collect the same ids."""
+    if isinstance(v, set):
+        return "+".join(sorted(t.value for t in v)) or "none"
+    return getattr(v, "id", repr(v))
+
+
+@pytest.mark.parametrize("principal,agent_allowed,allowed", GRANT_MATRIX, ids=_grant_id)
 @pytest.mark.parametrize("tier", list(Tier), ids=lambda t: t.value)
 def test_grant_matrix(principal, agent_allowed, allowed, tier) -> None:
     why = refusal(principal, tier, agent_allowed=agent_allowed)

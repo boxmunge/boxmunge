@@ -29,7 +29,9 @@ from tests.integration.userns.dockerd import (
     FakeTimers, ProcessDaemon, prior_daemon_json, write_daemon_json,
 )
 
-pytestmark = USERNS_DIND
+# Each crash sweep takes a quarter of the remapped-daemon tier: CI's shards
+# place this module's tests one by one (tests/shard.py), not the module whole.
+pytestmark = [*USERNS_DIND, pytest.mark.shard_by_test]
 
 
 @pytest.fixture(scope="module")
@@ -99,6 +101,19 @@ def test_migrate_then_roll_back(box) -> None:
     assert not os.path.lexists(f"/var/lib/docker/{s}.{s}")
 
 
+@pytest.fixture
+def rolled_back_once(box):
+    """The box as test_migrate_then_roll_back leaves it: migrated once, then
+    rolled back. Sharded by test, a test here may run without the ones
+    before it in this module; this gives it the box it gets after them."""
+    paths, _, images = box
+    if load_journal(paths) is None:
+        _migrate(paths, images)
+        _rollback(paths, images)
+    assert load_journal(paths).phase == "rolled-back"
+    return box
+
+
 def _recover(paths, images, before, n: int) -> None:
     """After a kill: odd kills resume the migration, even ones roll it back."""
     journal = load_journal(paths)
@@ -112,8 +127,8 @@ def _recover(paths, images, before, n: int) -> None:
     _as_before(paths, before)
 
 
-def test_a_kill_at_any_step_of_the_migration_is_recoverable(box) -> None:
-    paths, before, images = box
+def test_a_kill_at_any_step_of_the_migration_is_recoverable(rolled_back_once) -> None:
+    paths, before, images = rolled_back_once
     labels = count(lambda: _migrate(paths, images))
     _rollback(paths, images)
     points = crash_points(labels)
@@ -130,8 +145,8 @@ def test_a_kill_at_any_step_of_the_migration_is_recoverable(box) -> None:
     print(f"swept in {time.monotonic() - started:.0f}s")
 
 
-def test_a_kill_at_any_step_of_the_rollback_is_recoverable(box) -> None:
-    paths, before, images = box
+def test_a_kill_at_any_step_of_the_rollback_is_recoverable(rolled_back_once) -> None:
+    paths, before, images = rolled_back_once
     _migrate(paths, images)
     labels = count(lambda: _rollback(paths, images))
     points = crash_points(labels)
@@ -147,9 +162,9 @@ def test_a_kill_at_any_step_of_the_rollback_is_recoverable(box) -> None:
                                  f"({labels[n - 1]}): {e}") from e
 
 
-def test_commit_after_the_soak_removes_the_old_store(box) -> None:
+def test_commit_after_the_soak_removes_the_old_store(rolled_back_once) -> None:
     """Last in this module: the prior store is gone afterwards."""
-    paths, before, images = box
+    paths, before, images = rolled_back_once
     _migrate(paths, images)
     prior = load_journal(paths).prior_store
     applied = datetime.fromisoformat(load_journal(paths).applied_at)

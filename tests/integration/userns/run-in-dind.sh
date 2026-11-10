@@ -5,7 +5,8 @@
 # (there is no systemd here), so this script starts the prior-store daemon,
 # installs the runner and hands over to pytest. pytest imports boxmunge from
 # src/ (pyproject's pythonpath), so nothing is installed from the checkout.
-# Arguments, when given, replace the test paths (a local run of one file).
+# Arguments, when given, replace the test paths and may add pytest options
+# (a local run of one file; CI's `tests/integration/userns --shard K/N`).
 set -eu
 # Alpine packages are not version-pinned, as the integration job's apt
 # packages are not: Alpine offers no practical hash pinning.

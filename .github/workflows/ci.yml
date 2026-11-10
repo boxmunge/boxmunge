@@ -50,7 +50,8 @@ jobs:
           pip install --require-hashes -r requirements-dev.txt
           pip install -e . --no-deps
       - name: Server unit tests (includes pinning, file-length, and DCO-script lints)
-        run: python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -m 'not integration' -q
+        # One pytest-xdist worker per CPU; the suite is parallel-safe.
+        run: python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -m 'not integration' -q -n auto
 
   cli:
     runs-on: ubuntu-latest
@@ -88,31 +89,68 @@ jobs:
         run: cd services/version-check && python -m pytest tests -q
 
   integration:
+    # Split into shards of whole test files that run in parallel, one runner
+    # (and one Docker daemon) each; tests/shard.py balances them by measured
+    # time. Every shard's job is `integration` to ci-ok.
+    # The heavy Docker jobs always run and report (see arm64). On a pull
+    # request they skip their work only for a change made solely of files no
+    # test of theirs reads: the client, the version-check service,
+    # contributor docs. Any other path runs them, including one added later
+    # and never listed here. A push to main always runs them.
+    name: integration (${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]  # every K of --shard K/3 below
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          # Full history: the scope step compares with the base, and
+          # test_legacy_upgrade.py installs 0.10.1 from `git archive v0.10.1`.
+          fetch-depth: 0
+      - name: Can this change affect the Docker tests?
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        # Only a pull request may skip: a push to main runs these tiers in
+        # full. The same paths as userns-dind's scope step; the unit test
+        # test_nothing_the_docker_tiers_read_depends_on_a_skippable_path keeps
+        # every listed path out of what these tests read.
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "A push to main runs the Docker tests in full."
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bash scripts/ci-scope.sh --outside "$BASE" cli/ services/version-check/ \
+            docs/DEVELOPMENT.md docs/PLUGIN_API.md README.md CONTRIBUTING.md \
+            CODE_OF_CONDUCT.md SECURITY.md INSTALL.md
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        if: steps.scope.outputs.relevant == 'true'
         with:
           python-version: '3.13'
       - name: Install age
+        if: steps.scope.outputs.relevant == 'true'
         run: sudo apt-get update && sudo apt-get install -y age
       - name: Install pinned dependencies
+        if: steps.scope.outputs.relevant == 'true'
         run: |
           # requirements-mcp.txt: every server install includes MCP, and
           # test_mcp_integration.py talks to mcp-serve through it.
           pip install --require-hashes -r requirements.txt -r requirements-mcp.txt
           pip install --require-hashes -r requirements-dev.txt
           pip install -e . --no-deps
-      - name: Fetch the v0.10.1 tag
-        # test_legacy_upgrade.py installs boxmunge 0.10.1 from `git archive
-        # v0.10.1`; the checkout above is depth 1 with no tags.
-        run: git fetch --no-tags --depth=1 origin refs/tags/v0.10.1:refs/tags/v0.10.1
       - name: Integration tests (real Docker)
+        if: steps.scope.outputs.relevant == 'true'
         env:
           # Turn "prerequisite missing" into a failure instead of a silent skip.
           BOXMUNGE_REQUIRE_INTEGRATION: '1'
         # Selects every test marked `integration`, wherever it lives.
-        run: python -m pytest tests/ --ignore=tests/vm -m "integration and not userns_dind" -q
+        run: >-
+          python -m pytest tests/ --ignore=tests/vm -m "integration and not userns_dind" -q
+          --shard ${{ matrix.shard }}/3 --durations=15
 
   arm64:
     # boxmunge supports arm64 hosts. Builds the system image natively on
@@ -134,18 +172,11 @@ jobs:
         env:
           # A pull request: its base. A push to main: the commit before it.
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-        # 0: run the checks; 1: skip them; anything else (bad usage, git
-        # failing) fails the job rather than skipping silently.
-        run: |
-          rc=0
-          bash scripts/ci-touches.sh "$BASE" system/ install.sh bootstrap/ scripts/ \
-            .github/workflows/ tests/fixtures/age-v1.2.1/ || rc=$?
-          case "$rc" in
-            0) echo "relevant=true" >> "$GITHUB_OUTPUT" ;;
-            1) echo "Skipping the arm64 checks: this change touches none of the paths they test."
-               echo "relevant=false" >> "$GITHUB_OUTPUT" ;;
-            *) echo "scripts/ci-touches.sh failed (exit $rc)" >&2; exit "$rc" ;;
-          esac
+        # relevant=true runs the checks, false skips them; a failing
+        # comparison fails the job rather than skipping (scripts/ci-scope.sh).
+        run: >-
+          bash scripts/ci-scope.sh "$BASE" system/ install.sh bootstrap/ scripts/
+          .github/workflows/ tests/fixtures/age-v1.2.1/
       - name: Build the system image
         if: steps.scope.outputs.relevant == 'true'
         run: docker build -t boxmunge-system:ci system/
@@ -181,25 +212,55 @@ jobs:
     # container's root filesystem turns read-only partway through (EROFS on
     # /etc/docker/daemon.json) and every test after it fails. Boxes run
     # Debian 13; the runner's OS is only the host for the dind container.
+    # Each daemon runs every test, split into shards as the integration job
+    # is (the migration crash sweeps one per shard: `shard_by_test`), and is
+    # skipped by the same scope rule.
+    name: userns-dind (${{ matrix.daemon.label }}, ${{ matrix.shard }}/3)
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - image: docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+        daemon:
+          - label: docker 29, containerd store
+            image: docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
             prior_store: containerd
-          - image: docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
+          - label: docker 29, overlay2
+            image: docker:29.9.0-dind@sha256:0b6d18a4a222e71c88be6034926b4f6cde2fc33c2218643d03ccfddc65995470
             prior_store: overlay2
-          - image: docker:28.5.2-dind@sha256:2a232a42256f70d78e3cc5d2b5d6b3276710a0de0596c145f627ecfae90282ac
+          - label: docker 28, overlay2
+            image: docker:28.5.2-dind@sha256:2a232a42256f70d78e3cc5d2b5d6b3276710a0de0596c145f627ecfae90282ac
             prior_store: overlay2
+        shard: [1, 2, 3]  # every K of --shard K/3 below
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+      - name: Can this change affect the Docker tests?
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        # Only a pull request may skip: a push to main runs these tiers in
+        # full. The same paths as integration's scope step; the unit test
+        # test_nothing_the_docker_tiers_read_depends_on_a_skippable_path keeps
+        # every listed path out of what these tests read.
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "A push to main runs the Docker tests in full."
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bash scripts/ci-scope.sh --outside "$BASE" cli/ services/version-check/ \
+            docs/DEVELOPMENT.md docs/PLUGIN_API.md README.md CONTRIBUTING.md \
+            CODE_OF_CONDUCT.md SECURITY.md INSTALL.md
       - name: Remapped-daemon tests (privileged dind)
+        if: steps.scope.outputs.relevant == 'true'
         run: >-
           docker run --rm --privileged
-          -e BOXMUNGE_DIND_PRIOR_STORE=${{ matrix.prior_store }}
-          -v "$PWD:/src:ro" --entrypoint sh "${{ matrix.image }}"
+          -e BOXMUNGE_DIND_PRIOR_STORE=${{ matrix.daemon.prior_store }}
+          -v "$PWD:/src:ro" --entrypoint sh "${{ matrix.daemon.image }}"
           /src/tests/integration/userns/run-in-dind.sh
+          tests/integration/userns --shard ${{ matrix.shard }}/3 --durations=15
 
   dco:
     if: github.event_name == 'pull_request'
@@ -218,7 +279,7 @@ jobs:
     # The one check main's ruleset requires: it passes only if every job
     # above succeeded (dco may skip on a push, where it is skipped by design;
     # scripts/ci-ok.py). Required checks match exact names, and the
-    # userns-dind matrix names carry image digests Dependabot changes.
+    # sharded matrix jobs' names carry their shard and daemon.
     # `always()` so a failed or cancelled job fails this check rather than
     # skipping it. Add every new job to `needs`.
     if: always()
