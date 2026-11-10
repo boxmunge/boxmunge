@@ -46,8 +46,9 @@ class _Resp:
     def __exit__(self, *exc):
         return False
 
-    def read(self, limit: int = -1) -> bytes:
-        return self._body
+    def read1(self, limit: int = -1) -> bytes:
+        body, self._body = self._body, b""
+        return body
 
 
 def _ids(n: int = 1400) -> list[str]:

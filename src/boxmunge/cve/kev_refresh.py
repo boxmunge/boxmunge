@@ -58,6 +58,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from boxmunge.config import ConfigError, load_config
+from boxmunge.http_read import ReadDeadline, read_within
 from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, KevCatalog, load_kev
 from boxmunge.cve.kev_source_history import KevHistoryError, load_history, note_served
 from boxmunge.cve.kev_withdrawals import KevWithdrawalsError, record_withdrawals
@@ -85,7 +86,10 @@ KEV_MAX_FUTURE_RELEASE = timedelta(hours=1)
 # guarding later sources' withdrawals.
 KEV_OVERRIDE_RUNS = 2
 KEV_OVERRIDE_DAYS = 7
-_FETCH_TIMEOUT = 30
+_FETCH_TIMEOUT = 30  # each read of the socket
+# The whole download: a source trickling a byte inside every read timeout
+# must not hold the nightly scan until its unit's timeout kills it.
+KEV_FETCH_DEADLINE = 300
 _MAX_LISTED = 10
 
 # SourceFailure.kind values.
@@ -209,13 +213,15 @@ def _open(req: urllib.request.Request) -> Any:
 def _download(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "boxmunge"})
     with _open(req) as resp:
-        body = resp.read(KEV_MAX_BYTES + 1)
+        body = read_within(resp, KEV_MAX_BYTES + 1, KEV_FETCH_DEADLINE)
     if len(body) > KEV_MAX_BYTES:
         raise _Failed(REJECTED, f"response is larger than {KEV_MAX_BYTES // 2**20} MiB")
     return body
 
 
 def _describe(e: Exception) -> str:
+    if isinstance(e, ReadDeadline):
+        return str(e)
     if isinstance(e, urllib.error.HTTPError):
         return f"HTTP {e.code} {e.reason}"
     if isinstance(e, TimeoutError) or (
