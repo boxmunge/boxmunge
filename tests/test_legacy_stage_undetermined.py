@@ -38,7 +38,7 @@ def _deployed(paths) -> None:
 
 def test_check_runs_no_smoke_and_warns(paths, capsys) -> None:
     with _undetectable("boxmunge.commands.check"), \
-            patch("boxmunge.commands.check.run_check") as smoke, \
+            patch("boxmunge.commands.check.check_with_reason") as smoke, \
             patch("boxmunge.commands.check.update_health_state") as health:
         assert _check_one("myapp", paths, read_only=False) == 1
     smoke.assert_not_called()

@@ -28,23 +28,28 @@ def _load_project_config() -> tuple[dict[str, Any], Path]:
 
 
 def _handshake(config: dict[str, Any], manifest_schema: int | None = None,
-               batch: bool = False, flags: list[str] | tuple[str, ...] = ()) -> None:
-    """Refuse an incompatible server, and one too old for `flags` (before
-    anything is uploaded)."""
+               batch: bool = False, flags: list[str] | tuple[str, ...] = (),
+               features: tuple[str, ...] = ()) -> None:
+    """Refuse an incompatible server, and one too old for `flags` or
+    `features` (before anything is uploaded or sent)."""
     from boxmunge_cli.handshake import (
-        HandshakeError, check_server_compatibility, require_server_flags,
+        HandshakeError, check_server_compatibility, require_server_feature,
+        require_server_flags,
     )
     try:
         info = check_server_compatibility(config, manifest_schema, batch=batch)
         require_server_flags(info, flags)
+        for feature in features:
+            require_server_feature(info, feature)
     except HandshakeError as e:
         raise CliExit(e.exit_code, str(e)) from e
 
 
-def connect() -> dict[str, Any]:
-    """Load .boxmunge and confirm the server is compatible (CliExit if not)."""
+def connect(features: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Load .boxmunge and confirm the server is compatible, and new enough
+    for `features` (handshake.FEATURE_SINCE); CliExit if not."""
     config, _ = _load_project_config()
-    _handshake(config)
+    _handshake(config, features=features)
     return config
 
 

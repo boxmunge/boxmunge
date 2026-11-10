@@ -19,10 +19,12 @@ from boxmunge_cli.exitcodes import CONNECTION, FAILURE, SSH_CONNECTION_FAILED
 
 
 def build_ssh_cmd(config: dict[str, Any], command: str, *args: str,
-                  batch: bool = False) -> list[str]:
+                  batch: bool = False, tty: bool = False) -> list[str]:
     """Build an SSH command list from config and arguments.
 
     batch: never prompt (for callers with no person at a terminal).
+    tty: give the remote command a terminal (-t), so it can ask the
+    operator here.
     """
     return [
         "ssh",
@@ -30,6 +32,7 @@ def build_ssh_cmd(config: dict[str, Any], command: str, *args: str,
         "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ConnectTimeout=15",
         *(["-o", "BatchMode=yes"] if batch else []),
+        *(["-t"] if tty else []),
         f"{config['user']}@{config['server']}",
         shlex.join([command, *args]),
     ]
@@ -62,9 +65,15 @@ def _exit_code(returncode: int) -> int:
     return CONNECTION if returncode == SSH_CONNECTION_FAILED else returncode
 
 
-def run_ssh(config: dict[str, Any], command: str, *args: str) -> int:
-    """Execute an SSH command. Returns the remote exit code (4 if ssh failed)."""
-    result = subprocess.run(build_ssh_cmd(config, command, *args), check=False)
+def run_ssh(config: dict[str, Any], command: str, *args: str, tty: bool = False,
+            stdin_text: str | None = None) -> int:
+    """Execute an SSH command. Returns the remote exit code (4 if ssh failed).
+
+    stdin_text: what the remote command reads on stdin (then end of file),
+    for a value that must not appear in any process's argv.
+    """
+    result = subprocess.run(build_ssh_cmd(config, command, *args, tty=tty),
+                            input=stdin_text, text=stdin_text is not None, check=False)
     return _exit_code(result.returncode)
 
 

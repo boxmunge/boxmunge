@@ -210,7 +210,7 @@ class TestEndpointContract:
 class TestServiceErrorAnswers:
     """An HTTP error from the service (its own rate limiter, a server error)
     is an answer, not an outage: falling back to GitHub would offer a release
-    the circuit breaker holds, because GitHub cannot know about holds."""
+    the circuit breaker holds, because GitHub's [held] markers can lag its holds."""
 
     @pytest.mark.parametrize("status", [429, 500, 502, 503])
     @patch("urllib.request.OpenerDirector.open")

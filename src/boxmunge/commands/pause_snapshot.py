@@ -9,10 +9,17 @@ stop succeeded (pending_snapshot): that deploy uses it as its pre-deploy
 snapshot while Docker shows the backup service has not run since. A plain
 `resume` starts the service, which makes the record stale; it is dropped
 when it is next looked at.
+
+The pause record names the snapshot from the start (pause.write_paused_state),
+so when the stop fails and the pause is left incomplete, the run of `pause`
+that finishes it still pairs it, if the service has not run since
+(for_finishing).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
 
 from boxmunge.backup import BackupKind, resolve_backup_service
 from boxmunge.backup_source import backup_source
@@ -23,7 +30,10 @@ from boxmunge import docker_containers
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.pending_snapshot import age, pending, pending_for_live, record_pending
+from boxmunge.pause import read_paused_state, record_pause_snapshot
+from boxmunge.pending_snapshot import (
+    age, has_run_since, pending, pending_for_live, record_pending,
+)
 from boxmunge.state import StateError
 
 TAKEN_BY = "pause"
@@ -40,6 +50,25 @@ class PauseSnapshot:
     name: str
     service: str            # the backup service
     containers: list[str]   # its containers, running when the snapshot was taken
+    at: str                 # when the dump began (ISO, UTC)
+
+    def as_record(self) -> dict[str, Any]:
+        return {"name": self.name, "service": self.service,
+                "containers": list(self.containers), "at": self.at}
+
+    @classmethod
+    def from_record(cls, doc: Any, where: str) -> PauseSnapshot:
+        """Raises StateError for a record of another shape."""
+        try:
+            if not (isinstance(doc, dict) and isinstance(doc["containers"], list)
+                    and all(isinstance(doc[k], str) for k in ("name", "service", "at"))
+                    and all(isinstance(c, str) for c in doc["containers"])):
+                raise TypeError("wrong field types")
+            datetime.fromisoformat(doc["at"])
+        except (KeyError, TypeError, ValueError) as e:
+            raise StateError(f"{where}: snapshot is not a pause snapshot record "
+                             f"({e}): {doc!r}") from e
+        return cls(doc["name"], doc["service"], list(doc["containers"]), doc["at"])
 
 
 def _skip(paths: BoxPaths, project: str, no_snapshot: bool) -> str | None:
@@ -117,6 +146,7 @@ def take(paths: BoxPaths, project: str, no_snapshot: bool) -> PauseSnapshot | No
     running = [c.name for c in docker_containers.project_containers(project)
                if c.service == service and c.running and not c.oneoff]
     print("  Taking a snapshot before pausing...")
+    at = datetime.now(timezone.utc).isoformat()
     rc, name = take_snapshot(project, paths, BackupKind.PREPAUSE, source.manifest,
                              source.compose_file)
     if rc != 0 or name is None:
@@ -124,7 +154,39 @@ def take(paths: BoxPaths, project: str, no_snapshot: bool) -> PauseSnapshot | No
                            f"why above), so nothing was changed. Fix the backup and pause "
                            f"again, or add --no-snapshot to pause without one "
                            f"({NO_SNAPSHOT_COST})")
-    return PauseSnapshot(name, service, running)
+    return PauseSnapshot(name, service, running, at)
+
+
+def for_finishing(paths: BoxPaths, project: str, no_snapshot: bool) -> PauseSnapshot | None:
+    """The snapshot for the run of `pause` that finishes an incomplete one:
+    the one the pause took first, while Docker shows its service has not run
+    since (the failed stop stopped it, or the failure came after); else, if
+    the service still runs, a new one (take), recorded in the pause record
+    in its place; else none. A pause that took none takes none now. Raises
+    as take does."""
+    where = str(paths.project_paused_state(project))
+    recorded = (read_paused_state(project, paths) or {}).get("snapshot")
+    if recorded is None:
+        return None
+    first = PauseSnapshot.from_record(recorded, where)
+    stale = has_run_since(project, first.as_record()) if first.containers else None
+    if stale is None:
+        print(f"  The snapshot {first.name} taken when this pause began is kept: "
+              f"{first.service} has not run since.")
+        return first
+    states = docker_containers.start_states(project)
+    if not no_snapshot and any(st.service == first.service and st.running
+                               for st in states.values()):
+        print(f"  The snapshot {first.name} taken when this pause began is not used "
+              f"({stale}); a new one is taken.")
+        fresh = take(paths, project, no_snapshot)
+        if fresh is not None:
+            record_pause_snapshot(project, paths, fresh.as_record())
+        return fresh
+    print(f"  The snapshot {first.name} taken when this pause began stays in backups/ "
+          f"for a manual restore, but the deploy that ends the pause cannot pair with it: "
+          f"{stale}. {NO_SNAPSHOT_COST[0].upper()}{NO_SNAPSHOT_COST[1:]}.")
+    return None
 
 
 def record(paths: BoxPaths, project: str, snap: PauseSnapshot) -> None:

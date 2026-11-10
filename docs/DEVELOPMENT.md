@@ -189,7 +189,8 @@ either rule is broken. To change a dependency, edit the matching `.in` file or `
    the new `releases.json`. Do not redeploy it before then: it would offer a release boxes cannot
    download yet. Servers discover new releases through that service, with the GitHub releases
    list (and its `[security]` / `[breakfix]` / `[breaking]` markers) as the fallback only when
-   the service cannot be reached at all; an error answer from it is not a reason to fall back. If you
+   the service cannot be reached at all; an error answer from it is not a reason to fall back
+   (see "Holding a broken release" below for the `[held]` marker). If you
    change an existing entry in `releases.json`, edit that release's title on GitHub to match, and
    confirm with `python scripts/release-lint.py audit --github-releases FILE`, where FILE is the
    output of `gh api --paginate --slurp 'repos/boxmunge/boxmunge/releases?per_page=100'`.
@@ -231,8 +232,11 @@ each with its own credential, never interchangeable:
 
 Without `STATS_SECRET`, or with one shorter than 32 characters, every admin route answers 503 and
 names the setting. Wrong secrets, whether sent as a Bearer header or as the registration code,
-count against one limit per client (10 per 15 minutes); past it, that client is refused even
-with the right secret until the window ends. Each client (IPv4 address or IPv6 /64) may start
+count against one limit per client (10 per 15 minutes) in each worker: gunicorn runs two, and
+each counts on its own, so a client can make up to 20 wrong guesses per window. Past it, that
+client is refused even with the right secret until the window ends. Each worker tracks at
+most 10,000 guessing clients per window; once it does, every other client is refused the same
+way (fail closed), so the maintainer may have to wait out a flood. Each client (IPv4 address or IPv6 /64) may start
 5 sign-in or registration ceremonies per 5 minutes in each worker, and each network (IPv4 /24 or
 IPv6 /48) 20, both counted in memory: one client cannot block another's sign-in, the many /64s
 of one /48 cannot fill the database's global backstop of 10,000 pending challenges, and no
@@ -259,3 +263,45 @@ If the passkey is lost, or you suspect `STATS_SECRET` has leaked, set a new `STA
 redeploy (`openssl rand -hex 32` again). The stored passkey was registered under the old code, so it is ignored and registration
 reopens. Every existing session ends too, because the session key changes. Then repeat steps 3
 and 4. Nothing on the web resets the passkey.
+
+## Holding a broken release
+
+The version-check circuit breaker withholds a broken security or break-fix release from every
+box that can reach the service. Trip it, then mark the hold on GitHub, so that boxes which
+cannot reach the service (and fall back to the GitHub releases list) hold it too:
+
+```bash
+curl -X POST -H "Authorization: Bearer $CB_SECRET" \
+  'https://boxmunge.dev/v1/circuit-breaker/trip?version=X.Y.Z'
+gh release edit vX.Y.Z --title "vX.Y.Z [security] [held]"   # keep its class marker
+```
+
+Boxes read `[held]` from the release title only, never from the notes (auto-generated notes
+quote contributors' PR titles), so only someone with write access to the repository can set
+it. The release workflow refuses to publish a draft carrying `[held]` anywhere: a release is
+published unheld and held afterwards. To release the hold, reset the breaker
+(`/v1/circuit-breaker/reset?version=X.Y.Z`) and take `[held]` out of the title again. Check
+that GitHub matches the service with
+`python scripts/release-lint.py audit --github-releases FILE --held X.Y.Z` (one `--held`
+per held version, none when nothing is held); it fails on a hold missing on either side and
+on a `[held]` left in release notes, where it does nothing.
+
+Auto-trip (`CIRCUIT_BREAKER_AUTO_THRESHOLD`, a number of distinct reporting networks in six
+hours) is off (`0`) and should stay off. Failure reports are unauthenticated, so with it set
+to N, anyone with addresses in N networks (N IPv4 /24s, or N IPv6 /48s, which are cheap)
+holds the newest security release back from the whole fleet until the breaker is reset. The
+service prints that warning at every start while it is set. Only the network a report comes
+from counts; nothing in a report's body, a box ID least of all, may ever count towards the
+threshold, because the sender writes it. Failure reports stay useful without it: the stats
+page lists them, every distinct failure a network reports is kept (up to 10 per version per
+six hours), and `/v1/failures?version=X.Y.Z` counts the reports (by stage) and the
+networks that sent them.
+
+The service's limits are per gunicorn worker. Beyond the per-client request limit, a flood
+of distinct clients that fills a worker's table (100,000) no longer locks out every box that
+has not checked yet: a new client is then limited by its network (600 requests a minute per
+IPv4 /24 or IPv6 /48), so the flood exhausts only its own networks.
+
+The service's backup (`backup boxmunge-web`) runs `backup_db.py`, which copies the database
+through SQLite's backup API, never the file itself, and checks a snapshot before restoring
+it into the running service.

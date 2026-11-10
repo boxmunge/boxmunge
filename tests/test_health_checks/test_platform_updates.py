@@ -26,6 +26,7 @@ def _blocked(version="0.11.2", cls="security", reason=None):
 @pytest.fixture
 def box(paths):
     write_installed_version(paths, "0.10.3", "abc1234")
+    paths.config_file.write_text("hostname: t\nadmin_email: a@b\n")
     return paths
 
 
@@ -100,3 +101,10 @@ def test_health_reports_it_and_exits_warn_not_error(box, capsys):
     checks = {c["name"]: c for c in report["checks"]}
     assert checks["platform-updates"]["status"] == "warn"
     assert code == 1
+
+
+def test_unreadable_config_warns_naming_it(box):
+    box.config_file.write_text("hostname: [\n")
+    check = check_platform_updates(box)
+    assert check.status == "warn"
+    assert "cannot read boxmunge.yml" in check.detail

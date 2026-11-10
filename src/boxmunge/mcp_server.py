@@ -178,7 +178,7 @@ _TOOL_DEFS: list[dict[str, Any]] = [
                 "args": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Arguments: e.g. ['set', 'myapp', 'KEY', 'VALUE']",
+                    "description": "Arguments: e.g. ['set', 'myapp', 'KEY=VALUE']",
                 },
             },
             "required": ["args"],

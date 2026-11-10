@@ -21,6 +21,7 @@ from boxmunge.cve.policy import (
 from boxmunge.cve.scanner import AttackVector, Finding, PkgClass, Severity, VulnStatus
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.state import StateError, read_state
+from boxmunge.fs_nofollow import read_text_nofollow
 
 # The scan runs daily (03:00-03:30); 36h tolerates one late or missed run's
 # worth of jitter without crying wolf, and catches a second missed night.
@@ -135,7 +136,7 @@ def scan_problem(path: Path, project: str, now: datetime) -> str | None:
     if not path.exists():
         return f"{project}: never scanned"
     try:
-        state = json.loads(path.read_text())
+        state = json.loads(read_text_nofollow(path))
         scanned_at = datetime.fromisoformat(state["scanned_at"])
     except (OSError, ValueError, KeyError, TypeError) as e:
         return f"{project}: scan state unreadable ({e})"

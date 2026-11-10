@@ -111,6 +111,51 @@ class TestReporterIdentity:
         assert len(_rows(tmp_path / "checks.db")) == 1
         assert _held(client) is None
 
+    def test_different_failures_from_one_network_are_all_kept(self, make_client, tmp_path):
+        """VC-6: one /48 can hold many customers' boxes. A second box failing
+        differently must not lose its detail to the first box's report, and
+        the network still counts once towards auto-trip."""
+        client = make_client(threshold="2")
+        for addr, stage, detail in (("2001:db8:0:1::1", "apply", "install_sh_exit_100"),
+                                    ("2001:db8:0:2::1", "preflight", "cosign_verify"),
+                                    ("2001:db8:0:3::1", "apply", "install_sh_exit_100")):
+            body = {**_report(stage=stage), "detail": detail}
+            assert client.post("/v1/report-failure", json=body, environ_base=PROXY,
+                               headers={"X-Forwarded-For": addr}).status_code == 204
+        assert _rows(tmp_path / "checks.db", "stage, detail") == [
+            ("apply", "install_sh_exit_100"), ("preflight", "cosign_verify")]
+        assert _held(client) is None
+        summary = client.get("/v1/failures?version=0.2.1").get_json()
+        assert (summary["total"], summary["reporters"]) == (2, 1)
+
+    def test_one_network_stores_a_bounded_number_of_reports(self, make_client, tmp_path):
+        make_client()
+        db_path, now = tmp_path / "checks.db", datetime.now(timezone.utc)
+        stored = [failure_store.record_failure(db_path, "0.2.1", "0.2.0", "apply",
+                                               "198.51.100.0/24", now, f"reason {n}")
+                  for n in range(failure_store.REPORTS_PER_REPORTER + 3)]
+        assert stored == [True] * failure_store.REPORTS_PER_REPORTER + [False] * 3
+
+    def test_box_ids_never_count_towards_auto_trip(self, make_client):
+        """A box ID is whatever the sender puts in the body, so it is forgeable:
+        counting it would let one network hold a release fleet-wide. Only the
+        network prefix of the connection counts."""
+        client = make_client(threshold="2")
+        for n in range(3):
+            body = {**_report(), "box_id": f"box-{n}", "detail": f"failure {n}"}
+            client.post("/v1/report-failure", json=body, environ_base=PROXY,
+                        headers={"X-Forwarded-For": f"198.51.100.{n + 1}"})
+        assert _held(client) is None
+
+    def test_enabling_auto_trip_warns_in_the_service_log(self, make_client, capsys):
+        make_client(threshold="3")
+        err = capsys.readouterr().err
+        assert "CIRCUIT_BREAKER_AUTO_THRESHOLD=3" in err and "unauthenticated" in err
+
+    def test_auto_trip_off_says_nothing(self, make_client, capsys):
+        make_client()
+        assert "CIRCUIT_BREAKER_AUTO_THRESHOLD" not in capsys.readouterr().err
+
     def test_concurrent_reports_from_one_reporter_store_one_row(self, make_client, tmp_path):
         make_client()  # creates the schema
         db_path = tmp_path / "checks.db"
@@ -217,7 +262,7 @@ class TestRetention:
         assert "deleted after 90 days" in text
 
     @pytest.mark.parametrize("sql", [
-        failure_store.DUPLICATE_SQL,
+        failure_store.WINDOW_SQL,
         failure_store.EXPIRE_SQL, failure_store.COUNT_SQL,
     ])
     def test_report_queries_use_an_index(self, make_client, tmp_path, sql):

@@ -443,6 +443,14 @@ secrets unset myapp OLD_KEY
 
 Project secrets are stored in `secrets.env` and injected into the project's containers.
 
+`secrets set myapp KEY` (no `=`) takes the value from stdin instead: at a terminal it asks
+without echo, otherwise it reads all of stdin, less one trailing newline (a second line is
+refused, not dropped; empty stdin is refused, so an empty value is sent as an empty line).
+The value is then in no command line, so `ps` on the box does not show it, and nor does
+the deploy shell's command string. `KEY=VALUE` puts the value in the command line of the
+`boxmunge-server` process while it runs. The client's `boxmunge secrets set` always sends
+the value on stdin. Either way it is stored in plain text in `secrets.env`.
+
 Keys must be environment-variable names (letters, digits and underscores, not starting
 with a digit). Values may contain spaces, tabs, `=` and any printable text, but not
 newlines or other control characters, which would add lines to the env file. Either
@@ -705,7 +713,7 @@ Every snapshot is named `<project>-<UTC timestamp>-<kind>.tar.gz.age`, for examp
 | `prerestore` | `restore`, a safety snapshot of the data about to be replaced (unless `--no-safety-snapshot`) | 3 |
 | `manual` | `backup <project>`, the MCP `backup` tool, the console, `self-test` | 5 |
 
-After each backup, the oldest snapshots of that kind beyond its count are deleted. Archives from before kinds existed (`<project>-<timestamp>.tar.gz.age`) count as `nightly` and age out as new nightly backups arrive. Other files in `backups/` are never touched. `backup.retention` must be a whole number of at least 1. `validate`, `stage`, `promote` and `prod-deploy` refuse anything else; a project that already has a bad value keeps running through an upgrade (it is a warning there), but its backups fail before they dump until it is fixed.
+After each backup, the oldest snapshots of that kind beyond its count are deleted, except a snapshot something is paired with: the one the kept previous release's rollback restores, an open install's, and the one `pause` or `data chown` recorded for the next deploy. Those stay however many newer ones arrive, so a run of failed deploy attempts cannot evict the snapshot `rollback` needs. If one of those records cannot be read, the backup prunes nothing and warns, naming the record. Archives from before kinds existed (`<project>-<timestamp>.tar.gz.age`) count as `nightly` and age out as new nightly backups arrive. Other files in `backups/` are never touched. `backup.retention` must be a whole number of at least 1. `validate`, `stage`, `promote` and `prod-deploy` refuse anything else; a project that already has a bad value keeps running through an upgrade (it is a warning there), but its backups fail before they dump until it is fixed.
 
 ### Off-site copies
 
@@ -1091,7 +1099,12 @@ marked complete once the maintenance page is live, the containers are stopped an
 policies are held. If a step fails (Caddy cannot reload, `docker compose stop` errors), `pause`
 exits 1 with `ERROR: Pausing 'myapp' is incomplete: ...`: the project counts as paused, but may
 still be serving or running. Fix the cause and run `pause myapp` again to finish it (an incomplete
-pause is the one case where pausing a paused project is accepted), or `resume myapp`. Until then
+pause is the one case where pausing a paused project is accepted), or `resume myapp`. The pause
+record names its `prepause` snapshot, so the run that finishes it still pairs that snapshot with
+the deploy that ends the pause, as long as Docker shows the backup service has not run since. If
+the service is still running (the stop failed), it takes a new snapshot instead; if it ran and
+stopped again, the first snapshot stays in `backups/` for a manual restore and nothing is paired,
+which it says. Until then
 `status` shows it as `PAUSED (incomplete)`, `health` warns about it under `lifecycle`, and
 `container-update` logs that it may still be serving on images it does not update while paused.
 
@@ -1920,12 +1933,15 @@ logs the hold; `upgrade --target <version>` still installs it deliberately.
 If the service cannot be reached at all (DNS, connection or timeout
 failure), auto-update falls back to the GitHub releases list, applying the
 same rules to the markers in each release's title or notes (`[security]`,
-`[breakfix]`, `[breaking]`), and logs a warning. If the service answers but
-the answer cannot be used (an HTTP error such as its rate limit's 429, a
-redirect to somewhere unreachable, or an unexpected shape), nothing is
-installed and the check fails with the reason: GitHub cannot know about
-holds, so its answer could install a held release. The next run (every 6
-hours) tries again. A security release can therefore wait while the service
+`[breakfix]`, `[breaking]`), and logs a warning. A release whose GitHub
+title carries `[held]` is held there exactly as the circuit breaker holds it
+(only the maintainer can edit a release title; `[held]` in the notes counts
+for nothing). If the service answers but the answer cannot be used (an HTTP
+error such as its rate limit's 429, a redirect to somewhere unreachable, or
+an unexpected shape), nothing is installed and the check fails with the
+reason: the maintainer marks a hold on GitHub by hand after tripping the
+breaker, so GitHub's answer could still install a release the service
+holds. The next run (every 6 hours) tries again. A security release can therefore wait while the service
 answers with errors; that is the price of never installing a release the
 maintainer has held. So it is never silent: once the service has gone 48
 hours without a usable answer, `health` reports `platform-updates` as
@@ -2122,8 +2138,9 @@ The box contacts one boxmunge service, the version-check service at boxmunge.dev
   for `/v1/check?v=<installed version>`, with User-Agent `boxmunge/<installed version>`.
   Nothing else: no hostname, machine ID or project names.
 - **Failure reports**, when an upgrade fails: the version it tried, the version it came
-  from, the step that failed, a short reason (for example
-  `system_upgrade_failed: install_sh_exit_100`) and the time the box sent it.
+  from, the step that failed and a short reason (for example
+  `system_upgrade_failed: install_sh_exit_100`). The service records the time it
+  received the report.
 
 Like any connection, both carry the box's IP address. The service stores the network
 prefix it came from (IPv4 /24, IPv6 /48; an IPv6 address that embeds an IPv4 address
@@ -2156,10 +2173,24 @@ The box's other outbound requests go to third parties, never to a boxmunge servi
   blocklist;
 - alert channels the operator set up (Pushover, webhooks).
 
-There is no setting to turn version checks off. Stopping the timer
-(`systemctl disable --now boxmunge-auto-update.timer`) stops the scheduled checks, and
-with them automatic security updates and the alert when OS security updates stop
-arriving; a plain `upgrade` still checks.
+To send the version-check service nothing at all, set this in
+`/opt/boxmunge/config/boxmunge.yml` (as root):
+
+```yaml
+version_check:
+  enabled: false
+```
+
+The box then makes no update checks, neither to the service nor to GitHub instead,
+and sends no failure reports. The cost: it discovers no releases, so no security or
+break-fix release is installed automatically. Auto-update still runs (it keeps
+checking that OS security updates arrive) and logs that it skipped discovery;
+`health` reports `platform-updates` as `WARN` and `doctor` warns under "Update
+discovery", both saying that updates are not being discovered. A plain `upgrade`
+refuses with the same message. Watch <https://github.com/boxmunge/boxmunge/releases>
+and install a release with `upgrade --target X.Y.Z`, which asks nothing; it downloads
+the release from GitHub, like every upgrade. The value must be `true` or `false`.
+Set it back to `true` to discover releases again.
 
 ## Upgrading from 0.10.1 with a release staged
 

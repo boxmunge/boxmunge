@@ -82,7 +82,7 @@ def pending_for_live(paths: BoxPaths, project: str) -> dict | None:
                  if entry["ref"] != live else
                  "it is no longer in backups/"
                  if not (paths.project_backups(project) / entry["name"]).exists() else
-                 _has_run_since(project, entry))
+                 has_run_since(project, entry))
     except DockerError as e:
         print(f"  WARN: {what} is not used: whether {entry['service']} has run since it "
               f"was taken cannot be told ({e}).")
@@ -94,8 +94,9 @@ def pending_for_live(paths: BoxPaths, project: str) -> dict | None:
     return entry
 
 
-def _has_run_since(project: str, entry: dict) -> str | None:
-    """Why the service may have changed its data since the record, or None."""
+def has_run_since(project: str, entry: dict) -> str | None:
+    """Why the service may have changed its data since the record (``at``,
+    ``service``, ``containers``), or None. Raises DockerError."""
     at = datetime.fromisoformat(entry["at"])
     states = docker_containers.start_states(project)
     gone = sorted(set(entry["containers"]) - set(states) - set(entry.get(_REMOVED, [])))
@@ -124,7 +125,7 @@ def note_removal(paths: BoxPaths, project: str) -> None:
     entry = pending(paths, project)
     if entry is None:
         return
-    stale = _has_run_since(project, entry)
+    stale = has_run_since(project, entry)
     if stale is not None:
         drop(paths, project)
         print(f"  The snapshot {entry['name']} that {entry['taken_by']} took is dropped: "

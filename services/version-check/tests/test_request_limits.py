@@ -9,7 +9,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from request_limits import CheckCounter, RateLimiter, client_key  # noqa: E402
+from request_limits import (  # noqa: E402
+    FULL, LIMITED, CheckCounter, RateLimiter, RequestLimiter, client_key,
+)
 
 
 class FakeClock:
@@ -139,3 +141,54 @@ class TestExhausted:
         assert limiter.exhausted("a") and not limiter.exhausted("b")
         now[0] = 10.0
         assert not limiter.exhausted("a")
+
+
+class TestAdmit:
+    def test_says_why_it_refused(self):
+        rl = RateLimiter(limit=1, window=60, max_clients=1, clock=FakeClock())
+        assert rl.admit("a") is None
+        assert rl.admit("a") == LIMITED
+        assert rl.admit("b") == FULL
+
+    def test_full_for_counts_nothing_and_sees_the_sweep(self):
+        clock = FakeClock()
+        rl = RateLimiter(limit=5, window=60, max_clients=1, clock=clock)
+        assert not rl.full_for("a")
+        rl.allow("a")
+        assert rl.full_for("b") and not rl.full_for("a")
+        clock.now += 60
+        assert not rl.full_for("b"), "an expired window frees its slot"
+
+
+def _network(addr):
+    return addr.rsplit(".", 1)[0] + ".0/24"
+
+
+class TestRequestLimiter:
+    def _limiter(self, clock, per_network=2):
+        return RequestLimiter(per_client=3, per_network=per_network, window=60,
+                              max_clients=2, network_of=_network, clock=clock)
+
+    def test_tracked_clients_get_their_own_limit(self):
+        limiter = self._limiter(FakeClock())
+        assert [limiter.allow("198.51.100.1") for _ in range(4)] == [True, True, True, False]
+
+    def test_a_full_client_table_limits_new_clients_by_network(self):
+        """One network filling the client table exhausts only that network."""
+        limiter = self._limiter(FakeClock())
+        assert limiter.allow("203.0.113.1") and limiter.allow("203.0.113.2")
+        assert [limiter.allow(f"203.0.113.{n}") for n in (3, 4, 5)] == [True, True, False]
+        assert limiter.allow("198.51.100.7"), "a box on another network still gets through"
+
+    def test_refuses_a_new_client_once_both_tables_are_full(self):
+        limiter = self._limiter(FakeClock(), per_network=5)
+        limiter.allow("203.0.113.1")
+        limiter.allow("203.0.114.1")
+        assert limiter.allow("203.0.115.1") and limiter.allow("203.0.116.1")
+        assert not limiter.allow("203.0.117.1")
+
+    def test_a_client_over_its_own_limit_is_not_sent_to_the_network_table(self):
+        limiter = self._limiter(FakeClock())
+        for _ in range(3):
+            limiter.allow("198.51.100.1")
+        assert not limiter.allow("198.51.100.1")
