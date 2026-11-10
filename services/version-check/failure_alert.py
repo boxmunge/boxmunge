@@ -8,8 +8,10 @@ networks (failure_store reporters) in failure_store.REPORT_WINDOW, and the
 release is not already held, `python failure_alert.py DB` prints one line
 naming each such release and exactly how to hold it, and exits 1.
 
-The service's smoke script runs it, so boxmunge's health check turns that
-line into a warning, alerting the box's operator through Pushover once per
+The service's smoke script runs it on boxmunge's periodic health check only
+(BOXMUNGE_CHECK=periodic), never when a smoke result gates an operation
+(deploy, recover, a quarantine lift, bring-up): anyone can send reports.
+The health check turns that line into a warning, alerting the box's operator through Pushover once per
 distinct message (the line carries no counts, so new reports do not
 re-alert). The warning clears, with a recovery alert, when the release is
 held or its reports age out of the window; a later crossing alerts again.
@@ -36,17 +38,23 @@ def crossing(db_path: Path, now: datetime) -> list[str]:
     return sorted(over - circuit_breaker.tripped_versions(db_path), key=_version_key)
 
 
-def _hold_steps(version: str) -> str:
-    return (f"curl -X POST -H \"Authorization: Bearer $CB_SECRET\" "
+def hold_steps(version: str) -> str:
+    """One shell command: trip the breaker, then add [held] to the GitHub
+    title, keeping its markers. curl --fail-with-body stops a refused trip
+    (401, 429, 503) from marking GitHub alone; a title already held is left
+    as it is, so running it twice is harmless."""
+    tag = f"v{version}"
+    return (f"curl --fail-with-body -X POST -H \"Authorization: Bearer $CB_SECRET\" "
             f"'{SERVICE_URL}/v1/circuit-breaker/trip?version={version}' && "
-            f"gh release edit v{version} --title "
-            f"\"$(gh release view v{version} --json name -q .name) [held]\"")
+            f"t=$(gh release view {tag} --json name -q .name) && "
+            f"case \"$t\" in *\"[held]\"*) ;; "
+            f"*) gh release edit {tag} --title \"$t [held]\" ;; esac")
 
 
 def message(versions: list[str]) -> str:
     """One line for the health check: what crossed, and how to hold each."""
     hours = int(failure_store.REPORT_WINDOW.total_seconds() // 3600)
-    holds = "; ".join(f"{v}: {_hold_steps(v)}" for v in versions)
+    holds = "; ".join(f"{v}: {hold_steps(v)}" for v in versions)
     return (f"Upgrade failures reported from {ALERT_NETWORKS}+ networks in {hours}h for "
             f"{', '.join(versions)}, not held. Reports are unauthenticated: check them on "
             f"the admin stats page. To hold a release, run: {holds}")

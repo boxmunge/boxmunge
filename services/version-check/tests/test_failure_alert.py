@@ -147,10 +147,7 @@ class TestMessage:
     def test_names_exactly_how_to_hold_the_release(self):
         text = failure_alert.message(["0.2.1"])
         assert "\n" not in text
-        assert ('curl -X POST -H "Authorization: Bearer $CB_SECRET" '
-                "'https://boxmunge.dev/v1/circuit-breaker/trip?version=0.2.1'") in text
-        assert ('gh release edit v0.2.1 --title '
-                '"$(gh release view v0.2.1 --json name -q .name) [held]"') in text
+        assert f"0.2.1: {failure_alert.hold_steps('0.2.1')}" in text
         assert "not held" in text
 
     def test_names_every_crossing_release(self):
@@ -166,6 +163,53 @@ class TestMessage:
         before = failure_alert.message(failure_alert.crossing(migrated_db, now))
         _store(migrated_db, "0.2.1", "203.0.113.0/24")
         assert failure_alert.message(failure_alert.crossing(migrated_db, now)) == before
+
+
+@pytest.fixture
+def fake_tools(tmp_path):
+    """curl and gh stand-ins on PATH: curl exits $CURL_RC, gh prints $TITLE
+    for `release view` and records every call."""
+    bin_dir, calls = tmp_path / "bin", tmp_path / "calls"
+    bin_dir.mkdir()
+    for tool, body in (("curl", 'echo "curl $*" >> "$CALLS"; exit "${CURL_RC:-0}"'),
+                       ("gh", 'echo "gh $*" >> "$CALLS"\n'
+                              '[ "$2" = view ] && printf "%s\\n" "$TITLE"; exit 0')):
+        path = bin_dir / tool
+        path.write_text(f"#!/bin/sh\n{body}\n")
+        path.chmod(0o755)
+
+    def run(version, title, curl_rc=0):
+        env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", "CALLS": str(calls),
+               "CB_SECRET": "s", "TITLE": title, "CURL_RC": str(curl_rc)}
+        result = subprocess.run(["sh", "-c", failure_alert.hold_steps(version)], env=env)
+        lines = calls.read_text().splitlines() if calls.exists() else []
+        calls.unlink(missing_ok=True)
+        return result.returncode, lines
+
+    return run
+
+
+class TestHoldSteps:
+    def test_trips_the_breaker_then_marks_the_title(self, fake_tools):
+        rc, calls = fake_tools("0.2.1", "v0.2.1 [security] [breaking]")
+        assert rc == 0
+        assert calls[0].startswith("curl --fail-with-body -X POST")
+        assert calls[0].endswith(
+            "https://boxmunge.dev/v1/circuit-breaker/trip?version=0.2.1")
+        assert calls[-1] == ("gh release edit v0.2.1 --title "
+                             "v0.2.1 [security] [breaking] [held]")
+
+    def test_a_refused_trip_leaves_github_alone(self, fake_tools):
+        """curl exits 0 on a 401, 429 or 503 unless told to fail: a refused
+        trip must not mark the release held on GitHub alone."""
+        rc, calls = fake_tools("0.2.1", "v0.2.1 [security]", curl_rc=22)
+        assert rc != 0
+        assert [c for c in calls if c.startswith("gh")] == []
+
+    def test_running_it_twice_marks_the_title_once(self, fake_tools):
+        rc, calls = fake_tools("0.2.1", "v0.2.1 [security] [held]")
+        assert rc == 0
+        assert [c for c in calls if c.startswith("gh release edit")] == []
 
 
 class TestCommand:
@@ -192,9 +236,12 @@ class TestCommand:
 
 
 class TestWiring:
-    def test_smoke_script_runs_the_alert_check(self):
+    def test_smoke_script_runs_the_alert_check_on_the_periodic_tick_only(self):
+        """Every other smoke run gates an operation (deploy, recover, a lift,
+        bring-up); reports anyone can send must not hold one up."""
         smoke = (SERVICE_DIR / "boxmunge-scripts" / "smoke.sh").read_text()
-        assert "python3 /app/failure_alert.py /data/checks.db" in smoke
+        assert ('if [ "${BOXMUNGE_CHECK:-}" = periodic ]; then\n'
+                '    python3 /app/failure_alert.py /data/checks.db || exit 1\nfi') in smoke
 
     def test_image_ships_the_new_modules(self):
         dockerfile = (SERVICE_DIR / "Dockerfile").read_text()

@@ -9,8 +9,11 @@
 # Failure reports never hold a release (they are unauthenticated). When a
 # release's reports come from enough networks, failure_alert.py prints one
 # line naming it and how to hold it, and exits 1: boxmunge's health check
-# reports that as a warning and alerts the operator once per message. Never
-# exit 2 here: that is critical, and boxmunge would stop the service.
+# reports that as a warning and alerts the operator once per message. It
+# runs on the periodic health check only (BOXMUNGE_CHECK=periodic): every
+# other smoke run gates an operation (deploy, recover, a quarantine lift,
+# bring-up), and reports anyone can send must not hold one up. Never exit 2
+# here: that is critical, and boxmunge would stop the service.
 set -eu
 
 python3 -c "
@@ -26,5 +29,7 @@ if data.get('status') != 'ok':
     sys.exit(1)
 " || exit 1
 
-python3 /app/failure_alert.py /data/checks.db || exit 1
+if [ "${BOXMUNGE_CHECK:-}" = periodic ]; then
+    python3 /app/failure_alert.py /data/checks.db || exit 1
+fi
 echo 'OK: version-check service healthy'
