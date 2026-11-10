@@ -11,8 +11,8 @@ exiting 2 during an upgrade's probation rolls the platform back.
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
-from subprocess import TimeoutExpired
 from typing import TYPE_CHECKING
 
 from boxmunge import compose_inventory
@@ -85,7 +85,7 @@ def check_project_containers(paths: BoxPaths) -> HealthCheck:
             # One listing for every project; the `docker` check reports a missing CLI too.
             running = compose_inventory.running_inventory(timeout=10)
         except (DockerError, OSError) as e:
-            why = (timeout_detail(e.__cause__) if isinstance(e.__cause__, TimeoutExpired)
+            why = (timeout_detail(e.__cause__) if isinstance(e.__cause__, subprocess.TimeoutExpired)
                    else f"cannot list the running containers ({e}); run `health` again, "
                         f"and `doctor` if it repeats")
             return HealthCheck("project-containers", "warn",

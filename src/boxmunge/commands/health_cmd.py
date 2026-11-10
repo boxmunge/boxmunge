@@ -322,8 +322,8 @@ def _ssh_port(paths: BoxPaths) -> int:
         return 922
 
 
-# String-based on purpose, not a direct CHECKS tuple: probation reads the whole report, so
-# one unimportable module must fail only its row (test_an_unimportable_module_fails_its_check_with_exit_2).
+# String-based on purpose, not a direct CHECKS tuple: probation reads the whole report, so one
+# unimportable module fails only its row (test_an_unimportable_module_fails_its_check_with_exit_2).
 def _in(module: str, func: str, *args, **kwargs) -> Callable[[], HealthCheck]:
     """boxmunge.health_checks.<module>.<func>(*args, **kwargs), imported when
     the check runs, so a module that cannot be imported fails only its check."""

@@ -106,6 +106,7 @@ def run_smoke_in_container(
     smoke_services = {n: s["smoke"] for n, s in services.items() if s.get("smoke")}
     if not smoke_services:
         return SmokeResult(status="ok", message="")
+
     def listed() -> dict[str, list[str]]:
         return compose_inventory.running_inventory(compose_project).services(compose_project)
 

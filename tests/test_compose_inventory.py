@@ -30,7 +30,8 @@ def test_running_containers_by_project_and_service_names_sorted() -> None:
 
 
 def test_run_one_offs_are_not_service_containers() -> None:
-    inv = parse(_rows(("app-web-run-1", "app", "web", "True"), ("app-web-1", "app", "web", "False")))
+    inv = parse(_rows(("app-web-run-1", "app", "web", "True"),
+                      ("app-web-1", "app", "web", "False")))
     assert inv.services("app") == {"web": ["app-web-1"]}
 
 
