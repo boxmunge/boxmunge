@@ -28,7 +28,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from boxmunge.fs_nofollow import open_regular_nofollow
+from boxmunge.fs_nofollow import open_resolved_nofollow
 
 BUILT_IMAGE_HOST = "boxmunge.invalid"
 _STAGING = "-staging"
@@ -141,15 +141,16 @@ def _text_problems(what: str, text: str, project: str) -> list[str]:
 def _read_dockerfile(where: str, dockerfile: Path) -> tuple[str | None, str | None]:
     """(text, problem) of a local Dockerfile. Root reads it at every start
     check from a tree deploy can write, so it is read at its resolved place
-    (local_dockerfile kept that inside the project) without following a
-    link there, blocking on a FIFO, or reading past DOCKERFILE_LIMIT_BYTES.
+    (local_dockerfile kept that inside the project), walked from / without
+    following a link swapped in at any depth since, nor blocking on a
+    FIFO, nor reading past DOCKERFILE_LIMIT_BYTES.
     A missing one is left to the build to report."""
     def unusable(what: str) -> tuple[None, str]:
         return None, (f"{where} Dockerfile {dockerfile} {what}, so boxmunge cannot "
                       f"check the images it names. Make it a regular file under "
                       f"{DOCKERFILE_LIMIT_BYTES // 1024} KiB.")
     try:
-        fd = open_regular_nofollow(Path(os.path.realpath(dockerfile)), os.O_RDONLY)
+        fd = open_resolved_nofollow(Path(os.path.realpath(dockerfile)), os.O_RDONLY)
     except FileNotFoundError:
         return None, None
     except OSError:

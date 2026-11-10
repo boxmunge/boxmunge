@@ -163,3 +163,26 @@ def test_an_oversized_dockerfile_is_refused_unread(tmp_path: Path) -> None:
 
 def test_a_missing_dockerfile_is_left_to_the_build(tmp_path: Path) -> None:
     assert _problems({"build": {"context": "."}}, tmp_path / "Dockerfile") == []
+
+
+def test_a_dockerfile_whose_directory_is_swapped_for_a_link_is_refused(
+        tmp_path: Path, monkeypatch) -> None:
+    """The path is resolved, then opened from / one component at a time:
+    a directory swapped for a link in between is refused, not followed."""
+    import os
+
+    from boxmunge import compose_images
+    real = Path(os.path.realpath(tmp_path))
+    (real / "ctx").mkdir()
+    (real / "ctx" / "Dockerfile").write_text("FROM alpine\n")
+    (real / "other").mkdir()
+    (real / "other" / "Dockerfile").write_text("FROM boxmunge.invalid/projb/web\n")
+
+    def swapped(path):
+        os.rename(real / "ctx", real / "ctx.old")
+        (real / "ctx").symlink_to(real / "other")
+        return str(real / "ctx" / "Dockerfile")
+
+    monkeypatch.setattr(compose_images.os.path, "realpath", swapped)
+    [problem] = _problems({"build": {"context": "."}}, real / "ctx" / "Dockerfile")
+    assert "not a regular file" in problem

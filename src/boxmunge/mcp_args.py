@@ -6,6 +6,10 @@ whatever JSON the client sent. So before a handler runs: no unknown or
 missing arguments, each value of its schema type, project names in the
 project-name form, and no string that starts with '-', which a handler
 passing it on as argv would read as an option.
+
+The items of an array argument are exempt from the '-' rule by design:
+the one such argument, `secrets`'s `args`, is an argv the secrets command
+parses itself, where an option is meant to be one.
 """
 from __future__ import annotations
 
