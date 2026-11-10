@@ -396,7 +396,8 @@ project's images still contain such a CVE:
 
 The first such scan sends one priority-1 alert per withdrawal (`Quarantine
 kept — CISA KEV withdrew <CVE>`) naming the project, the CVE and the
-source. To accept the withdrawal, run `boxmunge security resume
+source. Only a delivered alert is recorded as sent, so if Pushover does
+not take it, the next scan sends it again. To accept the withdrawal, run `boxmunge security resume
 <project>`. The resume records the acceptance for that project, so a later
 quarantine of it is not held for that CVE again. A scan or release whose
 images no longer contain the withdrawn CVEs is a fix, and lifts the
