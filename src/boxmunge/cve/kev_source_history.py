@@ -17,11 +17,13 @@ the same trust: {"sources": {URL: {"released_at", "disagreed_runs"}}}.
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 from boxmunge.fileutil import atomic_write_text
+from boxmunge.fs_nofollow import read_text_nofollow
 from boxmunge.paths import BoxPaths
 
 
@@ -38,10 +40,12 @@ class Served:
 
 def _entries(paths: BoxPaths) -> dict[str, dict[str, Any]]:
     path = paths.kev_sources
-    if not path.exists():
+    # lexists: a link whose target is gone is not "no history yet"; an empty
+    # history would stop any source counting as stalled (CVE-03 reopened).
+    if not os.path.lexists(path):
         return {}
     try:
-        entries = json.loads(path.read_text())["sources"]
+        entries = json.loads(read_text_nofollow(path))["sources"]
         for entry in entries.values():
             datetime.fromisoformat(entry["released_at"])
             if not isinstance(entry["disagreed_runs"], int):
