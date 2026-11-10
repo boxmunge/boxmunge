@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.manifest import load_manifest
+from boxmunge.fs_nofollow import read_text_nofollow
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -115,7 +116,7 @@ def read_target_state(paths: "BoxPaths", name: str) -> dict[str, Any] | None:
     if not state_path.exists():
         return None
     try:
-        return json.loads(state_path.read_text())
+        return json.loads(read_text_nofollow(state_path))
     except json.JSONDecodeError as e:
         logging.getLogger("boxmunge").error("Corrupt JSON in %s: %s", state_path, e)
         raise
