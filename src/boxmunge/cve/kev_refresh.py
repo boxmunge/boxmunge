@@ -51,13 +51,14 @@ from __future__ import annotations
 import http.client
 import json
 import logging
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from boxmunge.config import ConfigError, load_config
 from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, KevCatalog, load_kev
-from boxmunge.cve.kev_fetch import Validators, describe, download
 from boxmunge.cve.kev_source_history import KevHistoryError, load_history, note_served
 from boxmunge.cve.kev_withdrawals import KevWithdrawalsError, record_withdrawals
 from boxmunge.fileutil import atomic_write_text
@@ -84,6 +85,7 @@ KEV_MAX_FUTURE_RELEASE = timedelta(hours=1)
 # guarding later sources' withdrawals.
 KEV_OVERRIDE_RUNS = 2
 KEV_OVERRIDE_DAYS = 7
+_FETCH_TIMEOUT = 30
 _MAX_LISTED = 10
 
 # SourceFailure.kind values.
@@ -187,19 +189,42 @@ def kev_sources(paths: BoxPaths) -> tuple[str, ...]:
     return tuple(sources)
 
 
-def _download(url: str, since: Validators | None) -> tuple[bytes, Validators] | None:
-    fetched = download(url, KEV_MAX_BYTES, since)
-    if fetched is not None and len(fetched[0]) > KEV_MAX_BYTES:
+class _HttpsOnlyRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to another https:// URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not newurl.startswith("https://"):
+            raise urllib.error.HTTPError(
+                newurl, code, f"redirect to non-https URL {newurl} refused", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+_OPENER = urllib.request.build_opener(_HttpsOnlyRedirects)
+
+
+def _open(req: urllib.request.Request) -> Any:
+    return _OPENER.open(req, timeout=_FETCH_TIMEOUT)
+
+
+def _download(url: str) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "boxmunge"})
+    with _open(req) as resp:
+        body = resp.read(KEV_MAX_BYTES + 1)
+    if len(body) > KEV_MAX_BYTES:
         raise _Failed(REJECTED, f"response is larger than {KEV_MAX_BYTES // 2**20} MiB")
-    return fetched
+    return body
 
 
-def _since(url: str, cached: KevCatalog) -> Validators | None:
-    """The validators to ask ``url`` with: only the source of a readable
-    cache with a release date has a catalog to compare against."""
-    if url != cached.source or cached.released_at is None:
-        return None
-    return cached.validators if cached.validators.conditional_headers() else None
+def _describe(e: Exception) -> str:
+    if isinstance(e, urllib.error.HTTPError):
+        return f"HTTP {e.code} {e.reason}"
+    if isinstance(e, TimeoutError) or (
+        isinstance(e, urllib.error.URLError) and isinstance(e.reason, TimeoutError)
+    ):
+        return f"timed out after {_FETCH_TIMEOUT}s"
+    if isinstance(e, http.client.HTTPException):
+        return f"bad HTTP response: {e!r}"
+    return str(e)
 
 
 def _parse(body: bytes) -> Any:
@@ -354,30 +379,18 @@ def _try_source(
     paths: BoxPaths, url: str, cached: KevCatalog, ctx: _Context, *, protected: bool,
 ) -> tuple[SourceFailure | None, list[str], frozenset[str]]:
     """Fetch, check and cache one source's catalog: (failure, withdrawn IDs,
-    the IDs of a disagreeing catalog).
-
-    The cache's own source is asked conditionally; its 304 Not Modified is
-    that source answering with the cached catalog, which passed these checks
-    when it was cached: the fetch time moves on, the release date does not,
-    so a source that stopped publishing still goes stale."""
+    the IDs of a disagreeing catalog)."""
     now = datetime.now(timezone.utc)
-    since = _since(url, cached)
     try:
-        fetched = _download(url, since)
-        if fetched is None:
-            assert since is not None and cached.released_at is not None
-            cve_ids, released, withdrawn = sorted(cached.cve_ids), cached.released_at, []
-            validators = since
-        else:
-            body, validators = fetched
-            cve_ids, released, withdrawn = _validate(_parse(body), cached, now, paths, ctx)
+        cve_ids, released, withdrawn = _validate(
+            _parse(_download(url)), cached, now, paths, ctx)
     except _Failed as e:
         failure, listed = _failed(paths, url, e, cached, now, protected=protected)
         return failure, [], listed
     except (OSError, http.client.HTTPException) as e:
         # HTTPError/URLError and socket errors are OSErrors; a body cut
         # short is an http.client.IncompleteRead.
-        return SourceFailure(url, UNREACHABLE, describe(e)), [], frozenset()
+        return SourceFailure(url, UNREACHABLE, _describe(e)), [], frozenset()
     try:
         # Before the cache: a withdrawal must outlive the catalog that made it.
         record_withdrawals(paths, url, withdrawn, cve_ids)
@@ -388,8 +401,6 @@ def _try_source(
         "source": url,
         "released_at": released.isoformat(),
         "fetched_at": now.isoformat(),
-        "etag": validators.etag,
-        "last_modified": validators.last_modified,
         "cve_ids": cve_ids,
     }
     try:

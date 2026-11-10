@@ -32,7 +32,6 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any
 
-from boxmunge.cve.kev_fetch import Validators
 from boxmunge.paths import BoxPaths
 from boxmunge.fs_nofollow import read_text_nofollow
 
@@ -81,10 +80,8 @@ class KevCatalog:
 
     ``fetched_at`` is when a source last answered with a catalog we
     accepted, ``released_at`` the catalog's own ``dateReleased`` and
-    ``source`` the URL that answered, and ``validators`` what that source
-    said identifies the catalog (asked again conditionally, kev_fetch).
-    ``unreadable`` is why the cache file could not be read (the catalog is
-    then empty).
+    ``source`` the URL that answered. ``unreadable`` is why the cache file
+    could not be read (the catalog is then empty).
     """
 
     cve_ids: frozenset[str]
@@ -92,7 +89,6 @@ class KevCatalog:
     released_at: datetime | None
     source: str | None
     unreadable: str | None = None
-    validators: Validators = Validators()
 
     def stale_reason(self, today: date) -> str | None:
         """Why this catalog cannot be trusted on ``today``, or None if fresh."""
@@ -153,11 +149,6 @@ def _optional_time(data: dict[str, Any], key: str) -> datetime | None:
     return _utc(datetime.fromisoformat(raw)) if raw else None
 
 
-def _optional_text(data: dict[str, Any], key: str) -> str | None:
-    raw = data.get(key)
-    return raw if isinstance(raw, str) and raw else None
-
-
 def load_kev(paths: BoxPaths) -> KevCatalog:
     """Load the cached KEV catalog. Missing/malformed cache → empty + stale.
 
@@ -183,8 +174,6 @@ def load_kev(paths: BoxPaths) -> KevCatalog:
             fetched_at=_optional_time(data, "fetched_at"),
             released_at=_optional_time(data, "released_at"),
             source=source if isinstance(source, str) else None,
-            validators=Validators(_optional_text(data, "etag"),
-                                  _optional_text(data, "last_modified")),
         )
     except (ValueError, TypeError, OSError, AttributeError) as e:
         # A corrupt cache must not wedge the scan; treat as "no catalog",

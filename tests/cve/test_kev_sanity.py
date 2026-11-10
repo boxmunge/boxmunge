@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 from datetime import date, datetime, timedelta, timezone
 
-from boxmunge.cve import kev_fetch
+from boxmunge.cve import kev_refresh
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.kev_refresh import (
     KEV_MAX_BYTES, KEV_MAX_REMOVALS, KEV_MIN_ENTRIES, LAGGING, REJECTED, UNREACHABLE,
@@ -27,8 +27,6 @@ def refresh_kev(paths):
 
 
 class _FakeResp:
-    headers: dict[str, str] = {}
-
     def __init__(self, body: bytes) -> None:
         self._body = body
 
@@ -59,13 +57,13 @@ def _seed_cache(paths, ids, released="2026-10-11T00:00:00+00:00") -> None:
 
 
 def _serve(monkeypatch, body: bytes) -> None:
-    monkeypatch.setattr(kev_fetch, "_open", lambda req: _FakeResp(body))
+    monkeypatch.setattr(kev_refresh, "_open", lambda req: _FakeResp(body))
 
 
 def _raise(monkeypatch, error: BaseException) -> None:
     def fail(req):
         raise error
-    monkeypatch.setattr(kev_fetch, "_open", fail)
+    monkeypatch.setattr(kev_refresh, "_open", fail)
 
 
 def test_refresh_kev_rejects_empty_feed_and_keeps_cache(tmp_path, monkeypatch):
@@ -171,7 +169,7 @@ def test_an_oversized_response_is_rejected(tmp_path, monkeypatch):
 
 
 def test_redirects_to_non_https_are_refused():
-    handler = kev_fetch._HttpsOnlyRedirects()
+    handler = kev_refresh._HttpsOnlyRedirects()
     req = urllib.request.Request(SOURCE)
     try:
         handler.redirect_request(req, None, 302, "Found", {}, "http://kev.example/feed.json")

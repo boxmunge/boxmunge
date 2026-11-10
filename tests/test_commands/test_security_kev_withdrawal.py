@@ -15,7 +15,7 @@ from boxmunge.commands import quarantine_gate as gate
 from boxmunge.commands import quarantine_lift, security_scan_core
 from boxmunge.commands.security_resume import security_resume_locked
 from boxmunge.commands.security_scan_core import scan_one_project
-from boxmunge.cve import kev_fetch
+from boxmunge.cve import kev_refresh
 from boxmunge.cve.kev import KevCatalog
 # Imported before conftest's autouse stub replaces the module attribute.
 from boxmunge.cve.kev_refresh import refresh_from, refresh_kev
@@ -35,8 +35,6 @@ LIFTED = "Quarantine lifted"
 
 
 class _Resp:
-    headers: dict[str, str] = {}
-
     def __init__(self, body: bytes) -> None:
         self._body = body
 
@@ -65,7 +63,7 @@ def _refresh(paths, monkeypatch, ids: list[str]) -> None:
     """One refresh run: MIRROR serves a catalog of ``ids``."""
     body = json.dumps({"dateReleased": datetime.now(timezone.utc).isoformat(),
                        "vulnerabilities": [{"cveID": c} for c in ids]}).encode()
-    monkeypatch.setattr(kev_fetch, "_open", lambda req: _Resp(body))
+    monkeypatch.setattr(kev_refresh, "_open", lambda req: _Resp(body))
     assert refresh_from(paths, (MIRROR,)).updated
 
 
@@ -209,7 +207,7 @@ def _fleet(paths, monkeypatch, ids: list[str], args: list[str]) -> int:
     paths.config_file.write_text(paths.config_file.read_text() + f"kev:\n  sources: [{MIRROR}]\n")
     body = json.dumps({"dateReleased": datetime.now(timezone.utc).isoformat(),
                        "vulnerabilities": [{"cveID": c} for c in ids]}).encode()
-    monkeypatch.setattr(kev_fetch, "_open", lambda req: _Resp(body))
+    monkeypatch.setattr(kev_refresh, "_open", lambda req: _Resp(body))
     monkeypatch.setattr(security_kev, "refresh_kev", refresh_kev)
     monkeypatch.setattr(security_kev, "load_kev", load_kev)
     monkeypatch.setattr(security_scan_core, "load_kev", load_kev)

@@ -286,13 +286,6 @@ its error (`boxmunge log --component cve-scan`). This is not a hidden
 fallback. Every source on the list is a copy of CISA's catalog that boxmunge
 trusts, and `boxmunge security` shows which one answered.
 
-The source the cached catalog came from is asked conditionally, with the
-`ETag` and `Last-Modified` it gave. Its `304 Not Modified` counts as that
-source answering with the cached catalog: the fetch time moves on and the
-~1.8 MB catalog is not downloaded again. The catalog's own release date
-does not move, so a source that stopped publishing still goes stale (see
-"Staleness and fail-safe").
-
 To replace the list, set `kev.sources` in `boxmunge.yml`. It must be a
 non-empty list of `https://` URLs that serve the same JSON, for example an
 internal mirror. A redirect to a non-`https://` URL is refused. A mistake
