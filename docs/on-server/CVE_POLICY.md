@@ -156,7 +156,9 @@ under `balanced` neither is anything not being exploited.
 For every finding, `evaluate_finding` runs these gates in order:
 
 1. **On CISA KEV** → `QUARANTINE`. KEV is the floor: active exploitation
-   bypasses the AV filter, distro-status routing, the severity threshold,
+   bypasses the AV filter, distro-status routing, the severity threshold
+   (a KEV CVE no source has rated yet, unknown severity, quarantines too:
+   Trivy reports findings of every severity, unknown included),
    any suppression, and an upstream fix the image is not yet running. A
    suppression never hides a KEV-listed CVE: a CVE reviewed and suppressed
    before CISA listed it stops applying on the first scan after it appears on KEV, and the
