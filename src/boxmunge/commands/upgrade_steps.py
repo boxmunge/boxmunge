@@ -295,12 +295,10 @@ def _regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any], re
 
 
 def _offline_exit(paths: BoxPaths, name: str) -> str:
-    """The commands that bring a paused or quarantined project back. Where
-    only a deploy fixes the refusal (a changed control file), resume and
-    `security resume` run the same start check and are refused too. A
-    deploy is refused while the project is paused, so `resume --no-start`
-    hands the pause to it; a quarantine lets it through (its images are
-    scanned first) and is lifted once it starts."""
+    """The commands that bring a paused or quarantined project back. Only a
+    deploy fixes a changed control file (resume and `security resume` run
+    the same check); `resume --no-start` hands a pause to it, and a
+    quarantine lets it through, scanned, and lifts once it starts."""
     deploy = f"`boxmunge {redeploy_command(paths, name)}`"
     if not is_paused(name, paths):
         return (f"run `boxmunge security resume {name}`, or {deploy} (its images are "
