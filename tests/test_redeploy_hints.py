@@ -144,3 +144,29 @@ def test_a_git_project_names_its_installed_commit(paths) -> None:
 def test_without_paths_both_forms_are_named() -> None:
     text = redeploy_either("myapp")
     assert "prod-deploy myapp --redeploy" in text and "--ref" in text
+
+
+def test_health_names_each_awaiting_projects_own_deploy(paths) -> None:
+    """A git project has no inbox and refuses --redeploy: its line names its
+    commit and its ref, a bundle project's the redeploy and an upload."""
+    from boxmunge.health_checks.projects import check_lifecycle_blocked
+    from boxmunge.pause import mark_awaiting_deploy, mark_pause_complete, write_paused_state
+    (paths.project_dir("gitapp") / "repo").mkdir(parents=True)
+    write_state(paths.project_deploy_state("gitapp"), {"current_ref": "a" * 40})
+    paths.project_dir("shop").mkdir(parents=True)
+    for name in ("gitapp", "shop"):
+        (paths.project_dir(name) / "manifest.yml").write_text(f"project: {name}\n")
+        write_paused_state(name, paths)
+        mark_pause_complete(name, paths)
+        mark_awaiting_deploy(name, paths)
+    detail = check_lifecycle_blocked(paths).detail
+    assert "gitapp (`prod-deploy gitapp --ref " + "a" * 40 + "`" in detail
+    assert "prod-deploy gitapp --redeploy" not in detail and "gitapp` after an upload" not in detail
+    assert "shop (`prod-deploy shop --redeploy`, or `prod-deploy shop` after an upload)" in detail
+    from boxmunge.lifecycle import is_blocked
+    for name, ways in (("gitapp", f"`prod-deploy gitapp --ref {'a' * 40}`, or `prod-deploy "
+                                  f"gitapp` for the newest commit on its ref"),
+                       ("shop", "`prod-deploy shop --redeploy`, or `prod-deploy shop` after "
+                                "an upload")):
+        block = is_blocked(name, paths)
+        assert ways in block.refuse_message and ways in block.skip_message

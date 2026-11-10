@@ -22,7 +22,7 @@ from boxmunge.pause import awaiting_deploy
 from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.redeploy_hint import redeploy_command
+from boxmunge.redeploy_hint import deploy_ways
 
 if TYPE_CHECKING:
     from boxmunge.staged_release import ComposeTarget
@@ -434,8 +434,7 @@ def _check_one(name: str, paths: BoxPaths, read_only: bool) -> int:
             )
         elif awaiting_deploy(name, paths):
             print(f"{name}: PAUSED (awaiting deploy; down behind its maintenance page "
-                  f"until a deploy: `{redeploy_command(paths, name)}`, or "
-                  f"`prod-deploy {name}` of an upload)")
+                  f"until a deploy: {deploy_ways(paths, name)})")
         return 0
     held = tick_hold(name, paths, read_only)
     if held is not None:
