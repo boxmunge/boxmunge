@@ -5,6 +5,3 @@
 # mcp 2 rebuilt the low-level Server that src/boxmunge/mcp_server.py is built
 # on: its list_tools()/call_tool() decorators are gone.
 mcp<2
-# cryptography 49 and 50 (boxmunge does not import it; mcp does, through
-# pyjwt[crypto]).
-cryptography<49
