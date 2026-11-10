@@ -128,10 +128,20 @@ def create_stash(paths: BoxPaths) -> CreatedStash:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
     archive_path = paths.stashes / f"boxmunge-stash-{ts}.tar.gz"
 
-    # stashes/ is deploy-writable (root:deploy 770), and root creates stashes
-    # too: never follow a planted symlink at this predictable name.
-    raw = os.fdopen(open_regular_nofollow(
-        archive_path, os.O_RDWR | os.O_CREAT | os.O_TRUNC, 0o600), "w+b")
+    # stashes/ is deploy-writable (root:deploy 770) and the name predictable:
+    # create it, never open what is already there. A file deploy planted
+    # would stay deploy's, so it could read the secrets root wrote into it.
+    try:
+        fd = open_regular_nofollow(archive_path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        raise StashError(
+            f"Cannot stash: {archive_path} already exists. stashes/ is deploy-"
+            f"writable, so root writes a stash only into a file it has just "
+            f"created: one planted at the name would stay its owner's, who "
+            f"could read the secrets written into it. Check what made it, "
+            f"remove it as root (sudo rm -- '{archive_path}'), then retry. "
+            f"Nothing has been changed.") from None
+    raw = os.fdopen(fd, "w+b")
     with raw:
         os.fchmod(raw.fileno(), 0o600)
         with tarfile.open(fileobj=raw, mode="w:gz") as tar:
