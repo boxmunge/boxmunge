@@ -13,17 +13,19 @@ overlay and bind record, which still agree.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from boxmunge.compose import load_user_compose, prepare_compose_override, render_compose_override
 from boxmunge.compose_guard import check_start
-from boxmunge.cve.quarantine import is_quarantined
+from boxmunge.cve.quarantine import QuarantineError, is_quarantined, read_quarantine_state
 from boxmunge.fileutil import atomic_write_bytes
 from boxmunge.fs_nofollow import open_regular_nofollow
-from boxmunge.pause import is_paused
+from boxmunge.pause import is_paused, read_paused_state
 from boxmunge.paths import BoxPaths
 from boxmunge.redeploy_hint import redeploy_or_bare
+from boxmunge.state import StateError
 
 _STAYS = "it keeps its previous overlay and bind record and stays offline"
 
@@ -148,3 +150,38 @@ def offline_exit(paths: BoxPaths, name: str) -> str:
         return f"run `boxmunge resume {name}` {back}, or {from_pause} to deploy them as they are"
     return (f"run {from_pause}: its images are scanned first, and once it starts the pause "
             f"ends and the quarantine lifts")
+
+
+@dataclass(frozen=True)
+class UnreadableRecord:
+    """A project whose pause or quarantine record cannot be read (corrupt,
+    or a link): the upgrade cannot tell whether it is meant to be offline,
+    so it leaves it as it is and reports it (upgrade_exclusions)."""
+    text: str
+
+    def __str__(self) -> str:
+        return self.text
+
+
+def unreadable_record(paths: BoxPaths, name: str) -> UnreadableRecord | None:
+    """Why the project's pause or quarantine record cannot be read, naming
+    the file and the commands that work once it is removed, or None."""
+    problems: list[str] = []
+    ways: list[str] = []
+    try:
+        read_quarantine_state(name, paths)
+    except QuarantineError as e:
+        problems.append(f"its quarantine record cannot be read ({e})")
+        ways.append(f"`boxmunge security scan {name}`, which quarantines it again if its "
+                    f"images still call for it")
+    try:
+        read_paused_state(name, paths)
+    except StateError as e:
+        problems.append(f"its pause record cannot be read ({e})")
+        ways.append(f"`boxmunge pause {name}` to keep it paused")
+    if not problems:
+        return None
+    it = "them" if len(problems) > 1 else "it"
+    ways.append(f"`boxmunge {redeploy_or_bare(paths, name)}` to bring it back on this release")
+    return UnreadableRecord(f"{'; '.join(problems)}. Inspect {it} and remove {it} as root, "
+                            f"then run {', '.join(ways[:-1])}, or {ways[-1]}")

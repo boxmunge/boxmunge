@@ -16,7 +16,8 @@ from typing import Any, Iterator
 from boxmunge.caddy import generate_caddy_config, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.upgrade_offline import (
-    PutBackError, offline_dry_run_line, offline_exit, regenerate_offline, render_overlay,
+    PutBackError, UnreadableRecord, offline_dry_run_line, offline_exit, regenerate_offline,
+    render_overlay, unreadable_record,
 )
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
@@ -73,11 +74,13 @@ def require_manifest(project_dir: Path) -> Path:
     return path
 
 
-def exclusion(paths: BoxPaths, name: str) -> LegacyStage | InstallTxn | ReleaseStateError | OSError | None:
+def exclusion(paths: BoxPaths, name: str) -> (
+        LegacyStage | InstallTxn | ReleaseStateError | OSError | UnreadableRecord | None):
     """Why the upgrade leaves `name` exactly as it is, or None: a stage left by
     0.10.1, an OSError when it cannot be told whether one is on disk, an
-    open install, or an install record this release cannot read. Read-only;
-    the one decision behind the dry run and the apply."""
+    open install, an install record this release cannot read, or a pause or
+    quarantine record it cannot read. Read-only; the one decision behind the
+    dry run and the apply."""
     try:
         stage = legacy_stage(paths, name)
     except OSError as e:
@@ -85,9 +88,10 @@ def exclusion(paths: BoxPaths, name: str) -> LegacyStage | InstallTxn | ReleaseS
     if stage is not None:
         return stage
     try:
-        return load_txn(paths, name)
+        txn = load_txn(paths, name)
     except ReleaseStateError as e:
         return e
+    return txn if txn is not None else unreadable_record(paths, name)
 
 
 def _unreadable_release_files(paths: BoxPaths, name: str, txn: InstallTxn) -> tuple[str | None, str | None]:
@@ -319,6 +323,8 @@ def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
         return line if unreadable is None else f"{line} ({unreadable})"
     if isinstance(why, OSError):
         return f"{name}: the project will be left as is: {cannot_tell_left_as_is(name, why)}"
+    if isinstance(why, UnreadableRecord):
+        return f"{name}: the project will be left as is: {why.text}"
     return f"{name}: {why}; the project will be left as is"
 
 
