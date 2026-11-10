@@ -67,3 +67,44 @@ def test_unhealthy_platform_caddy_warns(monkeypatch) -> None:
 def test_running_but_unhealthy_caddy_warns(monkeypatch) -> None:
     _inspect(monkeypatch, "true|false|unhealthy|caddy\n")
     assert health_cmd.check_caddy_container().status == "warn"
+
+
+def _sequence(monkeypatch, *results) -> list[float]:
+    """docker inspect answers each of *results* (returncode, stdout, stderr) in turn."""
+    answers, slept = list(results), []
+
+    def run(cmd, **kwargs):
+        rc, out, err = answers.pop(0)
+        return subprocess.CompletedProcess(cmd, rc, stdout=out, stderr=err)
+    monkeypatch.setattr(health_cmd.subprocess, "run", run)
+    monkeypatch.setattr(health_cmd, "REPROBE_DELAY", 5.0)
+    monkeypatch.setattr(health_cmd.time, "sleep", slept.append)
+    return slept
+
+
+_MISSING = (1, "", "Error: No such object: boxmunge-caddy")
+
+
+def test_caddy_missing_then_running_is_ok(monkeypatch) -> None:
+    """container-update recreating it: a probation run in that window must not roll back."""
+    slept = _sequence(monkeypatch, _MISSING, (0, "true|false|healthy|caddy\n", ""))
+    assert health_cmd.check_caddy_container().status == "ok"
+    assert slept == [5.0]
+
+
+def test_caddy_missing_twice_is_an_error(monkeypatch) -> None:
+    slept = _sequence(monkeypatch, _MISSING, _MISSING)
+    check = health_cmd.check_caddy_container()
+    assert (check.status, check.detail) == ("error", "Caddy container not found")
+    assert slept == [5.0]
+
+
+def test_caddy_stopped_then_restarting_is_an_error(monkeypatch) -> None:
+    _sequence(monkeypatch, (0, "false|false||caddy\n", ""), (0, "true|true||caddy\n", ""))
+    check = health_cmd.check_caddy_container()
+    assert check.status == "error" and "restarting" in check.detail
+
+
+def test_a_healthy_caddy_is_probed_once(monkeypatch) -> None:
+    slept = _sequence(monkeypatch, (0, "true|false|healthy|caddy\n", ""))
+    assert health_cmd.check_caddy_container().status == "ok" and slept == []

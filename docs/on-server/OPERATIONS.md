@@ -1567,7 +1567,7 @@ next fire, not rolled back.
 
 | Check | Warns (or errors) when | What to do |
 |---|---|---|
-| `docker`, `caddy`, `system-container` | Docker, the Caddy container or the boxmunge-system container is missing or not running, or Caddy is restarting (error); Caddy runs but is starting or unhealthy, or a probe timed out or failed for another reason (warning) | `doctor`, then the supervisor user restarts the component |
+| `docker`, `caddy`, `system-container` | Docker, the Caddy container or the boxmunge-system container is missing or not running, or Caddy is restarting, on two probes 5 seconds apart (error; a container being recreated, as container-update does to Caddy, passes the second probe); Caddy runs but is starting or unhealthy, or a probe timed out or failed for another reason (warning) | `doctor`, then the supervisor user restarts the component |
 | `system-container` | boxmunge-system runs an image built from an older definition than `/opt/boxmunge/system` (an upgrade's rebuild failed, so it still has the previous Alpine, age and rclone; warning, backups still work) | fix what stopped the build (the upgrade's output says), then the supervisor user runs `sudo docker compose -f /opt/boxmunge/system/compose.yml up -d --build`; the next upgrade also retries it |
 | `permissions`, `age-key` | the backup key or host secrets have the wrong mode, or the backup key is missing or invalid | fix as the supervisor user |
 | `project-containers`, `lifecycle` | a deployed project has no running containers, or is quarantined or stopped by the health monitor, or its state cannot be read (warning; the detail names the file and the fix) | `check <project>`, `logs <project>`, `recover <project>` |
@@ -1592,7 +1592,8 @@ next fire, not rolled back.
 Because exit 2 during probation rolls the upgrade back, only two things report an error. One is a
 platform component a probe saw broken: Docker not running (`docker info` fails) or its CLI
 missing, Caddy missing, stopped, restarting or from another compose project, the system container
-missing or wrong, the backup key missing or unreadable, sshd's drop-in changed or widened, the
+missing or wrong (a missing, stopped or restarting container only if a second probe 5 seconds later
+agrees), the backup key missing or unreadable, sshd's drop-in changed or widened, the
 firewall off or not installed, or the userns remap inconsistent. The other is a defect in the
 release's own code: a check whose module cannot be imported, or that hits a missing name or module
 attribute or a syntax error, is an error naming what is broken, so the release is rolled back.

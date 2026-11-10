@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import types
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -98,10 +99,28 @@ def check_docker_running() -> HealthCheck:
     # A timeout says the daemon is busy, not that it is down: run_guarded warns.
 
 
+# container-update recreating boxmunge-caddy (or an upgrade, boxmunge-system)
+# leaves it missing or stopped for a few seconds. A container check that
+# finds an error probes once more after this long, and errors only if the
+# second probe agrees: a probation run landing in that window must not roll
+# back. Two such re-probes add at most 10 s to the shim's 60 s/180 s budget.
+REPROBE_DELAY = 5.0
+
+
+def _confirmed(probe: Callable[[], HealthCheck]) -> HealthCheck:
+    """*probe*'s result; an error only if a second probe REPROBE_DELAY later agrees."""
+    first = probe()
+    if first.status != "error":
+        return first
+    time.sleep(REPROBE_DELAY)
+    return probe()
+
+
 def check_caddy_container() -> HealthCheck:
     """Check that the platform's Caddy container is running and healthy.
 
-    Error when it is missing, not running or restarting: no site is served.
+    Error when it is missing, not running or restarting on two probes
+    REPROBE_DELAY apart (_confirmed): no site is served.
     Warn when it runs but is starting or unhealthy, or `docker inspect`
     fails for another reason (container-update recreating it, a busy
     daemon): neither shows Caddy down.
@@ -110,6 +129,10 @@ def check_caddy_container() -> HealthCheck:
     that name from any compose project but the platform's own `caddy`
     (caddy/compose.yml) is an error: CrowdSec would read its output as
     Caddy's. Compose sets the project label itself; a service cannot."""
+    return _confirmed(_probe_caddy)
+
+
+def _probe_caddy() -> HealthCheck:
     fmt = ("{{.State.Running}}|{{.State.Restarting}}|"
            "{{if .State.Health}}{{.State.Health.Status}}{{end}}|"
            f'{{{{index .Config.Labels "{COMPOSE_PROJECT_LABEL}"}}}}')
@@ -148,11 +171,16 @@ def check_system_container(paths: BoxPaths) -> HealthCheck:
     """Check boxmunge-system is running with this root's mounts, on an image
     built from the installed definition.
 
-    An error when it is not usable: age and rclone have no host fallback, so
-    backups, restores and backup-sync all fail while it fails. A warning when
+    An error when it is not usable on two probes REPROBE_DELAY apart
+    (_confirmed): age and rclone have no host fallback, so backups, restores
+    and backup-sync all fail while it fails. A warning when
     it runs a previous image (a rebuild failed): backups still work, and an
     error would roll back a platform upgrade in probation.
     """
+    return _confirmed(lambda: _probe_system_container(paths))
+
+
+def _probe_system_container(paths: BoxPaths) -> HealthCheck:
     from boxmunge.system_container import (
         SystemContainerError, SystemContainerTimeout, connect, stale_image,
     )
