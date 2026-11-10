@@ -17,10 +17,12 @@ from typing import TYPE_CHECKING
 
 import sys
 
+from boxmunge import bind_sources
 from boxmunge.commands.upgrade_steps import (
     ManifestMigration, Regeneration, _links_into_repository, _migrated, _project_dirs,
     _regenerate_project, exclusion, install_exclusion_text, require_manifest,
 )
+from boxmunge.compose_guard import ComposeRefused, check_kept_files
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.git_layout import alert_old_schema, alert_unlinked, relink_advice
 from boxmunge.legacy_stage import (
@@ -72,7 +74,16 @@ def migrate_one(paths: BoxPaths, project_dir: Path) -> str | None:
     if _links_into_repository(project_dir):
         alert_old_schema(paths, name, manifest.get("schema_version"))
         return "in_memory"
+    record = paths.project_bind_record(name)
+    try:
+        deployed = bind_sources.control_file_unchanged(project_dir, record, "manifest.yml")
+    except bind_sources.BindSourceError:
+        deployed = False  # the record step refuses the project, naming why
     write_manifest(project_dir / "manifest.yml", migrated)
+    # Migrated from the manifest deployed, the new file is boxmunge's own
+    # output; migrated from any other, the record step refuses it (D-02).
+    if deployed:
+        bind_sources.refresh_control_hash(project_dir, record, "manifest.yml")
     return "written"
 
 
@@ -83,6 +94,11 @@ def _apply_locked(paths: BoxPaths, project_dir: Path, migration: ManifestMigrati
                               load_manifest_as_written(require_manifest(project_dir)))
     if unlinked:
         migration.unlinked[name] = relink_advice(project_dir, unlinked)
+    try:  # before anything is migrated or regenerated from its files (D-02)
+        check_kept_files(paths, name, component="upgrade")
+    except ComposeRefused as e:
+        regen.refused[name] = str(e)
+        return
     done = migrate_one(paths, project_dir)
     if done == "written":
         migration.written.append(name)

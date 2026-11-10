@@ -26,6 +26,7 @@ from boxmunge.lifecycle import is_blocked
 from boxmunge.manifest import ManifestError
 from boxmunge.pause import awaiting_deploy, is_paused, pause_incomplete
 from boxmunge.paths import InvalidProjectName
+from boxmunge.redeploy_hint import deploy_ways
 from boxmunge.state import StateError
 
 if TYPE_CHECKING:
@@ -140,7 +141,7 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
             elif pause_incomplete(name, paths):
                 incomplete.append(name)
             elif awaiting_deploy(name, paths):
-                awaiting.append(name)
+                awaiting.append(f"{name} ({deploy_ways(paths, name)})")
             elif is_paused(name, paths):
                 paused.append(name)
             elif is_monitor_stopped(name, paths):
@@ -155,8 +156,7 @@ def check_lifecycle_blocked(paths: BoxPaths) -> HealthCheck:
         ("pause incomplete: ", ", ".join(incomplete) + " (may still be serving; run `pause "
          "<project>` again to finish, or `resume <project>`)", incomplete),
         ("paused, awaiting a deploy: ", ", ".join(awaiting) + " (down behind the "
-         "maintenance page until `prod-deploy <project> --redeploy`, or `prod-deploy "
-         "<project>` after an upload)", awaiting),
+         "maintenance page until one of the deploys named runs)", awaiting),
         ("paused: ", ", ".join(paused), paused),
     ) if names]
     if bad or quarantined or stopped or incomplete or awaiting:

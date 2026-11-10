@@ -32,6 +32,7 @@ def paths_stub(tmp_path, monkeypatch):
     paths.log_file = paths.logs / "boxmunge.log"
     paths.state = tmp_path / "state"
     paths.state.mkdir()
+    paths.deploy_state = paths.state / "deploy"  # the bind record migrate_one renews
     return paths
 
 

@@ -240,6 +240,32 @@ class TestDispatchCommand:
     def test_rejects_scp_source(self) -> None:
         assert run_command("scp", ["-f", "/some/path"]) == 1
 
+    @pytest.mark.parametrize("args", [
+        ["-p", "-t", "."],                      # scp -O -p bundle.tar.gz deploy@host:
+        ["-d", "-t", "."],                      # several files at once
+        ["-v", "-p", "-d", "-t", "--", "."],    # OpenSSH's full sink form
+    ])
+    @patch("boxmunge.shell.handle_scp_upload")
+    def test_accepts_every_upload_form_openssh_sends(self, mock_scp: MagicMock,
+                                                     args: list[str]) -> None:
+        """B-03: OpenSSH puts -v/-r/-p/-d before -t; an upload is an upload."""
+        assert run_command("scp", args) == 0
+        mock_scp.assert_called_once_with(args)
+
+    @pytest.mark.parametrize("args, words", [
+        (["-p", "-f", "x"], "Downloads via scp are not supported"),
+        (["-r", "-t", "."], "scp -r"),
+        (["-x", "-t", "."], "Unsupported scp command"),
+        (["-t", "a", "b"], "Unsupported scp command"),
+    ])
+    @patch("boxmunge.shell.handle_scp_upload")
+    def test_refuses_everything_else_by_name(self, mock_scp: MagicMock, args, words,
+                                             capsys) -> None:
+        assert run_command("scp", args) == 1
+        mock_scp.assert_not_called()
+        err = capsys.readouterr().err
+        assert words in err and "scp -O" in err
+
     def test_empty_command_exits_silently(self) -> None:
         """Empty -c '' from SSH session setup must not print anything."""
         with pytest.raises(SystemExit) as exc_info:

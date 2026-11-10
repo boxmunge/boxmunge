@@ -94,7 +94,7 @@ READERS = [
            {"last_status": "failed", "last_check": ISO},
            lambda p: check_container_updates(p).detail),
     Reader("bind_sources", lambda p: p.project_bind_record(P),
-           {"version": 2, "sources": {}, "control": {}}, lambda p: read_record(p.project_bind_record(P))),
+           {"version": 2, "sources": {}, "control": {}}, lambda p: read_record(p.project_bind_record(P), redo="redeploy")),
     Reader("notify unconfigured", lambda p: p.alerts_unconfigured_state, {"logged_at": ISO},
            lambda p: _unconfigured_logged_recently(p, NOW)),
     Reader("start_alerts", lambda p: p.state / "start-refused" / f"{P}.json",

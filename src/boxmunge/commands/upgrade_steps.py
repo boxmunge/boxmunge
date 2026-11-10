@@ -36,6 +36,7 @@ from boxmunge.manifest import (
 from boxmunge.git_layout import relink_advice, repo_ownership_advice, unlinked_files
 from boxmunge.migration import migrate_manifest, MigrationError
 from boxmunge.pause import is_paused, render_maintenance_caddy_config
+from boxmunge.redeploy_hint import deploy_from_pause
 from boxmunge.fleet import report_project_failure
 from boxmunge.paths import BoxPaths, InvalidProjectName, validate_project_name
 from boxmunge.security_overlay import services_with_off_profile
@@ -213,7 +214,7 @@ def _record_bind_sources(paths: BoxPaths, name: str) -> str | None:
     """
     try:
         check_start(paths, name, component="upgrade",
-                    compose_files=_compose_files(paths, name), record=True)
+                    compose_files=_compose_files(paths, name), record=True, regenerated=True)
     except ComposeRefused as e:
         return str(e)
     return None
@@ -294,10 +295,11 @@ def _regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any], re
 
 
 def _offline_exit(paths: BoxPaths, name: str) -> str:
-    """The command that brings a paused or quarantined project back: a
-    deploy is refused while it is paused."""
+    """The command that brings a paused or quarantined project back. A
+    deploy is refused while it is paused, so where only a deploy fixes the
+    refusal (a changed control file), resume hands the pause to it."""
     if not is_quarantined(name, paths):
-        return f"run `boxmunge resume {name}`"
+        return f"run `boxmunge resume {name}`, or {deploy_from_pause(paths, name)}"
     if is_paused(name, paths):
         return f"run `boxmunge security resume {name}`, then `boxmunge resume {name}`"
     return f"run `boxmunge security resume {name}`, or deploy a fixed release"

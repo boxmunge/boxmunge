@@ -195,17 +195,26 @@ def _hash_file(project_dir: Path, path: Path, rel: str) -> str | None:
         raise BindSourceError(f"control file {rel} cannot be read: {e}") from e
 
 
-def refresh_overlay_hash(project_dir: Path, path: Path) -> None:
-    """Record the hash of the overlay boxmunge has just regenerated (resume,
-    recover, security resume and rollback regenerate it outside a deploy).
-    The overlay is derived from compose.yml and the manifest, whose own
-    hashes are still checked, so recording boxmunge's own output blesses
-    nothing a container wrote. No record yet: nothing to refresh."""
-    if not path.exists():
+def refresh_control_hash(project_dir: Path, path: Path, rel: str) -> None:
+    """Record the hash of a control file boxmunge has just written itself:
+    the overlay (resume, recover, security resume and rollback regenerate
+    it outside a deploy, from compose.yml and the manifest, whose own hashes
+    are still checked), or a manifest the upgrade migrated from the one
+    recorded (control_file_unchanged). Recording boxmunge's own output
+    blesses nothing a container wrote. No record yet: nothing to refresh."""
+    if not os.path.lexists(path):
         return
-    doc = read_record(path)
-    doc["control"][OVERLAY] = _hash_file(project_dir, project_dir / OVERLAY, OVERLAY)
+    doc = _load_record(path)
+    doc["control"][rel] = _hash_file(project_dir, project_dir / rel, rel)
     atomic_write_text(path, json.dumps(doc, indent=2) + "\n")
+
+
+def control_file_unchanged(project_dir: Path, path: Path, rel: str) -> bool:
+    """True if a record exists and control file ``rel`` still hashes to it."""
+    if not os.path.lexists(path):
+        return False
+    recorded = _load_record(path)["control"]
+    return rel in recorded and recorded[rel] == _hash_file(project_dir, project_dir / rel, rel)
 def _open_in_project(root: str, target: str, rel: str) -> int:
     """Open a control file's resolved target, one component at a time from
     the project root with O_NOFOLLOW, so a link swapped in after the
@@ -233,15 +242,25 @@ def _open_in_project(root: str, target: str, rel: str) -> int:
     return out
 
 
-def read_record(path: Path) -> dict[str, Any]:
+def read_record(path: Path, *, redo: str) -> dict[str, Any]:
     """The bind sources, kinds and control hashes deploy recorded. Raises
-    BindSourceError when there is no readable record."""
+    BindSourceError when there is no readable record; ``redo`` is the
+    command that records one."""
     try:
-        doc = json.loads(read_text_nofollow(path))
+        return _load_record(path)
     except FileNotFoundError:
         raise BindSourceError(
             f"no record of the bind sources this project was deployed with "
-            f"({path}). Deploy it again to record them.") from None
+            f"({path}); {redo} to record them.") from None
+
+
+def _load_record(path: Path) -> dict[str, Any]:
+    """read_record for a record known to exist (FileNotFoundError if it
+    went meanwhile)."""
+    try:
+        doc = json.loads(read_text_nofollow(path))
+    except FileNotFoundError:
+        raise
     except (OSError, ValueError) as e:
         raise BindSourceError(f"cannot read {path}: {e}") from e
     sources = doc.get("sources") if isinstance(doc, dict) else None
@@ -289,21 +308,43 @@ def check_control(
                 f"control file {rel} is newly tracked and was not recorded when the "
                 f"project was last deployed; {redo} to record it. Boxmunge will not "
                 f"start a release from files it did not validate.")
-        raise BindSourceError(
-            f"control file {rel} changed since the project was deployed; "
-            f"{redo} to run it. Boxmunge will not start a release from "
-            f"files it did not validate.")
+        raise _changed(rel, redo)
 
 
-def record(
-    project_dir: Path, sources: set[str], read_files: Iterable[Path], path: Path, *,
-    control_root: Path | None = None,
-) -> None:
+def _changed(rel: str, redo: str) -> BindSourceError:
+    return BindSourceError(
+        f"control file {rel} changed since the project was deployed; "
+        f"{redo} to run it. Boxmunge will not start a release from "
+        f"files it did not validate.")
+
+
+def check_kept_control(project_dir: Path, read_files: Iterable[Path], path: Path, *,
+                       redo: str) -> dict[str, str | None]:
+    """Before a record is renewed from configs boxmunge regenerated in place
+    (an upgrade, the user-namespace switch): every control file both the
+    record and this boxmunge track, but the overlay boxmunge just wrote,
+    still hashes to the record, so the renewal blesses nothing a container
+    wrote. A file only one side tracks (this boxmunge reads a new one, or no
+    longer reads one) is taken as it is. No record yet: nothing to compare.
+    Returns the hashes checked, for the record to hold exactly those (a
+    file rewritten after the check must not be recorded)."""
+    now = control_hashes(project_dir, read_files)
+    if not os.path.lexists(path):
+        return now
+    recorded = _load_record(path)["control"]
+    for rel in sorted((set(now) & set(recorded)) - {OVERLAY}):
+        if now[rel] != recorded[rel]:
+            raise _changed(rel, redo)
+    return now
+
+
+def record(project_dir: Path, sources: set[str], control: dict[str, str | None],
+           path: Path) -> None:
     """Check every source, creating missing ones, record their kinds, and
-    record the sha256 of every file boxmunge reads."""
+    record ``control``: the sha256 of every file boxmunge reads, as
+    control_hashes (or check_kept_control) took them."""
     kinds = {rel: source_kind(project_dir, rel, create=True) for rel in sorted(sources)}
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps({
-        "version": RECORD_VERSION, "sources": kinds,
-        "control": control_hashes(project_dir, read_files, control_root=control_root),
+        "version": RECORD_VERSION, "sources": kinds, "control": control,
     }, indent=2) + "\n")

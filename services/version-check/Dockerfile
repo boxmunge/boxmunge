@@ -1,4 +1,4 @@
-FROM python:3.12-alpine@sha256:236173eb74001afe2f60862de935b74fcbd00adfca247b2c27051a70a6a39a2d
+FROM python:3.13-alpine@sha256:1e1f6334529d1fb26a2ef619d7cffb30a7c7d7cc1cc7338ebee283a58d1aeaca
 
 WORKDIR /app
 
@@ -22,5 +22,7 @@ EXPOSE 8147
 # state (check counter, sweeper thread) must be created after the fork.
 # gunicorn's access log (stdout, so the container log) records each
 # request's full client address, like the Caddy proxy's access log; the
-# privacy statement in static/index.html says so.
-CMD ["sh", "-c", "python db_schema.py /data/checks.db && exec gunicorn --bind 0.0.0.0:8147 --workers 2 --access-logfile - 'app:create_app()'"]
+# privacy statement in static/index.html says so. --no-control-socket: gunicorn
+# 25.1+ otherwise opens a runtime control socket under $HOME/.gunicorn, which
+# the read-only root filesystem refuses (an ERROR on every start).
+CMD ["sh", "-c", "python db_schema.py /data/checks.db && exec gunicorn --bind 0.0.0.0:8147 --workers 2 --no-control-socket --access-logfile - 'app:create_app()'"]

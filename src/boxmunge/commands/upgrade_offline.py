@@ -103,7 +103,7 @@ def regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> 
     try:
         check_start(paths, name, component="upgrade",
                     compose_files=["compose.yml", "compose.boxmunge.yml"], record=True,
-                    deploying=True)
+                    regenerated=True, deploying=True)
     except Exception as e:  # noqa: BLE001 — a refusal (alerted by the check) or any other
         _put_back(kept)
         return f"its bind sources could not be recorded ({e}); {_STAYS}"

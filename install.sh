@@ -56,6 +56,7 @@ if grep -q '^# >>> boxmunge-upgrade.d:' "${SCRIPT_DIR}/scripts/boxmunge-upgrade"
     exit 1
 fi
 [[ "${FROM_UPGRADE_SHIM}" -eq 1 ]] || FROM_UPGRADE_SHIM="$(BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/run-by-old-shim.sh")"
+command -v python3 >/dev/null && bash "${SCRIPT_DIR}/bootstrap/python-floor.sh"
 
 # Docker Compose 2.35.0 or newer (bootstrap/compose-version.sh): an upgrade
 # checks before anything is changed, a fresh install after the bootstrap.

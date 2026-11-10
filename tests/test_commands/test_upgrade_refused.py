@@ -19,6 +19,7 @@ from boxmunge.commands.upgrade_cmd import run_upgrade
 from boxmunge.commands.upgrade_steps import Restart, restart_projects
 from boxmunge.upgrade_exclusions import apply_projects
 from boxmunge.version import read_installed_version
+from tests.deploy_helpers import mark_deployed
 from tests.test_commands.test_upgrade_dry_run_and_pause import _project, _setup, _snapshot
 
 OLD_OVERLAY = "# overlay written by the previous release\n"
@@ -36,6 +37,7 @@ def paths(tmp_path: Path):
     _project(paths, "bad")
     paths.project_compose("bad").write_text(HOSTILE)
     paths.project_compose_override("bad").write_text(OLD_OVERLAY)
+    mark_deployed(paths, "bad")  # deployed so under the release before the validator fix
     return paths
 
 
@@ -94,6 +96,7 @@ def test_apply_does_not_rebuild_or_rerun_refused_project(
 @patch("boxmunge.compose_guard.compose_up")
 def test_no_alert_when_nothing_is_refused(up, pushover, _reload, paths) -> None:
     paths.project_compose("bad").write_text("services:\n  web:\n    image: nginx:1.25\n")
+    mark_deployed(paths, "bad")  # the fixed compose, deployed
     assert run_upgrade(paths, apply_only=True) == 0
     pushover.assert_not_called()
     assert len(up.call_args_list) == 2

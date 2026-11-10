@@ -307,7 +307,8 @@ def test_mount_not_recorded_at_deploy_is_refused(box) -> None:
 
 
 def test_project_never_recorded_is_refused(box) -> None:
-    _refused(box, "no record of the bind sources")
+    """The refusal names the command that records one."""
+    _refused(box, "no record of the bind sources .*; prod-deploy shop --redeploy to record them")
 
 
 def test_unreadable_record_is_refused(box) -> None:
@@ -436,7 +437,8 @@ def test_regenerating_the_overlay_refreshes_its_recorded_hash(box) -> None:
     (project_dir / "compose.boxmunge.yml").write_text("services: {}\n")
     _deploy(paths)
     (project_dir / "compose.boxmunge.yml").write_text("services: {web: {init: true}}\n")
-    bind_sources.refresh_overlay_hash(project_dir, paths.project_bind_record(NAME))
+    bind_sources.refresh_control_hash(project_dir, paths.project_bind_record(NAME),
+                                      bind_sources.OVERLAY)
     _restart(paths)
 
 
