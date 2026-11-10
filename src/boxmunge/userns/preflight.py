@@ -21,7 +21,7 @@ from boxmunge.cve.quarantine import QuarantineError, is_quarantined, quarantine_
 from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.pause import is_paused, pause_incomplete
+from boxmunge.pause import pause_incomplete, read_paused_state
 from boxmunge.release_txn import open_install_reason
 from boxmunge.run_as import unmappable_users
 from boxmunge.staged_release import has_slot, slot_debris
@@ -170,7 +170,11 @@ def _notes(paths: BoxPaths, inv: Inventory, r: Report) -> None:
             status = f"unknown ({e})"
         if status not in (None, "ok", "healthy"):
             r.notes.append(f"{p} is currently {status}")
-        if is_paused(p, paths):
+        try:
+            paused = read_paused_state(p, paths) is not None
+        except StateError:
+            paused = False   # refused, naming the record (_project_state)
+        if paused:
             r.notes.append(f"{p} is paused: it gets no pre-migration backup (its containers are "
                            f"stopped); its data is carried like any other")
     _records(paths, inv, r)

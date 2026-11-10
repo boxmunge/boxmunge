@@ -203,6 +203,15 @@ def test_a_lifecycle_record_that_cannot_be_read_is_refused(paths, quiet, tmp_pat
     report = _run(paths, _inv(quiet))
     assert not report.ok and "REFUSED: shop: " in report.text()
     assert "symlink" in report.text()
+    # The refusal says what is wrong; no note claims it is paused.
+    assert "shop is paused" not in report.text()
+
+
+def test_a_paused_project_is_noted_as_getting_no_backup(paths, quiet) -> None:
+    from boxmunge.pause import mark_pause_complete, write_paused_state
+    write_paused_state("shop", paths)
+    mark_pause_complete("shop", paths)
+    assert "shop is paused: it gets no pre-migration backup" in _run(paths, _inv(quiet)).text()
 
 
 def test_a_project_without_a_binds_record_is_reported(paths, quiet) -> None:
