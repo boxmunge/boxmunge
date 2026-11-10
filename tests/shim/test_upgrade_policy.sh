@@ -126,13 +126,50 @@ expect 1 "Usage: boxmunge-upgrade auto" "auto refuses arguments"
 mock_server a 'echo "{\"action\": \"upgrade\", \"version\": \"1.0.0;id\", \"url\": \"x\"}"'
 run_shim auto
 expect 1 "Invalid version" "auto refuses a malformed discovered version"
+# discovery answers <json>: _discover-update prints it. Slot a's python records
+# what the shim puts in the operational log (bm_log), as "bm_log <level> <msg>".
+answers() { printf '%s' "$1" > "$BOXMUNGE_ROOT/answer"; mock_server a 'cat "$BOXMUNGE_ROOT/answer"'; }
+printf '%s\n' '#!/usr/bin/env bash' \
+    'if [[ "$1" == "-" ]]; then cat >/dev/null; echo "bm_log $BM_LEVEL $BM_MSG" >> "$BOXMUNGE_ROOT/calls"; exit 0; fi' \
+    "exec $(printf %q "$REAL_PYTHON3_FOR_VENV") \"\$@\"" > "$BOXMUNGE_ROOT/env-a/bin/python"
 # One parse of the answer: a line break cannot move a word into the next field.
-mock_server a 'echo "{\"action\": \"upgrade\", \"version\": \"1.5.0\\nsecurity\"}"'
+answers '{"action": "upgrade", "version": "1.5.0\nsecurity"}'
 run_shim auto
-expect 1 "line break in its action, version or class" "auto refuses a line break in a field"
-mock_server a 'echo "{\"action\": \"error\", \"message\": \"feed down\\nretry later\"}"'
+expect 1 "FATAL: _discover-update gave an answer the shim cannot read (a line break in its action, version or class" \
+    "auto refuses a line break in a field"
+answers '{"action": "error", "message": "feed down\nretry later"}'
 run_shim auto
-expect 1 "Discovery error: feed down" "auto reports discovery's error message"
+expect 1 "FATAL: Discovery error: feed down
+retry later" "auto reports discovery's error message whole"
+for empty in '""' null '"  "'; do
+    answers "{\"action\": \"error\", \"message\": $empty}"
+    run_shim auto
+    expect 1 "FATAL: Discovery error: (no message given)" "auto reports an error with message $empty"
+done
+answers '{"action": "error"}'
+run_shim auto
+expect 1 "FATAL: Discovery error: (no message given)" "auto reports an error with no message"
+answers '{"action": "blocklisted", "message": ""}'
+run_shim auto
+expect 0 "blocklisted on this box" "an empty last field does not cut the answer short"
+rm -f "$BOXMUNGE_ROOT/calls"
+for bad in '{"action": "upgrade"}|an upgrade with no version' \
+           'not json|Expecting value' \
+           '["upgrade", "1.5.0"]|a JSON list, not an object' \
+           '|Expecting value' \
+           '{"action": 3}|its action, version and class must be strings'; do
+    answers "${bad%%|*}"
+    run_shim auto
+    expect 1 "FATAL: _discover-update gave an answer the shim cannot read (${bad#*|}" \
+        "auto refuses a malformed answer: ${bad%%|*}"
+    [[ "$OUT" != *Traceback* ]] && pass "no traceback for ${bad%%|*}" \
+        || fail "a traceback for ${bad%%|*}: $OUT"
+done
+[[ "$(grep -c "^bm_log error _discover-update gave an answer the shim cannot read" \
+        "$BOXMUNGE_ROOT/calls")" == 5 ]] && pass "each malformed answer reaches the operational log" \
+    || fail "malformed answers were not all logged: $(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)"
+rm -f "$BOXMUNGE_ROOT/calls"
+mock_python a
 # The release class discovery gives names the success alert; anything else stops.
 mock_server a 'echo "{\"action\": \"upgrade\", \"version\": \"1.5.0\", \"url\": \"x\", \"class\": \"urgent\"}"'
 run_shim auto
