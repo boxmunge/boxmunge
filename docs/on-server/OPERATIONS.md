@@ -1928,7 +1928,9 @@ entry names the class that was applied (`log --component auto-update`).
 Releases are discovered through the version-check service at boxmunge.dev.
 Its answer also names any release its circuit breaker holds (withdrawn as
 broken). A held release is never installed automatically, and auto-update
-logs the hold; `upgrade --target <version>` still installs it deliberately.
+logs the hold. A plain `upgrade` never installs one either, a held feature
+release included: it takes the newest release that is not held, or refuses,
+naming `upgrade --target <version>`, which still installs it deliberately.
 
 If the service cannot be reached at all (DNS, connection or timeout
 failure), auto-update falls back to the GitHub releases list, applying the

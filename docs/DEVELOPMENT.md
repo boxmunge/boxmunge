@@ -226,8 +226,10 @@ names the setting. Wrong secrets, whether sent as a Bearer header or as the regi
 count against one limit per client (10 per 15 minutes) in each worker: gunicorn runs two, and
 each counts on its own, so a client can make up to 20 wrong guesses per window. Past it, that
 client is refused even with the right secret until the window ends. Each worker tracks at
-most 10,000 guessing clients per window; once it does, every other client is refused the same
-way (fail closed), so the maintainer may have to wait out a flood. Each client (IPv4 address or IPv6 /64) may start
+most 10,000 guessing clients per window; one IPv6 /48 holds enough /64s to fill that, so once
+it is full a new client is counted by its network (IPv4 /24 or IPv6 /48, 20 wrong guesses per
+window) instead, and a flood locks out only its own network. Only when 10,000 networks are
+tracked too is every new client refused the same way (fail closed). Each client (IPv4 address or IPv6 /64) may start
 5 sign-in or registration ceremonies per 5 minutes in each worker, and each network (IPv4 /24 or
 IPv6 /48) 20, both counted in memory: one client cannot block another's sign-in, the many /64s
 of one /48 cannot fill the database's global backstop of 10,000 pending challenges, and no
@@ -257,14 +259,17 @@ and 4. Nothing on the web resets the passkey.
 
 ## Holding a broken release
 
-The version-check circuit breaker withholds a broken security or break-fix release from every
-box that can reach the service. Trip it, then mark the hold on GitHub, so that boxes which
+The version-check circuit breaker withholds a broken release from every box that can reach
+the service: a security or break-fix release is withdrawn from automatic updates, and any
+release, a feature release included, is refused by a manual `upgrade` (which installs the
+newest unheld release instead, or names `upgrade --target X.Y.Z` to install the held one
+deliberately). Trip it, then mark the hold on GitHub, so that boxes which
 cannot reach the service (and fall back to the GitHub releases list) hold it too:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $CB_SECRET" \
   'https://boxmunge.dev/v1/circuit-breaker/trip?version=X.Y.Z'
-gh release edit vX.Y.Z --title "vX.Y.Z [security] [held]"   # keep its class marker
+gh release edit vX.Y.Z --title "vX.Y.Z [security] [held]"   # keep any class marker
 ```
 
 Boxes read `[held]` from the release title only, never from the notes (auto-generated notes
@@ -284,9 +289,11 @@ holds the newest security release back from the whole fleet until the breaker is
 service prints that warning at every start while it is set. Only the network a report comes
 from counts; nothing in a report's body, a box ID least of all, may ever count towards the
 threshold, because the sender writes it. Failure reports stay useful without it: the stats
-page lists them, every distinct failure a network reports is kept (up to 10 per version per
-six hours), and `/v1/failures?version=X.Y.Z` counts the reports (by stage) and the
-networks that sent them.
+page lists them, every distinct failure a network reports is kept, and
+`/v1/failures?version=X.Y.Z` counts the reports (by stage) and the networks that sent them.
+For sizing the `check-data` volume: a network stores at most 10 rows (about 200 bytes each)
+per listed version per six-hour window, so at most 40 a day per network and version, kept
+90 days.
 
 The service's limits are per gunicorn worker. Beyond the per-client request limit, a flood
 of distinct clients that fills a worker's table (100,000) no longer locks out every box that
@@ -294,5 +301,9 @@ has not checked yet: a new client is then limited by its network (600 requests a
 IPv4 /24 or IPv6 /48), so the flood exhausts only its own networks.
 
 The service's backup (`backup boxmunge-web`) runs `backup_db.py`, which copies the database
-through SQLite's backup API, never the file itself, and checks a snapshot before restoring
-it into the running service.
+through SQLite's backup API, never the file itself, while the service runs. Its restore checks
+a snapshot before writing it, and needs the service stopped: any connection inside a
+transaction holds a lock it waits for, then it gives up. Restore with `restore boxmunge-web`,
+which stops the project, runs the restore in the backup service alone and recreates the
+service on the restored data; never run `backup_db.py restore` against the service while it
+serves.
