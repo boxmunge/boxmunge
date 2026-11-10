@@ -184,7 +184,7 @@ def test_missing_bundle_is_a_bundle_error(tmp_path: Path) -> None:
     ("MAX_TOTAL_BYTES", 1500, lambda t: [_file(t, f"myapp/f{i}", b"\0" * 400) for i in range(4)],
      ["expands to", "1500 bytes"]),
     ("MAX_MEMBERS", 5, lambda t: [_file(t, f"myapp/f{i}") for i in range(4)],
-     ["7 entries", "at most 5"]),
+     ["more than 5 entries", "at most 5"]),
 ])
 def test_a_bundle_over_a_size_limit_is_refused_before_anything_is_written(
         tmp_path, monkeypatch, limit, value, extra, words) -> None:
@@ -206,3 +206,91 @@ def test_the_limits_leave_room_for_real_projects() -> None:
     assert bundle.MAX_TOTAL_BYTES >= 4 * 1024 ** 3
     assert bundle.MAX_MEMBER_BYTES >= 2 * 1024 ** 3
     assert bundle.MAX_MEMBERS >= 100_000
+
+
+# A GNU sparse member (tar --sparse): myapp/hole is 300000002 bytes with
+# 258 of them stored, so its archive is a few hundred bytes.
+_GNU_SPARSE = (
+    "H4sIAKap8moAA+3R0QrCIBiGYY+7Cu8gdf56IV3BoMGIjUYW1d23NiIY7CTmBvE+J7+I6Idf+yy7bq+yMr0o"
+    "Ms4wzt5nDmsrLnpxPvh+31oJUWnJG2t0S9fyorVKz3Q6pnb23L2uqmaNQOtqh/7rc1Ple+NdcPB+tn9v3KR/"
+    "CYVX+pAv0tfm/Rtnoymcnf7I4g8seum/eOy2TgAAAAAAAAAAAAAAAAD87gVZwxyjACgAAA==")
+
+
+def test_a_sparse_member_counts_at_its_expanded_size(tmp_path, monkeypatch) -> None:
+    import base64
+    monkeypatch.setattr("boxmunge.bundle.MAX_MEMBER_BYTES", 1000)
+    bundle = tmp_path / "myapp.tar.gz"
+    bundle.write_bytes(base64.b64decode(_GNU_SPARSE))
+    with pytest.raises(BundleError, match=r"'myapp/hole' is 286\.1 MiB"):
+        extract_bundle(bundle, tmp_path / "incoming")
+
+
+def _gz_bundle(path: Path, write) -> Path:
+    import gzip
+    with gzip.open(path, "wb") as gz:
+        write(gz)
+        gz.write(b"\0" * 1024)
+    return path
+
+
+def test_entries_are_counted_as_they_are_read_not_all_held_first(tmp_path, monkeypatch) -> None:
+    """Review: getmembers() built every header (1.5M entries: 0.68 GB, 48 s)
+    before the count was checked; the count now stops the read."""
+    monkeypatch.setattr("boxmunge.bundle.MAX_MEMBERS", 5)
+    block = tarfile.TarInfo("myapp/x").tobuf(tarfile.GNU_FORMAT)
+    bundle = _gz_bundle(tmp_path / "myapp.tar.gz", lambda gz: gz.write(block * 5000))
+    read = []
+    real = tarfile.TarInfo.fromtarfile.__func__
+    monkeypatch.setattr(tarfile.TarInfo, "fromtarfile",
+                        classmethod(lambda cls, t: read.append(1) or real(cls, t)))
+    with pytest.raises(BundleError, match="more than 5 entries"):
+        extract_bundle(bundle, tmp_path / "incoming")
+    assert len(read) <= 6
+
+
+def test_a_huge_extended_header_is_refused_before_it_is_read(tmp_path) -> None:
+    """Review: tarfile reads a PAX (or GNU long-name) header into memory
+    whole, so a 1 MB bundle could make it allocate 1 GiB before any cap."""
+    import tracemalloc
+    header = tarfile.TarInfo("myapp/././@PaxHeader")
+    header.type = tarfile.XHDTYPE
+    header.size = 8 * 1024 ** 2
+
+    def write(gz) -> None:
+        gz.write(header.tobuf(tarfile.PAX_FORMAT))
+        gz.write(b"\0" * header.size)
+    bundle = _gz_bundle(tmp_path / "myapp.tar.gz", write)
+    tracemalloc.start()
+    try:
+        with pytest.raises(BundleError, match=r"extended \(PAX or long-name\) header of 8\.0 MiB"):
+            extract_bundle(bundle, tmp_path / "incoming")
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 4 * 1024 ** 2, peak
+
+
+def _endless_sparse_map(blocks: int) -> bytes:
+    """An old-GNU sparse header whose map continues in `blocks` extension
+    blocks: tarfile reads them all as part of the header, with no entry
+    or extended header for the other limits to count."""
+    info = tarfile.TarInfo("myapp/s")
+    info.type = tarfile.GNUTYPE_SPARSE
+    head = bytearray(info.tobuf(tarfile.GNU_FORMAT))
+    head[482] = 1  # isextended
+    head[148:156] = b" " * 8
+    head[148:156] = b"%06o\0 " % sum(head)
+    extension = bytearray(512)
+    extension[504] = 1
+    return bytes(head) + bytes(extension) * blocks
+
+
+def test_the_archive_may_not_run_past_what_the_limits_allow(tmp_path, monkeypatch) -> None:
+    """Whatever a header makes tarfile read is bounded by the stream:
+    contents, an allowance per entry, and the extended headers."""
+    for limit, value in (("MAX_TOTAL_BYTES", 1000), ("MAX_MEMBERS", 2),
+                         ("MAX_EXTENDED_TOTAL_BYTES", 0)):
+        monkeypatch.setattr(f"boxmunge.bundle.{limit}", value)
+    bundle = _gz_bundle(tmp_path / "myapp.tar.gz", lambda gz: gz.write(_endless_sparse_map(50)))
+    with pytest.raises(BundleError, match="runs past 3048 bytes"):
+        extract_bundle(bundle, tmp_path / "incoming")

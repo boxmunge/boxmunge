@@ -57,9 +57,10 @@ link, a link that climbs out of the project (also through a chain of other links
 anywhere but at the start of its target (`sub/../x`), or a device or FIFO entry is refused with an
 `ERROR:` naming the entry. Links are installed as links and are never followed.
 
-A bundle may expand to at most 4 GiB, hold at most 100,000 entries, and carry no single file over
-2 GiB. These are checked before anything is extracted. A bundle over a limit is refused with an
-`ERROR:` that names the limit. Leave build output, dependencies and data out of it with
+A bundle may expand to at most 4 GiB, hold at most 100,000 entries, carry no single file over
+2 GiB, and carry no extended (PAX or long-name) header over 1 MiB (128 MiB of them in all). These
+are checked as the archive is read, before anything is extracted. A bundle over a limit is
+refused with an `ERROR:` that names the limit. Leave build output, dependencies and data out of it with
 `.boxmungeignore`.
 
 An empty `data/`, `backups/` or `security/` directory (or one holding only empty `.gitkeep` / `.keep`

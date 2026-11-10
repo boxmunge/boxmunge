@@ -4,25 +4,43 @@ Installing a checked tree into a project lives in boxmunge.release.
 """
 from __future__ import annotations
 
+import gzip
 import os
 import posixpath
 import shutil
 import tarfile
 from pathlib import Path
+from typing import IO, Any
 
 
 class BundleError(ValueError):
     """A bundle is malformed or carries content a deploy must not install."""
 
 
-# How far a bundle may expand, checked on the archive's headers before
-# anything is written: a small .tar.gz can otherwise fill the disk under
-# the project's incoming workspace. Far above any project's source tree.
+# How far a bundle may expand, enforced while its archive is read. A small
+# .tar.gz can expand without bound: into files that would fill the disk
+# under the project's incoming workspace, into millions of entries whose
+# headers tarfile holds in memory, or into extended (PAX, GNU long-name)
+# headers that tarfile reads into memory whole. So each entry is checked as
+# its header arrives (_read_members), each extended header before its body
+# is read (_CheckedTarInfo), and the decompressed stream refuses any
+# position past what those limits allow (_LimitedStream), whatever else a
+# header makes tarfile read. Nothing is written, and no more than that is
+# held, before the limits pass.
 MAX_TOTAL_BYTES = 4 * 1024 ** 3
 MAX_MEMBER_BYTES = 2 * 1024 ** 3
 MAX_MEMBERS = 100_000
+# An extended header holds a long path or link, some xattrs, or (git
+# archive's global header) a commit id.
+MAX_EXTENDED_HEADER_BYTES = 1024 ** 2
+MAX_EXTENDED_TOTAL_BYTES = 128 * 1024 ** 2
+# Archive bytes per entry beyond its contents and extended headers: its
+# header block and its padding to a 512-byte block.
+HEADER_ALLOWANCE = 1024
 _SHRINK = ("Leave build output, dependencies and data out of the bundle (list them in "
            ".boxmungeignore), then bundle and upload it again.")
+_EXTENDED = (tarfile.XHDTYPE, tarfile.XGLTYPE, tarfile.SOLARIS_XHDTYPE,
+             tarfile.GNUTYPE_LONGNAME, tarfile.GNUTYPE_LONGLINK)
 
 
 def _size(n: int) -> str:
@@ -32,20 +50,78 @@ def _size(n: int) -> str:
     return f"{n} bytes"
 
 
-def _check_size(members: list[tarfile.TarInfo]) -> None:
-    """Refuse a bundle over MAX_MEMBERS entries, with a file over
-    MAX_MEMBER_BYTES, or expanding past MAX_TOTAL_BYTES."""
-    if len(members) > MAX_MEMBERS:
-        raise BundleError(f"Bundle has {len(members)} entries; a bundle may have at most "
-                          f"{MAX_MEMBERS}. {_SHRINK}")
-    for m in members:
+class _LimitedStream:
+    """A bundle's decompressed archive, for tarfile: refuses any position
+    past the contents, headers and extended headers the limits allow, and
+    counts the extended header bytes read."""
+
+    def __init__(self, raw: IO[bytes]) -> None:
+        self._raw = raw
+        self._limit = (MAX_TOTAL_BYTES + MAX_MEMBERS * HEADER_ALLOWANCE
+                       + MAX_EXTENDED_TOTAL_BYTES)
+        self._extended = 0
+
+    def note_extended(self, info: tarfile.TarInfo) -> None:
+        """An extended header is about to be read: refuse one too large,
+        or one past the total extended headers may take."""
+        if info.size > MAX_EXTENDED_HEADER_BYTES:
+            raise BundleError(f"Bundle has an extended (PAX or long-name) header of "
+                              f"{_size(info.size)}; one may be at most "
+                              f"{_size(MAX_EXTENDED_HEADER_BYTES)}. {_SHRINK}")
+        self._extended += info.size
+        if self._extended > MAX_EXTENDED_TOTAL_BYTES:
+            raise BundleError(f"Bundle's extended (PAX or long-name) headers come to more "
+                              f"than {_size(MAX_EXTENDED_TOTAL_BYTES)}, the most a bundle "
+                              f"may carry. {_SHRINK}")
+
+    def read(self, size: int = -1) -> bytes:
+        left = self._limit - self._raw.tell()
+        data = self._raw.read(left + 1 if size < 0 else min(size, left + 1))
+        if len(data) > left:
+            raise BundleError(f"Bundle's archive runs past {_size(self._limit)}, more "
+                              f"than its limits allow. {_SHRINK}")
+        return data
+
+    def seek(self, offset: int, whence: int = 0) -> int:
+        return self._raw.seek(offset, whence)
+
+    def tell(self) -> int:
+        return self._raw.tell()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._raw, name)
+
+
+class _CheckedTarInfo(tarfile.TarInfo):
+    """Every header tarfile parses (an entry's, and each extended header
+    chained before it) passes _proc_member, before any body is read."""
+
+    def _proc_member(self, tarfile):  # noqa: ANN001 — tarfile's own signature
+        if self.type in _EXTENDED:
+            tarfile.fileobj.note_extended(self)
+        return super()._proc_member(tarfile)
+
+
+def _read_members(tar: tarfile.TarFile) -> list[tarfile.TarInfo]:
+    """Every member, each header checked against the limits as it arrives:
+    at most MAX_MEMBERS entries, no file over MAX_MEMBER_BYTES, and at most
+    MAX_TOTAL_BYTES in all. A sparse member counts at its expanded size."""
+    members: list[tarfile.TarInfo] = []
+    total = 0
+    for m in tar:
+        members.append(m)
+        if len(members) > MAX_MEMBERS:
+            raise BundleError(f"Bundle has more than {MAX_MEMBERS} entries; a bundle may "
+                              f"have at most {MAX_MEMBERS}. {_SHRINK}")
         if m.size > MAX_MEMBER_BYTES:
             raise BundleError(f"Bundle entry '{m.name}' is {_size(m.size)}; a file in a "
                               f"bundle may be at most {_size(MAX_MEMBER_BYTES)}. {_SHRINK}")
-    total = sum(m.size for m in members)
-    if total > MAX_TOTAL_BYTES:
-        raise BundleError(f"Bundle expands to {_size(total)}; a bundle may expand to at "
-                          f"most {_size(MAX_TOTAL_BYTES)}. {_SHRINK}")
+        total += m.size
+        if total > MAX_TOTAL_BYTES:
+            raise BundleError(f"Bundle expands to more than {_size(MAX_TOTAL_BYTES)}; a "
+                              f"bundle may expand to at most {_size(MAX_TOTAL_BYTES)}. "
+                              f"{_SHRINK}")
+    return members
 
 
 def _member_parts(name: str) -> list[str]:
@@ -159,13 +235,14 @@ def extract_bundle(bundle_path: Path, dest: Path) -> Path:
     if not bundle_path.exists():
         raise BundleError(f"Bundle not found: {bundle_path}")
     try:
-        with tarfile.open(bundle_path, "r:gz") as tar:
-            members = tar.getmembers()
-            _check_size(members)
+        with gzip.open(bundle_path, "rb") as raw, \
+                tarfile.open(fileobj=_LimitedStream(raw), mode="r:",
+                             tarinfo=_CheckedTarInfo) as tar:
+            members = _read_members(tar)
             top = _check_members(members)
             # The "data" filter re-checks links against the real filesystem
             # as it extracts: defence in depth behind _check_members.
-            tar.extractall(path=dest, filter="data")
+            tar.extractall(path=dest, members=members, filter="data")
     except BundleError:
         raise
     except (tarfile.TarError, EOFError, OSError) as e:
