@@ -15,7 +15,6 @@ kill at any point is resumed by running userns-rollback again.
 from __future__ import annotations
 
 import os
-import shutil
 from pathlib import Path
 
 from boxmunge.docker_run import run as _run
@@ -37,7 +36,7 @@ from boxmunge.userns.preflight import PreflightRefused, preflight
 from boxmunge.userns.shift import Direction
 from boxmunge.userns.switch import (
     MigrationError, back_to_prior, daemon_json_path, ensure_prior, read_daemon_json,
-    set_caddyfile_mode,
+    remove_docker_tree, set_caddyfile_mode,
 )
 from boxmunge.userns.volumes import data_dir, move, recreate
 
@@ -261,7 +260,7 @@ def _reverse(paths: BoxPaths, j: Journal, daemon: DaemonControl, timers: TimerCo
         save()
     bring_up(paths, rinv, j, save, component=COMPONENT, prefix="rb-project")
     if new_root.is_dir() and not new_root.is_symlink():
-        shutil.rmtree(new_root)
+        remove_docker_tree(new_root)
 
 
 def rollback(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,

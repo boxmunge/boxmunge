@@ -144,7 +144,7 @@ install_trivy() {
 
     # Fetch and dearmor the signing key into the trusted keyrings dir.
     if [[ ! -f /usr/share/keyrings/trivy.gpg ]]; then
-        curl -sSLf --connect-timeout 30 --max-time 120 https://aquasecurity.github.io/trivy-repo/deb/public.key \
+        curl -sSLf --proto =https --proto-redir =https --connect-timeout 30 --max-time 120 https://aquasecurity.github.io/trivy-repo/deb/public.key \
             | gpg --dearmor -o /usr/share/keyrings/trivy.gpg
     fi
 
@@ -489,16 +489,7 @@ echo "========================================================"
 echo "  Installing systemd units"
 echo "========================================================"
 
-cp "${SCRIPT_DIR}/systemd/"*.service /etc/systemd/system/
-cp "${SCRIPT_DIR}/systemd/"*.timer   /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now \
-    boxmunge-backup.timer \
-    boxmunge-health.timer \
-    boxmunge-backup-sync.timer \
-    boxmunge-auto-update.timer \
-    boxmunge-container-update.timer \
-    boxmunge-cve-scan.timer
+bash "${SCRIPT_DIR}/bootstrap/systemd-units.sh" "${SCRIPT_DIR}"
 
 # ---------------------------------------------------------------------------
 # Sudoers: deploy may run exactly `boxmunge-upgrade auto`, `target <version>`

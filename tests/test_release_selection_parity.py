@@ -14,10 +14,11 @@ boxmunge.release_selection). One scenario table runs through three paths:
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from urllib.error import URLError
 
 import pytest
@@ -97,9 +98,7 @@ def _github_entries(releases):
 
 
 def _response(payload):
-    m = MagicMock()
-    m.read.return_value = json.dumps(payload).encode()
-    return m
+    return io.BytesIO(json.dumps(payload).encode())  # read1, as discovery reads
 
 
 def _box(tmp_path, version):

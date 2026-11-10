@@ -43,6 +43,7 @@ import urllib.request
 from typing import Any
 
 from boxmunge.config import ConfigError, auto_update_breakfix_enabled
+from boxmunge.http_read import read_within
 from boxmunge.paths import BoxPaths
 from boxmunge.version_check_url import version_check_base
 from boxmunge.release_selection import (
@@ -55,6 +56,12 @@ from boxmunge.version import read_installed_version, parse_version_string
 
 
 RELEASES_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases"
+# Discovery runs as root, under upgrade.lock (which check-probation skips
+# while it is held), so no answer is read without bounds: the /v1/check
+# answer is a few hundred bytes, GitHub's release list a few hundred KiB.
+ENDPOINT_MAX_BYTES = 64 * 1024
+GITHUB_MAX_BYTES = 8 * 1024 * 1024
+_READ_DEADLINE = 60  # seconds for a whole body; the socket timeout bounds each read
 
 
 class EndpointContractError(ValueError):
@@ -105,13 +112,22 @@ def _check_endpoint(current: str) -> Any:
         raise EndpointContractError(
             f"it redirected to {tracker.redirected_to}, which could not be reached ({e})") from e
     try:
-        raw = resp.read()
+        raw = _read_capped(resp, ENDPOINT_MAX_BYTES)
     except (OSError, http.client.HTTPException) as e:
         raise EndpointContractError(f"its answer broke off while being read ({e!r})") from e
     try:
         return json.loads(raw)
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         raise EndpointContractError(f"its answer is not JSON ({e})") from e
+
+
+def _read_capped(resp: Any, limit: int) -> bytes:
+    """The body, refused past `limit` bytes or past the read deadline (a
+    TimeoutError, an OSError like any other failed read)."""
+    raw = read_within(resp, limit + 1, _READ_DEADLINE)
+    if len(raw) > limit:
+        raise EndpointContractError(f"its answer is larger than {limit} bytes")
+    return raw
 
 
 def _endpoint_candidate(result: dict[str, Any], mode: str) -> dict[str, Any] | None:
@@ -208,7 +224,7 @@ def _check_github(current: str) -> dict[str, Any]:
         headers={"Accept": "application/vnd.github+json", "User-Agent": "boxmunge"},
     )
     resp = urllib.request.urlopen(req, timeout=30)
-    raw = json.loads(resp.read())
+    raw = json.loads(_read_capped(resp, GITHUB_MAX_BYTES))
     if not isinstance(raw, list):
         raise EndpointContractError("GitHub releases response is not a list")
     return github_check_response(parse_github_releases(raw), current)

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from boxmunge import http_read
 from boxmunge.commands import security_actions, security_kev, security_scan_core
 from boxmunge.config import ConfigError, load_config
 from boxmunge.cve import kev_refresh
@@ -37,8 +38,9 @@ class _Resp:
     def __exit__(self, *exc):
         return False
 
-    def read(self, limit: int = -1) -> bytes:
-        return self._body
+    def read1(self, limit: int = -1) -> bytes:
+        body, self._body = self._body, b""
+        return body
 
 
 def _ids(n: int) -> list[str]:
@@ -135,6 +137,27 @@ def test_timeouts_and_non_json_answers_are_named(tmp_path, monkeypatch):
     assert result.failures[0].error == "timed out after 30s"
     assert result.failures[1].error.startswith("response is not JSON")
     assert not result.needs_alert  # nothing answered: the staleness alert covers it
+
+
+def test_a_source_that_trickles_is_cut_off_at_the_deadline(tmp_path, monkeypatch):
+    """The socket timeout bounds each read, not the whole download: a source
+    sending a byte inside every timeout would hold the nightly scan until its
+    unit's timeout killed it, and every project not yet scanned with it."""
+    paths = BoxPaths(root=tmp_path)
+    now = [0.0]
+    monkeypatch.setattr(http_read.time, "monotonic", lambda: now[0])
+
+    class Trickle(_Resp):
+        def read1(self, limit: int = -1) -> bytes:
+            now[0] += 29
+            return b"{"
+
+    monkeypatch.setattr(kev_refresh, "_open", lambda req: Trickle(b""))
+    result = refresh_from(paths, (CISA,))
+    assert result.failures[0].kind == "unreachable"
+    assert result.failures[0].error == (
+        f"the response did not finish within {kev_refresh.KEV_FETCH_DEADLINE}s")
+    assert now[0] <= kev_refresh.KEV_FETCH_DEADLINE + 29
 
 
 # ---------- configuration ----------

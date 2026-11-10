@@ -33,12 +33,12 @@ RUN case "${TARGETARCH}" in \
         ca-certificates \
         curl \
         unzip \
-    && curl -fsSL "https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-linux-${TARGETARCH}.tar.gz" \
+    && curl -fsSL --proto =https --proto-redir =https "https://github.com/FiloSottile/age/releases/download/v${AGE_VERSION}/age-v${AGE_VERSION}-linux-${TARGETARCH}.tar.gz" \
         -o /tmp/age.tar.gz \
     && echo "${age_sha256}  /tmp/age.tar.gz" | sha256sum -c - \
     && tar xzf /tmp/age.tar.gz -C /usr/local/bin --strip-components=1 age/age age/age-keygen \
     && rm /tmp/age.tar.gz \
-    && curl -fsSL "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-${TARGETARCH}.zip" \
+    && curl -fsSL --proto =https --proto-redir =https "https://downloads.rclone.org/v${RCLONE_VERSION}/rclone-v${RCLONE_VERSION}-linux-${TARGETARCH}.zip" \
         -o /tmp/rclone.zip \
     && echo "${rclone_sha256}  /tmp/rclone.zip" | sha256sum -c - \
     && unzip -q /tmp/rclone.zip -d /tmp \

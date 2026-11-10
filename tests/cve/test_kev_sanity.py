@@ -36,8 +36,9 @@ class _FakeResp:
     def __exit__(self, *exc):
         return False
 
-    def read(self, limit: int = -1) -> bytes:
-        return self._body if limit < 0 else self._body[:limit]
+    def read1(self, limit: int = -1) -> bytes:
+        body, self._body = (self._body, b"") if limit < 0 else (self._body[:limit], self._body[limit:])
+        return body
 
 
 def _feed(ids, released=RELEASED) -> bytes:

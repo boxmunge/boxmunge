@@ -102,17 +102,17 @@ load_active_slot() {
         case "$target" in
             "$BOXMUNGE_ROOT/env-a") from_link="a" ;;
             "$BOXMUNGE_ROOT/env-b") from_link="b" ;;
-            *) die "env-active points at '$(printable "$target")', not env-a or env-b" ;;
+            *) die_logged "env-active points at '$(printable "$target")', not env-a or env-b; point it back at the live venv as supervisor: sudo ln -sfn $BOXMUNGE_ROOT/env-<a or b> $BOXMUNGE_ROOT/env-active" ;;
         esac
     fi
     if [[ -n "$from_file" && -n "$from_link" && "$from_file" != "$from_link" ]]; then
         [[ -e "$(inflight_marker a)" || -e "$(inflight_marker b)" || -e "$(rollback_marker a)" || -e "$(rollback_marker b)" ]] \
-            || die "active-slot says '$from_file' but env-active points at env-$from_link; refusing to guess which venv is live"
+            || die_logged "active-slot says '$from_file' but env-active points at env-$from_link; refusing to guess which venv is live. env-active is root's and names the live venv: unless an upgrade is running, put it back as supervisor: echo $from_link | sudo tee $ACTIVE_SLOT_FILE"
         log "WARN: active-slot disagrees with env-active after an interrupted swap; following env-active (slot $from_link)"
         write_active_slot_file "$from_link"
     fi
     ACTIVE_SLOT="${from_link:-$from_file}"
-    [[ -n "$ACTIVE_SLOT" ]] || die "No active slot: neither $ACTIVE_SLOT_FILE nor $BOXMUNGE_ROOT/env-active exists"
+    [[ -n "$ACTIVE_SLOT" ]] || die_logged "No active slot: neither $ACTIVE_SLOT_FILE nor $BOXMUNGE_ROOT/env-active exists; reinstall as root from the installed release's GitHub release (sudo bash boxmunge-install.sh)"
 }
 
 standby_slot() { [[ "$ACTIVE_SLOT" == "a" ]] && echo "b" || echo "a"; }
@@ -137,14 +137,31 @@ active_venv() { echo "$BOXMUNGE_ROOT/env-$ACTIVE_SLOT"; }
 # anything but a plain regular file, put them on fds 9 and 8 and run this shim
 # again with the same arguments. That run finds BM_UPGRADE_LOCK_FD=9 and
 # checks fds 9 and 8 are the two lock files before it takes the flocks.
+#
+# Deploy can also lock the legacy file, root's or one it put there, to stall
+# every upgrade and probation check. Shims up to 0.10.1 made it 0644, which
+# deploy can open: the opener makes it 0600 on every run, so deploy cannot
+# newly open it. One deploy opened before that keeps its lock (an open
+# descriptor is not revoked); check-probation counts the skips that causes
+# (lock_busy_skip). A lock file that is not root's is replaced
+# (replace_foreign_legacy_lock); if deploy wins a race and plants one between
+# that and the open, the opener runs this shim again with
+# BM_UPGRADE_LOCK_FOREIGN naming it, counted like a held lock.
 acquire_lock() {
     [[ "$LOCK_HELD" -eq 1 ]] && return 0
+    if [[ -n "${BM_UPGRADE_LOCK_FOREIGN:-}" ]]; then
+        local foreign="$BM_UPGRADE_LOCK_FOREIGN"
+        unset BM_UPGRADE_LOCK_FOREIGN
+        [[ "${1:-}" != "skip" ]] || lock_busy_skip "$foreign was not root's when opened"
+        die_logged "$foreign was replaced by a file that is not root's as it was opened (the deploy user is racing for it to stall upgrades); refusing to lock it. Retry; if it keeps happening, find what runs as deploy and stop it."
+    fi
     if [[ "${BM_UPGRADE_LOCK_FD:-}" != 9 ]]; then
         refuse_symlink "$UPGRADE_ROOT_DIR"
         [[ -d "$UPGRADE_ROOT_DIR" ]] || mkdir -m 0700 "$UPGRADE_ROOT_DIR"
         mkdir -p "$STATE_DIR"
         refuse_symlink "$LOCK_FILE"
         refuse_symlink "$LEGACY_LOCK_FILE"
+        replace_foreign_legacy_lock
         open_lock_and_reexec
     fi
     unset BM_UPGRADE_LOCK_FD  # children inherit fds 9 and 8, never the claim that they are checked
@@ -159,10 +176,45 @@ for fd, path in ((9, sys.argv[1]), (8, sys.argv[2])):
         sys.exit(f"fd {fd} is not {path}")' "$LOCK_FILE" "$LEGACY_LOCK_FILE" 2>&1)" \
         || die "$why (it was replaced, or the descriptor came from elsewhere); refusing to lock it. Remove it and re-run."
     if ! flock -n 9 || ! flock -n 8; then
-        [[ "${1:-}" == "skip" ]] && { log "Another upgrade is in progress; skipping"; exit 0; }
+        [[ "${1:-}" != "skip" ]] || lock_busy_skip "upgrade.lock is held"
         die "Another upgrade is in progress"
     fi
+    rm -f "$LOCK_SKIPS_FILE"
     LOCK_HELD=1
+}
+
+# replace_foreign_legacy_lock: the legacy lock is in deploy-writable
+# upgrade-state/, so deploy can unlink root's and hold a flock on its own
+# file at the name, stalling every upgrade and probation check. Only root
+# runs upgrades, so a lock file that is not root's is never a real one: it is
+# removed (unlinking a name never follows a link) and recreated as root's,
+# with a warning. One deploy swaps in between is refused (open_lock_and_reexec).
+replace_foreign_legacy_lock() {
+    [[ -e "$LEGACY_LOCK_FILE" && ! -O "$LEGACY_LOCK_FILE" ]] || return 0
+    log "WARN: $LEGACY_LOCK_FILE is not root's (the deploy user replaced it); replacing it with root's"
+    bm_log warn upgrade "legacy upgrade lock not root's: replaced" "{}"
+    rm -f "$LEGACY_LOCK_FILE"
+}
+
+# lock_busy_skip <why>: check-probation could not take upgrade.lock (<why>),
+# and retries on the next health-timer fire (every five minutes). One skip is routine;
+# LOCK_SKIPS_ALERT in a row (an hour) is not: no upgrade holds the lock that
+# long, so something else does (deploy can hold the legacy one), and no
+# probation is promoted or rolled back meanwhile. The count is kept in
+# root-only upgrade-root/ (only the health timer skips, one run at a time),
+# and an error goes to the operational log at every LOCK_SKIPS_ALERT.
+LOCK_SKIPS_FILE="$UPGRADE_ROOT_DIR/lock-skips"
+LOCK_SKIPS_ALERT=12
+lock_busy_skip() {
+    local count
+    count="$(cat "$LOCK_SKIPS_FILE" 2>/dev/null)" || true
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    count=$((count + 1))
+    write_root_file "$LOCK_SKIPS_FILE" "$count"
+    log "Another upgrade is in progress; skipping ($count in a row: $1)"
+    [[ $((count % LOCK_SKIPS_ALERT)) -ne 0 ]] || bm_log error upgrade \
+        "check-probation could not take upgrade.lock $count times in a row (last: $1), so no probation is promoted or rolled back. Find the holder as supervisor: sudo lslocks | grep upgrade.lock"
+    exit 0
 }
 
 # open_lock_and_reexec: see acquire_lock. Replaces this process; prints a
@@ -184,6 +236,12 @@ for path, target in zip(locks, (9, 8)):
     st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
         fatal(path, "is not a plain regular file")
+    if st.st_uid != os.geteuid():
+        os.environ.pop("BM_UPGRADE_LOCK_FD", None)
+        os.environ["BM_UPGRADE_LOCK_FOREIGN"] = path
+        os.execv(shell, [shell, shim, *args])
+    if stat.S_IMODE(st.st_mode) != 0o600:
+        os.fchmod(fd, 0o600)  # shims up to 0.10.1 made the legacy one 0644
     os.set_blocking(fd, True)
     if fd != target:
         os.dup2(fd, target)
@@ -201,10 +259,10 @@ is_blocklisted() {
     refuse_symlink "$BLOCKLIST_FILE"
     [[ -e "$BLOCKLIST_FILE" ]] || return 1
     content="$(read_untrusted "$BLOCKLIST_FILE")" || exit 1
-    BM_VERSION="$1" BM_BLOCKLIST="$content" BM_SEMVER_RE="$SEMVER_RE" python3 - <<'PYBL' || rc=$?
+    printf '%s' "$content" | BM_VERSION="$1" BM_SEMVER_RE="$SEMVER_RE" python3 -c '
 import json, os, re, sys
 try:
-    bl = json.loads(os.environ["BM_BLOCKLIST"])
+    bl = json.loads(sys.stdin.read())
 except ValueError as e:
     print(f"blocklist unreadable: {e}", file=sys.stderr)
     sys.exit(3)
@@ -213,7 +271,7 @@ if not isinstance(bl, dict) or not all(isinstance(k, str) and pattern.fullmatch(
     print("blocklist is not an object keyed by semver versions", file=sys.stderr)
     sys.exit(3)
 sys.exit(0 if os.environ["BM_VERSION"] in bl else 1)
-PYBL
+' || rc=$?
     case "$rc" in
         0|1) return "$rc" ;;
         *) die "$BLOCKLIST_FILE is malformed; inspect it and repair or remove it" ;;
