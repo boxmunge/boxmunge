@@ -179,18 +179,27 @@ def withhold(offers: dict[str, dict[str, Any] | None],
 
     A held security or break-fix candidate is withdrawn, not replaced by an
     older one, except that an unheld security candidate stands in for a held
-    break-fix candidate. ``latest`` is left as it is (the box skips a held
-    one; see upgrade_discovery). Returns (offers, held versions, each once).
+    break-fix candidate. A held ``latest`` (a feature release too) stays in
+    the offers and is listed as held; the box skips it (see
+    upgrade_discovery). Returns (offers, held versions, each once).
     """
-    security, breakfix = offers["security"], offers["breakfix"]
+    security, breakfix, latest = offers["security"], offers["breakfix"], offers["latest"]
     held: list[str] = []
-    if security and is_held(security["version"]):
-        held.append(security["version"])
+
+    def hold(version: str) -> bool:
+        if version in held:
+            return True
+        if is_held(version):
+            held.append(version)
+            return True
+        return False
+
+    if security and hold(security["version"]):
         security = None
-    if breakfix and (breakfix["version"] in held or is_held(breakfix["version"])):
-        if breakfix["version"] not in held:
-            held.append(breakfix["version"])
+    if breakfix and hold(breakfix["version"]):
         breakfix = security
+    if latest:
+        hold(latest["version"])
     return {**offers, "security": security, "breakfix": breakfix}, held
 
 
