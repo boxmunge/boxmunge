@@ -1877,6 +1877,9 @@ self-test
 
 ## Upgrading the Platform
 
+A box still on 0.9 or 0.10 cannot get here by `upgrade` alone: follow
+[UPGRADING.md](UPGRADING.md), "Upgrading from 0.9 or 0.10".
+
 Apply platform updates:
 
 ```
