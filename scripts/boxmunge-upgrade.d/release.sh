@@ -76,7 +76,7 @@ FETCH_ERROR=""
 # download <dest> <url>: every download runs with upgrade.lock held, so a
 # stalled connection must not park the upgrade (and check-probation, which
 # skips while the lock is held) indefinitely.
-download() { curl -sLf -o "$1" --connect-timeout 30 --max-time 600 "$2"; }
+download() { curl -sLf -o "$1" --connect-timeout 30 --max-time 600 --proto =https --proto-redir =https "$2"; }
 # shellcheck disable=SC2034  # FETCH_STEP is read by upgrade_to, in the shim itself
 fetch_failed() { FETCH_STEP="$1"; FETCH_ERROR="$2"; }
 
