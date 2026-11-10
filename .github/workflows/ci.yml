@@ -87,9 +87,11 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install pinned service and test dependencies
+        # The service's own lock last, so where the two pin a package
+        # differently (click, say) the tests run what the service ships.
         run: |
-          pip install --require-hashes -r services/version-check/requirements.txt
           pip install --require-hashes -r requirements-dev.txt
+          pip install --require-hashes -r services/version-check/requirements.txt
       - name: Version-check service tests
         run: cd services/version-check && python -m pytest tests -q
 
