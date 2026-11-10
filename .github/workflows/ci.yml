@@ -92,10 +92,11 @@ jobs:
     # Split into shards of whole test files that run in parallel, one runner
     # (and one Docker daemon) each; tests/shard.py balances them by measured
     # time. Every shard's job is `integration` to ci-ok.
-    # The heavy Docker jobs always run and report (see arm64), and skip their
-    # work only for a change made solely of files no test of theirs reads:
-    # the client, the version-check service, contributor docs. Any other path
-    # runs them, including one added later and never listed here.
+    # The heavy Docker jobs always run and report (see arm64). On a pull
+    # request they skip their work only for a change made solely of files no
+    # test of theirs reads: the client, the version-check service,
+    # contributor docs. Any other path runs them, including one added later
+    # and never listed here. A push to main always runs them.
     name: integration (${{ matrix.shard }}/3)
     runs-on: ubuntu-latest
     strategy:
@@ -111,12 +112,21 @@ jobs:
       - name: Can this change affect the Docker tests?
         id: scope
         env:
-          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-        # The same paths as userns-dind's scope step.
-        run: >-
-          bash scripts/ci-scope.sh --outside "$BASE" cli/ services/version-check/
-          docs/DEVELOPMENT.md docs/PLUGIN_API.md README.md CONTRIBUTING.md
-          CODE_OF_CONDUCT.md SECURITY.md INSTALL.md
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        # Only a pull request may skip: a push to main runs these tiers in
+        # full. The same paths as userns-dind's scope step; the unit test
+        # test_nothing_the_docker_tiers_read_depends_on_a_skippable_path keeps
+        # every listed path out of what these tests read.
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "A push to main runs the Docker tests in full."
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bash scripts/ci-scope.sh --outside "$BASE" cli/ services/version-check/ \
+            docs/DEVELOPMENT.md docs/PLUGIN_API.md README.md CONTRIBUTING.md \
+            CODE_OF_CONDUCT.md SECURITY.md INSTALL.md
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         if: steps.scope.outputs.relevant == 'true'
         with:
@@ -228,12 +238,21 @@ jobs:
       - name: Can this change affect the Docker tests?
         id: scope
         env:
-          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-        # The same paths as integration's scope step.
-        run: >-
-          bash scripts/ci-scope.sh --outside "$BASE" cli/ services/version-check/
-          docs/DEVELOPMENT.md docs/PLUGIN_API.md README.md CONTRIBUTING.md
-          CODE_OF_CONDUCT.md SECURITY.md INSTALL.md
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        # Only a pull request may skip: a push to main runs these tiers in
+        # full. The same paths as integration's scope step; the unit test
+        # test_nothing_the_docker_tiers_read_depends_on_a_skippable_path keeps
+        # every listed path out of what these tests read.
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "A push to main runs the Docker tests in full."
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          bash scripts/ci-scope.sh --outside "$BASE" cli/ services/version-check/ \
+            docs/DEVELOPMENT.md docs/PLUGIN_API.md README.md CONTRIBUTING.md \
+            CODE_OF_CONDUCT.md SECURITY.md INSTALL.md
       - name: Remapped-daemon tests (privileged dind)
         if: steps.scope.outputs.relevant == 'true'
         run: >-
