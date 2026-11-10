@@ -182,9 +182,10 @@ major, for releases at least 7 days old (a pip major waits 30). See `.github/dep
    `X.Y.0`.
 2. `.github/workflows/release.yml` checks the tag with `scripts/release-lint.py` (listed in
    `releases.json` with a valid class, matching `pyproject.toml`), then, in a read-only job, runs
-   the tests, builds the installer and bundle, and generates an SBOM. A separate job holding the
-   write and signing tokens signs `SHA256SUMS` with cosign (keyless, tied to this workflow and
-   tag), creates a draft release whose title and notes carry the class marker (and `[breaking]`
+   the tests, builds the installer and bundle, and generates an SBOM (`scripts/generate-sbom.sh`:
+   the package and every hash-pinned dependency a box installs, plus age, rclone and the images
+   boxes pull, validated as CycloneDX). A separate job holding the write and signing tokens
+   signs `SHA256SUMS` with cosign (keyless, tied to this workflow and tag), creates a draft release whose title and notes carry the class marker (and `[breaking]`
    for a breaking release) generated from `releases.json`, verifies the draft carries exactly
    those markers, and publishes it. Any failure, including signing, fails the workflow. The notes
    are that generated preamble followed by GitHub's generated changelog, the pull requests since
