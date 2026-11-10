@@ -3,7 +3,7 @@
 # hostile values in deploy-writable upgrade-state before they reach an
 # executable path or an rm -rf.
 # pass() always returns 0, so "cond && pass || fail" is a safe if/else here.
-# shellcheck disable=SC2015
+# shellcheck disable=SC2015,SC2016  # SC2016: mock bodies are literal bash
 set -euo pipefail
 # shellcheck source=tests/shim/lib.sh
 source "$(dirname "$0")/lib.sh"
@@ -23,10 +23,28 @@ for bad in "../../tmp/x" "c" "a b" "a\\nb" "ab"; do
     drop_root
 done
 
+# record_bm_log: both slots' pythons record what bm_log writes (before the
+# live slot is settled, either may write it).
+record_bm_log() {
+    local s
+    for s in a b; do
+        printf '%s\n' '#!/usr/bin/env bash' \
+            'if [[ "$1" == "-" ]]; then cat >/dev/null; echo "bm_log $BM_LEVEL $BM_MSG" >> "$BOXMUNGE_ROOT/calls"; fi' \
+            > "$BOXMUNGE_ROOT/env-$s/bin/python"
+    done
+}
+logged() { [[ "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" == *"bm_log error $1"* ]]; }
+
 new_root a
+record_bm_log
 echo "b" > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
 run_shim check-probation
 expect 1 "refusing to guess" "active-slot disagreeing with env-active is refused"
+[[ "$OUT" == *"echo a | sudo tee $BOXMUNGE_ROOT/upgrade-state/active-slot"* ]] \
+    && pass "the refusal names the fix" || fail "no fix named: $OUT"
+logged "active-slot says 'b' but env-active points at env-a" \
+    && pass "the refusal is in the operational log (the health timer drops stderr)" \
+    || fail "not logged: $(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)"
 [[ -d "$BOXMUNGE_ROOT/env-a" ]] && pass "live env-a survives a forged active-slot" \
     || fail "forged active-slot made the shim delete the live venv"
 drop_root
@@ -41,14 +59,18 @@ drop_root
 new_root a
 rm "$BOXMUNGE_ROOT/env-active"
 ln -s /tmp "$BOXMUNGE_ROOT/env-active"
+record_bm_log
 run_shim check-probation
 expect 1 "not env-a or env-b" "env-active pointing elsewhere is refused"
+logged "env-active points at" && pass "that refusal is logged too" || fail "not logged"
 drop_root
 
 new_root a
 rm "$BOXMUNGE_ROOT/env-active" "$BOXMUNGE_ROOT/upgrade-state/active-slot"
+record_bm_log
 run_shim check-probation
 expect 1 "No active slot" "missing active slot is refused, not defaulted"
+logged "No active slot" && pass "that refusal is logged too" || fail "not logged"
 drop_root
 
 # The env-active symlink alone is enough (it is root-owned).

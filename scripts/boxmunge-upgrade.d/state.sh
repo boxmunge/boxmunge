@@ -102,17 +102,17 @@ load_active_slot() {
         case "$target" in
             "$BOXMUNGE_ROOT/env-a") from_link="a" ;;
             "$BOXMUNGE_ROOT/env-b") from_link="b" ;;
-            *) die "env-active points at '$(printable "$target")', not env-a or env-b" ;;
+            *) die_logged "env-active points at '$(printable "$target")', not env-a or env-b; point it back at the live venv as supervisor: sudo ln -sfn $BOXMUNGE_ROOT/env-<a or b> $BOXMUNGE_ROOT/env-active" ;;
         esac
     fi
     if [[ -n "$from_file" && -n "$from_link" && "$from_file" != "$from_link" ]]; then
         [[ -e "$(inflight_marker a)" || -e "$(inflight_marker b)" || -e "$(rollback_marker a)" || -e "$(rollback_marker b)" ]] \
-            || die "active-slot says '$from_file' but env-active points at env-$from_link; refusing to guess which venv is live"
+            || die_logged "active-slot says '$from_file' but env-active points at env-$from_link; refusing to guess which venv is live. env-active is root's and names the live venv: unless an upgrade is running, put it back as supervisor: echo $from_link | sudo tee $ACTIVE_SLOT_FILE"
         log "WARN: active-slot disagrees with env-active after an interrupted swap; following env-active (slot $from_link)"
         write_active_slot_file "$from_link"
     fi
     ACTIVE_SLOT="${from_link:-$from_file}"
-    [[ -n "$ACTIVE_SLOT" ]] || die "No active slot: neither $ACTIVE_SLOT_FILE nor $BOXMUNGE_ROOT/env-active exists"
+    [[ -n "$ACTIVE_SLOT" ]] || die_logged "No active slot: neither $ACTIVE_SLOT_FILE nor $BOXMUNGE_ROOT/env-active exists; reinstall as root from the installed release's GitHub release (sudo bash boxmunge-install.sh)"
 }
 
 standby_slot() { [[ "$ACTIVE_SLOT" == "a" ]] && echo "b" || echo "a"; }

@@ -80,7 +80,17 @@ die() { log "FATAL: $*"; exit 1; }
 # `2>/dev/null || true`.
 #
 # Levels: info | warn | error. Detail JSON defaults to {}.
-bm_log() { bm_log_via "$(active_venv)/bin/python" "$@" || true; }
+#
+# Through the live slot's python. Before load_active_slot has settled which
+# slot that is (its own refusals), through either slot's: both are root's.
+bm_log() {
+    local slot slots=(a b)
+    [[ -z "${ACTIVE_SLOT:-}" ]] || slots=("$ACTIVE_SLOT")
+    for slot in "${slots[@]}"; do
+        bm_log_via "$BOXMUNGE_ROOT/env-$slot/bin/python" "$@" && return 0
+    done
+    return 0
+}
 
 # bm_log_via <python> <level> <component> <msg> [<detail-json>]: bm_log through
 # that venv's python, returning whether it was written.
