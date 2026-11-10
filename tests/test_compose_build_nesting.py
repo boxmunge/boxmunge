@@ -37,6 +37,13 @@ REFUSED = {
     "context inside rw bind": {"build": "./data/ctx"},
     "context mapping inside rw bind": {"build": {"context": "./data/ctx"}},
     "dockerfile inside rw bind": {"build": {"context": ".", "dockerfile": "data/Dockerfile"}},
+    # `build: ./app` + `./app:/app` read-write. The context root itself
+    # cannot be swapped and BuildKit sends links inside it as links, but the
+    # Dockerfile is the container's to write (a release may not ship content
+    # for a read-write mount, release._check): `COPY --from=` another
+    # project's image, never scanned, reads that image into this one; and a
+    # `dockerfile:` subdirectory swapped for a link is followed.
+    "context is the rw bind (./app layout)": {"build": "./data"},
     "dockerfile directory is the rw bind": {
         "build": {"context": "./data", "dockerfile": "Dockerfile"}},
     "additional context inside rw bind": {
