@@ -20,14 +20,16 @@ _STDIN_SECRETS = "'secrets set' with the value on stdin"
 
 
 def _read_secret_value(key: str) -> str | None:
-    """The value for KEY: prompted without echo at a terminal, else one stdin line."""
+    """The value for KEY: prompted without echo at a terminal, else all of
+    stdin less one trailing newline, as the server reads it (a second line
+    is then refused as a line break, not dropped)."""
     if sys.stdin.isatty():
         return getpass.getpass(f"Value for {key}: ")
-    line = sys.stdin.readline()
-    if not line:
+    piped = sys.stdin.read()
+    if not piped:
         print(f"ERROR: no value for {key} on stdin.", file=sys.stderr)
         return None
-    return line.rstrip("\n")
+    return piped.removesuffix("\n")
 
 
 def _has_line_break(key: str, value: str) -> bool:
@@ -108,9 +110,11 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "secrets", help="Manage this project's secrets on the server",
         description="Run 'secrets <action> <project>' on the server. Secrets live "
                     "in the project's secrets.env on the server, never in a bundle. "
-                    "'set KEY' reads the value from a terminal prompt (no echo) or "
-                    "from one line of stdin, and sends it to the server on ssh's "
-                    "stdin: it is in no shell history and in no command line, so "
+                    "'set KEY' reads the value from a terminal prompt (no echo) or, "
+                    "when standard input is not a terminal, from it: one line, its "
+                    "trailing newline dropped, a second line refused (e.g. 'pass show "
+                    "myapp/token | boxmunge secrets set API_TOKEN'). The value goes "
+                    "to the server on ssh's stdin: it is in no shell history and in no command line, so "
                     "process listings (ps) here and on the server do not show it. "
                     "'set KEY=VALUE' still sends it that way, but the value is then "
                     "in your shell history and in this command's own process "
@@ -144,7 +148,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                     "The server's restricted shell decides what is allowed; run "
                     "'boxmunge remote help' for its command list. Commands that ask "
                     "before acting (pause, resume, recover, restore, rollback, "
-                    "inbox clean, project-delete) ask at a terminal; without one, "
-                    "add --yes.")
+                    "inbox clean, project-delete) ask at a terminal; when standard "
+                    "input is not a terminal (a script, CI), add --yes, or they are "
+                    "refused before anything is sent.")
     p.add_argument("command", nargs=argparse.REMAINDER, metavar="COMMAND [ARGS...]")
     p.set_defaults(func=_cmd_remote)

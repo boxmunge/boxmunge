@@ -65,6 +65,24 @@ def test_secrets_set_refuses_a_value_with_a_line_break(project, stdin_server, ca
     assert stdin_server.calls() == []
 
 
+@pytest.mark.parametrize("piped", ["first\nsecond\n", "first\nsecond", "first\n\n"])
+def test_secrets_set_refuses_more_than_one_line_on_stdin(project, stdin_server, monkeypatch,
+                                                          piped, capsys) -> None:
+    """Only one trailing newline is the line's end; anything after it would
+    be silently dropped, so it is refused as the server refuses it."""
+    monkeypatch.setattr("sys.stdin", io.StringIO(piped))
+    assert run_cli(["secrets", "set", "API_KEY"]) == 2
+    assert "line break" in capsys.readouterr().err
+    assert _server_argv(stdin_server) == []
+
+
+def test_secrets_set_takes_a_value_without_a_trailing_newline(project, stdin_server,
+                                                              monkeypatch) -> None:
+    monkeypatch.setattr("sys.stdin", io.StringIO("s3cret"))
+    assert run_cli(["secrets", "set", "API_KEY"]) == 0
+    assert stdin_server.stdins("ssh")[-1] == "s3cret\n"
+
+
 def test_secrets_set_is_refused_by_an_older_server_before_the_value_is_sent(
         project, fake_remote, monkeypatch, capsys) -> None:
     """The fixture's server is 0.11.0: it would take the value only in argv."""
