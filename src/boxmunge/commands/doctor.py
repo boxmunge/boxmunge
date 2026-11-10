@@ -120,17 +120,17 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
     except SystemContainerError as e:
         check("System container (age, rclone)", False, str(e))
 
-    # Caddy container
+    # Caddy container: the `caddy` service of the platform's `caddy` compose
+    # project, found by its labels (no compose file to parse).
     if docker_available:
+        from boxmunge import compose_inventory
+        from boxmunge.docker_run import DockerError
         try:
-            result = subprocess.run(
-                ["docker", "compose", "ps", "-q", "caddy"],
-                cwd=paths.caddy, capture_output=True, text=True, check=False,
-                env=docker_env(),
-            )
-            caddy_running = bool(result.stdout.strip())
-            check("Caddy container running", caddy_running)
-        except (FileNotFoundError, OSError):
+            running = compose_inventory.running_inventory("caddy")
+            check("Caddy container running", running.is_running("caddy", "caddy"))
+        except DockerError as e:
+            check("Caddy container running", False, str(e))
+        except OSError:
             warn("Caddy container running", "Could not check")
 
     # Caddy config valid

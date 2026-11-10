@@ -1,11 +1,13 @@
 """boxmunge check <project> — run health checks."""
 
+import functools
 import json
 import subprocess
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from boxmunge import compose_inventory
 from boxmunge.commands.argv import parse_args, require_project_name
 from boxmunge.commands.check_holds import tick_hold
 from boxmunge.commands.health_state import (
@@ -25,7 +27,11 @@ from boxmunge.paths import BoxPaths
 from boxmunge.redeploy_hint import deploy_ways
 
 if TYPE_CHECKING:
+    from boxmunge.compose_inventory import RunningInventory
     from boxmunge.staged_release import ComposeTarget
+
+    # The containers running on the box, listed once per check-all tick.
+    TickListing = Callable[[], RunningInventory]
 
 
 def _smoke_one(container: str, script: str, svc_name: str) -> SmokeResult:
@@ -69,6 +75,7 @@ def run_smoke_in_container(
     *,
     logs_target: "ComposeTarget | None" = None,
     hint: "Callable[[str], str | None] | None" = None,
+    tick: "TickListing | None" = None,
 ) -> SmokeResult:
     """Execute per-service smoke tests inside their running containers.
 
@@ -87,9 +94,11 @@ def run_smoke_in_container(
     production's compose files in ``project_dir``. ``hint(service)`` may add
     a line about the failing service (deploy's default-user hint).
 
+    ``tick`` is check-all's listing of the whole box, taken once per tick;
+    without it the project's own containers are listed.
+
     Returns the first failing result, or ok if all pass.
     """
-    from boxmunge.docker_containers import running_by_service
     from boxmunge.docker_run import DockerError
 
     services = manifest.get("services", {})
@@ -97,8 +106,16 @@ def run_smoke_in_container(
     smoke_services = {n: s["smoke"] for n, s in services.items() if s.get("smoke")}
     if not smoke_services:
         return SmokeResult(status="ok", message="")
+    def listed() -> dict[str, list[str]]:
+        return compose_inventory.running_inventory(compose_project).services(compose_project)
+
     try:
-        targets = running_by_service(compose_project)
+        targets = listed() if tick is None else tick().services(compose_project)
+        if tick is not None and not smoke_services.keys() <= targets.keys():
+            # The tick's listing predates this project's lock: a deploy that
+            # ended since may have recreated the service. Ask before saying
+            # it has no container.
+            targets = listed()
     except DockerError as e:
         return _cannot_run(f"cannot list the containers of {compose_project}: {e}")
 
@@ -148,11 +165,11 @@ def run_check(project_name: str, paths: BoxPaths, verbose: bool = True) -> int:
     return check_with_reason(project_name, paths, verbose)[0]
 
 
-def check_with_reason(project_name: str, paths: BoxPaths,
-                  verbose: bool = True) -> tuple[int, str]:
+def check_with_reason(project_name: str, paths: BoxPaths, verbose: bool = True, *,
+                      tick: "TickListing | None" = None) -> tuple[int, str]:
     """run_check's status, and the smoke message that decided it ("" when
     smoke passed or did not run): check-all records the very failure that
-    set the status, from the one smoke run."""
+    set the status, from the one smoke run. ``tick`` as run_smoke_in_container."""
     project_dir = paths.project_dir(project_name)
     manifest_path = paths.project_manifest(project_name)
 
@@ -214,9 +231,7 @@ def check_with_reason(project_name: str, paths: BoxPaths,
     has_smoke = any(svc.get("smoke") for svc in manifest.get("services", {}).values())
     if has_smoke:
         compose_files = ["compose.yml", "compose.boxmunge.yml"]
-        result = run_smoke_in_container(
-            project_dir, manifest, compose_files,
-        )
+        result = run_smoke_in_container(project_dir, manifest, compose_files, tick=tick)
         if verbose:
             if result.status == "ok":
                 print(f"  smoke:    in-container -> passed")
@@ -356,9 +371,13 @@ def run_check_all(paths: BoxPaths, *, read_only: bool) -> int:
         print("No projects to check.")
         return worst
 
+    # One `docker ps` answers every project's "which containers run each
+    # service", taken at the first smoke that needs it. A failed listing is
+    # not cached: the next project asks again and reports its own failure.
+    tick = functools.cache(compose_inventory.running_inventory)
     for name in projects:
         try:
-            worst = max(worst, _check_project(name, paths, read_only))
+            worst = max(worst, _check_project(name, paths, read_only, tick))
         except PROJECT_INPUT_ERRORS as e:
             report_project_failure("check-all", name, e, paths)
             failed.append(name)
@@ -384,7 +403,8 @@ def _host_config_usable(paths: BoxPaths) -> bool:
     return True
 
 
-def _check_project(name: str, paths: BoxPaths, read_only: bool) -> int:
+def _check_project(name: str, paths: BoxPaths, read_only: bool,
+                   tick: "TickListing | None" = None) -> int:
     """Check one project unless it is blocked or locked. Returns its status."""
     # Maintenance window: a deploy/stage/promote/restore in progress
     # holds the project lock. Stage transiently stops the prod container
@@ -395,7 +415,7 @@ def _check_project(name: str, paths: BoxPaths, read_only: bool) -> int:
     # able to start underneath us — never act on a transient state.
     try:
         with project_lock(name, paths):
-            return _check_one(name, paths, read_only)
+            return _check_one(name, paths, read_only, tick)
     except LockError:
         log_operation(
             "check-all",
@@ -405,7 +425,8 @@ def _check_project(name: str, paths: BoxPaths, read_only: bool) -> int:
         return 0
 
 
-def _check_one(name: str, paths: BoxPaths, read_only: bool) -> int:
+def _check_one(name: str, paths: BoxPaths, read_only: bool,
+               tick: "TickListing | None" = None) -> int:
     """Run a single project's check (caller holds the project lock).
 
     An unreadable manifest is fed to the health state machine as a
@@ -469,7 +490,7 @@ def _check_one(name: str, paths: BoxPaths, read_only: bool) -> int:
 
     # One smoke run: its status decides, its message is what is recorded
     # and alerted (a second run could pass and leave the reason empty).
-    result, message = check_with_reason(name, paths)
+    result, message = check_with_reason(name, paths, tick=tick)
     if not read_only:
         update_health_state(name, result, message if result != 0 else "", paths)
     return result
