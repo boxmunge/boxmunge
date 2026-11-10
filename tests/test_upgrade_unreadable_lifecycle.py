@@ -67,7 +67,7 @@ def test_the_project_is_left_as_is_and_the_others_are_upgraded(box) -> None:
     why = excluded.unreadable[P]
     assert str(record) in why and "cannot be read" in why and "remove it as root" in why
     assert "`boxmunge prod-deploy myapp --redeploy`" in why
-    assert ("`boxmunge pause myapp`" in why) == (kind == "pause")
+    assert ("`boxmunge pause myapp --no-snapshot`" in why) == (kind == "pause")
     assert ("`boxmunge security scan myapp`" in why) == (kind == "quarantine")
     log = paths.log_file.read_text()
     assert f"Left {P} as it is" in log and str(record) in log
