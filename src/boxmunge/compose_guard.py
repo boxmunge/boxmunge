@@ -49,7 +49,7 @@ from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import compose_up, start_containers
 from boxmunge.docker_run import DockerError
 from boxmunge.intake import IntakeError, validate_release_tree
-from boxmunge.legacy_stage import legacy_stage_refusal
+from boxmunge.legacy_stage import awaiting_deploy_refusal, legacy_stage_refusal
 from boxmunge.log import log_error
 from boxmunge.notify import notify
 from boxmunge.overlay_users import stale_containers_problem, stale_overlay_problem
@@ -117,7 +117,11 @@ def _refuse_stale_overlay(paths: BoxPaths, project_name: str, component: str,
 
 
 def _refuse_if_legacy_stage(paths: BoxPaths, project_name: str, component: str) -> None:
-    refusal = legacy_stage_refusal(paths, project_name)
+    """A legacy stage in place, or a discarded pre-0.10.1 one whose staged
+    files no deploy has replaced yet: either way the project directory holds
+    files production does not run."""
+    refusal = (legacy_stage_refusal(paths, project_name)
+               or awaiting_deploy_refusal(paths, project_name))
     if refusal is not None:
         raise _refused(paths, project_name, component, refusal, tampering=False)
 
@@ -254,6 +258,9 @@ def check_kept_files(paths: BoxPaths, project_name: str, *, component: str) -> N
     the deploy changes nothing live (bind_sources.check_kept_control). The
     renewal itself checks again (check_start's `regenerated`). Raises
     ComposeRefused."""
+    awaiting = awaiting_deploy_refusal(paths, project_name)
+    if awaiting is not None:
+        raise _refused(paths, project_name, component, awaiting, tampering=False)
     project_dir = paths.project_dir(project_name)
     compose = project_dir / "compose.yml"
     try:

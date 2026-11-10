@@ -228,7 +228,7 @@ def test_backup_of_a_recreated_stage_uses_the_project_dir(paths, legacy) -> None
     assert src.manifest["backup"]["type"] == "none" and src.compose_file is None
 
 
-def test_backup_of_a_leftover_uses_the_project_dir(paths) -> None:
+def test_backup_of_a_leftover_or_pre0101_stage_uses_the_project_dir(paths) -> None:
     from boxmunge.project_registry import add_project
     from tests.bundle_helpers import manifest_text
     add_project("myapp", paths)
@@ -236,6 +236,11 @@ def test_backup_of_a_leftover_uses_the_project_dir(paths) -> None:
     pdir.mkdir(parents=True, exist_ok=True)
     (pdir / "manifest.yml").write_text(manifest_text(backup="postgres"))
     (pdir / "compose.boxmunge-staging.yml").write_text("services: {}\n")
+    assert legacy_stage(paths, "myapp") == LegacyStage("pre0101")
+    with patch(CREATED, side_effect=AssertionError("no evidence for a pre0101 stage")):
+        assert backup_source(paths, "myapp").manifest["backup"]["type"] == "postgres"
+    (pdir / ".releases").mkdir()
+    (pdir / ".releases" / "live.json").write_text('{"ref": "myapp-v1"}\n')
     assert legacy_stage(paths, "myapp") == LegacyStage("leftover")
     with patch(CREATED, side_effect=AssertionError("no evidence for a leftover")):
         assert backup_source(paths, "myapp").manifest["backup"]["type"] == "postgres"

@@ -96,7 +96,7 @@ Operator only (as root, not in the deploy shell):
   container-update        Pull and recreate Caddy and project image: containers
   install-txn <p> --drop  Drop a stale install record
   project-forget <p>      Drop a registry entry whose project directory is gone
-  legacy-stage <p> ...    Resolve a release staged by boxmunge 0.10.1
+  legacy-stage <p> ...    Resolve a release staged by boxmunge 0.10.1 or earlier
   bundle <dir>            Build a bundle on this machine (the client's
                           'boxmunge bundle' is the usual way)
   boxmunge-upgrade force-target VER

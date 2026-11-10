@@ -20,12 +20,22 @@ def _state(paths, active=True, ref=None):
     path.write_text(json.dumps({"active": active, "ref": ref}))
 
 
+def _live(pdir) -> None:
+    """The live.json every 0.10.1 deploy writes."""
+    (pdir / ".releases").mkdir(parents=True, exist_ok=True)
+    (pdir / ".releases" / "live.json").write_text('{"ref": "myapp-v1"}\n')
+
+
 @pytest.mark.parametrize("setup,kind", [
     (lambda pdir, paths: (pdir / ".releases" / "prestage" / "release").mkdir(parents=True), "bundle"),
     (lambda pdir, paths: ((pdir / "repo").mkdir(), _state(paths)), "git"),
     (lambda pdir, paths: ((pdir / "repo").mkdir(), (pdir / "compose.boxmunge-staging.yml").write_text("")), "git"),
-    (lambda pdir, paths: _state(paths), "leftover"),
-    (lambda pdir, paths: (pdir / "compose.staging-base.yml").write_text(""), "leftover"),
+    (lambda pdir, paths: (_live(pdir), _state(paths)), "leftover"),
+    (lambda pdir, paths: (_live(pdir), (pdir / "compose.staging-base.yml").write_text("")),
+     "leftover"),
+    # Before 0.10.1 no release kept a .releases/ (0.9.x, 0.10.0).
+    (lambda pdir, paths: _state(paths), "pre0101"),
+    (lambda pdir, paths: (pdir / "compose.staging-base.yml").write_text(""), "pre0101"),
 ])
 def test_kinds(paths, setup, kind) -> None:
     pdir = paths.project_dir(P)
@@ -49,7 +59,7 @@ def test_unreadable_state_counts_as_a_stage(paths, text) -> None:
     path = legacy_staging_state(paths, P)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
-    assert legacy_stage(paths, P).kind == "leftover"
+    assert legacy_stage(paths, P).kind == "pre0101"
 
 
 def test_new_layout_stage_is_not_legacy(paths) -> None:
@@ -174,7 +184,7 @@ def test_a_state_file_that_is_not_a_file_counts_as_a_stage(paths, tmp_path, make
         path.symlink_to(tmp_path / "gone.json")
     else:
         path.mkdir()
-    assert legacy_stage(paths, P).kind == "leftover"
+    assert legacy_stage(paths, P).kind == "pre0101"
 
 
 def _unreadable_state_dir(paths):
