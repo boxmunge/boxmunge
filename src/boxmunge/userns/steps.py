@@ -100,12 +100,28 @@ def _final(paths: BoxPaths, j: Journal, results: dict[str, str]) -> None:
            component=COMPONENT, priority=1)
 
 
+def left_alone(j: Journal) -> list[str]:
+    """A warning per tree whose inverse shift left entries alone: ids in
+    neither range have no owner to go back to, so they keep theirs, and a
+    service may not be able to use them on the old daemon. The rollback
+    still completes (the box must come back up, and no rerun could do
+    better); the operator chowns those entries by hand."""
+    return [f"WARNING: {k.removeprefix('left:rb:')}: {v}. Give them the owner the "
+            f"service expects (chown, as root)" for k, v in sorted(j.items.items())
+            if k.startswith("left:")]
+
+
 def report_back(paths: BoxPaths, j: Journal, prefix: str, title: str, component: str) -> None:
     """The alert once a rollback or an abort has the box running on its old
-    daemon: each project's result, and whether CrowdSec tails Caddy."""
+    daemon: each project's result, entries left with unmapped owners, and
+    whether CrowdSec tails Caddy."""
     lines = [f"{k.split(':', 1)[1]}: {v}" for k, v in sorted(j.items.items())
              if k.startswith(f"{prefix}:")]
     failed = [line for line in lines if ": failed" in line]
+    left = left_alone(j)
+    lines += left
+    if left:
+        title += f"; files in {len(left)} tree(s) keep owners outside both id ranges"
     crowdsec = crowdsec_tails_caddy()
     if crowdsec:
         print(f"ERROR: {crowdsec}", file=sys.stderr)

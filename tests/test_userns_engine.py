@@ -11,6 +11,7 @@ from boxmunge.userns import switch as sw
 from boxmunge.userns.inventory import ImageEntry, Inventory, VolumeEntry
 from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
 from boxmunge.userns.preflight import Report
+from boxmunge.userns.shift import ShiftReport
 from tests.integration.userns.dockerd import FakeTimers
 
 S = 1048576
@@ -265,7 +266,8 @@ def test_rebuild_resumes_a_volume_part_way(paths, monkeypatch, tmp_path) -> None
                                                    new.mkdir(parents=True, exist_ok=True)))
     monkeypatch.setattr(en, "scan_tree", lambda *a: type("S", (), {"setid": {"x": 0o4755}})())
     shifted = []
-    monkeypatch.setattr(en, "shift_tree", lambda tree, s, d, setid, resumed: shifted.append((tree, setid)))
+    monkeypatch.setattr(en, "shift_tree", lambda tree, s, d, setid, resumed: shifted.append(
+        (tree, setid)) or ShiftReport())
     monkeypatch.setattr(en, "set_caddyfile_mode", lambda paths, mode: events.append(oct(mode)))
     inv = Inventory("overlay2", "", str(root), "29.9.0", images=[ImageEntry("sha256:a", ["a:1"], 1, True)],
                     volumes=[VolumeEntry("v", "local", {}, {}, "", True, False, True),
@@ -411,3 +413,29 @@ def test_crowdsec_must_tail_the_recreated_caddy(monkeypatch, tmp_path) -> None:
     assert steps.crowdsec_tails_caddy() is None
     monkeypatch.setattr(steps.shutil, "which", lambda name: None)
     assert steps.crowdsec_tails_caddy() is None  # not installed: nothing to check
+
+
+def test_an_inverse_shift_journals_what_it_left_alone(monkeypatch, tmp_path) -> None:
+    """Entries whose ids are in neither range keep their owners (there is no
+    inverse to give them): the rollback says so instead of dropping it."""
+    from boxmunge.userns.shift import Direction, Scan
+    left = [f"f{i} (300000:300000)" for i in range(7)]
+    monkeypatch.setattr(en, "scan_tree", lambda tree, s, d: Scan([], 0))
+    monkeypatch.setattr(en, "shift_tree", lambda *a, **kw: ShiftReport(7, 0, list(left)))
+    j = Journal(ROLLBACK, "rb-quiesced", S)
+    saved = []
+    en.shift_journalled(j, tmp_path, Direction.INVERSE, lambda: saved.append(dict(j.items)),
+                        f"rb:{tmp_path}")
+    note = j.items[f"left:rb:{tmp_path}"]
+    assert note.startswith("7 entries with ids outside both ranges keep their owners")
+    assert "f0 (300000:300000)" in note and "f6" not in note and "and 2 more" in note
+    assert saved[-1] == j.items
+
+
+def test_a_shift_that_left_nothing_alone_journals_nothing(monkeypatch, tmp_path) -> None:
+    from boxmunge.userns.shift import Direction, Scan
+    monkeypatch.setattr(en, "scan_tree", lambda tree, s, d: Scan([], 0))
+    monkeypatch.setattr(en, "shift_tree", lambda *a, **kw: ShiftReport(3, 3, []))
+    j = Journal(ROLLBACK, "rb-quiesced", S, items={f"left:rb:{tmp_path}": "from a run before"})
+    en.shift_journalled(j, tmp_path, Direction.INVERSE, lambda: None, f"rb:{tmp_path}")
+    assert not any(k.startswith("left:") for k in j.items)
