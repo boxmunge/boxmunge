@@ -9,8 +9,9 @@ import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from boxmunge import compose_inventory
 from boxmunge.config import load_config, ConfigError
-from boxmunge.docker_run import docker_env
+from boxmunge.docker_run import DockerError, docker_env
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError, read_state
@@ -124,16 +125,12 @@ def load_host_info(paths: BoxPaths) -> HostInfo:
     except OSError:
         disk_free_gb = 0.0
 
-    caddy_running = False
+    # Polled every 10 s: one `docker ps` for the platform's caddy project,
+    # no compose file parsed. Docker not answering shows as stopped.
     try:
-        result = subprocess.run(
-            ["docker", "compose", "ps", "-q", "caddy"],
-            cwd=paths.caddy, capture_output=True, text=True, check=False,
-            env=docker_env(),
-        )
-        caddy_running = bool(result.stdout.strip())
-    except (FileNotFoundError, OSError):
-        pass
+        caddy_running = compose_inventory.running_inventory("caddy").is_running("caddy", "caddy")
+    except (DockerError, OSError):
+        caddy_running = False
 
     return HostInfo(
         hostname=hostname,
@@ -149,8 +146,10 @@ def load_project_services(paths: BoxPaths, project: str) -> list[ServiceInfo]:
     except ManifestError:
         return []
 
+    services = manifest.get("services", {})
+    health = _docker_health([f"{project}-{name}-1" for name in services])
     results = []
-    for svc_name, svc in manifest.get("services", {}).items():
+    for svc_name, svc in services.items():
         routes = svc.get("routes", [])
         if routes and isinstance(routes[0], dict):
             route_str = routes[0].get("path", "")
@@ -159,29 +158,33 @@ def load_project_services(paths: BoxPaths, project: str) -> list[ServiceInfo]:
         else:
             route_str = ""
 
-        docker_health = None
-        try:
-            r = subprocess.run(
-                ["docker", "inspect", "--format", "{{.State.Health.Status}}",
-                 f"{project}-{svc_name}-1"],
-                capture_output=True, text=True, check=False,
-                env=docker_env(),
-            )
-            status = r.stdout.strip()
-            if status and status != "<no value>":
-                docker_health = status
-        except (FileNotFoundError, OSError):
-            pass
-
         results.append(ServiceInfo(
             name=svc_name,
             svc_type=svc.get("type", ""),
             port=svc.get("port", 0),
             route=route_str,
-            docker_health=docker_health,
+            docker_health=health.get(f"{project}-{svc_name}-1"),
         ))
 
     return results
+
+
+def _docker_health(containers: list[str]) -> dict[str, str]:
+    """{container: its healthcheck status}, from one `docker inspect` of them
+    all. A container that is missing or has no healthcheck is left out."""
+    if not containers:
+        return {}
+    try:
+        r = subprocess.run(
+            ["docker", "inspect", "--format",
+             "{{.Name}}\t{{if .State.Health}}{{.State.Health.Status}}{{end}}", *containers],
+            capture_output=True, text=True, check=False, env=docker_env(),
+        )
+    except OSError:
+        return {}
+    # A missing container makes inspect exit 1 after describing the others.
+    found = (line.split("\t", 1) for line in r.stdout.splitlines() if "\t" in line)
+    return {name.lstrip("/"): status for name, status in found if status}
 
 
 def load_project_backups(paths: BoxPaths, project: str) -> list[BackupInfo]:

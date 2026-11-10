@@ -56,6 +56,7 @@ class ProjectDetailScreen(Screen):
         self.project_name = project_name
         self.paths = paths
         self._log_task: asyncio.Task | None = None
+        self._log_process: asyncio.subprocess.Process | None = None
         self._log_services: list[str] = []
         self._log_filter_index = 0
 
@@ -205,13 +206,38 @@ class ProjectDetailScreen(Screen):
                 stderr=asyncio.subprocess.STDOUT,
                 env=docker_env(),
             )
-            while True:
-                line = await process.stdout.readline()
-                if not line:
-                    break
+        except OSError as e:
+            log_widget.write(f"cannot run {' '.join(cmd[:2])}: {e}")
+            return
+        self._log_process = process
+        try:
+            while line := await process.stdout.readline():
                 log_widget.write(line.decode("utf-8", errors="replace").rstrip())
-        except (OSError, asyncio.CancelledError):
-            pass
+        finally:
+            # `logs --follow` never ends by itself: a tab switch, a filter
+            # change or leaving the screen must not leave it running.
+            self._stop_log_process(process)
+            await process.wait()
+
+    def _stop_log_process(self, process: asyncio.subprocess.Process | None = None) -> None:
+        process = process or self._log_process
+        if process is not None and process.returncode is None:
+            try:
+                process.terminate()
+            except ProcessLookupError:  # it exited and was reaped meanwhile
+                pass
+        if process is self._log_process:
+            self._log_process = None
+
+    def _stop_log_tail(self) -> None:
+        """Stop the log follower now, not when its cancelled task next runs."""
+        self._stop_log_process()
+        if self._log_task and not self._log_task.done():
+            self._log_task.cancel()
+
+    def on_unmount(self) -> None:
+        # Popping the screen and quitting the app both unmount it.
+        self._stop_log_tail()
 
     def on_tabbed_content_tab_activated(
         self, event: TabbedContent.TabActivated
@@ -220,15 +246,13 @@ class ProjectDetailScreen(Screen):
             if self._log_task is None or self._log_task.done():
                 self._log_task = asyncio.create_task(self._tail_logs())
         else:
-            if self._log_task and not self._log_task.done():
-                self._log_task.cancel()
+            self._stop_log_tail()
 
     def action_show_tab(self, tab_id: str) -> None:
         self.query_one(TabbedContent).active = tab_id
 
     def action_go_back(self) -> None:
-        if self._log_task and not self._log_task.done():
-            self._log_task.cancel()
+        self._stop_log_tail()
         self.app.pop_screen()
 
     def action_filter_logs(self) -> None:
@@ -239,8 +263,7 @@ class ProjectDetailScreen(Screen):
         self._log_filter_index = (self._log_filter_index + 1) % len(options)
         service = options[self._log_filter_index]
 
-        if self._log_task and not self._log_task.done():
-            self._log_task.cancel()
+        self._stop_log_tail()
         self._log_task = asyncio.create_task(self._tail_logs(service))
 
         log_widget = self.query_one("#log-view", RichLog)

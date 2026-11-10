@@ -1,5 +1,6 @@
 """Tests for boxmunge.tui.data — TUI data loading functions."""
 
+import subprocess
 from datetime import datetime, timezone
 
 import pytest
@@ -8,6 +9,7 @@ from boxmunge.tui.data import (
     load_all_project_status,
     load_host_info,
     load_project_backups,
+    load_project_services,
     relative_time,
 )
 from boxmunge.paths import BoxPaths
@@ -70,6 +72,37 @@ class TestLoadHostInfo:
     def test_fallback_when_no_config(self, paths: BoxPaths) -> None:
         info = load_host_info(paths)
         assert info.hostname == "unknown"
+
+
+class TestPolledDockerCalls:
+    """The console polls every 10 s: it parses no compose file and asks
+    Docker once, not once per service (deep review E-6)."""
+
+    def test_caddy_running_comes_from_its_compose_labels(self, paths, fake_containers) -> None:
+        assert load_host_info(paths).caddy_running is False
+        fake_containers.run("caddy", "caddy", "sha256:" + "c" * 64, name="boxmunge-caddy")
+        assert load_host_info(paths).caddy_running is True
+
+    def test_service_health_is_one_docker_inspect(self, paths, monkeypatch) -> None:
+        pdir = paths.project_dir("myapp")
+        pdir.mkdir(parents=True)
+        (pdir / "manifest.yml").write_text(
+            "project: myapp\nhosts: [myapp.example.com]\nservices:\n"
+            "  web: {port: 3000, routes: [{path: /}]}\n  api: {port: 4000, routes: []}\n"
+            "  worker: {port: 5000, routes: []}\n")
+        calls = []
+
+        def run(cmd, **kw):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(
+                cmd, 1, "/myapp-web-1\thealthy\n/myapp-api-1\t\n",
+                "Error: No such object: myapp-worker-1")
+
+        monkeypatch.setattr(subprocess, "run", run)
+        services = {s.name: s.docker_health for s in load_project_services(paths, "myapp")}
+        assert services == {"web": "healthy", "api": None, "worker": None}
+        assert len(calls) == 1
+        assert calls[0][-3:] == ["myapp-web-1", "myapp-api-1", "myapp-worker-1"]
 
 
 class TestLoadProjectBackups:
