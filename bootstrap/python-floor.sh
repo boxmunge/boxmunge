@@ -3,9 +3,13 @@
 # bootstrap/python-floor.sh: refuse a host whose python3 is older than the
 # server package's floor (requires-python in pyproject.toml). On an older
 # python3 the venv builds and the hash-pinned install then fails halfway with
-# a resolver error. Run by install.sh before it changes anything (when the
-# host has python3, as every upgrade does), and by init-host.sh once it has
-# installed python3 on a fresh host.
+# a resolver error. install.sh runs it before install.sh itself changes
+# anything (when the host has python3), and init-host.sh once it has
+# installed python3 on a fresh host, so a fresh install is refused here
+# first. An upgrade reaches install.sh only after the upgrade shim has built
+# the standby venv, installed into it and created the platform stash; on an
+# older python3, pip's Requires-Python check refuses that install first, and
+# this check is the backstop.
 set -euo pipefail
 
 MIN_PYTHON="3.11"
