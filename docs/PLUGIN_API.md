@@ -228,7 +228,7 @@ actions.
 
 ## Dev mode: build without a server
 
-You need Python 3.13 or newer and a clone of this repository.
+You need Python 3.11 or newer and a clone of this repository.
 
 ```sh
 python3 -m venv .venv
