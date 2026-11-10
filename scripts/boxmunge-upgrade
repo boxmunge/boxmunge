@@ -385,18 +385,27 @@ write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT']
 }
 
 cmd_auto() {
-    local result action version class msg
+    local result fields action version class msg
     load_active_slot
     acquire_lock  # before discovery, and held through the upgrade itself
     result="$("$(active_venv)/bin/boxmunge-server" _discover-update --json 2>/dev/null)" || \
         die "Discovery failed (boxmunge-server _discover-update returned non-zero)"
 
-    action="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("action",""))')"
+    # One interpreter for the answer: three one-word fields, then the message,
+    # which may span lines.
+    fields="$(printf '%s' "$result" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+words = [str(w) for w in (d.get("action", ""), d["version"] if d.get("action") == "upgrade"
+                          else "", d.get("class") or "")]
+if any("\n" in w for w in words):
+    sys.exit("_discover-update answered a line break in its action, version or class")
+print(*words, d.get("message", "(no message)"), sep="\n")')"
+    { IFS= read -r action; IFS= read -r version; IFS= read -r class
+      IFS= read -r -d '' msg || true; } <<<"$fields"
 
     case "$action" in
         upgrade)
-            version="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
-            class="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("class") or "")')"
             log "Manual upgrade: discovered $(printable "$version")"
             upgrade_to "$version" run "$class"
             ;;
@@ -409,8 +418,7 @@ cmd_auto() {
             exit 0
             ;;
         error)
-            msg="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("message","(no message)"))')"
-            die "Discovery error: $msg"
+            die "Discovery error: ${msg%$'\n'}"
             ;;
         *)
             die "Unknown action from _discover-update: $action"

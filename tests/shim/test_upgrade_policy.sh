@@ -126,6 +126,13 @@ expect 1 "Usage: boxmunge-upgrade auto" "auto refuses arguments"
 mock_server a 'echo "{\"action\": \"upgrade\", \"version\": \"1.0.0;id\", \"url\": \"x\"}"'
 run_shim auto
 expect 1 "Invalid version" "auto refuses a malformed discovered version"
+# One parse of the answer: a line break cannot move a word into the next field.
+mock_server a 'echo "{\"action\": \"upgrade\", \"version\": \"1.5.0\\nsecurity\"}"'
+run_shim auto
+expect 1 "line break in its action, version or class" "auto refuses a line break in a field"
+mock_server a 'echo "{\"action\": \"error\", \"message\": \"feed down\\nretry later\"}"'
+run_shim auto
+expect 1 "Discovery error: feed down" "auto reports discovery's error message"
 # The release class discovery gives names the success alert; anything else stops.
 mock_server a 'echo "{\"action\": \"upgrade\", \"version\": \"1.5.0\", \"url\": \"x\", \"class\": \"urgent\"}"'
 run_shim auto
