@@ -44,7 +44,8 @@ def _bundle(project: str) -> bytes:
 class _Upload:
     """One deploy-shell scp session, fed the protocol by hand."""
 
-    def __init__(self, root: Path, data: bytes, filename: str = "bundle.tar.gz"):
+    def __init__(self, root: Path, data: bytes, filename: str = "bundle.tar.gz",
+                 times: bool = False):
         self.data = data
         env = {**os.environ, "PYTHONPATH": str(Path(boxmunge.__file__).parents[1])}
         self.proc = subprocess.Popen(
@@ -52,6 +53,8 @@ class _Upload:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env,
         )
+        if times:  # `scp -p`: the file's times come first
+            self._send(b"T1700000000 0 1700000000 0\n")
         self._send(f"C0644 {len(data)} {filename}\n".encode())
 
     def _send(self, chunk: bytes) -> None:
@@ -219,3 +222,16 @@ def test_an_unremovable_leftover_is_logged_and_the_upload_proceeds(paths: BoxPat
     assert rc == 0, err
     assert len(_inbox_bundles(paths, "alpha")) == 1
     assert "cannot remove abandoned upload" in paths.log_file.read_text()
+
+
+def test_an_upload_with_its_times_preserved_lands(paths: BoxPaths) -> None:
+    """`scp -O -p` sends a T record before the file; the sink takes it."""
+    alpha = _bundle("alpha")
+    upload = _Upload(paths.root, alpha, times=True)
+    upload.send_first_half()
+    upload.send_rest()
+    rc, err = upload.finish()
+    assert rc == 0, err
+    [received] = _inbox_bundles(paths, "alpha")
+    assert received.read_bytes() == alpha
+

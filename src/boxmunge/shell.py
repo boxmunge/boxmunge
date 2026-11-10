@@ -143,6 +143,29 @@ def parse_shell_command(command_string: str) -> tuple[str, list[str]]:
     return parts[0], parts[1:]
 
 
+_SCP_UPLOAD = ("scp -O -P 922 (or the SSH port chosen at install) bundle.tar.gz "
+               "deploy@<host>:")
+# What OpenSSH's client puts before `-t` in the sink command it runs here
+# (`scp [-v] [-r] [-p] [-d] -t [--] <target>`): -v verbose, -p the file's
+# times follow (the sink takes them as sent), -d the target is a directory.
+# The sink always runs as `/usr/bin/scp -t <session dir>`.
+_SCP_SINK_FLAGS = frozenset({"-v", "-p", "-d"})
+
+
+def scp_refusal(args: list[str]) -> str | None:
+    """Why an scp command is refused, or None for an upload of files."""
+    if "-t" not in args or "-f" in args[:args.index("-t")]:
+        return "Downloads via scp are not supported."
+    flags, targets = args[:args.index("-t")], args[args.index("-t") + 1:]
+    if "-r" in flags:
+        return "Directory uploads (scp -r) are not supported: upload the bundle file itself."
+    if targets[:1] == ["--"]:
+        targets = targets[1:]
+    if set(flags) - _SCP_SINK_FLAGS or len(targets) != 1:
+        return f"Unsupported scp command: scp {' '.join(args)}."
+    return None
+
+
 def handle_scp_upload(args: list[str]) -> None:
     """Handle an scp upload by receiving to a temp dir, then filing to inbox.
 
@@ -239,11 +262,12 @@ def run_command(command: str, args: list[str]) -> int:
         sys.exit(0)
 
     if command == "scp":
-        if args and args[0] == "-t":
-            handle_scp_upload(args)
-            return 0
-        print("ERROR: Downloads via scp are not supported.", file=sys.stderr)
-        return 1
+        refusal = scp_refusal(args)
+        if refusal:
+            print(f"ERROR: {refusal} Upload a bundle with: {_SCP_UPLOAD}", file=sys.stderr)
+            return 1
+        handle_scp_upload(args)
+        return 0
 
     # SFTP subsystem — sshd routes this through the login shell as:
     #   boxmunge-shell -c "/opt/boxmunge/bin/boxmunge-sftp"
