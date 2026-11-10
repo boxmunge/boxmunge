@@ -140,6 +140,7 @@ SSH into the deploy user and run commands directly — no `boxmunge` prefix need
 - [Client install](INSTALL.md) — installing the `boxmunge` client on your workstation ([commands](cli/README.md))
 - [Architecture](docs/on-server/ARCHITECTURE.md) — system design and components
 - [Operations](docs/on-server/OPERATIONS.md) — step-by-step guides
+- [Upgrading from 0.9 or 0.10](docs/on-server/UPGRADING.md) — for boxes that auto-update cannot move past a breaking release
 - [Project Conventions](docs/on-server/PROJECT_CONVENTIONS.md) — manifest format
 - [Trust Model](docs/on-server/TRUST_MODEL.md) — security model and boundaries
 - [Container Security](docs/on-server/SECURITY.md) — per-container hardening details

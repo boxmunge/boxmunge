@@ -41,11 +41,16 @@ st /mockvenv/bin/boxmunge-server 'case "$1" in
         echo "1.5.0+abc1234" > /opt/boxmunge/config/version
     fi;;
 esac; exit 0'
+# Every old shim's pre-flight import test (`import boxmunge; print(
+# boxmunge.__version__)` up to v0.9.1, `get_build_version()` after) runs for
+# real, exactly as written, against the release's own package: it decides
+# whether the old shim gets as far as installing the new one.
 st /mockvenv/bin/python 'if [[ "$1" == "-" ]]; then cat >/dev/null; exit 0; fi
 case "$2" in
     *write_probation*) printf "{\"version\": \"%s\", \"previous_slot\": \"%s\", \"started_at\": \"x\", \"expires_at\": \"%s\"}\n" \
         "$BM_VERSION" "$BM_PREV_SLOT" "$(date -u -d "+6 hours" +%Y-%m-%dT%H:%M:%S+00:00)" > /opt/boxmunge/upgrade-state/probation.json ;;
-    *get_build_version*) echo 1.5.0 ;;
+    *get_build_version*|*__version__*)
+        exec '"$REALPY"' -I -c "import sys; sys.path.insert(0, \"/rel/boxmunge/src\"); $2" ;;
 esac
 exit 0'
 
