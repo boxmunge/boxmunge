@@ -24,6 +24,7 @@ FALLBACK = {**ANSWER, "source": "github", "endpoint_error": "connection refused"
 @pytest.fixture
 def box(paths):
     write_installed_version(paths, "0.11.3", "abc1234")
+    paths.config_file.write_text("hostname: t\nadmin_email: a@b\n")
     return paths
 
 

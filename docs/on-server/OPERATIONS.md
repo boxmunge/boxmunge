@@ -1933,12 +1933,15 @@ logs the hold; `upgrade --target <version>` still installs it deliberately.
 If the service cannot be reached at all (DNS, connection or timeout
 failure), auto-update falls back to the GitHub releases list, applying the
 same rules to the markers in each release's title or notes (`[security]`,
-`[breakfix]`, `[breaking]`), and logs a warning. If the service answers but
-the answer cannot be used (an HTTP error such as its rate limit's 429, a
-redirect to somewhere unreachable, or an unexpected shape), nothing is
-installed and the check fails with the reason: GitHub cannot know about
-holds, so its answer could install a held release. The next run (every 6
-hours) tries again. A security release can therefore wait while the service
+`[breakfix]`, `[breaking]`), and logs a warning. A release whose GitHub
+title carries `[held]` is held there exactly as the circuit breaker holds it
+(only the maintainer can edit a release title; `[held]` in the notes counts
+for nothing). If the service answers but the answer cannot be used (an HTTP
+error such as its rate limit's 429, a redirect to somewhere unreachable, or
+an unexpected shape), nothing is installed and the check fails with the
+reason: the maintainer marks a hold on GitHub by hand after tripping the
+breaker, so GitHub's answer could still install a release the service
+holds. The next run (every 6 hours) tries again. A security release can therefore wait while the service
 answers with errors; that is the price of never installing a release the
 maintainer has held. So it is never silent: once the service has gone 48
 hours without a usable answer, `health` reports `platform-updates` as
@@ -2135,8 +2138,9 @@ The box contacts one boxmunge service, the version-check service at boxmunge.dev
   for `/v1/check?v=<installed version>`, with User-Agent `boxmunge/<installed version>`.
   Nothing else: no hostname, machine ID or project names.
 - **Failure reports**, when an upgrade fails: the version it tried, the version it came
-  from, the step that failed, a short reason (for example
-  `system_upgrade_failed: install_sh_exit_100`) and the time the box sent it.
+  from, the step that failed and a short reason (for example
+  `system_upgrade_failed: install_sh_exit_100`). The service records the time it
+  received the report.
 
 Like any connection, both carry the box's IP address. The service stores the network
 prefix it came from (IPv4 /24, IPv6 /48; an IPv6 address that embeds an IPv4 address
@@ -2169,10 +2173,24 @@ The box's other outbound requests go to third parties, never to a boxmunge servi
   blocklist;
 - alert channels the operator set up (Pushover, webhooks).
 
-There is no setting to turn version checks off. Stopping the timer
-(`systemctl disable --now boxmunge-auto-update.timer`) stops the scheduled checks, and
-with them automatic security updates and the alert when OS security updates stop
-arriving; a plain `upgrade` still checks.
+To send the version-check service nothing at all, set this in
+`/opt/boxmunge/config/boxmunge.yml` (as root):
+
+```yaml
+version_check:
+  enabled: false
+```
+
+The box then makes no update checks, neither to the service nor to GitHub instead,
+and sends no failure reports. The cost: it discovers no releases, so no security or
+break-fix release is installed automatically. Auto-update still runs (it keeps
+checking that OS security updates arrive) and logs that it skipped discovery;
+`health` reports `platform-updates` as `WARN` and `doctor` warns under "Update
+discovery", both saying that updates are not being discovered. A plain `upgrade`
+refuses with the same message. Watch <https://github.com/boxmunge/boxmunge/releases>
+and install a release with `upgrade --target X.Y.Z`, which asks nothing; it downloads
+the release from GitHub, like every upgrade. The value must be `true` or `false`.
+Set it back to `true` to discover releases again.
 
 ## Upgrading from 0.10.1 with a release staged
 

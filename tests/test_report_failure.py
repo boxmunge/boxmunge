@@ -1,6 +1,17 @@
 import json
 from unittest.mock import patch, MagicMock
+
+import pytest
+
 from boxmunge.report_failure import report_failure
+
+
+@pytest.fixture(autouse=True)
+def box_config(paths, monkeypatch):
+    """A box with version checks on, as BoxPaths() finds it on a real box."""
+    paths.config_file.write_text("hostname: t\nadmin_email: a@b\n")
+    monkeypatch.setattr("boxmunge.report_failure.BoxPaths", lambda: paths)
+
 
 class TestReportFailure:
     @patch("boxmunge.report_failure.urllib.request.urlopen")
@@ -19,7 +30,8 @@ class TestReportFailure:
         assert body["version"] == "0.2.1"
         assert body["installed_from"] == "0.2.0"
         assert body["stage"] == "preflight"
-        assert "timestamp" in body
+        # The service records when it received the report; the box sends no time.
+        assert "timestamp" not in body
 
     @patch("boxmunge.report_failure.urllib.request.urlopen")
     def test_returns_true_on_success(self, mock_urlopen):

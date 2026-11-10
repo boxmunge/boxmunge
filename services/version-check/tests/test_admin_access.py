@@ -111,6 +111,27 @@ class TestSecretGuessing:
                                  headers={"X-Forwarded-For": "198.51.100.3", **BEARER})
         assert other.status_code == 200
 
+    def test_a_full_guess_table_refuses_new_clients_before_comparing(self, admin_app):
+        """VC-2: once the guess limiter tracks its maximum of clients, a client
+        it cannot track must be refused, not given unlimited guesses."""
+        from request_limits import RateLimiter
+        admin_app.extensions[admin_auth.GUESSES] = RateLimiter(
+            admin_auth.GUESS_FAILURES, admin_auth.GUESS_WINDOW_SECONDS, max_clients=2)
+        client = admin_app.test_client(use_cookies=False)
+
+        def guess(addr, secret="wrong"):
+            return client.get("/v1/admin/version-checks", headers={
+                "X-Forwarded-For": addr, "Authorization": f"Bearer {secret}"})
+
+        assert guess("203.0.113.1").status_code == 401
+        assert guess("203.0.113.2").status_code == 401
+        refused = guess("203.0.113.3")
+        assert refused.status_code == 429
+        assert "too many clients" in refused.get_json()["error"]
+        # Refused before the comparison: the right secret does not get through either.
+        assert guess("203.0.113.3", ADMIN_SECRET).status_code == 429
+        assert guess("203.0.113.1").status_code == 401, "tracked clients keep their budget"
+
     def test_correct_bearer_requests_do_not_use_up_the_limit(self, admin_client):
         for _ in range(admin_auth.GUESS_FAILURES + 2):
             assert admin_client.get("/v1/admin/version-checks",
