@@ -8,7 +8,9 @@ Dependabot never regenerates: `make relock` refreshes them before each
 release. A pin is overdue when a newer release in its major has been on PyPI
 for more than MAX_AGE_DAYS: the 7-day cooldown `make relock` keeps
 (.github/dependabot.yml) plus a week's grace. A new major is never overdue;
-taking one is a decision of its own (RELOCK_HOLDS in the Makefile).
+taking one is a decision of its own (relock-holds.txt). A calendar-versioned
+package (a year for its major, as certifi's 2026.10.23) has no majors: a new
+year is just its next release, so any newer release can be overdue.
 CI runs this on release pull requests.
 
 Usage: scripts/lock-freshness.py LOCK...
@@ -20,12 +22,20 @@ import json
 import re
 import sys
 import urllib.request
-from typing import Callable
+from typing import IO, Callable
 
 from packaging.version import InvalidVersion, Version
 
 MAX_AGE_DAYS = 14
+# A major this large is a year: the package is calendar-versioned.
+CALENDAR_MAJOR = 2000
+# pydantic-core's full release history is about 13 MB of JSON.
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 PIN_RE = re.compile(r"^([A-Za-z][\w.\-]*)(?:\[[^\]]*\])?==(\S+)", re.M)
+
+
+class FetchError(Exception):
+    """PyPI's release list for a package could not be read."""
 
 
 def pins(text: str) -> dict[str, str]:
@@ -33,10 +43,16 @@ def pins(text: str) -> dict[str, str]:
     return {m[1].lower(): m[2] for m in PIN_RE.finditer(text)}
 
 
+def same_line(current: Version, version: Version) -> bool:
+    """Whether `version` is a release the pin is expected to follow: its own
+    major, or any release of a calendar-versioned package."""
+    return current.major >= CALENDAR_MAJOR or version.major == current.major
+
+
 def overdue(pinned: str, releases: dict[str, list[dict]], now: dt.datetime,
             max_age_days: int) -> str | None:
-    """The newest same-major release out longer than max_age_days and newer
-    than the pin, or None. Pre-releases and fully yanked releases never count."""
+    """The newest release on the pin's line out longer than max_age_days and
+    newer than the pin, or None. Pre-releases and fully yanked releases never count."""
     current = Version(pinned)
     best: Version | None = None
     for raw, files in releases.items():
@@ -46,7 +62,7 @@ def overdue(pinned: str, releases: dict[str, list[dict]], now: dt.datetime,
             continue
         live = [f for f in files if not f.get("yanked")]
         if (version.is_prerelease or version <= current or not live
-                or version.major != current.major):
+                or not same_line(current, version)):
             continue
         uploaded = min(dt.datetime.fromisoformat(f["upload_time_iso_8601"].replace("Z", "+00:00"))
                        for f in live)
@@ -55,10 +71,25 @@ def overdue(pinned: str, releases: dict[str, list[dict]], now: dt.datetime,
     return str(best) if best else None
 
 
+def read_releases(stream: IO[bytes], name: str) -> dict[str, list[dict]]:
+    """The `releases` map of a PyPI JSON response, refusing one past MAX_RESPONSE_BYTES."""
+    body = stream.read(MAX_RESPONSE_BYTES + 1)
+    if len(body) > MAX_RESPONSE_BYTES:
+        raise FetchError(f"{name}: PyPI's JSON is over {MAX_RESPONSE_BYTES // (1024 * 1024)} MiB; "
+                         "refusing to read it (raise MAX_RESPONSE_BYTES if PyPI's answer is genuine)")
+    try:
+        return json.loads(body)["releases"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise FetchError(f"{name}: PyPI's answer is not a release list ({exc})") from exc
+
+
 def fetch_pypi(name: str) -> dict[str, list[dict]]:
     url = f"https://pypi.org/pypi/{name}/json"
-    with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310 (fixed https host)
-        return json.load(resp)["releases"]
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310 (fixed https host)
+            return read_releases(resp, name)
+    except OSError as exc:  # URLError and timeouts included
+        raise FetchError(f"{name}: could not fetch {url} ({exc}); re-run once PyPI answers") from exc
 
 
 def main(argv: list[str], fetch: Callable[[str], dict] = fetch_pypi,
@@ -71,7 +102,11 @@ def main(argv: list[str], fetch: Callable[[str], dict] = fetch_pypi,
     for lock in argv:
         with open(lock, encoding="utf-8") as fh:
             for name, version in sorted(pins(fh.read()).items()):
-                newer = overdue(version, fetch(name), now, MAX_AGE_DAYS)
+                try:
+                    newer = overdue(version, fetch(name), now, MAX_AGE_DAYS)
+                except FetchError as exc:
+                    print(f"ERROR: {lock}: {exc}", file=sys.stderr)
+                    return 2
                 if newer:
                     stale.append(f"  {lock}: {name} {version} (a newer {newer} is out "
                                  f"more than {MAX_AGE_DAYS} days)")
@@ -79,7 +114,8 @@ def main(argv: list[str], fetch: Callable[[str], dict] = fetch_pypi,
         print("ERROR: runtime locks have fallen behind; run `make relock` "
               "(docs/DEVELOPMENT.md) and commit the result:", *stale, sep="\n", file=sys.stderr)
         return 1
-    print(f"Runtime locks current: no same-major release older than {MAX_AGE_DAYS} days is missing.")
+    print(f"Runtime locks current: no release older than {MAX_AGE_DAYS} days is missing "
+          "(within each pin's major; calendar-versioned packages across years).")
     return 0
 
 
