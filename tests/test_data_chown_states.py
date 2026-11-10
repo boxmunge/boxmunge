@@ -112,6 +112,9 @@ def test_a_stopped_backup_service_is_dumped_offline_and_paired(
     ("stopped", "app is stopped", "prod-deploy shop"),
     ("installing", "an install is open", "that install's ways out"),
     ("awaiting", "awaiting a deploy", "prod-deploy shop"),
+    # #144 review P3-2: the awaited deploy may be the user change this chown
+    # is for, refused until the chown; resume is accepted from this state.
+    ("awaiting", "awaiting a deploy", "boxmunge resume shop"),
 ])
 def test_a_dump_that_cannot_run_offline_names_the_states_way_out_first(
         paths, monkeypatch, system_container, capsys, state, why, way_out) -> None:
@@ -125,7 +128,6 @@ def test_a_dump_that_cannot_run_offline_names_the_states_way_out_first(
         from boxmunge.pause import write_paused_state
         write_paused_state("shop", paths, reason="maintenance")
     elif state == "awaiting":
-        # resume refuses a pause handed to the next deploy (#141).
         from boxmunge.pause import mark_awaiting_deploy, write_paused_state
         write_paused_state("shop", paths, reason="maintenance")
         mark_awaiting_deploy("shop", paths)
@@ -144,7 +146,6 @@ def test_a_dump_that_cannot_run_offline_names_the_states_way_out_first(
     assert err.index(way_out) < err.index("--no-snapshot")
     assert "Only if you cannot" in err
     assert state != "installing" or "security resume" not in err
-    assert state != "awaiting" or "resume shop" not in err
     assert calls == ["dump-offline"] and pending(paths, "shop") is None
 
 

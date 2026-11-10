@@ -316,3 +316,13 @@ def test_each_container_gets_its_new_releases_policy(paths, fake_containers, mon
     with docker_off():
         assert run_deploy("myapp", paths, ref=V2) == 0
     assert policies == {"myapp-web-1": "always", "myapp-job-1": "no"}
+
+
+def test_plain_resume_still_starts_a_pause_awaiting_a_deploy(paths) -> None:
+    """data chown's refusal for this state names `resume` for the case where
+    the awaited deploy is itself refused until the chown (#144 review P3-2)."""
+    _paused_v1(paths, compose="services:\n  web:\n    image: nginx\n")
+    assert _resume(paths, no_start=True) == 0 and awaiting_deploy("myapp", paths)
+    with patch("boxmunge.commands.resume_cmd.caddy_reload"):
+        assert _resume(paths) == 0 and _resume.up_calls == 1
+    assert not is_paused("myapp", paths)
