@@ -41,7 +41,7 @@ install_cosign() {
     echo "  Installing cosign ${COSIGN_VERSION} (${arch})..."
     COSIGN_DOWNLOAD="$(mktemp)"
     trap 'rm -f "${COSIGN_DOWNLOAD}"' EXIT
-    curl -sSLf "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${arch}" -o "${COSIGN_DOWNLOAD}"
+    curl -sSLf --connect-timeout 30 --max-time 600 "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-${arch}" -o "${COSIGN_DOWNLOAD}"
     echo "${sha256}  ${COSIGN_DOWNLOAD}" | sha256sum -c -
     install -m 0755 "${COSIGN_DOWNLOAD}" "${COSIGN_BIN}"
     rm -f "${COSIGN_DOWNLOAD}"
