@@ -77,7 +77,9 @@ Usage: boxmunge unstage <project> [--dry-run]
 Tear down staging.""",
     "prod-deploy": """\
 Usage: boxmunge prod-deploy <project> [--ref REF] [--no-snapshot] [--no-pull] [--dry-run]
+                                     [--accept-stale-kev]
        boxmunge prod-deploy <project> --redeploy [--no-snapshot] [--no-pull] [--dry-run]
+                                     [--accept-stale-kev]
        boxmunge prod-deploy <project> --abandon
 
 Deploy directly to production (skips staging). Build services are built on
@@ -86,7 +88,10 @@ images in this box's local image store. With no new bundle in the inbox,
 prod-deploy refuses; --redeploy deploys the installed release again (as
 strictly checked as a new deploy).
 --abandon undoes an install that stopped before its pre-deploy hook ran:
-the replaced release's files go back; containers and data are not touched.""",
+the replaced release's files go back; containers and data are not touched.
+--accept-stale-kev lets a CVE-quarantined project's fix through although
+there is no usable CISA KEV catalog; it is logged and alerted. It never
+overrides a stale catalog that lists a CVE still in the release's images.""",
     "install-txn": """\
 Usage: boxmunge install-txn <project> --drop
 

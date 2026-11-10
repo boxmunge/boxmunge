@@ -1154,6 +1154,7 @@ boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason 
 boxmunge security unsuppress <CVE> --project <name>
 boxmunge security resume <project>                      Lift CVE quarantine
 boxmunge security resume <project> --accept-stale-kev  Lift with no usable KEV catalog (audited)
+boxmunge prod-deploy <project> --accept-stale-kev     Deploy a fix with no usable KEV catalog (audited)
 ```
 
 The fleet view shows posture distribution, currently quarantined projects,
@@ -1299,13 +1300,23 @@ A refusal keeps the quarantine and names the exits that work:
   `boxmunge security resume <project> --accept-stale-kev` lifts anyway. It
   still needs a complete re-scan with no quarantine-level finding, says what
   it gives up, is logged before the lift and sends a priority-1 alert after
-  it. It brings the images the project runs now back online: for a fix
-  deploy the gate refused, those are the old images, until the deploy
-  (repeated after the resume) replaces them. Under `strict` or `paranoid`,
-  if that resume refuses a finding that is still quarantine-level in the old
-  images, the route is: `security suppress` it for the project, resume with
-  `--accept-stale-kev`, deploy the fix, then `security unsuppress` it. (A
-  deploy that carries the acceptance itself is planned for 0.11.5.)
+  it. It brings the images the project runs now back online.
+- **No usable catalog, for a fix deploy:** `prod-deploy <project>
+  --accept-stale-kev` carries the same acceptance through the deploy, so the
+  old images never come back. The release's images are still scanned in
+  full and must clear every quarantine-level finding. The acceptance is
+  logged before anything starts, and the lift's alert says it was lifted
+  with `--accept-stale-kev` (priority 1). The gate's refusal names the
+  exact command, for example `prod-deploy <project> --ref <release>
+  --accept-stale-kev`, which finishes the install the refusal left open.
+  With nothing to accept (a fresh catalog, a stale one that lists none of
+  the release's CVEs, or a project that is not quarantined) the flag says
+  so and changes nothing. A promote, a rollback, the TUI or MCP take no
+  acceptance: their refusal offers the resume above, then the deploy again
+  (under `strict` or `paranoid`, if that resume refuses a finding that is
+  still quarantine-level in the old images: `security suppress` it for the
+  project, resume with `--accept-stale-kev`, deploy the fix, then
+  `security unsuppress` it).
 
 Staging lifts nothing, so `stage` is not judged against the catalog; the
 promote is.

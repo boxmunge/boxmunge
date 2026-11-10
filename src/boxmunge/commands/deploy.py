@@ -481,19 +481,25 @@ def run_deploy(
 def cmd_deploy(args: list[str]) -> None:
     """CLI entry point for prod-deploy command."""
     from boxmunge.commands.argv import parse_args, require_project_name, usage_error
+    from boxmunge.commands.kev_acceptance import prod_deploy_acceptance
+    from boxmunge.cve.lift_rule import ACCEPT_FLAG
     parsed = parse_args(
         "prod-deploy", args,
-        flags={"--no-snapshot", "--dry-run", "--abandon", "--no-pull", "--redeploy"},
+        flags={"--no-snapshot", "--dry-run", "--abandon", "--no-pull", "--redeploy",
+               ACCEPT_FLAG},
         options={"--ref"}, min_positional=1, max_positional=1,
     )
     project = require_project_name("prod-deploy", parsed.positional[0])
     if parsed.has("--abandon"):
         if parsed.get("--ref") or any(parsed.has(f) for f in (
-                "--no-snapshot", "--dry-run", "--no-pull", "--redeploy")):
+                "--no-snapshot", "--dry-run", "--no-pull", "--redeploy", ACCEPT_FLAG)):
             usage_error("prod-deploy", "--abandon takes no other options")
         from boxmunge.commands import install_abandon
         sys.exit(install_abandon.run_abandon(project, BoxPaths()))
-    sys.exit(run_deploy(project, BoxPaths(), ref=parsed.get("--ref"),
+    paths = BoxPaths()
+    with prod_deploy_acceptance(paths, project, parsed.has(ACCEPT_FLAG)):
+        rc = run_deploy(project, paths, ref=parsed.get("--ref"),
                         no_snapshot=parsed.has("--no-snapshot"),
                         dry_run=parsed.has("--dry-run"), pull=not parsed.has("--no-pull"),
-                        redeploy=parsed.has("--redeploy")))
+                        redeploy=parsed.has("--redeploy"))
+    sys.exit(rc)
