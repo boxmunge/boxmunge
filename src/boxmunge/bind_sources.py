@@ -202,7 +202,7 @@ def refresh_control_hash(project_dir: Path, path: Path, rel: str) -> None:
     are still checked), or a manifest the upgrade migrated from the one
     recorded (control_file_unchanged). Recording boxmunge's own output
     blesses nothing a container wrote. No record yet: nothing to refresh."""
-    if not path.exists():
+    if not os.path.lexists(path):
         return
     doc = read_record(path)
     doc["control"][rel] = _hash_file(project_dir, project_dir / rel, rel)
@@ -211,7 +211,7 @@ def refresh_control_hash(project_dir: Path, path: Path, rel: str) -> None:
 
 def control_file_unchanged(project_dir: Path, path: Path, rel: str) -> bool:
     """True if a record exists and control file ``rel`` still hashes to it."""
-    if not path.exists():
+    if not os.path.lexists(path):
         return False
     recorded = read_record(path)["control"]
     return rel in recorded and recorded[rel] == _hash_file(project_dir, project_dir / rel, rel)
@@ -319,7 +319,7 @@ def check_kept_control(project_dir: Path, read_files: Iterable[Path], path: Path
     Returns the hashes checked, for the record to hold exactly those (a
     file rewritten after the check must not be recorded)."""
     now = control_hashes(project_dir, read_files)
-    if not path.exists():
+    if not os.path.lexists(path):
         return now
     recorded = read_record(path)["control"]
     for rel in sorted((set(now) & set(recorded)) - {OVERLAY}):

@@ -253,8 +253,10 @@ class TestOfflineOverlayRefused:
         [line] = check_upgrade(paths)
         assert "would be refused" in line and "is a symlink" in line
         regen = apply_projects(paths)[1]
+        # Refused by the check of its files against the record (D-02), before
+        # anything is regenerated or put back.
         assert "is a symlink" in regen.refused["alpha"]
-        assert "nothing was changed" in regen.refused["alpha"]
+        assert "Nothing was started or recreated" in regen.refused["alpha"]
         assert target.is_symlink() and secret.read_text() == "SECRET\n"
         assert not any("SECRET" in f.read_text() for f in paths.project_dir("alpha").rglob("*")
                        if f.is_file() and not f.is_symlink())
