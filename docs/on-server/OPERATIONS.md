@@ -1340,6 +1340,8 @@ hosts:
 
 Plain hostnames don't need the flag. See `SECURITY.md` for the routing-isolation trade-off.
 
+A project with a wildcard host cannot be staged: staging serves `staging.<host>`, and no certificate can be issued for `staging.*.example.com`. `stage` refuses it before anything changes; deploy with `prod-deploy <project>`.
+
 ---
 
 ### Container crash-loops with "Read-only file system" (v0.9+)

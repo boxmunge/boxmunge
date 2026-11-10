@@ -171,6 +171,14 @@ def precheck_candidate(paths: BoxPaths, project: str, manifest: dict[str, Any],
                        tree: Path, workspace: Path) -> None:
     """Refuse a candidate staging cannot be kept apart from production as it
     runs and as it would run after promoting it, before anything changes."""
+    wildcards = [h for h in manifest.get("hosts") or [] if str(h).startswith("*.")]
+    if wildcards:
+        raise StagingIsolationError(
+            f"{project} serves the wildcard host(s) {', '.join(wildcards)}; staging "
+            f"would serve staging.{wildcards[0]}, for which no certificate can be "
+            f"issued, so Caddy would refuse it at the stage's last step. A project "
+            f"with a wildcard host cannot be staged: deploy the release with "
+            f"prod-deploy {project}.")
     check_dir = workspace / "staging-check"
     check_dir.mkdir()
     write_staging_files(paths, project, manifest, tree, check_dir)
