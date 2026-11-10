@@ -211,7 +211,7 @@ def test_create_stash_writes_no_symlink_members(paths) -> None:
     (pdir / "repo").mkdir(parents=True)
     (pdir / "repo" / "manifest.yml").write_text("project: g\n")
     os.symlink(pdir / "repo" / "manifest.yml", pdir / "manifest.yml")
-    with tarfile.open(create_stash(paths)) as tar:
+    with tarfile.open(create_stash(paths).path) as tar:
         assert not any(m.issym() for m in tar.getmembers())
 
 

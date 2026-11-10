@@ -19,9 +19,10 @@ class PreflightError(Exception):
 
 def _run_check(target: Target, argv: list[str],
                needs_sudo: bool = False) -> subprocess.CompletedProcess:
-    """Run argv over SSH with captured output."""
-    return subprocess.run(target.ssh(argv, needs_sudo), capture_output=True,
-                          text=True, check=False)
+    """Run argv over SSH with captured output. No stdin: ssh would forward
+    it, taking input typed ahead for server-setup's own prompts."""
+    return subprocess.run(target.ssh(argv, needs_sudo), stdin=subprocess.DEVNULL,
+                          capture_output=True, text=True, check=False)
 
 
 # Debian releases boxmunge is built and tested on, and the CPUs it installs

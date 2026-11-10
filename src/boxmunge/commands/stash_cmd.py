@@ -17,11 +17,14 @@ def cmd_stash(args: list[str]) -> None:
 
     if subcmd == "create":
         try:
-            archive = create_stash(paths)
+            created = create_stash(paths)
         except StashError as e:
             print(f"ERROR: {e}", file=sys.stderr)
             sys.exit(1)
-        print(f"Stash created: {archive.name}")
+        # The upgrade shim reads both lines: it records the size and sha256
+        # printed here instead of hashing the deploy-writable name.
+        print(f"Stash created: {created.path.name}")
+        print(f"Stash digest: {created.size} {created.sha256}")
         sys.exit(0)
 
     elif subcmd == "restore":

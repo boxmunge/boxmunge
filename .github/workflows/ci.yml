@@ -52,6 +52,32 @@ jobs:
       - name: Server unit tests (includes pinning, file-length, and DCO-script lints)
         # One pytest-xdist worker per CPU; the suite is parallel-safe.
         run: python -m pytest tests/ --ignore=tests/integration --ignore=tests/vm -m 'not integration' -q -n auto
+      - name: Runtime locks are current (release pull requests)
+        # Dependabot never regenerates the pyproject-extra locks: a release
+        # pull request fails until `make relock` has taken every same-major
+        # release out longer than the script's limit (docs/DEVELOPMENT.md).
+        if: startsWith(github.head_ref, 'release/')
+        run: python scripts/lock-freshness.py requirements.txt requirements-tui.txt requirements-mcp.txt cli/requirements.txt
+      - name: The release SBOM builds, lists every pin a box installs, and validates
+        # The release workflow's own step: a venv built from the box's
+        # hash-pinned requirements, read by cyclonedx-py, checked and
+        # validated as CycloneDX (scripts/assemble-sbom.py).
+        run: bash scripts/generate-sbom.sh
+
+  locks:
+    # Every server lock file installs, hash-checked, on the 3.11 floor and on
+    # 3.12; the unit job covers 3.13, which they are compiled with. Install
+    # only, no tests, on every change: it takes about a minute.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: |
+            3.11
+            3.12
+      - name: The server's lock files install on Python 3.11 and 3.12
+        run: bash scripts/ci-lock-install.sh python3.11 python3.12
 
   cli:
     runs-on: ubuntu-latest
@@ -82,9 +108,11 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install pinned service and test dependencies
+        # The service's own lock last, so where the two pin a package
+        # differently (click, say) the tests run what the service ships.
         run: |
-          pip install --require-hashes -r services/version-check/requirements.txt
           pip install --require-hashes -r requirements-dev.txt
+          pip install --require-hashes -r services/version-check/requirements.txt
       - name: Version-check service tests
         run: cd services/version-check && python -m pytest tests -q
 
@@ -283,7 +311,7 @@ jobs:
     # `always()` so a failed or cancelled job fails this check rather than
     # skipping it. Add every new job to `needs`.
     if: always()
-    needs: [lint, unit, cli, version-check, integration, userns-dind, dco, arm64]
+    needs: [lint, unit, locks, cli, version-check, integration, userns-dind, dco, arm64]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -194,6 +194,16 @@ def test_dependabot_has_one_entry_per_ecosystem() -> None:
     assert sorted(names) == sorted(set(names)), names
 
 
+def test_dependabot_watches_every_hash_pinned_requirements_directory() -> None:
+    """Every directory holding a hash-pinned requirements file is one of the
+    pip entry's directories; a directory left out is never bumped."""
+    (pip,) = [u for u in _dependabot_updates() if u["package-ecosystem"] == "pip"]
+    watched = set(pip["directories"])
+    rels = {p.parent.relative_to(REPO).as_posix() for p in REQUIREMENTS_FILES}
+    dirs = {"/" if rel == "." else f"/{rel}" for rel in rels}
+    assert not dirs - watched, f"add to the pip entry's directories: {sorted(dirs - watched)}"
+
+
 @pytest.mark.parametrize("update", _dependabot_updates(), ids=lambda u: u["package-ecosystem"])
 def test_dependabot_waits_and_groups_minor_and_patch(update: dict) -> None:
     """A release must age before it is proposed (a compromised upload is

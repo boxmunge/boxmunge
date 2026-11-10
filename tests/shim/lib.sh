@@ -29,12 +29,19 @@ run_shim() {
     OUT="$(bash "$SHIM" "$@" 2>&1)" || RC=$?
 }
 
-# run_shim_within <secs> <fifo> <args...>: run_shim, but a shim still running
-# after <secs> (blocked on the planted FIFO <fifo>) has the FIFO opened
-# read-write, which unblocks a blocked reader or writer, and gets RC=124.
-run_shim_within() {
-    local secs="$1" fifo="$2" out pid ticks=0
-    shift 2
+# A shim blocked on a planted FIFO never finishes, so this budget only has to
+# outlast an honest run on a loaded runner, where one shim run can take tens
+# of seconds (under pytest-xdist, 10 was not enough). A real hang still fails,
+# after the budget, as RC=124.
+SHIM_BLOCKED_SECS=120
+
+# run_shim_unless_blocked <fifo> <args...>: run_shim, but a shim still running
+# after SHIM_BLOCKED_SECS (blocked on the planted FIFO <fifo>) has the FIFO
+# opened read-write, which unblocks a blocked reader or writer, and gets
+# RC=124.
+run_shim_unless_blocked() {
+    local fifo="$1" secs="$SHIM_BLOCKED_SECS" out pid ticks=0
+    shift
     out="$(mktemp)"
     bash "$SHIM" "$@" >"$out" 2>&1 &
     pid=$!

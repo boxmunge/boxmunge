@@ -126,11 +126,16 @@ send_notification() {
 # without following a link and only if it is a plain file root owns with the
 # recorded size and sha256 (so another root-made stash renamed onto the name
 # is refused), and has the previous release restore the copy (restore_stash
-# takes an archive path since 0.10.0). A stash with link members (made by a
-# release before 0.10.2) is recorded by name alone: the new release's apply
-# rewrites it without them (D18), changing its hash. An upgrade run by a shim
-# before this one recorded nothing: its rollback takes the newest-named
-# stash, as that shim would, under the same checks.
+# takes an archive path since 0.10.0). The size and sha256 recorded are the
+# ones `stash create` prints ("Stash digest: <size> <sha256>", since 0.11.6),
+# of the bytes it wrote, and the file at the name must match them: hashing
+# the name alone would record whatever deploy renamed over it meanwhile. A
+# release before 0.11.6 prints no digest (it runs the stash of the upgrade to
+# 0.11.6); then the file at the name is what is recorded. A stash with link
+# members (made by a release before 0.10.2) is recorded by name alone: the
+# new release's apply rewrites it without them (D18), changing its hash. An
+# upgrade run by a shim before this one recorded nothing: its rollback takes
+# the newest-named stash, as that shim would, under the same checks.
 #
 # upgrade-stash: "<version> <name> [<size> <sha256>]"
 # ---------------------------------------------------------------------------
@@ -138,8 +143,8 @@ STASH_RECORD_FILE="$UPGRADE_ROOT_DIR/upgrade-stash"
 STASH_COPY_DIR="$UPGRADE_ROOT_DIR/rollback-stash"
 STASH_NAME_RE='^boxmunge-stash-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}\.tar\.gz$'
 
-# stash_facts <stash>: print "<size> <sha256>" of the stash just made, or
-# "links" when it holds link members; on failure print why and return 1.
+# stash_facts <stash>: print "<size> <sha256>" of the stash just made, with
+# " links" after when it holds link members; on failure print why and return 1.
 stash_facts() {
     BM_STASH="$1" python3 - <<'PYREC'
 import hashlib, os, stat, sys, tarfile
@@ -163,19 +168,26 @@ with os.fdopen(fd, "rb") as f:
             links = any(m.issym() for m in tar)
     except (tarfile.TarError, OSError, EOFError):
         links = False  # nothing the apply's rewrite would touch
-print("links" if links else f"{st.st_size} {digest.hexdigest()}")
+print(f"{st.st_size} {digest.hexdigest()}" + (" links" if links else ""))
 PYREC
 }
 
 # record_stash <version> <stash create output>: record the stash `stash
 # create` said it made; on failure print why and return 1.
 record_stash() {
-    local name facts
+    local name printed facts
     name="$(printf '%s\n' "$2" | sed -n 's/^Stash created: //p' | tail -n 1)"
     [[ "$name" =~ $STASH_NAME_RE ]] \
         || { echo "stash create did not name the stash it made (no 'Stash created: <name>' line): $2"; return 1; }
+    printed="$(printf '%s\n' "$2" | sed -n 's/^Stash digest: //p')"
+    [[ -z "$printed" || "$printed" =~ ^[0-9]+\ [0-9a-f]{64}$ ]] \
+        || { echo "stash create printed a digest line the shim cannot read (want one 'Stash digest: <size> <sha256>'): $2"; return 1; }
     facts="$(stash_facts "$BOXMUNGE_ROOT/stashes/$name")" || { echo "$facts"; return 1; }
-    if [[ "$facts" == links ]]; then
+    if [[ -n "$printed" && "${facts% links}" != "$printed" ]]; then
+        echo "$BOXMUNGE_ROOT/stashes/$name is not what stash create just wrote: it printed size and sha256 '$printed', the file there has '${facts% links}' (stashes/ is deploy-writable: something renamed or wrote another file over the name). Nothing has changed. Find what wrote to stashes/, then retry: sudo $BOXMUNGE_ROOT/bin/boxmunge-upgrade target $1"
+        return 1
+    fi
+    if [[ "$facts" == *" links" ]]; then
         log "The stash $name has link members (an older release made it); the upgrade rewrites it without them, so it is recorded by name alone"
         write_root_file "$STASH_RECORD_FILE" "$1 $name"
     else

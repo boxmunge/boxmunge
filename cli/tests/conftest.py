@@ -31,8 +31,10 @@ _FAKE_TOOL = """\
 import json, os, sys
 name = os.path.basename(sys.argv[0])
 argv = sys.argv[1:]
-reads = os.environ.get("FAKE_REMOTE_READ_STDIN") and argv[-1:] != ["handshake"]
-stdin = sys.stdin.read() if reads else None
+# Like real ssh, read whatever stdin holds (never a terminal: a test run
+# with -s must not hang). None: stdin was closed or a terminal.
+stdin = (sys.stdin.read() if sys.stdin is not None and not sys.stdin.isatty()
+         else None)
 with open(os.environ["FAKE_REMOTE_LOG"], "a") as log:
     log.write(json.dumps({{"prog": name, "argv": argv, "stdin": stdin}}) + "\\n")
 joined = " ".join([name] + argv)
@@ -83,7 +85,7 @@ class FakeRemote:
         self._save()
 
     def stdins(self, prog: str) -> list[str | None]:
-        """What each call of `prog` read on stdin (with FAKE_REMOTE_READ_STDIN set)."""
+        """What each call of `prog` read on stdin."""
         entries = [json.loads(line) for line in self.log.read_text().splitlines()]
         return [e["stdin"] for e in entries if e["prog"] == prog]
 

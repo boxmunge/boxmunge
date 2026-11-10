@@ -28,8 +28,15 @@ if TYPE_CHECKING:
     from boxmunge.staged_release import ComposeTarget
 
 
-def _smoke_one(container: str, script: str, svc_name: str) -> SmokeResult:
-    cmd = ["docker", "exec", container, "sh", script, svc_name]
+# In the smoke's environment on check-all's tick only: every other smoke run
+# gates something, so an alert-only check runs under this (PROJECT_CONVENTIONS.md).
+PERIODIC_ENV = "BOXMUNGE_CHECK=periodic"
+
+
+def _smoke_one(container: str, script: str, svc_name: str,
+               periodic: bool = False) -> SmokeResult:
+    env = ["-e", PERIODIC_ENV] if periodic else []
+    cmd = ["docker", "exec", *env, container, "sh", script, svc_name]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
                                 env=docker_env())
@@ -69,6 +76,7 @@ def run_smoke_in_container(
     *,
     logs_target: "ComposeTarget | None" = None,
     hint: "Callable[[str], str | None] | None" = None,
+    periodic: bool = False,
 ) -> SmokeResult:
     """Execute per-service smoke tests inside their running containers.
 
@@ -86,6 +94,8 @@ def run_smoke_in_container(
     ``logs_target`` (staging passes its slot target); without one, through
     production's compose files in ``project_dir``. ``hint(service)`` may add
     a line about the failing service (deploy's default-user hint).
+    ``periodic`` (check-all's tick only) sets PERIODIC_ENV in the script's
+    environment.
 
     Returns the first failing result, or ok if all pass.
     """
@@ -113,7 +123,7 @@ def run_smoke_in_container(
         else:
             sr = SmokeResult(status="ok", message="")
             for container in containers:
-                sr = _smoke_one(container, script, svc_name)
+                sr = _smoke_one(container, script, svc_name, periodic)
                 if sr.status != "ok":
                     break
 
@@ -148,11 +158,12 @@ def run_check(project_name: str, paths: BoxPaths, verbose: bool = True) -> int:
     return check_with_reason(project_name, paths, verbose)[0]
 
 
-def check_with_reason(project_name: str, paths: BoxPaths,
-                  verbose: bool = True) -> tuple[int, str]:
+def check_with_reason(project_name: str, paths: BoxPaths, verbose: bool = True,
+                      *, periodic: bool = False) -> tuple[int, str]:
     """run_check's status, and the smoke message that decided it ("" when
     smoke passed or did not run): check-all records the very failure that
-    set the status, from the one smoke run."""
+    set the status, from the one smoke run. check-all alone passes
+    ``periodic`` (run_smoke_in_container)."""
     project_dir = paths.project_dir(project_name)
     manifest_path = paths.project_manifest(project_name)
 
@@ -215,7 +226,7 @@ def check_with_reason(project_name: str, paths: BoxPaths,
     if has_smoke:
         compose_files = ["compose.yml", "compose.boxmunge.yml"]
         result = run_smoke_in_container(
-            project_dir, manifest, compose_files,
+            project_dir, manifest, compose_files, periodic=periodic,
         )
         if verbose:
             if result.status == "ok":
@@ -469,7 +480,7 @@ def _check_one(name: str, paths: BoxPaths, read_only: bool) -> int:
 
     # One smoke run: its status decides, its message is what is recorded
     # and alerted (a second run could pass and leave the reason empty).
-    result, message = check_with_reason(name, paths)
+    result, message = check_with_reason(name, paths, periodic=True)
     if not read_only:
         update_health_state(name, result, message if result != 0 else "", paths)
     return result

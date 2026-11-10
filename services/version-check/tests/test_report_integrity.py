@@ -1,13 +1,12 @@
 """Failure reports cannot be multiplied, are bounded, and the schema migrates.
 
-Auto-trip lets public, unauthenticated reports withhold a release fleetwide,
-so a report must count once per reporter (an IPv4 /24 or an IPv6 /48, the
-network prefix the service stores instead of an address) and only for
-versions the service publishes.
+Reports from enough networks alert the maintainer (failure_alert), so a
+report must count once per reporter (an IPv4 /24 or an IPv6 /48, the network
+prefix the service stores instead of an address) and only for versions the
+service publishes. Reports never hold a release (test_failure_alert).
 """
 
 import json
-import os
 import sqlite3
 import sys
 import subprocess
@@ -22,6 +21,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import db_schema  # noqa: E402
+import failure_alert  # noqa: E402
 import failure_store  # noqa: E402
 import retention  # noqa: E402
 
@@ -45,10 +45,9 @@ def make_client(tmp_path, migrated_db):
     ]}))
     started = []
 
-    def build(threshold="0"):
+    def build():
         for p in (patch("app.RELEASES_PATH", releases_file),
-                  patch("app.DB_PATH", tmp_path / "checks.db"),
-                  patch.dict(os.environ, {"CIRCUIT_BREAKER_AUTO_THRESHOLD": threshold})):
+                  patch("app.DB_PATH", tmp_path / "checks.db")):
             p.start()
             started.append(p)
         from app import create_app
@@ -72,8 +71,10 @@ def _rows(db_path, columns="version, reporter"):
         conn.close()
 
 
-def _held(client):
-    return client.get("/v1/check?v=0.2.0").get_json().get("held")
+def _alerting(tmp_path):
+    """The releases the maintainer alert names (failure_alert.ALERT_NETWORKS is 2)."""
+    assert failure_alert.ALERT_NETWORKS == 2
+    return failure_alert.crossing(tmp_path / "checks.db", datetime.now(timezone.utc))
 
 
 class TestReporterIdentity:
@@ -83,24 +84,25 @@ class TestReporterIdentity:
     ])
     def test_addresses_in_one_network_count_once(self, make_client, tmp_path,
                                                  first, second, prefix):
-        client = make_client(threshold="2")
+        client = make_client()
         assert _post(client, first).status_code == 204
         assert _post(client, second).status_code == 204
         assert _rows(tmp_path / "checks.db") == [("0.2.1", prefix)]
-        assert _held(client) is None
+        assert _alerting(tmp_path) == []
 
     @pytest.mark.parametrize("first, second", [
         ("2001:db8:1::1", "2001:db8:2::1"), ("198.51.100.1", "198.51.101.1")])
-    def test_distinct_networks_are_distinct_reporters(self, make_client, first, second):
-        client = make_client(threshold="2")
+    def test_distinct_networks_are_distinct_reporters(self, make_client, tmp_path,
+                                                      first, second):
+        client = make_client()
         _post(client, first)
         _post(client, second)
-        assert _held(client) == [{"version": "0.2.1", "reason": "circuit_breaker"}]
+        assert _alerting(tmp_path) == ["0.2.1"]
 
-    def test_one_address_counts_once_across_the_auto_trip_window(self, make_client, tmp_path):
+    def test_one_address_counts_once_across_the_alert_window(self, make_client, tmp_path):
         """A reporter that could report again every hour would reach a low
-        threshold alone within the six-hour auto-trip window."""
-        client = make_client(threshold="2")
+        threshold alone within the six-hour alert window."""
+        client = make_client()
         _post(client, "198.51.100.1")
         conn = sqlite3.connect(tmp_path / "checks.db")
         conn.execute("UPDATE failures SET reported_at = ?",
@@ -109,13 +111,13 @@ class TestReporterIdentity:
         conn.close()
         _post(client, "198.51.100.1")
         assert len(_rows(tmp_path / "checks.db")) == 1
-        assert _held(client) is None
+        assert _alerting(tmp_path) == []
 
     def test_different_failures_from_one_network_are_all_kept(self, make_client, tmp_path):
         """VC-6: one /48 can hold many customers' boxes. A second box failing
         differently must not lose its detail to the first box's report, and
-        the network still counts once towards auto-trip."""
-        client = make_client(threshold="2")
+        the network still counts once towards the alert."""
+        client = make_client()
         for addr, stage, detail in (("2001:db8:0:1::1", "apply", "install_sh_exit_100"),
                                     ("2001:db8:0:2::1", "preflight", "cosign_verify"),
                                     ("2001:db8:0:3::1", "apply", "install_sh_exit_100")):
@@ -124,7 +126,7 @@ class TestReporterIdentity:
                                headers={"X-Forwarded-For": addr}).status_code == 204
         assert _rows(tmp_path / "checks.db", "stage, detail") == [
             ("apply", "install_sh_exit_100"), ("preflight", "cosign_verify")]
-        assert _held(client) is None
+        assert _alerting(tmp_path) == []
         summary = client.get("/v1/failures?version=0.2.1").get_json()
         assert (summary["total"], summary["reporters"]) == (2, 1)
 
@@ -136,25 +138,16 @@ class TestReporterIdentity:
                   for n in range(failure_store.REPORTS_PER_REPORTER + 3)]
         assert stored == [True] * failure_store.REPORTS_PER_REPORTER + [False] * 3
 
-    def test_box_ids_never_count_towards_auto_trip(self, make_client):
+    def test_box_ids_never_count_towards_the_alert(self, make_client, tmp_path):
         """A box ID is whatever the sender puts in the body, so it is forgeable:
-        counting it would let one network hold a release fleet-wide. Only the
+        counting it would let one network raise the alert alone. Only the
         network prefix of the connection counts."""
-        client = make_client(threshold="2")
+        client = make_client()
         for n in range(3):
             body = {**_report(), "box_id": f"box-{n}", "detail": f"failure {n}"}
             client.post("/v1/report-failure", json=body, environ_base=PROXY,
                         headers={"X-Forwarded-For": f"198.51.100.{n + 1}"})
-        assert _held(client) is None
-
-    def test_enabling_auto_trip_warns_in_the_service_log(self, make_client, capsys):
-        make_client(threshold="3")
-        err = capsys.readouterr().err
-        assert "CIRCUIT_BREAKER_AUTO_THRESHOLD=3" in err and "unauthenticated" in err
-
-    def test_auto_trip_off_says_nothing(self, make_client, capsys):
-        make_client()
-        assert "CIRCUIT_BREAKER_AUTO_THRESHOLD" not in capsys.readouterr().err
+        assert _alerting(tmp_path) == []
 
     def test_concurrent_reports_from_one_reporter_store_one_row(self, make_client, tmp_path):
         make_client()  # creates the schema
@@ -263,7 +256,7 @@ class TestRetention:
 
     @pytest.mark.parametrize("sql", [
         failure_store.WINDOW_SQL,
-        failure_store.EXPIRE_SQL, failure_store.COUNT_SQL,
+        failure_store.EXPIRE_SQL, failure_store.REPORTED_BY_SQL,
     ])
     def test_report_queries_use_an_index(self, make_client, tmp_path, sql):
         make_client()

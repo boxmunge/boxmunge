@@ -273,7 +273,9 @@ link makes the operation fail with an error naming the path, instead of redirect
 another file. Remove the link and re-run.
 
 A platform rollback restores exactly the stash its upgrade made, never whichever is newest in
-`stashes/`: the shim records the stash's name, size and sha256 root-only, copies that archive
+`stashes/`: the shim records the stash's name, size and sha256 root-only (the size and sha256
+`stash create` prints for the bytes it wrote, since 0.11.6; an upgrade stops before changing
+anything if the file at the name does not match them), copies that archive
 into `upgrade-root/rollback-stash/` (opened without following a link, and only if it is a plain
 file root owns, which deploy cannot write, with the recorded size and sha256, so no other stash
 renamed onto the name passes), and has the previous release restore the copy. A stash with link
@@ -451,7 +453,9 @@ release between the box's version and the candidate (the candidate
 included) is breaking, and never into a new major version. A box that
 cannot reach a security or break-fix release for that reason alerts its
 operator and reports a `platform-updates` health warning instead. The
-version-check circuit breaker can hold a broken release fleet-wide. A box
+version-check circuit breaker can hold a broken release fleet-wide. Only
+the maintainer trips it: the failure reports boxes send are unauthenticated,
+so they never hold a release, and only alert the maintainer. A box
 honours a hold whenever the service answers: a held release (a feature
 release too) is never installed, automatically or by a plain `upgrade`;
 only `upgrade --target` installs it, deliberately. GitHub is consulted only when the service
