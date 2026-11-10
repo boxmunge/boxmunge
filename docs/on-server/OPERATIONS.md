@@ -1648,7 +1648,8 @@ unless `health` also ran past its budget before the upgrade.
 | `auto-updates` | OS security updates are not being fetched or installed | see [OS security updates](#os-security-updates) |
 | `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, container-update, cve-scan) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
 
-Because exit 2 during probation rolls the upgrade back, only two things report an error. One is a
+Because an error during probation that was not there before the upgrade rolls it back, only two
+things report an error. One is a
 platform component a probe saw broken: Docker not running (`docker info` fails) or its CLI
 missing, Caddy missing, stopped, restarting or from another compose project, the system container
 missing or wrong (a missing, stopped or restarting container only if a second probe 5 seconds later
@@ -2105,7 +2106,7 @@ file.
 
 The previous release does not have to be there for probation to end: at expiry the health
 timer promotes the release whether or not the previous venv still works. Only a rollback needs
-it. If a critical health result calls for a rollback and the previous venv is missing or broken,
+it. If a new health error (or a live environment that no longer runs) calls for a rollback and the previous venv is missing or broken,
 the shim refuses the rollback, logs an error (`log --component upgrade --level error`) and
 sends one alert, and the probation stays until it expires. The log entry and the alert each count
 as done only once they went out (through either environment's Python); until then every
@@ -2203,7 +2204,9 @@ discovery", both saying that updates are not being discovered. A plain `upgrade`
 refuses with the same message. Watch <https://github.com/boxmunge/boxmunge/releases>
 and install a release with `upgrade --target X.Y.Z`, which asks nothing; it downloads
 the release from GitHub, like every upgrade. The value must be `true` or `false`.
-Set it back to `true` to discover releases again.
+Set it back to `true` to discover releases again. One exception: if this box rolls back from
+a release that has the setting to one that predates it (0.11.4 or older), the older release's
+code reports that rollback once, because it does not know the setting.
 
 ## Upgrading from 0.10.1 with a release staged
 

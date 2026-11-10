@@ -459,7 +459,7 @@ that drops nothing, which is always accepted. When the first source in
 2 runs since it last served a catalog that was used (runs it does not
 answer do not count), or against a cached catalog released over 7 days
 ago, the notice becomes a priority-1 alert: `CISA KEV first source overridden by
-<source>`. If `sources.json` cannot be read, no catalog is accepted
+<source>`. If `sources.json` cannot be read (a link or other non-file in its place counts as unreadable), no catalog is accepted
 (priority 1) until root repairs or removes the file.
 
 **Fail-safe: toward uptime, never toward quarantine.** When the catalog is
