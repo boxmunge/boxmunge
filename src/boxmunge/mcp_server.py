@@ -10,6 +10,7 @@ import os
 import sys
 from typing import Any, BinaryIO, Callable
 
+from boxmunge.mcp_args import argument_problem
 from boxmunge.mcp_tools import (
     _tool_agent_help,
     _tool_backup,
@@ -312,6 +313,28 @@ _TOOL_DEFS: list[dict[str, Any]] = [
     },
 ]
 
+_DEFS_BY_NAME: dict[str, dict[str, Any]] = {d["name"]: d for d in _TOOL_DEFS}
+
+
+def _handler(name: str) -> Callable[..., dict]:
+    return _DEFS_BY_NAME[name]["handler"]
+
+
+def call_tool(name: str, arguments: dict | None) -> dict:
+    """Run tool `name`, after checking `arguments` against its schema."""
+    defn = _DEFS_BY_NAME.get(name)
+    if defn is None:
+        return {"success": False, "exit_code": 1,
+                "data": {}, "messages": [f"Unknown tool: {name}"]}
+    arguments = {} if arguments is None else arguments
+    problem = argument_problem(defn["inputSchema"], arguments)
+    if problem:
+        return {"success": False, "exit_code": 2, "data": {},
+                "messages": [f"ERROR: {name}: {problem}. Call it again with "
+                             f"arguments that match its input schema."]}
+    return _handler(name)(**arguments)
+
+
 # ---------------------------------------------------------------------------
 # Protocol stream isolation
 # ---------------------------------------------------------------------------
@@ -362,16 +385,11 @@ def create_mcp_server() -> Any:
 
     server = Server("boxmunge")
 
-    # Build handler lookup (strip 'handler' from defs sent to client)
-    _handlers: dict[str, Callable[..., dict]] = {}
-    tool_objects: list[Tool] = []
-    for defn in _TOOL_DEFS:
-        _handlers[defn["name"]] = defn["handler"]
-        tool_objects.append(Tool(
-            name=defn["name"],
-            description=defn["description"],
-            inputSchema=defn["inputSchema"],
-        ))
+    tool_objects = [
+        Tool(name=defn["name"], description=defn["description"],
+             inputSchema=defn["inputSchema"])
+        for defn in _TOOL_DEFS
+    ]
 
     @server.list_tools()
     async def handle_list_tools() -> list[Tool]:
@@ -379,12 +397,7 @@ def create_mcp_server() -> Any:
 
     @server.call_tool()
     async def handle_call_tool(name: str, arguments: dict | None) -> list[TextContent]:
-        handler = _handlers.get(name)
-        if handler is None:
-            error = {"success": False, "exit_code": 1,
-                     "data": {}, "messages": [f"Unknown tool: {name}"]}
-            return [TextContent(type="text", text=json.dumps(error))]
-        result = handler(**(arguments or {}))
+        result = call_tool(name, arguments)
         return [TextContent(type="text", text=json.dumps(result, default=str))]
 
     return server

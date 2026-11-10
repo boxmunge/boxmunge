@@ -239,7 +239,13 @@ def _tool_health() -> dict:
 def _tool_log(project: str | None = None, component: str | None = None,
               level: str | None = None, since: str | None = None,
               tail: int = 50) -> dict:
-    from boxmunge.commands.log_cmd import query_log
+    from boxmunge.commands.log_cmd import parse_since, query_log
+    if since is not None:
+        try:
+            parse_since(since)
+        except ValueError as e:
+            return {"success": False, "exit_code": 2, "data": {},
+                    "messages": [f"ERROR: log: since: {e}"]}
     read = query_log(
         _get_paths(), project=project, component=component,
         level=level, since=since, tail=tail)
