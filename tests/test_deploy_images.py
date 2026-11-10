@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import pytest
 
-from boxmunge.commands import deploy_images as di
+from boxmunge.commands import deploy_build, deploy_images as di
 from boxmunge.docker_containers import ImageFacts
+from boxmunge.docker_run import DockerError
 from boxmunge.release_target import (
     DeployRefused, ReleaseTarget, production_target, staging_release_target,
 )
@@ -15,8 +16,16 @@ S = 1048576
 
 def _calls(monkeypatch) -> list:
     calls: list = []
-    monkeypatch.setattr(di, "_run", lambda cmd, **kw: calls.append((cmd, kw)))
+    record = lambda cmd, **kw: calls.append((cmd, kw))  # noqa: E731
+    monkeypatch.setattr(di, "_run", record)
+    monkeypatch.setattr(deploy_build, "_run", record)
     return calls
+
+
+def _compose(paths, text: str = "services:\n  web:\n    build: .\n") -> None:
+    pdir = paths.project_dir("app")
+    pdir.mkdir(parents=True, exist_ok=True)
+    (pdir / "compose.yml").write_text(text)
 
 
 def test_build_and_pull_names_services_and_pulls_only_missing(paths, monkeypatch) -> None:
@@ -25,11 +34,71 @@ def test_build_and_pull_names_services_and_pulls_only_missing(paths, monkeypatch
         "web": {"build": {"context": "."}, "image": "boxmunge.invalid/app/web"},
         "db": {"image": "postgres:16"},
         "side": {"image": "boxmunge.invalid/app/web"},
-    })
+    }, pull=False)
     (build, kw), (pull, _) = calls
     assert build[-4:] == ["--profile", "*", "build", "web"]
     assert pull[-5:] == ["pull", "--ignore-buildable", "--policy", "missing", "db"]
     assert "--profile" in pull and kw["cwd"] == paths.project_dir("app")
+
+
+def test_a_pulling_build_asks_for_each_base_images_current_digest(paths, monkeypatch) -> None:
+    calls = _calls(monkeypatch)
+    _compose(paths)
+    di.build_and_pull(production_target(paths, "app"),
+                      {"web": {"build": ".", "image": "boxmunge.invalid/app/web"}}, pull=True)
+    assert calls[0][0][-3:] == ["build", "--pull", "web"]
+
+
+_UNREADABLE = ("Command failed: docker compose build --pull web\nfailed to solve: "
+               "registry.example/base:1: failed to resolve source metadata for "
+               "registry.example/base:1: failed to do request: dial tcp: i/o timeout")
+
+
+def _failing_build(monkeypatch, message: str) -> None:
+    def run(cmd, **kw):
+        raise DockerError(message)
+    monkeypatch.setattr(deploy_build, "_run", run)
+
+
+def test_an_unreadable_base_registry_fails_naming_no_pull(paths, monkeypatch) -> None:
+    _compose(paths)
+    _failing_build(monkeypatch, _UNREADABLE)
+    with pytest.raises(DockerError) as e:
+        di.build_and_pull(production_target(paths, "app"),
+                          {"web": {"build": ".", "image": "boxmunge.invalid/app/web"}},
+                          pull=True)
+    text = str(e.value)
+    assert "--no-pull" in text and "i/o timeout" in text and "docker image ls" in text
+    assert "build: {pull: false}" in text and "no such image" in text
+
+
+def test_a_build_that_sets_pull_false_is_built_apart_without_pull(paths, monkeypatch) -> None:
+    """Its FROM may name an image only this box has; compose's CLI --pull
+    would override its own `pull: false`."""
+    calls = _calls(monkeypatch)
+    _compose(paths, "services:\n  web:\n    build: .\n"
+                    "  tool:\n    build:\n      context: .\n      pull: false\n")
+    services = {n: {"build": ".", "image": f"boxmunge.invalid/app/{n}"} for n in ("web", "tool")}
+    di.build_and_pull(production_target(paths, "app"), services, pull=True)
+    assert [c[0][-3:] for c in calls] == [["build", "--pull", "web"], ["*", "build", "tool"]]
+    calls.clear()
+    di.build_and_pull(production_target(paths, "app"), services, pull=False)
+    assert [c[0][-3:] for c in calls] == [["build", "tool", "web"]]
+
+
+@pytest.mark.parametrize("pull, message", [
+    (True, "failed to solve: process \"/bin/sh -c make\" did not complete"),
+    (False, _UNREADABLE),  # --no-pull cannot help a build that did not pull
+])
+def test_other_build_failures_are_not_blamed_on_the_pull(paths, monkeypatch, pull,
+                                                         message) -> None:
+    _compose(paths)
+    _failing_build(monkeypatch, message)
+    with pytest.raises(DockerError) as e:
+        di.build_and_pull(production_target(paths, "app"),
+                          {"web": {"build": ".", "image": "boxmunge.invalid/app/web"}},
+                          pull=pull)
+    assert str(e.value) == message
 
 
 def test_staging_target_passes_project_directory_and_env_file(tmp_path, monkeypatch) -> None:
@@ -37,7 +106,7 @@ def test_staging_target_passes_project_directory_and_env_file(tmp_path, monkeypa
     target = ReleaseTarget("app", ComposeTarget(
         cwd=tmp_path / "rel", project_name="app-staging", files=["/s/base.yml", "/s/over.yml"],
         project_directory=tmp_path / "rel", env_file=tmp_path / "rel" / ".env"), staging=True)
-    di.build_and_pull(target, {"db": {"image": "postgres:16"}})
+    di.build_and_pull(target, {"db": {"image": "postgres:16"}}, pull=True)
     cmd = calls[0][0]
     assert cmd[cmd.index("--project-directory") + 1] == str(tmp_path / "rel")
     assert cmd[cmd.index("--env-file") + 1] == str(tmp_path / "rel" / ".env")
@@ -57,3 +126,36 @@ def test_every_service_needing_a_declaration_is_listed() -> None:
         di.decide_users(services, facts, {"project": "shop", "services": {"web": {}}})
     assert len(e.value.problems) == 3 and "merge" in e.value.problems[2]
     assert "redis:7" in e.value.problems[0] and "postgres:16" in e.value.problems[1]
+
+
+def test_a_git_projects_compose_link_into_its_checkout_is_read(paths) -> None:
+    pdir = paths.project_dir("app")
+    (pdir / "repo").mkdir(parents=True)
+    (pdir / "repo" / "compose.yml").write_text(
+        "services:\n  tool:\n    build:\n      context: .\n      pull: false\n")
+    (pdir / "compose.yml").symlink_to("repo/compose.yml")
+    assert deploy_build.local_base_builds(production_target(paths, "app")) == {"tool"}
+
+
+def test_pull_false_in_an_included_file_counts(paths) -> None:
+    """Read as the reference walk follows include: (compose_references)."""
+    _compose(paths, "include:\n  - parts/tools.yml\nservices:\n  web:\n    build: .\n")
+    (paths.project_dir("app") / "parts").mkdir()
+    (paths.project_dir("app") / "parts" / "tools.yml").write_text(
+        "services:\n  tool:\n    build:\n      context: .\n      pull: false\n")
+    assert deploy_build.local_base_builds(production_target(paths, "app")) == {"tool"}
+
+
+def test_unreadable_compose_files_refuse_the_deploy(paths) -> None:
+    _compose(paths, "include:\n  - parts/missing.yml\nservices: {}\n")
+    with pytest.raises(DeployRefused, match="build.pull: false"):
+        deploy_build.local_base_builds(production_target(paths, "app"))
+
+
+@pytest.mark.parametrize("contexts", ["{tools: 'service:tool'}", "['tools=service:tool']"])
+def test_a_build_on_a_pull_false_service_is_local_too(paths, contexts) -> None:
+    """A pulling build would build its `service:` context again, with --pull."""
+    _compose(paths, "services:\n  tool:\n    build:\n      context: .\n      pull: false\n"
+                    f"  web:\n    build:\n      context: .\n      additional_contexts: {contexts}\n"
+                    "  other:\n    build: .\n")
+    assert deploy_build.local_base_builds(production_target(paths, "app")) == {"tool", "web"}

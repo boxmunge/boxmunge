@@ -169,10 +169,14 @@ def format_fixable_alert(project: str, hits: Sequence[Hit]) -> Alert:
         "A fix exists for each of these, but the running image predates it:",
         *_listing(hits),
         "",
-        "boxmunge does not rebuild images, and a deploy does not pull a newer",
-        "base image. Bump the image tag or digest, change FROM, or set compose",
-        "`build: {pull: true}` (and no_cache if needed), then redeploy. See",
-        "CVE_POLICY.md, \"Shipping a fix the upstream image does not have yet\".",
+        "boxmunge does not rebuild images on its own. A `build:` service is",
+        "rebuilt on its base image's current digest by its next stage and",
+        f"promote, or prod-deploy (`prod-deploy {project} --redeploy` when",
+        "nothing new was uploaded). Otherwise bump the image tag or digest (a",
+        "FROM pinned by digest is never refreshed), or, for a package your",
+        "Dockerfile installs, set compose `build: {no_cache: true}`, then",
+        "redeploy. See CVE_POLICY.md, \"Base images and the build cache\" and",
+        "\"Shipping a fix the upstream image does not have yet\".",
     ])
     return Alert(kind="fix_available", title=title, body=body, priority=0)
 

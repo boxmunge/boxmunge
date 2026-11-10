@@ -57,24 +57,36 @@ Usage: boxmunge add-git-project <name> <repo-url> [--ref REF]
 
 Register a git-backed project.""",
     "stage": """\
-Usage: boxmunge stage <project> [--ref REF] [--dry-run]
+Usage: boxmunge stage <project> [--ref REF] [--no-pull] [--dry-run]
 
-Deploy alongside production on the staging hostname for verification.""",
+Deploy alongside production on the staging hostname for verification.
+Build services are built on their base images' current registry digests;
+--no-pull builds from the base images in this box's local image store.""",
     "promote": """\
-Usage: boxmunge promote <project> [--dry-run]
+Usage: boxmunge promote <project> [--no-pull] [--dry-run]
 
-Promote the staged build to production.""",
+Promote the staged build to production. Build services are built again on
+their base images' current registry digests: normally the ones the stage
+pulled, so the build is cached. A base image that moved since the stage
+reaches production untested; stage again to test it. --no-pull builds from
+the base images in this box's local image store, which can be older than
+the stage's.""",
     "unstage": """\
 Usage: boxmunge unstage <project> [--dry-run]
 
 Tear down staging.""",
     "prod-deploy": """\
-Usage: boxmunge prod-deploy <project> [--ref REF] [--no-snapshot] [--dry-run]
+Usage: boxmunge prod-deploy <project> [--ref REF] [--no-snapshot] [--no-pull] [--dry-run]
+       boxmunge prod-deploy <project> --redeploy [--no-snapshot] [--no-pull] [--dry-run]
        boxmunge prod-deploy <project> --abandon
 
-Deploy directly to production (skips staging). --abandon undoes an install
-that stopped before its pre-deploy hook ran: the replaced release's files
-go back; containers and data are not touched.""",
+Deploy directly to production (skips staging). Build services are built on
+their base images' current registry digests; --no-pull builds from the base
+images in this box's local image store. With no new bundle in the inbox,
+prod-deploy refuses; --redeploy deploys the installed release again (as
+strictly checked as a new deploy).
+--abandon undoes an install that stopped before its pre-deploy hook ran:
+the replaced release's files go back; containers and data are not touched.""",
     "install-txn": """\
 Usage: boxmunge install-txn <project> --drop
 

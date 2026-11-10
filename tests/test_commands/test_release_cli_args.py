@@ -63,14 +63,15 @@ def test_prod_deploy_options_reach_the_command(no_run, monkeypatch) -> None:
     assert _main(argv, monkeypatch) == 0
     name, args, kwargs = no_run[0]
     assert (name, args[0]) == ("run_deploy", "myapp")
-    assert kwargs == {"ref": "myapp-2026", "no_snapshot": True, "dry_run": True}
+    assert kwargs == {"ref": "myapp-2026", "no_snapshot": True, "dry_run": True,
+                      "pull": True, "redeploy": False}
 
 
 def test_stage_options_reach_the_command(no_run, monkeypatch) -> None:
     assert _main(["stage", "myapp", "--ref", "x", "--dry-run"], monkeypatch) == 0
     name, args, kwargs = no_run[0]
     assert (name, args[0]) == ("run_stage", "myapp")
-    assert kwargs == {"ref": "x", "dry_run": True}
+    assert kwargs == {"ref": "x", "dry_run": True, "pull": True}
 
 
 def test_import_is_not_a_command() -> None:

@@ -111,27 +111,28 @@ def _get_paths() -> BoxPaths:
 # ---------------------------------------------------------------------------
 
 def _tool_prod_deploy(project: str, ref: str | None = None,
-                      no_snapshot: bool = False, dry_run: bool = False) -> dict:
+                      no_snapshot: bool = False, dry_run: bool = False,
+                      no_pull: bool = False, redeploy: bool = False) -> dict:
     from boxmunge.commands.deploy import run_deploy
     paths = _get_paths()
     return capture_tool_call(
-        lambda: run_deploy(project, paths, ref=ref,
-                           no_snapshot=no_snapshot, dry_run=dry_run))
+        lambda: run_deploy(project, paths, ref=ref, no_snapshot=no_snapshot,
+                           dry_run=dry_run, pull=not no_pull, redeploy=redeploy))
 
 
 def _tool_stage(project: str, ref: str | None = None,
-                dry_run: bool = False) -> dict:
+                dry_run: bool = False, no_pull: bool = False) -> dict:
     from boxmunge.commands.stage_cmd import run_stage
     paths = _get_paths()
     return capture_tool_call(
-        lambda: run_stage(project, paths, ref=ref, dry_run=dry_run))
+        lambda: run_stage(project, paths, ref=ref, dry_run=dry_run, pull=not no_pull))
 
 
-def _tool_promote(project: str, dry_run: bool = False) -> dict:
+def _tool_promote(project: str, dry_run: bool = False, no_pull: bool = False) -> dict:
     from boxmunge.commands.promote_cmd import run_promote
     paths = _get_paths()
     return capture_tool_call(
-        lambda: run_promote(project, paths, dry_run=dry_run))
+        lambda: run_promote(project, paths, dry_run=dry_run, pull=not no_pull))
 
 
 def _tool_unstage(project: str, dry_run: bool = False) -> dict:

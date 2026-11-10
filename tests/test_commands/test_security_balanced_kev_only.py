@@ -95,7 +95,7 @@ def test_the_fix_landing_alerts_with_the_rebuild_advice(box) -> None:
     assert fd.disposition is Disposition.IGNORED_FIXED and fd.fix_would_quarantine
     [(title, body, priority)] = pushover.sent
     assert "fixable CVE finding" in title and "rebuild to apply the fix" in title
-    assert priority == 0 and "build: {pull: true}" in body and "redeploy" in body
+    assert priority == 0 and "prod-deploy demo --redeploy" in body
     assert not is_quarantined("demo", paths)
     pushover.clear()
     _scan(paths)

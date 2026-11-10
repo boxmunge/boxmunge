@@ -283,7 +283,8 @@ def model_env_file_problems(model: dict[str, Any], base_dir: Path, roots: tuple[
         problems += [
             f"service {name}: env_file {ref!r} in the model Compose resolved lies "
             f"outside the project directory. Keep every env_file path inside the "
-            f"project, then deploy the fixed release: prod-deploy {project_name}."
+            f"project, then upload the fixed release and deploy it: prod-deploy "
+            f"{project_name}."
             for ref in refs
             if not isinstance(ref, str) or not ref or outside_roots(ref, base_dir, roots)]
     return problems

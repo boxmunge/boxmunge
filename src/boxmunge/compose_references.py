@@ -84,6 +84,7 @@ class _ReferenceWalk:
         self.roots = roots
         self.problems: list[str] = []
         self.files: list[Path] = []
+        self.compose_files: list[Path] = []  # the top file, its includes and extends
         self._seen: set[tuple[str, str, int]] = set()
 
     def _confined(self, what: str, ref: Any, base: Path, *, read: bool = True) -> bool:
@@ -165,6 +166,8 @@ class _ReferenceWalk:
             return
         self._seen.add(key)
         self.files.append(path)
+        if path not in self.compose_files:
+            self.compose_files.append(path)
         try:
             doc = yaml.safe_load(path.read_text())
         except yaml.YAMLError as e:
@@ -205,3 +208,15 @@ def walk_references(
     walk = _ReferenceWalk(roots)
     walk.visit(compose_path, base)
     return walk.problems, walk.files
+
+
+def compose_files(compose_path: Path, roots: tuple[Path, ...]) -> list[Path]:
+    """The compose files Compose reads for ``compose_path``: it, then every
+    file its include entries and extends name, as walk_references follows
+    them. Raises ValueError for references the walk refuses (validation
+    has refused them already, so this is a broken assumption)."""
+    walk = _ReferenceWalk(roots)
+    walk.visit(compose_path)
+    if walk.problems:
+        raise ValueError(f"{compose_path}: {walk.problems[0]}")
+    return walk.compose_files

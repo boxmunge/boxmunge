@@ -28,10 +28,15 @@ def _load_project_config() -> tuple[dict[str, Any], Path]:
 
 
 def _handshake(config: dict[str, Any], manifest_schema: int | None = None,
-               batch: bool = False) -> None:
-    from boxmunge_cli.handshake import HandshakeError, check_server_compatibility
+               batch: bool = False, flags: list[str] | tuple[str, ...] = ()) -> None:
+    """Refuse an incompatible server, and one too old for `flags` (before
+    anything is uploaded)."""
+    from boxmunge_cli.handshake import (
+        HandshakeError, check_server_compatibility, require_server_flags,
+    )
     try:
-        check_server_compatibility(config, manifest_schema, batch=batch)
+        info = check_server_compatibility(config, manifest_schema, batch=batch)
+        require_server_flags(info, flags)
     except HandshakeError as e:
         raise CliExit(e.exit_code, str(e)) from e
 
@@ -66,7 +71,7 @@ def _bundle_upload_and_run(command: str, server_flags: list[str]) -> int:
             print("ERROR: Bundle was not created.", file=sys.stderr)
             return 1
 
-        _handshake(config, _manifest_schema(config_path.parent))
+        _handshake(config, _manifest_schema(config_path.parent), flags=server_flags)
 
         print(f"Uploading {bundles[0].name} to {config['user']}@{config['server']}:"
               f"{config['port']} ...", file=sys.stderr)
@@ -79,7 +84,8 @@ def _bundle_upload_and_run(command: str, server_flags: list[str]) -> int:
 
 
 def _cmd_stage(args: argparse.Namespace) -> int:
-    return _bundle_upload_and_run("stage", ["--dry-run"] if args.dry_run else [])
+    return _bundle_upload_and_run("stage", [*(["--dry-run"] if args.dry_run else []),
+                                            *(["--no-pull"] if args.no_pull else [])])
 
 
 def _cmd_prod_deploy(args: argparse.Namespace) -> int:
@@ -90,13 +96,15 @@ def _cmd_prod_deploy(args: argparse.Namespace) -> int:
         flags.append("--dry-run")
     if args.no_snapshot:
         flags.append("--no-snapshot")
+    if args.no_pull:
+        flags.append("--no-pull")
     return _bundle_upload_and_run("prod-deploy", flags)
 
 
 def _abandon_install(args: argparse.Namespace) -> int:
     """Undo the open install on the server; nothing is bundled or uploaded."""
     from boxmunge_cli.ssh import run_ssh
-    if args.dry_run or args.no_snapshot:
+    if args.dry_run or args.no_snapshot or args.no_pull:
         raise CliExit(USAGE, "--abandon takes no other options.")
     config = connect()
     return run_ssh(config, "prod-deploy", config["project"], "--abandon")
@@ -104,9 +112,10 @@ def _abandon_install(args: argparse.Namespace) -> int:
 
 def _cmd_promote(args: argparse.Namespace) -> int:
     from boxmunge_cli.ssh import run_ssh
-    config = connect()
-    return run_ssh(config, "promote", config["project"],
-                   *(["--dry-run"] if args.dry_run else []))
+    config, _ = _load_project_config()
+    flags = [*(["--dry-run"] if args.dry_run else []), *(["--no-pull"] if args.no_pull else [])]
+    _handshake(config, flags=flags)
+    return run_ssh(config, "promote", config["project"], *flags)
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
@@ -168,6 +177,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                     "on the server. Verify the staging site, then 'promote'.")
     p.add_argument("--dry-run", action="store_true",
                    help="Upload and validate on the server without staging")
+    p.add_argument("--no-pull", action="store_true",
+                   help="Build from the base images in the server's image store instead of "
+                        "checking their registries for newer digests")
     p.set_defaults(func=_cmd_stage)
 
     p = subparsers.add_parser(
@@ -178,6 +190,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                    help="Upload and validate on the server without deploying")
     p.add_argument("--no-snapshot", action="store_true",
                    help="Skip the pre-deploy backup snapshot")
+    p.add_argument("--no-pull", action="store_true",
+                   help="Build from the base images in the server's image store instead of "
+                        "checking their registries for newer digests")
     p.add_argument("--abandon", action="store_true",
                    help="Undo an interrupted install whose pre-deploy hook has not "
                         "run: the previous release's files go back (a first "
@@ -189,6 +204,9 @@ def register(subparsers: argparse._SubParsersAction) -> None:
                               description="Run 'promote <project>' on the server.")
     p.add_argument("--dry-run", action="store_true",
                    help="Show what would be promoted without doing it")
+    p.add_argument("--no-pull", action="store_true",
+                   help="Build from the base images in the server's image store instead of "
+                        "checking their registries for newer digests")
     p.set_defaults(func=_cmd_promote)
 
     p = subparsers.add_parser("status", help="Show the server's project dashboard",

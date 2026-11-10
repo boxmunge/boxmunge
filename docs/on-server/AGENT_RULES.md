@@ -31,6 +31,7 @@ These operations are safe to run without human confirmation:
 | Promote staging to production | `promote <project>` |
 | Abandon staging | `unstage <project>` |
 | Deploy directly to production | `prod-deploy <project>` |
+| Deploy the installed release again (no new upload; rebuilds on current base images) | `prod-deploy <project> --redeploy` |
 | Register a git-based project | `add-git-project <name> <repo-url>` |
 | Preview changes before deploying (against the newest bundle in the inbox) | `diff <project>` |
 | Set a project secret | `secrets set <project> KEY=value` |

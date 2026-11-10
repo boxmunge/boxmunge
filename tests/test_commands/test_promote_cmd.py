@@ -139,7 +139,7 @@ class TestPromoteComponentTagging:
         ))
 
         from boxmunge.commands.deploy import deploy_locked
-        deploy_locked("testapp", paths, no_snapshot=True, component="promote")
+        deploy_locked("testapp", paths, no_snapshot=True, component="promote", redeploy=True)
         assert observed == ["promote"]
 
 

@@ -129,7 +129,7 @@ def test_a_container_whose_image_is_gone_fails_saying_what_to_do(daemon):
         project_containers("demo")
     text = str(raised.value)
     assert "demo-web-1" in text and _GONE in text and "boxmunge.invalid/demo/web" in text
-    assert "no longer has" in text and "prod-deploy demo" in text
+    assert "no longer has" in text and "prod-deploy demo --redeploy" in text
     assert "demo-db-1" not in text
 
 

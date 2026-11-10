@@ -340,7 +340,7 @@ def _build_release(paths: BoxPaths, project: str, manifest: dict) -> dict:
     try:
         # A release 0.10.1 deployed predates users being decided.
         users = decide_release_users(project, paths, manifest, COMPONENT,
-                                     carry_record=True).users
+                                     pull=False, carry_record=True).users
         promote_candidates(paths, project)
     except (DeployRefused, DockerError, ComposeError) as e:
         raise LegacyStageError(f"building and checking this release's images failed: {e}. "

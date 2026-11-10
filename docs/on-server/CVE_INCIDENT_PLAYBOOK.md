@@ -66,10 +66,12 @@ For every finding marked `QUARANTINE` or `STILL_RUNNING_AT_RISK`:
 
 If the finding has `fix_available: true` (and a `fixed_version`, in
 `security <project> --json`), a fixed package exists but the running image
-predates it. boxmunge does not rebuild images: a `build:` service needs a
-rebuild on the fixed base image and a redeploy; a deploy's build uses the
-cached base image unless the service's `build:` sets `pull: true` or the
-`FROM` names a new tag or digest. An `image:` service gets a fix published
+predates it. boxmunge does not rebuild images on its own. A `build:`
+service is rebuilt on the base image's current digest by its next `stage`
+and `promote`, or `prod-deploy` (`prod-deploy <project> --redeploy` when
+nothing new was uploaded). A `FROM` pinned by digest needs a new digest, and
+a package the Dockerfile installs needs `build: {no_cache: true}` (CVE_POLICY.md,
+"Base images and the build cache"). An `image:` service gets a fix published
 under the same tag from the daily container-update (on unless the manifest
 sets `container_updates: {enabled: false}`), but not while the project is
 quarantined: container-update skips it and a deploy pulls only images
@@ -276,7 +278,7 @@ security <project>
 Once a fix lands, rebuild and deploy it: the deploy scans its images first
 and lifts the quarantine once it is live (no `security resume` needed). The
 release must actually carry the fix: a new image tag or digest, or a
-rebuild that pulls the new base image (step 1).
+rebuild on the fixed base image (step 1).
 
 ### D. dangerously_disable_quarantine
 

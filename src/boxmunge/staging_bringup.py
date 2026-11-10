@@ -64,19 +64,20 @@ def _staging_auth(project_name: str, paths: BoxPaths) -> tuple[str, str] | None:
     return auth_user, hashed
 
 
-def _decide_users(paths: BoxPaths, project: str, manifest: dict[str, Any]
-                  ) -> tuple[Clearance | None, dict[str, ServiceUser]]:
-    """Build staging's images, decide and record who each service runs as
-    (deploy_images), and write the slot's overlay with those users. A
-    CVE-quarantined project's staging starts only if every image it would
-    start scans clean (quarantine_gate; its clearance is returned, to check
-    what the start ran); production stays quarantined. Returns the
-    clearance and the users."""
+def _decide_users(paths: BoxPaths, project: str, manifest: dict[str, Any], *,
+                  pull: bool) -> tuple[Clearance | None, dict[str, ServiceUser]]:
+    """Build staging's images (`pull`: with --pull), decide and record who
+    each service runs as (deploy_images), and write the slot's overlay
+    with those users. A CVE-quarantined project's staging starts only if
+    every image it would start scans clean (quarantine_gate; its clearance
+    is returned, to check what the start ran); production stays
+    quarantined. Returns the clearance and the users."""
     slot = slot_dir(paths, project)
     print("  Building images and deciding who each service runs as...")
     try:
         users = deploy_images.prepare_release_users(
-            paths, staging_release_target(paths, project), manifest, component="stage")
+            paths, staging_release_target(paths, project), manifest, component="stage",
+            pull=pull)
         clearance = (clear_release(paths, staging_release_target(paths, project), manifest)
                      if is_quarantined(project, paths) else None)
     except (RunAsError, ComposeResolveError) as e:
@@ -108,12 +109,12 @@ def _give_and_check_owners(paths: BoxPaths, project: str, plan: CopyPlan | None,
         raise DeployRefused(problems)
 
 
-def _prepare_storage(paths: BoxPaths, project: str,
-                     manifest: dict[str, Any]) -> Clearance | None:
+def _prepare_storage(paths: BoxPaths, project: str, manifest: dict[str, Any], *,
+                     pull: bool) -> Clearance | None:
     """Decide staging's users, check staging's files from the slot and,
     with copy_data, copy production's data into staging's created, never
     started containers. Returns the quarantine gate's clearance, if any."""
-    clearance, users = _decide_users(paths, project, manifest)
+    clearance, users = _decide_users(paths, project, manifest, pull=pull)
     release = release_dir(slot_dir(paths, project))
     user_compose = load_user_compose(release / "compose.yml", project)
     # Deploy-time warnings, repeated by design (spec "Deploy-time warning").
@@ -155,7 +156,8 @@ def _reload_caddy(paths: BoxPaths, project: str) -> bool:
     return True
 
 
-def bring_up_staging(paths: BoxPaths, project: str, manifest: dict[str, Any]) -> int:
+def bring_up_staging(paths: BoxPaths, project: str, manifest: dict[str, Any], *,
+                     pull: bool) -> int:
     """Run staging from the slot. Returns 0, or 1 with the failure reported
     (the caller tears the stage down)."""
     release = release_dir(slot_dir(paths, project))
@@ -174,7 +176,7 @@ def bring_up_staging(paths: BoxPaths, project: str, manifest: dict[str, Any]) ->
         with caddy_config_lock(paths.state):
             write_site(paths.caddy, staging_conf,
                        generate_staging_caddy_config(manifest, auth=staging_auth))
-        clearance = _prepare_storage(paths, project, manifest)
+        clearance = _prepare_storage(paths, project, manifest, pull=pull)
     except DeployRefused as e:
         print(f"  ERROR: Staging cannot start as it is:\n{e}", file=sys.stderr)
         print("  Staging was not started.", file=sys.stderr)
