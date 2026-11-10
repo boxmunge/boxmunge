@@ -5,9 +5,10 @@ The lock is taken without waiting, and the checks below are made under it.
 Excluded, and reported, rather than touched: a project with a stage left by
 0.10.1 (D9: it is left exactly as it is, so a rollback finds 0.10.1's own
 state), one with an open install transaction (the core that finishes or
-abandons it migrates what it keeps), and one whose lock is held (it keeps
-its old configs until its next deploy, resume or recover). Excluded
-projects do not fail the upgrade.
+abandons it migrates what it keeps), one whose pause or quarantine record
+cannot be read (whether it is meant to be offline cannot be told), and one
+whose lock is held (it keeps its old configs until its next deploy, resume
+or recover). Excluded projects do not fail the upgrade.
 """
 from __future__ import annotations
 
@@ -18,6 +19,7 @@ from typing import TYPE_CHECKING
 import sys
 
 from boxmunge import bind_sources
+from boxmunge.commands.upgrade_offline import UnreadableRecord
 from boxmunge.commands.upgrade_steps import (
     ManifestMigration, Regeneration, _links_into_repository, _migrated, _project_dirs,
     _regenerate_project, exclusion, install_exclusion_text, require_manifest,
@@ -47,14 +49,18 @@ class Exclusions:
     busy: list[str] = field(default_factory=list)
     # name -> why it cannot be told whether a 0.10.1 stage is on disk
     undetermined: dict[str, str] = field(default_factory=dict)
+    # name -> its pause or quarantine record that cannot be read, and the fix
+    unreadable: dict[str, str] = field(default_factory=dict)
 
     def names(self) -> set[str]:
-        return set(self.legacy) | set(self.install) | set(self.busy) | set(self.undetermined)
+        return (set(self.legacy) | set(self.install) | set(self.busy)
+                | set(self.undetermined) | set(self.unreadable))
 
     def by_cause(self) -> dict[str, list[str]]:
         """The excluded names by why, for the upgrade's log entry."""
         return {"legacy_stage": sorted(self.legacy), "undetermined": sorted(self.undetermined),
-                "open_install": sorted(self.install), "busy": sorted(self.busy)}
+                "open_install": sorted(self.install), "busy": sorted(self.busy),
+                "unreadable_record": sorted(self.unreadable)}
 
 
 def migrate_one(paths: BoxPaths, project_dir: Path) -> str | None:
@@ -125,6 +131,8 @@ def apply_projects(paths: BoxPaths) -> tuple[ManifestMigration, Regeneration, Ex
                     excluded.undetermined[name] = cannot_tell_left_as_is(name, why)
                 elif isinstance(why, InstallTxn):
                     excluded.install[name] = install_exclusion_text(paths, name, why)
+                elif isinstance(why, UnreadableRecord):
+                    excluded.unreadable[name] = why.text
                 else:
                     excluded.install[name] = str(why)
         except LockError:
@@ -132,7 +140,8 @@ def apply_projects(paths: BoxPaths) -> tuple[ManifestMigration, Regeneration, Ex
             log_warning("upgrade", f"Skipped {name}: held by another operation; it keeps its "
                         f"current configs until its next deploy, resume or recover",
                         paths, project=name)
-    for name, why in {**excluded.install, **excluded.undetermined}.items():
+    for name, why in {**excluded.install, **excluded.undetermined,
+                      **excluded.unreadable}.items():
         log_warning("upgrade", f"Left {name} as it is (not migrated, regenerated or "
                     f"restarted): {why}", paths, project=name)
     return migration, regen, excluded
@@ -164,6 +173,12 @@ def notify_exclusions(paths: BoxPaths, excluded: Exclusions) -> None:
         _summary(paths, "upgrade: projects that may hold a 0.10.1 stage left as they are",
                  f"The upgrade did not migrate, regenerate or restart these projects:\n"
                  f"{lines}", priority=1)
+    if excluded.unreadable:
+        lines = "\n".join(f"- {n}: {why}" for n, why in sorted(excluded.unreadable.items()))
+        _summary(paths, "upgrade: projects whose pause or quarantine record cannot be read "
+                 "left as they are",
+                 f"The upgrade did not migrate, regenerate or restart these projects; their "
+                 f"containers keep running as they are:\n{lines}", priority=1)
     if excluded.busy:
         _summary(paths, "upgrade: busy projects skipped",
                  f"These projects were busy and keep their previous configs until their next "

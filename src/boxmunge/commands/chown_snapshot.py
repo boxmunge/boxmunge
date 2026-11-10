@@ -21,7 +21,7 @@ from boxmunge.commands.deploy_checks import service_mounts
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.docker_containers import running_by_service
 from boxmunge.lifecycle import BlockReason, is_blocked
-from boxmunge.pause import awaiting_deploy
+from boxmunge.pause import awaiting_deploy, is_paused
 from boxmunge.paths import BoxPaths
 from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.pending_snapshot import age, pending_for_live
@@ -62,6 +62,13 @@ def _why_stopped(paths: BoxPaths, project: str, backup_service: str) -> tuple[st
                 "take one of that install's ways out first (abandoning it leaves the "
                 "containers and data as they are), then run data chown again")
     block = is_blocked(project, paths)
+    if block is not None and block.reason is BlockReason.QUARANTINED \
+            and is_paused(project, paths):
+        # A lift while paused starts nothing (quarantine_lift.start_hold).
+        return ("the project is paused and CVE-quarantined",
+                f"run `boxmunge security resume {project}` once its images are clean (it "
+                f"stays paused), then `boxmunge resume {project}` (that starts it, and the "
+                f"backup dumps from the running service), then run data chown again")
     if block is not None and block.reason is BlockReason.QUARANTINED:
         return ("the project is CVE-quarantined",
                 f"run `boxmunge security resume {project}` once its images are clean (that "

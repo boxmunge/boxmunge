@@ -35,7 +35,7 @@ from boxmunge.cve.grace import (
     read_grace_state,
 )
 from boxmunge.cve.policy import Disposition, ProjectDecision
-from boxmunge.cve.quarantine import is_quarantined
+from boxmunge.cve.quarantine import QuarantineError, is_quarantined
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
 from boxmunge import docker_containers
 from boxmunge.docker_run import DockerError
@@ -259,10 +259,10 @@ def _scan_each(
             print(f"{name}: SKIPPED — held by another operation; will be "
                   f"picked up on next scan")
             continue
-        except (RuntimeError, ManifestError, OSError, StateError) as e:
+        except (RuntimeError, ManifestError, OSError, StateError, QuarantineError) as e:
             # Audit B-12: a malformed per-project file (a manifest, a corrupt
-            # health or deploy state) is reported for that project and the
-            # fleet scan carries on with the rest.
+            # health, deploy, pause or quarantine record) is reported for
+            # that project and the fleet scan carries on with the rest.
             print(f"{name}: ERROR — {e}")
             log_warning(
                 "cve-scan", f"scan failed for {name}: {e}",

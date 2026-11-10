@@ -129,7 +129,7 @@ def test_the_record_holds_exactly_the_hashes_that_were_checked(box, monkeypatch)
 def test_a_paused_projects_refusal_names_the_way_a_deploy_can_run(box) -> None:
     """A deploy is refused while the project is paused, and resume runs the
     same check: the way out is to hand the pause to the redeploy."""
-    from boxmunge.commands.upgrade_steps import _offline_exit
+    from boxmunge.commands.upgrade_offline import offline_exit
     from boxmunge.pause import mark_pause_complete, write_paused_state
     paths, project_dir, *_ = box
     _deploy(paths)
@@ -140,4 +140,4 @@ def test_a_paused_projects_refusal_names_the_way_a_deploy_can_run(box) -> None:
     with pytest.raises(ComposeRefused) as e:
         _upgrade_record(paths)
     assert way in str(e.value)
-    assert way in _offline_exit(paths, NAME)
+    assert way in offline_exit(paths, NAME)

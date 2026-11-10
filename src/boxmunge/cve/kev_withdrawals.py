@@ -25,7 +25,7 @@ from typing import Any
 
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
-from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 
 
 class KevWithdrawalsError(Exception):
@@ -41,12 +41,13 @@ class Withdrawal:
 
 def _entries(paths: BoxPaths) -> dict[str, dict[str, Any]]:
     path = paths.kev_withdrawn
-    # lexists: a link whose target is gone is not "nothing withdrawn"; an
-    # empty answer would lift every withdrawal hold.
-    if not os.path.lexists(path):
-        return {}
     try:
-        entries = json.loads(read_text_nofollow(path))["withdrawn"]
+        # A link whose target is gone is not "nothing withdrawn": an empty
+        # answer would lift every withdrawal hold.
+        raw = read_text_nofollow_or_none(path)
+        if raw is None:
+            return {}
+        entries = json.loads(raw)["withdrawn"]
         for entry in entries.values():
             if not isinstance(entry["source"], str) or not isinstance(entry["at"], str):
                 raise ValueError("an entry has no source or time")
@@ -84,7 +85,7 @@ def record_withdrawals(
         entries.setdefault(cve, {"source": source, "at": now})
     listed = set(listed)
     kept = {cve: e for cve, e in entries.items() if cve not in listed}
-    if not kept and not paths.kev_withdrawn.exists():
+    if not kept and not os.path.lexists(paths.kev_withdrawn):
         return
     _write(paths, kept)
 

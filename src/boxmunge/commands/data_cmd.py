@@ -59,7 +59,7 @@ from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation
 from boxmunge.manifest import ManifestError, load_manifest
-from boxmunge.pause import awaiting_deploy
+from boxmunge.pause import awaiting_deploy, is_paused
 from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.paths import BoxPaths
 from boxmunge.pending_snapshot import record_pending
@@ -228,14 +228,18 @@ def _chown_mount(paths: BoxPaths, project: str, model: dict, m, ids: tuple[int, 
 
 
 def _regenerates(paths: BoxPaths, project: str) -> str:
-    """The command that regenerates the overlay from the state the project is in."""
+    """The command that regenerates the overlay from the state the project
+    is in. A deploy is refused while it is paused, and a lift while paused
+    regenerates nothing (quarantine_lift.start_hold): resume does."""
     block = is_blocked(project, paths)
-    if block is not None and block.reason is BlockReason.PAUSED and \
-            not awaiting_deploy(project, paths):
-        return f"`boxmunge resume {project}`"
+    paused = is_paused(project, paths) and not awaiting_deploy(project, paths)
     if block is not None and block.reason is BlockReason.QUARANTINED:
-        return (f"a deploy of a fixed release, or `boxmunge security resume {project}` once "
-                f"its images are clean")
+        lift = f"`boxmunge security resume {project}` once its images are clean"
+        if paused:
+            return f"{lift} (it stays paused), then `boxmunge resume {project}`"
+        return f"a deploy of a fixed release, or {lift}"
+    if block is not None and block.reason is BlockReason.PAUSED and paused:
+        return f"`boxmunge resume {project}`"
     return f"`{redeploy_command(paths, project)}`"
 
 
