@@ -130,3 +130,88 @@ def test_manifest_project_must_be_a_valid_name(project, capsys) -> None:
     _set_config_project(project, "myapp")
     assert run_cli(["bundle", "--validate"]) == 1
     assert "project" in capsys.readouterr().err
+
+
+def _server(fake_remote, version: str) -> None:
+    fake_remote.respond("ssh", "handshake", stdout=json.dumps({
+        "server_version": version, "min_client_version": "0.1.0", "schema_version": 3}))
+
+
+def test_redeploy_forwards_without_bundling(project, fake_remote) -> None:
+    _server(fake_remote, "0.11.4")
+    assert run_cli(["prod-deploy", "--redeploy", "--no-snapshot", "--dry-run"]) == 0
+    assert fake_remote.calls("scp") == []
+    assert _remote_commands(fake_remote) == [
+        "handshake", "prod-deploy myapp --redeploy --dry-run --no-snapshot"]
+    assert not list(project.glob("*.tar.gz"))
+
+
+def test_redeploy_is_refused_by_an_older_server_naming_its_redeploy(project, fake_remote,
+                                                                    capsys) -> None:
+    """The fixture's server is 0.11.0: a bare prod-deploy with no bundle
+    waiting deploys the installed release again there."""
+    assert run_cli(["prod-deploy", "--redeploy"]) == 3
+    assert _remote_commands(fake_remote) == ["handshake"]
+    err = capsys.readouterr().err
+    assert "--redeploy needs boxmunge-server 0.11.4" in err
+    assert "'boxmunge remote prod-deploy myapp'" in err
+
+
+def test_ref_deploys_that_release_without_bundling(project, fake_remote) -> None:
+    """--ref (any supported server) resumes an open install, or deploys a
+    bundle already in the inbox, without uploading the working tree."""
+    assert run_cli(["prod-deploy", "--ref", "myapp-20261110T120000Z", "--no-pull"]) == 3
+    _server(fake_remote, "0.11.4")
+    assert run_cli(["prod-deploy", "--ref", "myapp-20261110T120000Z"]) == 0
+    assert fake_remote.calls("scp") == []
+    assert _remote_commands(fake_remote)[-1] == "prod-deploy myapp --ref myapp-20261110T120000Z"
+
+
+def test_accept_stale_kev_is_forwarded_with_the_upload(project, fake_remote) -> None:
+    _server(fake_remote, "0.11.5")
+    assert run_cli(["prod-deploy", "--accept-stale-kev"]) == 0
+    assert len(fake_remote.calls("scp")) == 1
+    assert _remote_commands(fake_remote)[-1] == "prod-deploy myapp --accept-stale-kev"
+
+
+@pytest.mark.parametrize("mode", [["--redeploy"], ["--ref", "abc123"]])
+def test_accept_stale_kev_goes_with_a_deploy_of_no_upload(project, fake_remote, mode) -> None:
+    _server(fake_remote, "0.11.5")
+    assert run_cli(["prod-deploy", *mode, "--accept-stale-kev"]) == 0
+    assert fake_remote.calls("scp") == []
+    assert _remote_commands(fake_remote)[-1] == " ".join(
+        ["prod-deploy", "myapp", *mode, "--accept-stale-kev"])
+
+
+def test_accept_stale_kev_is_refused_before_upload_by_an_older_server(project, fake_remote,
+                                                                      capsys) -> None:
+    _server(fake_remote, "0.11.4")
+    assert run_cli(["prod-deploy", "--accept-stale-kev"]) == 3
+    assert fake_remote.calls("scp") == []
+    assert _remote_commands(fake_remote) == ["handshake"]
+    err = capsys.readouterr().err
+    assert "--accept-stale-kev needs boxmunge-server 0.11.5" in err
+    assert "Nothing was sent" in err and "without --accept-stale-kev" not in err
+
+
+@pytest.mark.parametrize("argv", [
+    ["--redeploy", "--ref", "abc123"],
+    ["--abandon", "--redeploy"],
+    ["--abandon", "--ref", "abc123"],
+    ["--abandon", "--accept-stale-kev"],
+])
+def test_prod_deploy_modes_exclude_each_other(project, fake_remote, argv) -> None:
+    assert run_cli(["prod-deploy", *argv]) == 2
+    assert fake_remote.calls() == []
+
+
+def test_logs_staging_is_forwarded(project, fake_remote) -> None:
+    _server(fake_remote, "0.11.4")
+    assert run_cli(["logs", "web", "--staging", "--tail", "5"]) == 0
+    assert _remote_commands(fake_remote)[-1] == "logs myapp web --tail 5 --staging"
+
+
+def test_logs_staging_is_refused_by_an_older_server(project, fake_remote, capsys) -> None:
+    assert run_cli(["logs", "--staging"]) == 3
+    assert _remote_commands(fake_remote) == ["handshake"]
+    assert "--staging needs boxmunge-server 0.11.4" in capsys.readouterr().err

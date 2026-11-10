@@ -27,10 +27,18 @@ from boxmunge_cli.version import parse_version
 # handshake schema_version) the client was built and tested against. Newer
 # flags are not worth refusing every command for: prod-deploy --abandon is
 # left to older servers to reject ("unknown argument"; it uploads nothing),
-# and the flags in FLAG_SINCE are refused here, before a bundle is uploaded.
+# and the flags in FLAG_SINCE are refused here, before anything is sent.
 MIN_SERVER_VERSION = "0.10.0"
-# Flags newer than MIN_SERVER_VERSION -> the first server release that takes them.
-FLAG_SINCE = {"--no-pull": "0.11.4"}
+# Flags newer than MIN_SERVER_VERSION -> (the first server release that takes
+# them, what an older server accepts instead or None). "{project}" is filled in.
+FLAG_SINCE: dict[str, tuple[str, str | None]] = {
+    "--no-pull": ("0.11.4", "run the command without --no-pull"),
+    "--staging": ("0.11.4", None),
+    "--redeploy": ("0.11.4", "deploy the installed release again with "
+                             "'boxmunge remote prod-deploy {project}', which an older "
+                             "server does when no bundle is waiting in its inbox"),
+    "--accept-stale-kev": ("0.11.5", None),
+}
 # Server behaviours newer than MIN_SERVER_VERSION that a command relies on ->
 # the first server release that has them.
 FEATURE_SINCE = {"'secrets set' with the value on stdin": "0.11.5"}
@@ -120,15 +128,20 @@ def check_server_compatibility(config: dict[str, Any],
     return info
 
 
-def require_server_flags(info: ServerInfo, flags: list[str] | tuple[str, ...]) -> None:
-    """Refuse a flag the server is too old to accept (FLAG_SINCE)."""
+def require_server_flags(info: ServerInfo, flags: list[str] | tuple[str, ...],
+                         project: str | None = None) -> None:
+    """Refuse a flag the server is too old to accept (FLAG_SINCE). `flags`
+    holds flag names only, never an option's value."""
     for flag in flags:
-        since = FLAG_SINCE.get(flag)
-        if since and parse_version(info.server_version) < parse_version(since):
+        if flag not in FLAG_SINCE:
+            continue
+        since, instead = FLAG_SINCE[flag]
+        if parse_version(info.server_version) < parse_version(since):
+            other = f", or {instead.format(project=project)}" if instead else ""
             raise HandshakeError(
                 f"{flag} needs boxmunge-server {since} or newer; the server runs "
-                f"{info.server_version}. Upgrade the server (run 'upgrade' on it), or "
-                f"run the command without {flag}.")
+                f"{info.server_version}. Nothing was sent. Upgrade the server "
+                f"(boxmunge remote upgrade){other}.")
 
 
 def require_server_feature(info: ServerInfo, feature: str) -> None:
