@@ -463,7 +463,9 @@ compromise of any single one cannot silently propagate.
    `release.yml` is pinned to a 40-character commit SHA, not a version
    tag, so a tag-takeover on (e.g.) `actions/checkout` cannot redirect
    to a malicious commit. Dependabot maintains these pins on a weekly
-   schedule. A lint test (`tests/test_release_pinning.py`) refuses any
+   schedule, and proposes a release only once it is 7 days old, so a
+   compromised upload has time to be caught and pulled (security updates
+   are not held back). A lint test (`tests/test_release_pinning.py`) refuses any
    workflow whose `uses:` references a tag.
 
 4. **Python dependencies.** The workflow installs from hash-pinned

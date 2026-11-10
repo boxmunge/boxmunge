@@ -159,7 +159,9 @@ signed bundle. MCP is always installed, not opt-in: the shim builds each venv sl
 anything else would be lost on the next upgrade. Likewise,
 every GitHub Action is pinned to a commit SHA. `tests/test_release_pinning.py` fails the build if
 either rule is broken. To change a dependency, edit the matching `.in` file or `pyproject.toml`, run
-`make lock`, and commit the regenerated `.txt` files. Dependabot proposes routine bumps.
+`make lock`, and commit the regenerated `.txt` files. Dependabot proposes routine bumps: each
+week, one pull request per ecosystem (pip, Actions, Docker) for minor and patch updates, and one per
+major, for releases at least 7 days old (a pip major waits 30). See `.github/dependabot.yml`.
 
 ## How a release reaches a server
 
