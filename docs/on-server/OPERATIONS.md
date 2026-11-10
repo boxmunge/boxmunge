@@ -443,6 +443,14 @@ secrets unset myapp OLD_KEY
 
 Project secrets are stored in `secrets.env` and injected into the project's containers.
 
+`secrets set myapp KEY` (no `=`) takes the value from stdin instead: at a terminal it asks
+without echo, otherwise it reads all of stdin, less one trailing newline (a second line is
+refused, not dropped; empty stdin is refused, so an empty value is sent as an empty line).
+The value is then in no command line, so `ps` on the box does not show it, and nor does
+the deploy shell's command string. `KEY=VALUE` puts the value in the command line of the
+`boxmunge-server` process while it runs. The client's `boxmunge secrets set` always sends
+the value on stdin. Either way it is stored in plain text in `secrets.env`.
+
 Keys must be environment-variable names (letters, digits and underscores, not starting
 with a digit). Values may contain spaces, tabs, `=` and any printable text, but not
 newlines or other control characters, which would add lines to the env file. Either
@@ -705,7 +713,7 @@ Every snapshot is named `<project>-<UTC timestamp>-<kind>.tar.gz.age`, for examp
 | `prerestore` | `restore`, a safety snapshot of the data about to be replaced (unless `--no-safety-snapshot`) | 3 |
 | `manual` | `backup <project>`, the MCP `backup` tool, the console, `self-test` | 5 |
 
-After each backup, the oldest snapshots of that kind beyond its count are deleted. Archives from before kinds existed (`<project>-<timestamp>.tar.gz.age`) count as `nightly` and age out as new nightly backups arrive. Other files in `backups/` are never touched. `backup.retention` must be a whole number of at least 1. `validate`, `stage`, `promote` and `prod-deploy` refuse anything else; a project that already has a bad value keeps running through an upgrade (it is a warning there), but its backups fail before they dump until it is fixed.
+After each backup, the oldest snapshots of that kind beyond its count are deleted, except a snapshot something is paired with: the one the kept previous release's rollback restores, an open install's, and the one `pause` or `data chown` recorded for the next deploy. Those stay however many newer ones arrive, so a run of failed deploy attempts cannot evict the snapshot `rollback` needs. If one of those records cannot be read, the backup prunes nothing and warns, naming the record. Archives from before kinds existed (`<project>-<timestamp>.tar.gz.age`) count as `nightly` and age out as new nightly backups arrive. Other files in `backups/` are never touched. `backup.retention` must be a whole number of at least 1. `validate`, `stage`, `promote` and `prod-deploy` refuse anything else; a project that already has a bad value keeps running through an upgrade (it is a warning there), but its backups fail before they dump until it is fixed.
 
 ### Off-site copies
 
@@ -1091,7 +1099,12 @@ marked complete once the maintenance page is live, the containers are stopped an
 policies are held. If a step fails (Caddy cannot reload, `docker compose stop` errors), `pause`
 exits 1 with `ERROR: Pausing 'myapp' is incomplete: ...`: the project counts as paused, but may
 still be serving or running. Fix the cause and run `pause myapp` again to finish it (an incomplete
-pause is the one case where pausing a paused project is accepted), or `resume myapp`. Until then
+pause is the one case where pausing a paused project is accepted), or `resume myapp`. The pause
+record names its `prepause` snapshot, so the run that finishes it still pairs that snapshot with
+the deploy that ends the pause, as long as Docker shows the backup service has not run since. If
+the service is still running (the stop failed), it takes a new snapshot instead; if it ran and
+stopped again, the first snapshot stays in `backups/` for a manual restore and nothing is paired,
+which it says. Until then
 `status` shows it as `PAUSED (incomplete)`, `health` warns about it under `lifecycle`, and
 `container-update` logs that it may still be serving on images it does not update while paused.
 

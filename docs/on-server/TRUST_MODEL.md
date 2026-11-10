@@ -246,8 +246,11 @@ writes there too (timers, upgrades). Root opens those files without following a 
 symlink and refuses anything but a plain file with one link (the operational log, lock files,
 the container-update lock, stash archives, decrypted restore snapshots). It sets owner and mode
 on the open descriptor, never by name after the fact (atomic state writes, backup dumps and
-temps). A planted link makes the operation fail with an error naming the path, instead of
-redirecting root to another file. Remove the link and re-run.
+temps). Root reads the `state/` records (deploy, pause, quarantine, health, scan, breaker,
+KEV, alert and update records) the same way: without following a link, refusing a FIFO or
+other non-regular file without blocking on it, and refusing a file over 64 MiB. A planted
+link makes the operation fail with an error naming the path, instead of redirecting root to
+another file. Remove the link and re-run.
 
 This protects the last path component only. Deploy can still swap an intermediate directory it
 owns (`projects/<p>/backups`, a `state/` subdirectory, `inbox/.tmp`) for a symlink, so a root

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 from boxmunge.commands.health_cmd import HealthCheck
+from boxmunge.fs_nofollow import read_text_nofollow
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -38,7 +39,7 @@ def check_container_updates(paths: BoxPaths) -> HealthCheck:
     for state_file in sorted(state_dir.glob("*.json")):
         target = state_file.stem
         try:
-            data = json.loads(state_file.read_text())
+            data = json.loads(read_text_nofollow(state_file))
             last_check = data.get("last_check")
             ts = datetime.fromisoformat(last_check) if last_check else None
             if ts is not None and ts.tzinfo is None:

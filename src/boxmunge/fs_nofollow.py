@@ -107,11 +107,24 @@ def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
     return fd
 
 
-def read_text_nofollow(path: Path) -> str:
+# Far above any state record, compose file or catalog boxmunge writes or
+# reads (the KEV catalog, the largest, is a few MB), and far below what
+# would make a root reader exhaust memory on a file deploy grew.
+READ_LIMIT_BYTES = 64 * 1024 * 1024
+
+
+def read_text_nofollow(path: Path, *, limit: int = READ_LIMIT_BYTES) -> str:
     """A UTF-8 file's text, read without following a link (see
-    open_regular_nofollow). Raises OSError (or UnicodeDecodeError)."""
-    with os.fdopen(open_regular_nofollow(path, os.O_RDONLY), encoding="utf-8") as f:
-        return f.read()
+    open_regular_nofollow) and refused past ``limit`` bytes. The one way
+    root reads a file by name in a directory deploy can write (state/,
+    a project's tree). Raises OSError (or UnicodeDecodeError); a missing
+    file raises FileNotFoundError, as Path.read_text does."""
+    with os.fdopen(open_regular_nofollow(path, os.O_RDONLY), "rb") as f:
+        data = f.read(limit + 1)
+    if len(data) > limit:
+        raise OSError(f"{path} is larger than {limit} bytes; refusing to read it. "
+                      "Remove it so it can be recreated.")
+    return data.decode("utf-8")
 
 
 def chmod_nofollow(path: Path, mode: int | None = None, add: int = 0) -> None:

@@ -67,6 +67,21 @@ Every command has `--help`. Errors go to stderr and start with `ERROR:`. Exit
 codes: 0 success, 1 failure, 2 usage error, 3 client and server incompatible,
 4 server unreachable; commands that run a server command exit with its code.
 
+`rollback` and the server commands that ask before acting (`remote pause`,
+`resume`, `recover`, `restore`, `inbox clean`, `project-delete`) show the
+server's plan and ask `Proceed? [y/N]` when run at a terminal. Without a
+terminal (a script, CI) nobody can answer, so the command is refused before
+anything is sent unless `--yes` is given.
+
+`secrets set KEY` asks for the value without echo (or reads one line of stdin)
+and sends it on ssh's stdin, so it is in no shell history and in no command
+line: process listings on your machine and on the server do not show it.
+`secrets set KEY=VALUE` works too, but puts the value in your shell history and
+in the CLI's own process listing. The server stores the value in plain text in
+the project's `secrets.env` (readable by the deploy user and root), and the
+containers of every service the manifest declares get it in their environment.
+`secrets set` needs boxmunge-server 0.11.5 or newer.
+
 ## The scaffold
 
 `boxmunge init` writes a project that deploys as-is once its host is set:

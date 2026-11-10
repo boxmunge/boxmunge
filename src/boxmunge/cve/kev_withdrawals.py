@@ -24,6 +24,7 @@ from typing import Any
 
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
+from boxmunge.fs_nofollow import read_text_nofollow
 
 
 class KevWithdrawalsError(Exception):
@@ -42,7 +43,7 @@ def _entries(paths: BoxPaths) -> dict[str, dict[str, Any]]:
     if not path.exists():
         return {}
     try:
-        entries = json.loads(path.read_text())["withdrawn"]
+        entries = json.loads(read_text_nofollow(path))["withdrawn"]
         for entry in entries.values():
             if not isinstance(entry["source"], str) or not isinstance(entry["at"], str):
                 raise ValueError("an entry has no source or time")

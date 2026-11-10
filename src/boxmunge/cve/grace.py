@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from boxmunge.fileutil import atomic_write_text
+from boxmunge.fs_nofollow import read_text_nofollow
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -128,7 +129,7 @@ def read_grace_state(paths: "BoxPaths") -> GraceState | None:
     if not path.exists():
         return None
     try:
-        raw = path.read_text()
+        raw = read_text_nofollow(path)
     except OSError as e:
         raise GraceError(f"failed to read grace state file {path}: {e}") from e
     try:

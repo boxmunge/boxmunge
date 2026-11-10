@@ -22,6 +22,7 @@ from typing import Any
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
 from boxmunge.version_check_url import version_check_base
+from boxmunge.fs_nofollow import read_text_nofollow
 
 STALE_AFTER = timedelta(hours=48)
 _KEYS = {"answered_at", "failing_since", "last_error"}
@@ -48,7 +49,7 @@ def _read(paths: BoxPaths) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        state = json.loads(path.read_text())
+        state = json.loads(read_text_nofollow(path))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise DiscoveryStateError(f"{path}: unreadable: {e}") from e
     if not isinstance(state, dict) or set(state) != _KEYS:
