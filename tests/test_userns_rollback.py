@@ -6,6 +6,7 @@ import pytest
 from boxmunge.compose import ComposeError
 from boxmunge.system_container import SystemContainerError
 from boxmunge.userns import rollback as rb
+from boxmunge.userns import switch as sw
 from boxmunge.userns.inventory import Inventory, VolumeEntry
 from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
 from boxmunge.userns.preflight import Report
@@ -35,6 +36,12 @@ class _Daemon:
 def flushes(monkeypatch):
     """The durability barrier, stood in for (it flushes real filesystems)."""
     monkeypatch.setattr(rb, "barrier", lambda paths, j, images_dir: None)
+
+
+@pytest.fixture(autouse=True)
+def no_mounts(monkeypatch):
+    """No mount below the remapped root (a test host has no mountinfo)."""
+    monkeypatch.setattr(sw, "mount_points_under", lambda root: [])
 
 
 @pytest.fixture
@@ -358,3 +365,15 @@ def test_the_rollback_command_prints_what_was_left_alone(paths, monkeypatch, cap
     out = capsys.readouterr().out
     assert "Rolled back to the prior store." in out
     assert "WARNING: /srv/a: 1 entry ..." in out
+
+
+def test_a_mount_below_the_remapped_root_is_not_deleted_through(paths, remapped,
+                                                                 monkeypatch) -> None:
+    events, new_root = remapped
+    (new_root / "overlay2" / "l" / "merged").mkdir(parents=True)
+    leaked = str(new_root / "overlay2" / "l" / "merged")
+    monkeypatch.setattr(sw, "mount_points_under", lambda root: [leaked])
+    with pytest.raises(rb.MigrationError, match=f"{leaked}.*umount"):
+        rb.rollback(paths, daemon=_Daemon(events), timers=FakeTimers())
+    assert (new_root / "overlay2" / "l" / "merged").is_dir()
+    assert "umount" in load_journal(paths).failed

@@ -12,6 +12,7 @@ from __future__ import annotations
 import grp
 import os
 import pwd
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -25,6 +26,7 @@ from boxmunge.userns.daemon_config import (
 from boxmunge.userns.daemon_ctl import DaemonControl, daemon_answers
 from boxmunge.userns.inventory import CONTAINERD_STORE, Inventory
 from boxmunge.userns.preflight_checks import dir_size
+from boxmunge.userns.shift import mount_points_under
 from boxmunge.userns.walk import open_parent_nofollow
 
 _OPEN = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -33,6 +35,20 @@ CADDYFILE_MODE = 0o644
 
 class MigrationError(Exception):
     """The migration cannot start or continue; the message says what to do."""
+
+
+def remove_docker_tree(root: Path) -> None:
+    """shutil.rmtree, refused while anything is mounted below `root`: rmtree
+    crosses filesystems, so a leaked overlay `merged` or `shm` mount would
+    have its contents deleted through it."""
+    mounts = mount_points_under(root)
+    if mounts:
+        raise MigrationError(
+            f"{root} has mounts below it ({', '.join(mounts[:5])}"
+            f"{', ...' if len(mounts) > 5 else ''}), so it is not deleted: deleting it would "
+            f"delete through them. Unmount each as root (umount <path>), then run the "
+            f"command again")
+    shutil.rmtree(root)
 
 
 def daemon_json_path() -> Path:
