@@ -6,6 +6,7 @@ deploy state, and platform version. Used automatically during
 boxmunge upgrade; not a user-facing command.
 """
 
+import errno
 import io
 import json
 import os
@@ -14,6 +15,7 @@ import tarfile
 from contextlib import AbstractContextManager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import BinaryIO
 
 from boxmunge.fileutil import atomic_write_bytes
 from boxmunge.fs_nofollow import open_regular_nofollow
@@ -255,6 +257,31 @@ def _secrets_lock(paths: BoxPaths, member_name: str) -> AbstractContextManager:
     return nullcontext()
 
 
+def _open_archive(archive: Path) -> BinaryIO:
+    """Open a stash the way the upgrade shim's stash_facts does: never
+    through a link, and only a plain single-link file of the user restoring
+    it (root, on a box). stashes/ is deploy-writable, so a name there may
+    be a planted link to, or hard link of, an archive deploy wrote."""
+    fix = (f" stashes/ is deploy-writable, so it may have been planted. Remove "
+           f"{archive}, then run `sudo boxmunge-server stash restore --latest` "
+           f"again to restore the newest remaining stash.")
+    try:
+        fd = open_regular_nofollow(archive, os.O_RDONLY)
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Stash not found: {archive}") from None
+    except OSError as e:
+        what = ("a symlink" if e.errno == errno.ELOOP else
+                "not a plain file (a hard link, FIFO, socket or directory)")
+        raise StashError(f"refusing to restore {archive}: it is {what}.{fix}") from e
+    owner, me = os.fstat(fd).st_uid, os.geteuid()
+    if owner != me:
+        os.close(fd)
+        raise StashError(f"refusing to restore {archive}: it is owned by uid {owner}, "
+                         f"not by uid {me} that restores it, so this user did not "
+                         f"make it.{fix}")
+    return os.fdopen(fd, "rb")
+
+
 def restore_stash(paths: BoxPaths, archive: Path | None = None) -> Path:
     """Restore platform state from a stash archive.
 
@@ -271,14 +298,11 @@ def restore_stash(paths: BoxPaths, archive: Path | None = None) -> Path:
             raise FileNotFoundError("No stashes available to restore")
         archive = stashes[0]
 
-    if not archive.exists():
-        raise FileNotFoundError(f"Stash not found: {archive}")
-
     config_root = paths.config.resolve()
     deploy_root = paths.deploy_state.resolve()
     projects_root = paths.projects.resolve()
 
-    with tarfile.open(archive, "r:gz") as tar:
+    with _open_archive(archive) as raw, tarfile.open(fileobj=raw, mode="r:gz") as tar:
         _validate_meta(tar, archive, paths)
 
         for member in tar.getmembers():

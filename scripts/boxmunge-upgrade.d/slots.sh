@@ -195,7 +195,7 @@ copy_rollback_stash() {
     if [[ -n "$recorded" ]]; then
         read -r r_version r_name r_size r_sha r_extra <<< "$recorded"
         if [[ ! "$r_name" =~ $STASH_NAME_RE || -n "${r_extra:-}" || ! "${r_size:+$r_size $r_sha}" =~ $hash_re ]]; then
-            echo "$STASH_RECORD_FILE is malformed ('$(printable "$recorded")'); restore the stash this upgrade made by hand as supervisor: sudo boxmunge-server stash restore --latest; sudo boxmunge-server upgrade --apply"
+            echo "$STASH_RECORD_FILE is malformed ('$(printable "$recorded")'); restore the stash this upgrade made by hand as supervisor: check that sudo boxmunge-server stash list names it first (stashes/ is deploy-writable), then run: sudo boxmunge-server stash restore --latest; sudo boxmunge-server upgrade --apply"
             return 1
         elif [[ "$r_version" == "$1" ]]; then
             name="$r_name" size="${r_size:-}" sha="${r_sha:-}"
@@ -208,7 +208,8 @@ import errno, fnmatch, hashlib, os, stat, sys, tempfile
 stashes, name, dest = os.environ["BM_STASHES"], os.environ["BM_NAME"], os.environ["BM_DEST"]
 want = (int(os.environ["BM_SIZE"]), os.environ["BM_SHA"]) if os.environ["BM_SHA"] else None
 fix = (" (stashes/ is deploy-writable: it was removed, planted or replaced). Put the right stash back"
-       " or remove the wrong one, then, as supervisor, run: sudo boxmunge-server stash restore --latest;"
+       " or remove the wrong one, so that sudo boxmunge-server stash list names the stash this upgrade made"
+       " first; then, as supervisor, run: sudo boxmunge-server stash restore --latest;"
        " sudo boxmunge-server upgrade --apply")
 
 def refuse(why):
