@@ -38,8 +38,18 @@ def test_a_final_link_is_refused(tmp_path: Path) -> None:
         open_resolved_nofollow(real / "l", os.O_RDONLY)
 
 
-@pytest.mark.parametrize("parts", [[".."], ["a", ".."], [""]])
+@pytest.mark.parametrize("parts", [[".."], ["a", ".."], [""], ["a/b"]])
 def test_parts_must_be_plain_names(tmp_path: Path, parts: list[str]) -> None:
     (tmp_path / "a").mkdir()
     with pytest.raises(OSError):
         open_dir_beneath(tmp_path, parts)
+
+
+def test_a_part_with_a_slash_does_not_skip_the_walk(tmp_path: Path) -> None:
+    """``["a/b"]`` used to open t/a/b in one step, with O_NOFOLLOW on b
+    only, so a link at a was followed."""
+    real = Path(os.path.realpath(tmp_path))
+    (real / "elsewhere" / "b").mkdir(parents=True)
+    (real / "a").symlink_to("elsewhere")
+    with pytest.raises(OSError):
+        open_dir_beneath(real, ["a/b"])

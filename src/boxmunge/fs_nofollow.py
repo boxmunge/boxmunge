@@ -120,7 +120,7 @@ def open_dir_beneath(root: Path, parts: Sequence[str]) -> int:
     fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         for part in parts:
-            if part in ("", ".", ".."):
+            if part in ("", ".", "..") or "/" in part:
                 raise OSError(errno.EINVAL, f"{root}: {'/'.join(parts)} is not a plain "
                               f"relative path")
             child = os.open(part, _DIR_FLAGS, dir_fd=fd)
