@@ -99,6 +99,15 @@ expect 0 "the live slot does not run" "a failure after a working run is a first 
 [[ "$(live)" == "$BOXMUNGE_ROOT/env-a" ]] && pass "no rollback for failures that were not in a row" || fail "rolled back"
 drop_root
 
+# The count is the live slot's, kept root-only: deploy rewriting the version
+# in its probation.json between runs does not start it again.
+box "$DEAD" "$SOON"
+run_shim check-probation
+write_probation "1.5.1" "b" "$SOON"
+run_shim check-probation
+expect 1 "Rollback complete" "a rewritten probation version does not reset the live-slot failure count"
+drop_root
+
 # A --version that crashes (a broken C extension: SIGSEGV) counts like any
 # other failure.
 box 'kill -SEGV $$' "$SOON"

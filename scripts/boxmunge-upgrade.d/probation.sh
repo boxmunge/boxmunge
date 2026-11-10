@@ -226,7 +226,9 @@ probation_failed() {
 # is rolled back, expired or not. Not on one failure: a healthy release must
 # not be rolled back and blocklisted for a blip. Every failure counts, a crash
 # (a signal: 128 and up) included; consecutive ones are counted in a
-# root-only marker, which a working run resets. Two in a row roll back, or
+# root-only marker, which a working run resets. The count is keyed by the
+# live slot, not by the version in deploy-writable probation.json, which deploy
+# could rewrite between runs to start it again. Two in a row roll back, or
 # four when the latest only timed out (124, or 137 once timeout escalated to
 # SIGKILL), since a busy box can be slow for a while.
 check_live_slot() {
@@ -246,7 +248,7 @@ check_live_slot() {
     out="$(printf '%s' "$out" | tail -n 1 | tr -d '\n' | tr -c '[:print:]' '?')"
     why="env-$ACTIVE_SLOT/bin/boxmunge-server --version exited $rc: ${out:0:200}"
     read -r seen count < "$marker" 2>/dev/null || true
-    [[ "$seen" == "$version" && "$count" =~ ^[0-9]+$ ]] || count=0
+    [[ "$seen" == "$ACTIVE_SLOT" && "$count" =~ ^[0-9]+$ ]] || count=0
     count=$((count + 1))
     local state="does not run"
     if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
@@ -254,7 +256,7 @@ check_live_slot() {
         needed=4
     fi
     if [[ "$count" -lt "$needed" ]]; then
-        echo "$version $count" > "$marker"
+        echo "$ACTIVE_SLOT $count" > "$marker"
         log "WARN: the live slot $state ($why), $count time(s) in a row; $version is rolled back at $needed"
         bm_log warn upgrade "live slot $state" \
             "{\"version\": \"$version\", \"slot\": \"$ACTIVE_SLOT\", \"exit\": $rc, \"in_a_row\": $count}"
