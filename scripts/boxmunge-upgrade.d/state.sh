@@ -69,14 +69,18 @@ replace_file() {
 }
 
 # write_root_file <file> <line>: replace a file in root-only upgrade-root/
-# (created if missing) by rename, so a reader never sees half of it.
+# (created if missing) by rename, so a reader never sees half of it. A temp a
+# run killed before its rename left (every caller holds upgrade.lock, so none
+# is in use) is swept first, and a failed write removes its own. No trap: it
+# would replace the shim's EXIT trap (cleanup_download), and SIGKILL skips one.
 write_root_file() {
-    local tmp
+    local tmp prefix
     refuse_symlink "$UPGRADE_ROOT_DIR"
     [[ -d "$UPGRADE_ROOT_DIR" ]] || mkdir -m 0700 "$UPGRADE_ROOT_DIR"
-    tmp="$(mktemp "$UPGRADE_ROOT_DIR/.$(basename "$1").XXXXXX")"
-    printf '%s\n' "$2" > "$tmp"
-    replace_file "$tmp" "$1"
+    prefix="$UPGRADE_ROOT_DIR/.$(basename "$1")"
+    rm -f "$prefix".*
+    tmp="$(mktemp "$prefix.XXXXXX")"
+    { printf '%s\n' "$2" > "$tmp" && replace_file "$tmp" "$1"; } || { rm -f "$tmp"; die_logged "Cannot write $1"; }
 }
 
 # load_active_slot: set ACTIVE_SLOT from the root-owned env-active symlink and

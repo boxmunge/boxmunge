@@ -108,3 +108,34 @@ def test_run_by_the_shim_it_reports_the_bundle_version_not_the_live_one(tmp_path
 
 def test_run_by_hand_it_reports_and_records_the_live_venv(tmp_path: Path) -> None:
     assert _installed_version(tmp_path, from_shim=0) == ("0.11.3", "0.11.3")
+
+
+def test_an_unbuilt_source_shim_is_refused_and_the_old_one_kept(tmp_path: Path) -> None:
+    """The source shim passes `bash -n` but needs scripts/boxmunge-upgrade.d/
+    beside it: installed into bin/ it would refuse every command."""
+    script, dest = _box(tmp_path, "#!/usr/bin/env bash\n# >>> boxmunge-upgrade.d: loader\nexit 0\n")
+    before, inode = dest.read_bytes(), dest.stat().st_ino
+    proc = _install(script, tmp_path)
+    assert proc.returncode == 1
+    assert "unbuilt source shim" in proc.stderr and "Install another release" in proc.stderr
+    assert dest.read_bytes() == before and dest.stat().st_ino == inode
+
+
+def test_a_temp_left_by_a_killed_install_is_swept(tmp_path: Path) -> None:
+    script, dest = _box(tmp_path, "#!/usr/bin/env bash\necho new\n")
+    (dest.parent / ".boxmunge-upgrade.AbC123").write_text("half")
+    assert _install(script, tmp_path).returncode == 0
+    assert os.listdir(dest.parent) == ["boxmunge-upgrade"]
+
+
+def test_a_failed_copy_leaves_no_temp(tmp_path: Path) -> None:
+    script, dest = _box(tmp_path, "#!/usr/bin/env bash\necho new\n")
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    (stubs / "chmod").write_text("#!/bin/sh\nexit 1\n")
+    (stubs / "chmod").chmod(0o755)
+    proc = subprocess.run([BASH, str(script)], capture_output=True, text=True,
+                          env={**os.environ, "BOXMUNGE_ROOT": str(tmp_path / "root"),
+                               "PATH": f"{stubs}:{os.environ['PATH']}"})
+    assert proc.returncode != 0
+    assert os.listdir(dest.parent) == ["boxmunge-upgrade"]
