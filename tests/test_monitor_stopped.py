@@ -153,7 +153,7 @@ class TestStickyCriticalStop:
 
 class TestHealthReport:
     def test_lifecycle_lists_monitor_stopped_as_warning(self, paths):
-        from boxmunge.commands.health_cmd import check_lifecycle_blocked
+        from boxmunge.health_checks.projects import check_lifecycle_blocked
         write_state(paths.project_health_state(NAME), {
             "status": "critical_stopped", "failure_reason": "db unreachable",
             "stopped_at": datetime.now(timezone.utc).isoformat(),

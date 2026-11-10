@@ -74,9 +74,10 @@ def test_a_widened_environment_is_an_error(as_root, stdout, problem) -> None:
     assert "sshd -T -C user=deploy" in result.detail
 
 
-def test_sshd_failing_is_an_error(as_root) -> None:
+def test_sshd_failing_to_run_is_a_warning(as_root) -> None:
+    """It could not tell; only a parsed widening is an error (exit 2 rolls back)."""
     result = check_sshd_deploy_env(_sshd("", returncode=255)[0])
-    assert result.status == "error" and "no hostkeys" in result.detail
+    assert result.status == "warn" and "no hostkeys" in result.detail
 
 
 def test_without_root_it_is_skipped(monkeypatch) -> None:

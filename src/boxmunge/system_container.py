@@ -33,6 +33,10 @@ class SystemContainerError(Exception):
     """Raised when a system container operation fails."""
 
 
+class SystemContainerTimeout(SystemContainerError):
+    """Docker did not answer an inspect in time: busy, not proof of a fault."""
+
+
 @dataclass(frozen=True)
 class Mount:
     """One bind mount of the system container (see system/compose.yml)."""
@@ -131,7 +135,7 @@ def _inspect(name: str) -> dict[str, Any] | None:
     except FileNotFoundError as e:
         raise SystemContainerError(f"docker CLI not found; cannot reach {name}.") from e
     except subprocess.TimeoutExpired as e:
-        raise SystemContainerError(
+        raise SystemContainerTimeout(
             f"docker inspect {name} timed out after {_INSPECT_TIMEOUT}s; "
             "is the Docker daemon healthy?"
         ) from e

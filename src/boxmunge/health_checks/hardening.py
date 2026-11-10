@@ -70,7 +70,11 @@ def check_ufw(ssh_port: int = 922) -> HealthCheck:
     try:
         result = _run(["ufw", "status"], timeout=10)
         if result.returncode != 0:
-            return HealthCheck("ufw", "error", "UFW command failed")
+            # The probe failed (often a held xtables lock while Docker starts a
+            # container); it says nothing about the firewall, so it warns.
+            why = (result.stderr or result.stdout).strip() or f"exit {result.returncode}"
+            return HealthCheck("ufw", "warn", f"`ufw status` failed ({why}), so the firewall "
+                               f"could not be checked; run `sudo ufw status`")
         if "Status: inactive" in result.stdout:
             return HealthCheck("ufw", "error", "UFW is inactive")
         if "Status: active" in result.stdout:
@@ -89,8 +93,8 @@ def check_ufw(ssh_port: int = 922) -> HealthCheck:
         return HealthCheck("ufw", "warn", "UFW status unclear")
     except FileNotFoundError:
         return HealthCheck("ufw", "error", "UFW not installed")
-    except subprocess.TimeoutExpired:
-        return HealthCheck("ufw", "error", "UFW status timed out")
+    # A timeout says the host is busy, not that the firewall is off:
+    # health's run_guarded reports it as a warning naming the command.
 
 
 def check_crowdsec() -> HealthCheck:
@@ -177,7 +181,7 @@ def check_sysctl_hardening() -> HealthCheck:
             got = result.stdout.strip()
             if got != want:
                 wrong.append(f"{key}={got} (expected {want})")
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except FileNotFoundError:
             # sysctl not available (e.g. macOS) — skip all checks
             return HealthCheck("sysctl", "ok", "sysctl not available (non-Linux)")
     if wrong:
