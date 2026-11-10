@@ -12,8 +12,9 @@
 # * repair-deps                install the installed release's hash-pinned
 #                              dependencies into the live slot (also in probation)
 #   force-target <version>     operator only: ignore the blocklist and downgrade floor
-#   run <version> <url>        auto-update timer: upgrade to a discovered version
-#                              (the bundle URL is always derived from <version>)
+#   run <version> <url> [<class>]  auto-update timer: upgrade to a discovered
+#                              version of release class <class> (the bundle URL
+#                              is always derived from <version>)
 #   check-probation            health timer: promote or roll back a probation
 #   clear-blocklist <version>  operator only: forget a failed version
 #   install-sudoers            install.sh and upgrades: (re)write deploy's sudo rule
@@ -181,15 +182,40 @@ extract_failed() {
     exit 1
 }
 
+# run <version> <url> [<class>]: the auto-update timer's entry point (root
+# only). Releases before 0.10.1 pass no class.
 cmd_run() {
-    local version="${1:?Usage: boxmunge-upgrade run <version> <url>}"
-    : "${2:?Usage: boxmunge-upgrade run <version> <url>}"
-    upgrade_to "$version" run
+    [[ $# -eq 2 || $# -eq 3 ]] || die "Usage: boxmunge-upgrade run <version> <url> [<class>]"
+    upgrade_to "$1" run "${3:-}"
 }
 
-# upgrade_to <version> <mode>: the upgrade itself, after the policy check.
+# applied_alert <version> <mode> <class>: the title, a tab, and the message of
+# the alert a successful upgrade sends. Only a release discovery named says
+# its class; target and force-target install one by version alone.
+applied_alert() {
+    local version="$1" mode="$2" class="$3" title how=""
+    case "$class" in
+        security) title="boxmunge security update applied" ;;
+        breakfix) title="boxmunge break-fix update applied" ;;
+        feature)  title="boxmunge feature update applied" ;;
+        "")       title="boxmunge upgrade applied" ;;
+    esac
+    case "$mode" in
+        target) how="targeted upgrade; " ;;
+        force)  how="operator-forced upgrade; " ;;
+    esac
+    printf '%s\t%s\n' "$title" "Updated to $version (${how}probation: ${PROBATION_HOURS}h)"
+}
+
+# upgrade_to <version> <mode> [<class>]: the upgrade itself, after the policy
+# check. <mode> is run (timer and auto), target or force (see check_policy);
+# <class> is the release class discovery gave, if any.
 upgrade_to() {
-    local version="$1" mode="$2"
+    local version="$1" mode="$2" class="${3:-}"
+    case "$class" in
+        ""|feature|breakfix|security) ;;
+        *) die "Unknown release class '$(printable "$class")' for $version (expected feature, breakfix or security)" ;;
+    esac
 
     load_active_slot
     acquire_lock
@@ -336,13 +362,15 @@ write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT']
     rm -f "$(inflight_marker "$ACTIVE_SLOT")"
     refresh_docs_for_slot "$ACTIVE_SLOT"
 
-    send_notification "boxmunge security update applied" "Updated to $version (probation: ${PROBATION_HOURS}h)"
+    local alert
+    alert="$(applied_alert "$version" "$mode" "$class")"
+    send_notification "${alert%%$'\t'*}" "${alert#*$'\t'}"
     log "Upgrade to $version complete, probation started"
     exit 0
 }
 
 cmd_auto() {
-    local result action version msg
+    local result action version class msg
     load_active_slot
     acquire_lock  # before discovery, and held through the upgrade itself
     result="$("$(active_venv)/bin/boxmunge-server" _discover-update --json 2>/dev/null)" || \
@@ -353,8 +381,9 @@ cmd_auto() {
     case "$action" in
         upgrade)
             version="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+            class="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("class") or "")')"
             log "Manual upgrade: discovered $(printable "$version")"
-            upgrade_to "$version" run
+            upgrade_to "$version" run "$class"
             ;;
         up_to_date)
             log "Already on latest version"
