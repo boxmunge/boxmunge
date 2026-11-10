@@ -120,11 +120,11 @@ class TestRestore:
         backup_db.dump(db_path, out)
         return out.getvalue()
 
-    def test_round_trip_into_a_database_a_worker_has_open(self, migrated_db, tmp_path):
+    def test_round_trip_into_a_database_with_an_idle_connection(self, migrated_db, tmp_path):
         _report(migrated_db, detail="kept")
         snapshot = self._dump(migrated_db)
         _report(migrated_db, reporter="203.0.113.0/24", detail="after the backup")
-        worker = sqlite3.connect(migrated_db)  # an open connection, as a worker holds
+        worker = sqlite3.connect(migrated_db)  # open, but in no transaction
         backup_db.restore(migrated_db, io.BytesIO(snapshot))
         assert worker.execute("SELECT detail FROM failures").fetchall() == [("kept",)]
         worker.close()
@@ -145,6 +145,23 @@ class TestRestore:
             writer.execute("ROLLBACK")
             writer.close()
         assert len(_reports(migrated_db)) == 2
+
+    def test_an_open_reader_blocks_the_restore_until_it_gives_up(self, migrated_db,
+                                                                 monkeypatch):
+        """Review P3-2: restore is not for a database in use. A reader inside a
+        transaction holds a lock the restore needs, so it waits, then fails."""
+        _report(migrated_db, detail="kept")
+        snapshot = self._dump(migrated_db)
+        monkeypatch.setattr(backup_db, "LOCK_WAIT_SECONDS", 0.2)
+        reader = sqlite3.connect(migrated_db, isolation_level=None)
+        reader.execute("BEGIN")
+        reader.execute("SELECT COUNT(*) FROM failures").fetchone()
+        try:
+            with pytest.raises(backup_db.StillLocked, match="stop the service"):
+                backup_db.restore(migrated_db, io.BytesIO(snapshot))
+        finally:
+            reader.execute("ROLLBACK")
+            reader.close()
 
     def test_an_old_schema_snapshot_is_migrated(self, migrated_db, tmp_path):
         old = tmp_path / "old.db"

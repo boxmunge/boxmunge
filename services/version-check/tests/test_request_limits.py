@@ -10,7 +10,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from request_limits import (  # noqa: E402
-    FULL, LIMITED, CheckCounter, RateLimiter, RequestLimiter, client_key,
+    FULL, LIMITED, NETWORK_LIMITED, CheckCounter, RateLimiter, RequestLimiter, client_key,
 )
 
 
@@ -186,6 +186,20 @@ class TestRequestLimiter:
         limiter.allow("203.0.114.1")
         assert limiter.allow("203.0.115.1") and limiter.allow("203.0.116.1")
         assert not limiter.allow("203.0.117.1")
+
+    def test_refusal_counts_nothing_and_says_which_table_refused(self):
+        limiter = self._limiter(FakeClock(), per_network=1)
+        assert limiter.refusal("203.0.113.1") is None
+        for _ in range(3):
+            limiter.admit("203.0.113.1")
+        assert limiter.refusal("203.0.113.1") == LIMITED
+        limiter.admit("203.0.113.2")
+        assert limiter.refusal("203.0.113.3") is None, "the network table has room"
+        assert limiter.admit("203.0.113.3") is None
+        assert limiter.refusal("203.0.113.4") == NETWORK_LIMITED
+        assert limiter.admit("203.0.113.4") == NETWORK_LIMITED
+        limiter.admit("198.51.100.1")
+        assert limiter.refusal("192.0.2.1") == FULL
 
     def test_a_client_over_its_own_limit_is_not_sent_to_the_network_table(self):
         limiter = self._limiter(FakeClock())

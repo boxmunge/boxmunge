@@ -206,6 +206,7 @@ def test_stdin_that_cannot_be_watched_fails_loudly(tmp_path, sock_path) -> None:
     assert not sock_path.exists()
 
 
+@pytest.mark.runs_long
 def test_a_stop_right_after_the_socket_opens_always_cleans_up(tmp_path, sock_path) -> None:
     for attempt in range(40):
         with DevApid(tmp_path / "box", sock_path) as apid:

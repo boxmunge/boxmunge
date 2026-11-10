@@ -257,7 +257,9 @@ class TestCrossLine:
                    _rel("0.10.3", "feature")]
         data = _check("0.10.3", held=frozenset({"0.11.2"}), catalog=catalog)
         assert data["blocked"]["version"] == "0.11.2"
-        assert "held" not in data
+        # Held only as the manual upgrade's `latest`: no auto offer was withdrawn.
+        assert data["held"] == [{"version": "0.11.2", "reason": "circuit_breaker"}]
+        assert data["security"] is None and data["breakfix"] is None
 
 
 class TestHolds:
@@ -289,7 +291,8 @@ class TestHolds:
         data = _check("0.3.0", held=frozenset({"0.3.2"}), catalog=catalog)
         assert data["security"] is None and data["breakfix"] is None
         assert data["held"] == [{"version": "0.3.2", "reason": "circuit_breaker"}]
-        # The circuit breaker withholds auto-apply candidates, not `latest`.
+        # `latest` stays in the answer; `held` tells the box not to install it.
+        assert data["latest"]["version"] == "0.3.2"
         assert data["status"] == "update_available"
 
     def test_both_held(self) -> None:
@@ -304,6 +307,18 @@ class TestHolds:
         assert data["security"] is None and data["breakfix"] is None
         assert data["held"] == [{"version": "0.11.2", "reason": "circuit_breaker"}]
         assert data["blocked"] is None
+
+    def test_a_held_feature_release_offered_as_latest_is_listed(self) -> None:
+        """A tripped feature release must not reach a manual upgrade: boxes
+        skip a `latest` that `held` names."""
+        data = _check("0.3.3", held=frozenset({"0.4.0"}))
+        assert data["latest"]["version"] == "0.4.0"
+        assert data["held"] == [{"version": "0.4.0", "reason": "circuit_breaker"}]
+
+    def test_held_latest_is_listed_once(self) -> None:
+        catalog = [_rel("0.3.2", "security"), _rel("0.3.0", "feature")]
+        data = _check("0.3.0", held=frozenset({"0.3.2"}), catalog=catalog)
+        assert data["held"] == [{"version": "0.3.2", "reason": "circuit_breaker"}]
 
     def test_no_held_key_when_nothing_held(self) -> None:
         assert "held" not in _check("0.3.0")

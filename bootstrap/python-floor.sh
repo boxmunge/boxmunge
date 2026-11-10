@@ -1,9 +1,13 @@
-# shellcheck shell=bash
+#!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # bootstrap/python-floor.sh: refuse a host whose python3 is older than the
 # server package's floor (requires-python in pyproject.toml). On an older
 # python3 the venv builds and the hash-pinned install then fails halfway with
-# a resolver error. Sourced by install.sh.
+# a resolver error. Run by install.sh before it changes anything (when the
+# host has python3, as every upgrade does), and by init-host.sh once it has
+# installed python3 on a fresh host.
+set -euo pipefail
+
 MIN_PYTHON="3.11"
 require_python_floor() {
     local found have="this host has no python3"
@@ -16,3 +20,4 @@ sys.exit(sys.version_info[:2] < tuple(map(int, sys.argv[1].split("."))))' "${MIN
         exit 1
     fi
 }
+require_python_floor

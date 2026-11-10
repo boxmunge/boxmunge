@@ -1,5 +1,5 @@
-"""install.sh (bootstrap/python-floor.sh) refuses a host whose python3 is
-older than the server's floor.
+"""bootstrap/python-floor.sh: install.sh and init-host.sh refuse a host whose
+python3 is older than the server's floor.
 
 Without the check, `python3 -m venv` succeeds on an older Python and the
 hash-pinned install then fails halfway with a resolver error that does not
@@ -58,13 +58,24 @@ def test_a_host_without_python3_is_refused(tmp_path: Path) -> None:
     assert "this host has no python3" in result.stderr
 
 
+def test_the_script_passes_this_suite_s_python(tmp_path: Path) -> None:
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "python3").symlink_to(sys.executable)
+    result = subprocess.run(["/bin/bash", str(REPO / "bootstrap" / "python-floor.sh")],
+                            capture_output=True, text=True, env={"PATH": str(bindir)})
+    assert (result.returncode, result.stderr) == (0, ""), result
+
+
 def test_checked_before_changes_and_after_the_bootstrap() -> None:
     """An upgrade (python3 always present) is refused before cosign, Trivy or
-    the bootstrap touch the host; a fresh install whose image lacks python3 is
-    checked once init-host.sh has installed it."""
-    assert INSTALL_SH.index('source "${SCRIPT_DIR}/bootstrap/python-floor.sh"') < INSTALL_SH.index(
-        "command -v python3 >/dev/null && require_python_floor")
-    early = INSTALL_SH.index('command -v python3 >/dev/null && require_python_floor')
+    the bootstrap touch the host; a fresh host whose image lacks python3 is
+    checked by init-host.sh once it has installed python3."""
+    early = INSTALL_SH.index(
+        'command -v python3 >/dev/null && bash "${SCRIPT_DIR}/bootstrap/python-floor.sh"\n')
     assert early < INSTALL_SH.index('install_cosign "${HOST_ARCH}"')
-    init = INSTALL_SH.index('bash "${SCRIPT_DIR}/bootstrap/init-host.sh" "$@"')
-    assert INSTALL_SH.index("    require_python_floor\n", init) < INSTALL_SH.index("else", init)
+    assert early < INSTALL_SH.index('bash "${SCRIPT_DIR}/bootstrap/init-host.sh"')
+    init_host = (REPO / "bootstrap" / "init-host.sh").read_text()
+    installed = init_host.index("    python3 \\\n")
+    check = init_host.index('bash "$(dirname "$0")/python-floor.sh"\n')
+    assert installed < check < init_host.index("Step 3: Install Docker")
