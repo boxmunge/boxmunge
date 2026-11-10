@@ -7,7 +7,7 @@
 # installs this one keeps running, holding only that lock, until its upgrade
 # ends (tests/integration/test_shim_hop.py runs that hop for real).
 # pass() always returns 0, so "cond && pass || fail" is a safe if/else here.
-# shellcheck disable=SC2015
+# shellcheck disable=SC2015,SC2016  # SC2016: mock bodies are literal bash
 set -euo pipefail
 # shellcheck source=tests/shim/lib.sh
 source "$(dirname "$0")/lib.sh"
@@ -84,5 +84,56 @@ OUT="$(BM_UPGRADE_LOCK_FD=9 bash "$SHIM" check-probation 9<>"$BOXMUNGE_ROOT/$ROO
 expect 1 "fd 8 is not $BOXMUNGE_ROOT/$LEGACY_LOCK" "a legacy lock descriptor for another file is refused"
 rm -f "$other"
 drop_root
+
+# record_bm_log: the live slot's python records what bm_log writes.
+record_bm_log() {
+    printf '%s\n' '#!/usr/bin/env bash' \
+        'if [[ "$1" == "-" ]]; then cat >/dev/null; echo "bm_log $BM_LEVEL $BM_MSG" >> "$BOXMUNGE_ROOT/calls"; fi' \
+        > "$BOXMUNGE_ROOT/env-a/bin/python"
+}
+
+# A held lock makes check-probation skip, and each skip is counted: a skip is
+# routine, but a whole hour of them means something is holding the lock (no
+# upgrade takes that long), and no probation moves meanwhile. That is an error
+# in the operational log, not a silent exit 0.
+new_root a
+record_bm_log
+mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+echo 10 > "$BOXMUNGE_ROOT/upgrade-root/lock-skips"
+PATH="$BUSYLOCK:$PATH" run_shim check-probation
+expect 0 "skipping (11 in a row)" "a skip is counted"
+[[ "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" != *"bm_log error"* ]] && pass "eleven skips are not an error yet" \
+    || fail "logged too early: $(cat "$BOXMUNGE_ROOT/calls")"
+PATH="$BUSYLOCK:$PATH" run_shim check-probation
+expect 0 "skipping (12 in a row)" "the twelfth skip is counted"
+[[ "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" == *"bm_log error check-probation found upgrade.lock held 12 times in a row"*"lslocks"* ]] \
+    && pass "an hour of skips is an error naming how to find the holder" || fail "not logged: $(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)"
+run_shim check-probation
+expect 0 "" "check-probation runs once the lock is free"
+[[ ! -e "$BOXMUNGE_ROOT/upgrade-root/lock-skips" ]] && pass "taking the lock resets the count" \
+    || fail "count left: $(cat "$BOXMUNGE_ROOT/upgrade-root/lock-skips")"
+drop_root
+
+# Deploy can unlink root's legacy lock and hold a flock on its own file at the
+# name. Only root runs upgrades, so a lock file that is not root's is no real
+# lock: it is replaced with root's, loudly, and the run goes on. Needs root
+# (to make a file another user owns).
+if [[ "$(id -u)" -eq 0 ]]; then
+    new_root a
+    record_bm_log
+    write_probation 1.2.3 b "2000-01-01T00:00:00+00:00"
+    : > "$BOXMUNGE_ROOT/$LEGACY_LOCK"
+    chown nobody "$BOXMUNGE_ROOT/$LEGACY_LOCK"
+    exec 6<>"$BOXMUNGE_ROOT/$LEGACY_LOCK"
+    flock -n 6
+    run_shim check-probation
+    expect 0 "promoted" "a lock file deploy planted and holds does not stall the probation"
+    [[ "$OUT" == *"is not root's"* && "$(stat -c %u "$BOXMUNGE_ROOT/$LEGACY_LOCK")" == 0 ]] \
+        && pass "it is replaced with root's, with a warning" || fail "out: $OUT; $(ls -l "$BOXMUNGE_ROOT/$LEGACY_LOCK")"
+    [[ "$(cat "$BOXMUNGE_ROOT/calls")" == *"bm_log warn legacy upgrade lock not root's: replaced"* ]] \
+        && pass "the replacement is in the operational log" || fail "not logged: $(cat "$BOXMUNGE_ROOT/calls")"
+    exec 6>&-
+    drop_root
+fi
 
 finish

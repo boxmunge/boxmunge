@@ -171,6 +171,13 @@ def _flock(path: Path) -> Iterator[None]:
     except OSError as e:
         raise UpgradeStateError.of(path, e) from e
     try:
+        # Deploy can replace the legacy lock with a file of its own and hold
+        # that, stalling every upgrade; root's own file it cannot make.
+        owner = os.fstat(fd).st_uid
+        if owner != os.geteuid():
+            raise UpgradeStateError(f"{path} is owned by uid {owner}, not {os.geteuid()}, so "
+                                    "another user may be holding it to stall upgrades; refusing "
+                                    "to lock it. Remove it so it can be recreated.")
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as e:
