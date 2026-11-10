@@ -47,3 +47,34 @@ def test_missing_env_file_exists_only_during_resolution(tmp_path: Path) -> None:
     assert during == [True]
     assert not (tmp_path / "secrets.env").exists()
     assert (tmp_path / "project.env").read_text() == "MODE=prod\n"
+
+
+def _resolve_recording(tmp_path: Path, env_file: str, probe: Path) -> list[bool]:
+    from boxmunge import compose_resolve
+
+    (tmp_path / "compose.yml").write_text(
+        f"services:\n  web:\n    image: nginx\n    env_file: [{env_file}]\n"
+    )
+    during: list[bool] = []
+
+    def fake_config(project_dir, compose_files=None, *, project_name, **_kw):
+        during.append(probe.exists())
+        return '{"services": {"web": {"image": "nginx"}}}'
+
+    with patch.object(compose_resolve.docker, "compose_config", side_effect=fake_config):
+        compose_resolve.resolve_compose_config(tmp_path / "compose.yml", "myapp")
+    return during
+
+
+def test_no_directory_is_made_for_a_missing_env_file(tmp_path: Path) -> None:
+    """Root resolves at every start check: it must not mkdir in a project
+    tree (the directory used to be left behind, too)."""
+    assert _resolve_recording(tmp_path, "nope/missing.env", tmp_path / "nope") == [False]
+    assert not (tmp_path / "nope").exists()
+
+
+def test_no_placeholder_through_a_linked_directory(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (tmp_path / "conf").symlink_to(real)
+    assert _resolve_recording(tmp_path, "conf/app.env", real / "app.env") == [False]
