@@ -94,6 +94,7 @@ repair_unattended_origins() {
     local conf=/etc/apt/apt.conf.d/50unattended-upgrades
     [[ -f "${conf}" ]] || return 0
     grep -q '^Unattended-Upgrade::Allowed-Origins {$' "${conf}" || return 0
+    # shellcheck disable=SC2016  # the file's own literal ${distro_codename}
     grep -q '^    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";$' \
         "${conf}" || return 0
     echo "  Repairing ${conf}: unattended-upgrade has been crashing on its origins list"
