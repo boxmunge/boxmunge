@@ -18,7 +18,7 @@ from boxmunge.fileutil import atomic_write_text
 from boxmunge.log import log_error, log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
-from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 
 ALERT_KINDS = ("manifest-schema", "git-layout", "staged-slot", "production-down")
 
@@ -32,10 +32,11 @@ def alert_state(paths: BoxPaths, project: str, kind: str) -> Path:
 
 def _already_alerted(paths: BoxPaths, project: str, kind: str, key: dict[str, Any]) -> bool:
     path = alert_state(paths, project, kind)
-    if not path.exists():
-        return False
     try:
-        recorded = json.loads(read_text_nofollow(path))
+        raw = read_text_nofollow_or_none(path)
+        if raw is None:
+            return False
+        recorded = json.loads(raw)
         if not isinstance(recorded, dict):
             raise ValueError("not a JSON object")
     except (OSError, UnicodeDecodeError, ValueError) as e:
