@@ -228,6 +228,7 @@ def test_a_push_to_main_runs_the_docker_tiers_in_full(tmp_path: Path, job: str,
 # the path must come off DOCKER_SKIPPABLE, so the Docker jobs run for it.
 NOT_DEPENDENCIES = {
     ("Makefile", "cli/"): "the lint and lock targets; the bundle never reads cli/",
+    ("Makefile", "docs/DEVELOPMENT.md"): "a comment on the lock targets",
     ("Makefile", "services/version-check/"): "the lock target only",
     ("scripts/check-dco.sh", "CONTRIBUTING.md"): "named in its error message",
     ("scripts/release-lint.py", "services/version-check/"):
