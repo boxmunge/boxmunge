@@ -42,7 +42,8 @@ Key features:
     .site-journal/            # site files written since Caddy last accepted its config (deploy 700)
     maintenance/              # the maintenance page (root:deploy 755)
   upgrade-state/              # upgrade slots, probation, blocklist (root:deploy 770)
-  upgrade-root/               # root-only (0700): upgrade.lock, userns-migration.json, installer.sha256
+  upgrade-root/               # root-only (0700): upgrade.lock, userns-migration.json, installer.sha256,
+                              #   the probation's expiry, counts and health baseline, the upgrade's stash record
   stashes/                    # pre-upgrade stashes, for an upgrade rollback (root:deploy 770)
   canary/                     # the self-test canary project (root:root)
   projects/                   # project directories (deploy:deploy 755)
