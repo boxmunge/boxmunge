@@ -35,7 +35,7 @@ def test_tick_starts_production_again(paths, fake_containers, capsys) -> None:
     before = _last_started(paths)
     with patch("boxmunge.compose_guard.start_containers") as start, \
             patch("boxmunge.production_stopped.notify"), \
-            patch("boxmunge.commands.check.run_check") as check, \
+            patch("boxmunge.commands.check.check_with_reason") as check, \
             patch("boxmunge.commands.health_state.compose_down") as down:
         assert _check_one("myapp", paths, read_only=False) == 1
     start.assert_called_once_with(["myapp-web-1"])
@@ -127,7 +127,7 @@ def test_read_only_tick_reports_the_marker_and_starts_nothing(paths, fake_contai
                                                               capsys) -> None:
     _stopped(paths, fake_containers)
     with patch("boxmunge.compose_guard.start_containers") as start, \
-            patch("boxmunge.commands.check.run_check") as check:
+            patch("boxmunge.commands.check.check_with_reason") as check:
         assert _check_one("myapp", paths, read_only=True) == 2
     start.assert_not_called()
     check.assert_not_called()
@@ -143,7 +143,7 @@ def test_tick_alerts_an_unreadable_slot_once(paths, fake_containers, capsys) -> 
     _break_slot(paths)
     with patch("boxmunge.project_alerts.notify", return_value=True) as page, \
             patch("boxmunge.production_stopped.notify") as down_page, \
-            patch("boxmunge.commands.check.run_check") as check, \
+            patch("boxmunge.commands.check.check_with_reason") as check, \
             patch("boxmunge.commands.health_state.compose_down") as down:
         assert _check_one("myapp", paths, read_only=False) == 2
         assert _check_one("myapp", paths, read_only=False) == 2
@@ -160,7 +160,7 @@ def test_tick_alerts_again_after_the_slot_was_readable(paths, fake_containers) -
     prod_and_stage(paths)
     meta_text = (slot_dir(paths, "myapp") / "meta.json").read_text()
     with patch("boxmunge.project_alerts.notify", return_value=True) as page, \
-            patch("boxmunge.commands.check.run_check", return_value=0):
+            patch("boxmunge.commands.check.check_with_reason", return_value=(0, "")):
         _break_slot(paths)
         _check_one("myapp", paths, read_only=False)
         (slot_dir(paths, "myapp") / "meta.json").write_text(meta_text)
@@ -174,7 +174,7 @@ def test_read_only_tick_reports_an_unreadable_slot_without_alerting(paths) -> No
     prod_and_stage(paths)
     _break_slot(paths)
     with patch("boxmunge.project_alerts.notify") as page, \
-            patch("boxmunge.commands.check.run_check") as check:
+            patch("boxmunge.commands.check.check_with_reason") as check:
         assert _check_one("myapp", paths, read_only=True) == 2
     page.assert_not_called()
     check.assert_not_called()
@@ -187,7 +187,7 @@ def test_tick_leaves_an_open_install_alone(paths, fake_containers, capsys) -> No
     prod_and_stage(paths)
     open_txn(paths, "myapp", source="bundle", ref="myapp-x", replaced_ref=f"myapp-{V1}",
              staged_id=None, snapshot="")
-    with patch("boxmunge.commands.check.run_check") as check, \
+    with patch("boxmunge.commands.check.check_with_reason") as check, \
             patch("boxmunge.commands.check.update_health_state") as health, \
             patch("boxmunge.commands.health_state.compose_down") as down:
         assert _check_one("myapp", paths, read_only=False) == 1
