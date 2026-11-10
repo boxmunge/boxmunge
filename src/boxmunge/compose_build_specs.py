@@ -42,9 +42,12 @@ def service_contexts(spec: dict[str, Any]) -> set[str]:
 def _resolved(sources: ComposeSources, path: Path, name: str,
               seen: frozenset[tuple[Path, str]]) -> dict[str, Any] | None:
     """``name``'s build in ``path``, merged over what it extends."""
-    svc = sources.services(path).get(name)
-    if not isinstance(svc, dict):
+    services = sources.services(path)
+    if name not in services:
         raise ValueError(f"{path.name}: service {name!r} is extended but not defined")
+    svc = services[name]
+    if not isinstance(svc, dict):
+        raise ValueError(f"{path.name}: service {name!r} is not a mapping")
     own = _normalised(svc.get("build"))
     parent = sources.extends.get((path, name))
     if parent is None:

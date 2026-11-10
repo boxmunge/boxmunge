@@ -233,3 +233,13 @@ def test_a_build_local_only_through_its_context_says_so(paths, monkeypatch) -> N
     [problem] = e.value.problems
     assert "'web' builds from the local image store because it builds on 'tool'" in problem
     assert "build.pull: false" not in problem.split(" but ")[0]
+
+
+@pytest.mark.parametrize("text, words", [
+    ("services:\n  web: null\n", "service 'web' is not a mapping"),
+    ("services:\n  web:\n    extends: base\n", "service 'base' is extended but not defined"),
+])
+def test_a_broken_service_definition_is_named_as_it_is(paths, text, words) -> None:
+    _compose(paths, text)
+    with pytest.raises(DeployRefused, match=words):
+        deploy_build.local_base_builds(production_target(paths, "app"))
