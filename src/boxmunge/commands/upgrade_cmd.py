@@ -218,8 +218,7 @@ def _run_full(
     """Run the complete five-step upgrade flow."""
     print("[1/5] Creating stash...")
     try:
-        archive = create_stash(paths)
-        print(f"  Stash: {archive.name}")
+        print(f"  Stash: {create_stash(paths).path.name}")
     except Exception as e:
         print(f"  ERROR: Stash failed: {e}", file=sys.stderr)
         log_error("upgrade", f"Stash failed: {e}", paths)

@@ -172,22 +172,35 @@ either rule is broken. To change a dependency, edit the matching `.in` file or `
 week, one pull request per ecosystem (pip, Actions, Docker) for minor and patch updates, and one per
 major, for releases at least 7 days old (a pip major waits 30). See `.github/dependabot.yml`.
 
+Dependabot does not regenerate the runtime locks built from `pyproject.toml` (`requirements.txt`,
+`requirements-tui.txt`, `requirements-mcp.txt`, `cli/requirements.txt`), so they are re-locked by
+hand: `make relock` (with the pip and pip-tools from `requirements-dev.txt`) upgrades them, taking
+no release younger than the same 7-day cooldown. It holds back the majors listed in
+`relock-holds.txt`: taking one is a decision of its own, made with whatever code change it needs.
+Re-lock before each release, respecting the cooldown (release step 1 below). CI fails a release
+pull request (a `release/*` branch) while a runtime pin is behind a same-major release that has been
+out for more than 14 days (`scripts/lock-freshness.py`).
+
 ## How a release reaches a server
 
-1. A maintainer bumps `version` in `pyproject.toml`, records the release, its class and whether it
+1. A maintainer re-locks the runtime dependencies (`make relock`; see "Dependencies are
+   hash-pinned" above): re-lock before each release, respecting the cooldown. Check the advisories
+   fixed by the pins that moved (`pip-audit --require-hashes --disable-pip -r FILE` on the old and
+   new locks): they belong in the release notes, and may make it a `security` release.
+2. A maintainer bumps `version` in `pyproject.toml`, records the release, its class and whether it
    is breaking in `services/version-check/releases.json` (`"class": "feature"`, `"breakfix"` or
    `"security"`; `"breaking": true` or `false`), and tags `vX.Y.Z`. A unit test fails if the
    `pyproject.toml` version is not listed. The version-check service refuses to start if any entry
    lacks either field, and the release workflow refuses a breaking release whose version is not
    `X.Y.0`.
-2. `.github/workflows/release.yml` checks the tag with `scripts/release-lint.py` (listed in
+3. `.github/workflows/release.yml` checks the tag with `scripts/release-lint.py` (listed in
    `releases.json` with a valid class, matching `pyproject.toml`), then, in a read-only job, runs
    the tests, builds the installer and bundle, and generates an SBOM. A separate job holding the
    write and signing tokens signs `SHA256SUMS` with cosign (keyless, tied to this workflow and
    tag), creates a draft release whose title and notes carry the class marker (and `[breaking]`
    for a breaking release) generated from `releases.json`, verifies the draft carries exactly
    those markers, and publishes it. Any failure, including signing, fails the workflow.
-3. Once the release is published, the maintainer redeploys the version-check service so it serves
+4. Once the release is published, the maintainer redeploys the version-check service so it serves
    the new `releases.json`. Do not redeploy it before then: it would offer a release boxes cannot
    download yet. Servers discover new releases through that service, with the GitHub releases
    list (and its `[security]` / `[breakfix]` / `[breaking]` markers) as the fallback only when
@@ -196,7 +209,7 @@ major, for releases at least 7 days old (a pip major waits 30). See `.github/dep
    change an existing entry in `releases.json`, edit that release's title on GitHub to match, and
    confirm with `python scripts/release-lint.py audit --github-releases FILE`, where FILE is the
    output of `gh api --paginate --slurp 'repos/boxmunge/boxmunge/releases?per_page=100'`.
-4. `scripts/boxmunge-upgrade` downloads the release, verifies the cosign signature against this
+5. `scripts/boxmunge-upgrade` downloads the release, verifies the cosign signature against this
    repository's release workflow identity, checks the checksums, installs into the standby venv,
    swaps, and watches a probation window. A release that fails probation is rolled back and
    blocklisted.
