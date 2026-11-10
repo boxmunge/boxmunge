@@ -481,8 +481,7 @@ def run_deploy(
 def cmd_deploy(args: list[str]) -> None:
     """CLI entry point for prod-deploy command."""
     from boxmunge.commands.argv import parse_args, require_project_name, usage_error
-    from boxmunge.commands.kev_acceptance import prod_deploy_acceptance
-    from boxmunge.cve.lift_rule import ACCEPT_FLAG
+    from boxmunge.commands.kev_acceptance import ACCEPT_FLAG, prod_deploy_acceptance
     parsed = parse_args(
         "prod-deploy", args,
         flags={"--no-snapshot", "--dry-run", "--abandon", "--no-pull", "--redeploy",

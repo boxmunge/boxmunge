@@ -277,20 +277,12 @@ def scan_image(image_ref: str, *, timeout: int = _DEFAULT_TIMEOUT) -> ScanResult
     cmd = [
         "trivy", "image",
         "--format", "json",
-        # Every severity, UNKNOWN included: a CVE CISA lists as exploited
-        # before any source rates it must still reach the KEV check, which
-        # never looks at severity. The policy reports unrated non-KEV
-        # findings as informational.
+        # UNKNOWN too: a KEV CVE no source has rated yet must reach the KEV check.
         "--severity", "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL",
-        # Vulnerabilities only: the secret and misconfig scanners add time
-        # and findings the policy does not read.
         "--scanners", "vuln",
-        # Each command refreshes the DB once before it scans (refresh_db);
-        # an update per image would only repeat it, mid-run.
-        "--skip-db-update",
+        "--skip-db-update",  # each command runs refresh_db once before scanning
         "--no-progress",
         "--quiet",
-        # An image ref is never read as an option.
         "--", image_ref,
     ]
     try:
