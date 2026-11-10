@@ -55,6 +55,8 @@ LOCK_FILE="$UPGRADE_ROOT_DIR/upgrade.lock"
 LEGACY_LOCK_FILE="$STATE_DIR/upgrade.lock"
 INTERRUPTED_FILE="$UPGRADE_ROOT_DIR/interrupted.json"
 PIP_FAILURES_FILE="$UPGRADE_ROOT_DIR/pip-failures.json"
+# Written by install.sh; see system_upgrade in system.sh.
+INSTALLER_HASH_FILE="$UPGRADE_ROOT_DIR/installer.sha256"
 # The last release whose bundle has no requirements-mcp.txt. Every install
 # needs it, so this shim cannot install that release or any before it.
 LAST_RELEASE_WITHOUT_MCP_LOCK="0.10.1"
@@ -77,10 +79,14 @@ die() { log "FATAL: $*"; exit 1; }
 # `2>/dev/null || true`.
 #
 # Levels: info | warn | error. Detail JSON defaults to {}.
-bm_log() {
-    local level="$1" component="$2" msg="$3" detail="${4:-"{}"}"
+bm_log() { bm_log_via "$(active_venv)/bin/python" "$@" || true; }
+
+# bm_log_via <python> <level> <component> <msg> [<detail-json>]: bm_log through
+# that venv's python, returning whether it was written.
+bm_log_via() {
+    local python="$1" level="$2" component="$3" msg="$4" detail="${5:-"{}"}"
     BM_LEVEL="$level" BM_COMPONENT="$component" BM_MSG="$msg" BM_DETAIL="$detail" \
-        "$(active_venv)/bin/python" - <<'PYBM' 2>/dev/null || true
+        "$python" - <<'PYBM' 2>/dev/null
 import json, os
 from boxmunge.paths import BoxPaths
 from boxmunge.log import log_operation, log_warning, log_error
@@ -281,59 +287,9 @@ upgrade_to() {
     # 3b. Self-update the upgrade shim and its libraries (see self_update_shim).
     self_update_shim "$tmp_download/boxmunge"
 
-    # 3c. System upgrade (install.sh re-run).
-    #
-    # Closes the v0.6.x gap where new system deps (Trivy, new systemd timers,
-    # apt packages) silently required a manual install.sh re-run after every
-    # auto-update. install.sh writes its own sha256 to state/installer.sha256
-    # at the end of every successful run — when the bundled install.sh differs
-    # from the on-disk fingerprint, we re-invoke it BEFORE the slot swap so
-    # system-level dependencies are in place by the time the new venv goes
-    # active. install.sh is hard-gated on `bash -n` for the same reason as
-    # the shim self-update above: a syntactically broken install.sh in a
-    # future release must NOT brick this host.
-    #
-    # On install.sh failure: fail noisily before the swap, blocklist this
-    # version, and exit. The prior venv stays active and the prior shim
-    # stays in place (we already swapped the shim above, but the new shim
-    # is meant to be backwards-compatible with the old layout). Operator
-    # diagnoses, fixes manually, and clears the blocklist.
-    #
-    # Missing-fingerprint case (first upgrade past this feature): treated
-    # as "needs upgrade" — install.sh re-runs, writes the fingerprint, and
-    # subsequent upgrades only re-run when the bundle changes install.sh.
-    #
-    # Called with --upgrade-shim, install.sh also installs its bundle's
-    # hash-pinned requirements into the standby (bootstrap/venv-deps.sh).
-    # After the install above pip has nothing to do; it is there for older
-    # shims, which install only the requirements files they know.
-    local new_install_sh="$tmp_download/boxmunge/install.sh"
-    local installer_hash_file="$BOXMUNGE_ROOT/state/installer.sha256"
-    if [[ -f "$new_install_sh" ]]; then
-        if ! bash -n "$new_install_sh" 2>/dev/null; then
-            bm_log error upgrade "system upgrade skipped: bash -n failed" "{\"version\": \"$version\"}"
-            preflight_fail "$version" "$from_version" "system_upgrade_failed: install_sh_syntax" \
-                "ERROR: bundled install.sh has syntax errors; refusing to run system upgrade" system_upgrade
-        fi
-        local new_hash current_hash
-        new_hash="$( (cd "$tmp_download/boxmunge" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' -o -path './system/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}')"
-        current_hash="$(cat "$installer_hash_file" 2>/dev/null || echo "")"
-        if [[ "$new_hash" != "$current_hash" ]]; then
-            log "install.sh changed (current=${current_hash:0:8}, new=${new_hash:0:8}); running system upgrade..."
-            bm_log info upgrade "system upgrade started" "{\"new_hash\": \"${new_hash:0:16}\", \"prev_hash\": \"${current_hash:0:16}\"}"
-            local sysup_exit=0
-            bash "$new_install_sh" --upgrade-shim || sysup_exit=$?
-            if [[ "$sysup_exit" -eq 0 ]]; then
-                bm_log info upgrade "system upgrade completed" "{\"hash\": \"${new_hash:0:16}\"}"
-            else
-                bm_log error upgrade "system upgrade failed" "{\"exit_code\": $sysup_exit}"
-                preflight_fail "$version" "$from_version" "system_upgrade_failed: install_sh_exit_${sysup_exit}" \
-                    "ERROR: install.sh failed (exit ${sysup_exit}); aborting upgrade before slot swap" system_upgrade
-            fi
-        else
-            log "install.sh unchanged (${new_hash:0:8}); skipping system upgrade"
-        fi
-    fi
+    # 3c. System upgrade: re-run the bundle's install.sh if it changed (see
+    # system_upgrade).
+    system_upgrade "$tmp_download/boxmunge" "$version" "$from_version"
 
     # 4. SWAP. Until probation is recorded, the marker is what keeps
     # check-probation from deleting the previous slot as an orphan after a
@@ -356,6 +312,11 @@ upgrade_to() {
     # --kill-after=10 to escalate SIGTERM -> SIGKILL if the process refuses
     # to die. Budget is shorter than probation's 180s because this is the
     # post-swap quick check; probation does the long-running validation.
+    # Only exit 2 rolls back here. A health that cannot run at all (126/127)
+    # is left to check-probation, which re-checks the live slot and rolls
+    # back if it still does not run on the next health-timer fire: swap_to
+    # has just run this slot's boxmunge-server, so one failure here is more
+    # likely a blip than a broken release worth blocklisting.
     local health_exit=0
     timeout --kill-after=10 60 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
     if [[ "$health_exit" -eq 2 ]]; then
@@ -370,6 +331,7 @@ from boxmunge.upgrade_state import write_probation
 from boxmunge.paths import BoxPaths
 write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT'], hours=int(os.environ['BM_HOURS']))
 "
+    clear_probation_markers
     bm_log info upgrade "probation entered" "{\"version\": \"$version\", \"prev_slot\": \"$prev_slot\", \"hours\": $PROBATION_HOURS}"
     rm -f "$(inflight_marker "$ACTIVE_SLOT")"
     refresh_docs_for_slot "$ACTIVE_SLOT"

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""install.sh records, and the upgrade shim recomputes over a new bundle, one
+"""install.sh records (bootstrap/installer-fingerprint.sh), and the upgrade shim recomputes over a new bundle, one
 fingerprint covering install.sh and the files it installs from, so a release
 that changes only bootstrap/, the sshd drop-in or system/ (the boxmunge-system
 image) still re-runs install.sh."""
@@ -24,7 +24,7 @@ def _expr(path: Path) -> str:
 
 
 def test_install_sh_and_the_shim_compute_the_same_fingerprint() -> None:
-    assert _expr(REPO / "install.sh") == _expr(REPO / "scripts" / "boxmunge-upgrade")
+    assert _expr(REPO / "bootstrap" / "installer-fingerprint.sh") == _expr(REPO / "scripts" / "boxmunge-upgrade.d" / "system.sh")
 
 
 def _bundle(root: Path) -> Path:
@@ -49,7 +49,7 @@ def _fingerprint(bundle: Path, tmp: Path) -> str:
             "    print(f'{hashlib.sha256(data).hexdigest()}  {p}')\n")
         stub.chmod(0o755)
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
-    script = f'( cd "{bundle}" && {_expr(REPO / "install.sh")}'
+    script = f'( cd "{bundle}" && {_expr(REPO / "bootstrap" / "installer-fingerprint.sh")}'
     out = subprocess.run(["bash", "-o", "pipefail", "-c", script], env=env,
                          capture_output=True, text=True, check=True).stdout.strip()
     assert re.fullmatch(r"[0-9a-f]{64}", out), out

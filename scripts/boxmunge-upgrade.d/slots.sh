@@ -87,18 +87,33 @@ report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.envir
 " || { log "WARNING: the upgrade failure report could not be sent"; } || :
 }
 
-send_notification() {
-    local title="$1" message="$2" priority="${3:-0}"
-    BM_TITLE="$title" BM_MESSAGE="$message" BM_PRIORITY="$priority" "$(active_venv)/bin/python" -c "
-import os
+# notify_via <python> <title> <message> [priority]: send a Pushover alert
+# through that venv's python. Returns 0 when sent, 3 when Pushover is not
+# configured, anything else when it could not be sent.
+notify_via() {
+    local python="$1" title="$2" message="$3" priority="${4:-0}"
+    BM_TITLE="$title" BM_MESSAGE="$message" BM_PRIORITY="$priority" "$python" -c "
+import os, sys
 from boxmunge.config import load_config
 from boxmunge.pushover import send_notification
 from boxmunge.paths import BoxPaths
 config = load_config(BoxPaths())
 po = config.get('pushover', {})
-send_notification(po.get('user_key',''), po.get('app_token',''), os.environ['BM_TITLE'], os.environ['BM_MESSAGE'],
-                  int(os.environ['BM_PRIORITY']))
-" 2>/dev/null || true
+if not (po.get('user_key') and po.get('app_token')):
+    sys.exit(3)
+sys.exit(0 if send_notification(po['user_key'], po['app_token'], os.environ['BM_TITLE'], os.environ['BM_MESSAGE'],
+                                int(os.environ['BM_PRIORITY'])) else 1)
+" 2>/dev/null
+}
+
+# send_notification <title> <message> [priority]: best effort through the live
+# slot's python: no upgrade step fails on an alert, but one that could not be
+# sent is said on stderr. rollback_impossible needs to know, and uses
+# notify_via.
+send_notification() {
+    local rc=0
+    notify_via "$(active_venv)/bin/python" "$@" || rc=$?
+    [[ "$rc" -eq 0 || "$rc" -eq 3 ]] || log "WARN: alert not delivered (exit $rc): $1"
 }
 
 # rollback_partial <new_version> <from_version> <stage> <prev_slot> <step> <exit> <output>
@@ -128,8 +143,8 @@ Output (truncated): ${output:0:500}"
     exit 2
 }
 
-# do_rollback <new_version> <from_version> <stage> <prev_slot>: return to
-# <prev_slot>. The rollback-inflight marker is on disk before the swap, so a
+# do_rollback <new_version> <from_version> <stage> <prev_slot> [detail]: return
+# to <prev_slot>; [detail] says why, for complete_rollback. The rollback-inflight marker is on disk before the swap, so a
 # crash anywhere from here on is finished by the next check-probation.
 #
 # An interruption (stage "interrupted": a power cut or kill) is rarely the
@@ -138,13 +153,13 @@ Output (truncated): ${output:0:500}"
 # hangs or is killed cannot loop. The count is decided here, kept in the
 # marker, and recorded only once the rollback has succeeded.
 do_rollback() {
-    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" count=0
+    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" detail="${5:-}" count=0
     rollback_target_ok "$prev_slot" \
         || die_logged "Cannot roll back $new_version: env-$prev_slot is not a working venv, or is itself a half-finished upgrade; inspect it as supervisor"
     [[ "$stage" != interrupted ]] || count=$(( $(interruptions "$new_version") + 1 ))
     printf '%s\n%s\n%s\n' "$new_version" "$stage" "$count" > "$(rollback_marker "$prev_slot")"
     sync
-    complete_rollback "$new_version" "$from_version" "$stage" "$prev_slot" "$count"
+    complete_rollback "$new_version" "$from_version" "$stage" "$prev_slot" "$count" "$detail"
 }
 
 # legacy_caddy_log_note <version>: what the active (previous) release costs CrowdSec. A
@@ -178,12 +193,14 @@ teardown_before_rollback() {
     send_notification "boxmunge rollback: staged releases not torn down" "$msg" 1
 }
 
-# complete_rollback <new_version> <from_version> <stage> <prev_slot> <count>:
-# everything after the marker. Safe to run again after a crash part-way: the
+# complete_rollback <new_version> <from_version> <stage> <prev_slot> <count> [detail]:
+# everything after the marker. [detail] (why, when the stage alone does not
+# say) goes into the log once swapped, since before that the logging venv may
+# be the broken one, and with the failure report; a resumed rollback has none. Safe to run again after a crash part-way: the
 # swap is skipped once done, the stash restore and re-apply are idempotent,
 # and the interruption count is set, not incremented.
 complete_rollback() {
-    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" count="$5"
+    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" count="$5" detail="${6:-}"
     log "ROLLBACK: $new_version failed at stage=$stage, reverting to slot $prev_slot"
     bm_log warn upgrade "rollback initiated" "{\"version\": \"$new_version\", \"from_version\": \"$from_version\", \"stage\": \"$stage\"}"
 
@@ -194,9 +211,14 @@ complete_rollback() {
         teardown_before_rollback
     fi
     [[ "$ACTIVE_SLOT" == "$prev_slot" ]] || swap_to "$prev_slot"
+    if [[ -n "$detail" ]]; then
+        log "ROLLBACK reason: $detail"
+        bm_log warn upgrade "rolling back $new_version: $detail" "{\"version\": \"$new_version\", \"stage\": \"$stage\"}"
+    fi
     # Any probation ended with this rollback. Left behind, it would name the
     # now-live slot as previous_slot.
     rm -f "$PROBATION_FILE"
+    clear_probation_markers
 
     # 1. Stash restore returns config + state to the pre-upgrade snapshot.
     local output rc=0
@@ -240,7 +262,7 @@ complete_rollback() {
         send_notification "boxmunge ROLLBACK" "Rolled back $new_version: the upgrade was interrupted ($outcome).$note"
     else
         add_blocklist "$new_version" "$stage"
-        report_failure "$new_version" "$from_version" "$stage"
+        report_failure "$new_version" "$from_version" "$stage" "$detail"
         send_notification "boxmunge ROLLBACK" "Rolled back $new_version (stage: $stage).$note"
     fi
 

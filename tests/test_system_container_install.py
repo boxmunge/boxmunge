@@ -152,10 +152,14 @@ def _policy(tmp: Path, *, from_shim: int, script_rc: int) -> subprocess.Complete
     final check, as install.sh orders them."""
     (tmp / "bootstrap").mkdir()
     (tmp / "bootstrap" / "system-container.sh").write_text(f"exit {script_rc}\n")
+    shutil.copy(REPO / "bootstrap" / "installer-fingerprint.sh", tmp / "bootstrap")
+    fingerprint = tmp / "root" / "upgrade-root" / "installer.sha256"
+    fingerprint.parent.mkdir(parents=True, mode=0o700)
+    fingerprint.write_text("0" * 64 + "\n")
     script = tmp / "run.sh"
     script.write_text(
         "set -euo pipefail\n"
-        f"SCRIPT_DIR={tmp}\nBOXMUNGE_ROOT=/opt/boxmunge\nFROM_UPGRADE_SHIM={from_shim}\n"
+        f"SCRIPT_DIR={tmp}\nBOXMUNGE_ROOT={tmp / 'root'}\nFROM_UPGRADE_SHIM={from_shim}\n"
         "SYSTEM_IMAGE_STALE=0\n"
         'SYSTEM_REBUILD="sudo docker compose -f /opt/boxmunge/system/compose.yml up -d --build"\n'
         + _function_body("refresh_system_container")
@@ -175,6 +179,8 @@ def test_a_failed_build_finishes_a_fresh_install_then_fails_it(tmp_path: Path) -
     assert "rest of the install" in proc.stdout and "stale=" not in proc.stdout
     error = proc.stderr[proc.stderr.index("ERROR"):]
     assert REBUILD in error and "boxmunge doctor" in error
+    # Forgotten before the exit, so the next upgrade re-runs install.sh.
+    assert not (tmp_path / "root" / "upgrade-root" / "installer.sha256").exists()
 
 
 def test_a_failed_build_under_the_upgrade_shim_warns_and_marks_the_image_stale(tmp_path: Path) -> None:
@@ -182,6 +188,7 @@ def test_a_failed_build_under_the_upgrade_shim_warns_and_marks_the_image_stale(t
     assert proc.returncode == 0, proc.stderr
     assert "stale=1" in proc.stdout
     assert "WARNING" in proc.stderr and REBUILD in proc.stderr and "ERROR" not in proc.stderr
+    assert not (tmp_path / "root" / "upgrade-root" / "installer.sha256").exists()
 
 
 @pytest.mark.parametrize("from_shim", [0, 1])
@@ -189,6 +196,7 @@ def test_a_successful_build_is_not_stale(tmp_path: Path, from_shim: int) -> None
     proc = _policy(tmp_path, from_shim=from_shim, script_rc=0)
     assert proc.returncode == 0, proc.stderr
     assert "stale=0" in proc.stdout
+    assert (tmp_path / "root" / "upgrade-root" / "installer.sha256").exists()
 
 
 def test_the_install_fails_after_everything_else_and_before_the_fingerprint() -> None:
@@ -204,9 +212,8 @@ def test_a_stale_image_leaves_the_installer_fingerprint_unrecorded() -> None:
     """So the upgrade shim runs install.sh, and so the build, again next time."""
     write = INSTALLER_WRITE.search(INSTALL_SH)
     assert write, "install.sh no longer records the installer fingerprint"
-    guard = INSTALL_SH.rindex('if [[ "${SYSTEM_IMAGE_STALE}" -eq 1 ]]; then', 0, write.start())
-    between = INSTALL_SH[guard:write.start()]
-    assert "else" in between and "fi\n" not in between
+    guard = INSTALL_SH.rindex('if [[ "${SYSTEM_IMAGE_STALE}" -eq 0 ]]; then', 0, write.start())
+    assert "fi\n" not in INSTALL_SH[guard:write.start()]
 
 
-INSTALLER_WRITE = re.compile(r'^\s*mv -f "\$\{INSTALLER_HASH_FILE\}\.tmp" "\$\{INSTALLER_HASH_FILE\}"$', re.M)
+INSTALLER_WRITE = re.compile(r'^\s*BOXMUNGE_ROOT=\S+ bash "\$\{SCRIPT_DIR\}/bootstrap/installer-fingerprint\.sh" record ', re.M)
