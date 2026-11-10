@@ -30,6 +30,7 @@ stub "$FIXTURE/bin/cosign" 'exit 0'
 stub "$FIXTURE/venv/bin/pip" 'echo "pip $0 $*" >> "$BOXMUNGE_ROOT/calls"'
 stub "$FIXTURE/venv/bin/boxmunge-server" '[[ "$1" != --version ]] || echo "boxmunge 1.5.0"; exit 0'
 stub "$FIXTURE/venv/bin/python" 'if [[ "$1" == "-" ]]; then cat >/dev/null; exit 0; fi
+[[ -z "${BM_TITLE:-}" ]] || echo "notify title=$BM_TITLE msg=$BM_MESSAGE" >> "$BOXMUNGE_ROOT/calls"
 case "$2" in
     *write_probation*)
         printf "{\"version\": \"%s\", \"previous_slot\": \"%s\", \"expires_at\": \"'"$SOON"'\"}\n" \
@@ -107,6 +108,29 @@ box 1.4.0
 run_shim target 1.5.0
 expect 0 "probation started" "upgrade: a true SHA256SUMS passes"
 [[ "$(live)" == b ]] && pass "upgrade: 1.5.0 is live" || fail "upgrade: live slot is $(live)"
+# A targeted upgrade installs a release by version alone: its class is unknown.
+grep -qx "notify title=boxmunge upgrade applied msg=Updated to 1.5.0 (targeted upgrade; probation: 6h)" "$BOXMUNGE_ROOT/calls" \
+    && pass "a targeted upgrade alerts without claiming a release class" || fail "target alert: $(calls)"
+drop_root
+
+# The auto-update timer passes the class discovery gave; the alert names it.
+for class in security breakfix feature; do
+    box 1.4.0
+    run_shim run 1.5.0 https://example.invalid/ignored "$class"
+    expect 0 "probation started" "run: a $class release installs"
+    case "$class" in
+        security) title="boxmunge security update applied" ;;
+        breakfix) title="boxmunge break-fix update applied" ;;
+        feature) title="boxmunge feature update applied" ;;
+    esac
+    grep -qx "notify title=$title msg=Updated to 1.5.0 (probation: 6h)" "$BOXMUNGE_ROOT/calls" \
+        && pass "a $class release alerts as $title" || fail "$class alert: $(calls)"
+    drop_root
+done
+box 1.4.0
+run_shim run 1.5.0 https://example.invalid/ignored urgent
+expect 1 "Unknown release class 'urgent' for 1.5.0" "run refuses an unknown release class"
+[[ -z "$(installs)" ]] && pass "an unknown class installs nothing" || fail "unknown class: $(installs)"
 drop_root
 rm -rf "$RELEASE"
 

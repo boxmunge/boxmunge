@@ -6,7 +6,8 @@ non-security fixes) are applied unless boxmunge.yml sets
 ``auto_update.breakfix: false``. Feature releases are never applied here,
 and neither is any release across a breaking release or into a new major
 version. When such a security or break-fix release is all there is, the
-operator is alerted instead (boxmunge.blocked_update). Every run also checks
+operator is alerted instead (boxmunge.blocked_update). With
+``version_check.enabled: false`` it discovers nothing and says so. Every run also checks
 that OS security updates are arriving and alerts when they are not
 (boxmunge.os_update_alert).
 
@@ -20,7 +21,7 @@ and blocklisting identically for every class. Run by a systemd timer every
 import os
 import sys
 
-from boxmunge.config import ConfigError, load_config
+from boxmunge.config import ConfigError, load_config, version_check_enabled
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.paths import BoxPaths
 
@@ -44,11 +45,17 @@ def run_auto_update(paths: BoxPaths) -> int:
     # the shim and never returns.
     record_os_updates(paths, inspect_os_updates())
     try:
-        mode = auto_update_mode(load_config(paths))
+        config = load_config(paths)
     except ConfigError as e:
         print(f"ERROR: Cannot read auto-update policy: {e}", file=sys.stderr)
         log_error("auto-update", f"Cannot read auto-update policy: {e}", paths)
         return 1
+    if not version_check_enabled(config):
+        from boxmunge.version_check_optout import OFF
+        print(f"Skipped: {OFF}.")
+        log_operation("auto-update", f"Skipped: {OFF}", paths)
+        return 0
+    mode = auto_update_mode(config)
     scope = _SCOPE[mode]
     print(f"Checking for {scope} updates...")
     # Discover under upgrade.lock so a check never runs against a half-swapped
@@ -76,9 +83,11 @@ def run_auto_update(paths: BoxPaths) -> int:
 
     if result.get("held"):
         held = ", ".join(result["held"])
-        print(f"Release(s) {held} held by the version-check circuit breaker; not installed.")
-        log_operation("auto-update", f"Release(s) {held} held by the circuit breaker",
-                      paths, detail={"held": result["held"]})
+        by = ("the version-check circuit breaker" if result["source"] == "endpoint"
+              else "[held] in the GitHub release title")
+        print(f"Release(s) {held} held by {by}; not installed.")
+        log_operation("auto-update", f"Release(s) {held} held by {by}",
+                      paths, detail={"held": result["held"], "source": result["source"]})
 
     if action == "up_to_date":
         print(f"No {scope} updates available.")

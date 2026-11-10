@@ -210,9 +210,13 @@ reads from that directory is checked before use:
   that is the current standby slot. One naming the live slot is stale and is
   removed. Promotion deletes the standby whatever it holds; a rollback swaps
   to it only if it is a working venv, and otherwise refuses (with one error
-  and one alert per probation). An `expires_at` later than a fresh
-  probation's 6 hours (plus 15 minutes for clock steps) counts as expired, so
-  a forged far-future value cannot hold off upgrades.
+  and one alert per probation). The first run that reads a probation records
+  its expiry root-only, at most a fresh probation's 6 hours from then, and the
+  probation ends at the earlier of that and `expires_at`: deploy can end a
+  probation early but not lengthen it, so a forged far-future value cannot
+  hold off upgrades. A recorded expiry more than 6 hours ahead means the clock
+  went back (an NTP step, a VM restore); it is moved to 6 hours from then,
+  rather than promoting the release at once.
 - `blocklist.json` must be a JSON object keyed by semver versions.
 - None of these files, nor the legacy `upgrade.lock` (below), may be a
   symlink, a FIFO or anything but a plain file. Root opens them without
@@ -229,9 +233,13 @@ the file as `supervisor` and re-run.
 
 The shim deletes a venv slot only while the live one runs, and never the live
 one. State deploy must not influence is root-only: the crash-safety markers
-inside the venv slots, and the interruption counts, `upgrade.lock` and the
-installer fingerprint (which decides whether an upgrade re-runs `install.sh`) in
-`/opt/boxmunge/upgrade-root/` (root, 0700). One upgrade runs at a time because
+inside the venv slots, and in `/opt/boxmunge/upgrade-root/` (root, 0700) the
+interruption counts, `upgrade.lock`, the installer fingerprint (which decides
+whether an upgrade re-runs `install.sh`), the probation's recorded expiry and
+failure counts (keyed by the live slot, not by the version in `probation.json`),
+the health report from just before the upgrade (`health-baseline`: a health
+error already there then does not roll the release back) and the name of the
+stash the upgrade made (`upgrade-stash`). One upgrade runs at a time because
 the shim, `auto-update`, `check-probation` and `legacy-stage` all hold that
 lock, which deploy cannot replace. Shims up to 0.10.1 locked
 `upgrade-state/upgrade.lock` instead, and the one that installs this release
@@ -251,6 +259,12 @@ KEV, alert and update records) the same way: without following a link, refusing 
 other non-regular file without blocking on it, and refusing a file over 64 MiB. A planted
 link makes the operation fail with an error naming the path, instead of redirecting root to
 another file. Remove the link and re-run.
+
+A platform rollback restores exactly the stash its upgrade made, never whichever is newest in
+`stashes/`: the shim records the stash's name root-only, copies that archive into
+`upgrade-root/rollback-stash/` (opened without following a link, and only if it is a plain file
+root owns, which deploy cannot write), and has the previous release restore the copy. A missing
+or replaced stash stops the rollback as "ROLLBACK PARTIAL", naming the file.
 
 This protects the last path component only. Deploy can still swap an intermediate directory it
 owns (`projects/<p>/backups`, a `state/` subdirectory, `inbox/.tmp`) for a symlink, so a root
@@ -426,9 +440,15 @@ version-check circuit breaker can hold a broken security or break-fix
 release fleet-wide. A box honours a hold whenever the service answers: a
 held release is never installed. GitHub is consulted only when the service
 cannot be reached at all; an error answer from the service (a 429, a 5xx, a
-malformed body) fails the check instead, because GitHub cannot know about
-holds. While the service is unreachable a hold cannot be seen, so a held
-release could still arrive through the GitHub fallback until it returns.
+malformed body) fails the check instead. On GitHub a hold is the `[held]`
+marker in a release's title, which only someone with write access to the
+repository can set (release notes, which quote contributors' PR titles, do
+not count, and the release workflow refuses to publish a release carrying
+it). The maintainer adds it when tripping the breaker, so a box that cannot
+reach the service still honours the hold; until it is added, GitHub's
+answer lags the service's, which is why an error answer is never a reason to
+ask GitHub. A box whose `boxmunge.yml` sets `version_check.enabled: false`
+asks neither, and gets no automatic updates at all.
 
 The class and the breaking flag are decided from `releases.json` alone. The
 release workflow refuses to build a tag that is not listed there with a

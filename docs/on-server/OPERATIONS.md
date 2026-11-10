@@ -1606,13 +1606,19 @@ run from the deploy shell) reports `SKIP`, which does not affect the exit code. 
 tool runs the same checks.
 
 Outside an upgrade nothing runs `health` on a schedule: the 5-minute health timer runs `check-all`
-(the per-project checks and alerts). A platform upgrade runs `health` as root twice over: once
-right after it switches to the new release (60-second budget), then on every health-timer fire for
-the 6-hour probation that follows (`boxmunge-upgrade check-probation`, 180-second budget). An exit
-of 2 from either rolls the platform back to the previous release and blocklists the new one, so
+(the per-project checks and alerts). A platform upgrade runs `health --json` as root: once with
+the previous release just before it starts (180-second budget), once right after it switches to
+the new release (60 seconds), then on every health-timer fire for the 6-hour probation that
+follows (`boxmunge-upgrade check-probation`, 180 seconds). An error in a check that did not fail
+before the upgrade rolls the platform back to the previous release and blocklists the new one, so
 auto-update does not retry it (`sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist <version>`
-forgets it). Exit 0 or 1 keeps the release; a `health` that runs past its budget is retried on the
-next fire, not rolled back.
+forgets it). An error that was already there before the upgrade is logged but does not roll back
+(rolling back would not fix it); if `health` gave no report before the upgrade, every error
+counts. Warnings keep the release. The output must be a valid report: a `health` that crashes
+before it (a module that cannot be imported, say), prints something else, or exits with a code
+its checks do not mean gives no verdict, and two probation runs in a row without one roll back.
+One that runs past its budget is retried on the next fire; six in a row (half an hour) roll back,
+unless `health` also ran past its budget before the upgrade.
 
 | Check | Warns (or errors) when | What to do |
 |---|---|---|
@@ -1933,12 +1939,15 @@ logs the hold; `upgrade --target <version>` still installs it deliberately.
 If the service cannot be reached at all (DNS, connection or timeout
 failure), auto-update falls back to the GitHub releases list, applying the
 same rules to the markers in each release's title or notes (`[security]`,
-`[breakfix]`, `[breaking]`), and logs a warning. If the service answers but
-the answer cannot be used (an HTTP error such as its rate limit's 429, a
-redirect to somewhere unreachable, or an unexpected shape), nothing is
-installed and the check fails with the reason: GitHub cannot know about
-holds, so its answer could install a held release. The next run (every 6
-hours) tries again. A security release can therefore wait while the service
+`[breakfix]`, `[breaking]`), and logs a warning. A release whose GitHub
+title carries `[held]` is held there exactly as the circuit breaker holds it
+(only the maintainer can edit a release title; `[held]` in the notes counts
+for nothing). If the service answers but the answer cannot be used (an HTTP
+error such as its rate limit's 429, a redirect to somewhere unreachable, or
+an unexpected shape), nothing is installed and the check fails with the
+reason: the maintainer marks a hold on GitHub by hand after tripping the
+breaker, so GitHub's answer could still install a release the service
+holds. The next run (every 6 hours) tries again. A security release can therefore wait while the service
 answers with errors; that is the price of never installing a release the
 maintainer has held. So it is never silent: once the service has gone 48
 hours without a usable answer, `health` reports `platform-updates` as
@@ -2050,8 +2059,9 @@ How an upgrade is applied and undone:
    0.10.1 needs a redeploy (or the next upgrade) instead: its previous overlay names its
    image by the old name, which the upgrade dropped, and its previous record lacks this
    release's mounts, so the scan and the start checks refuse it.
-4. A health check runs, then a 6-hour probation. A critical health result during probation
-   rolls back. So does a live environment whose `boxmunge-server` no longer starts, once two
+4. A health check runs, then a 6-hour probation. A health error during probation that was not
+   there before the upgrade rolls back (see [Verifying Platform Health](#verifying-platform-health)
+   for what counts). So does a live environment whose `boxmunge-server` no longer starts, once two
    health-timer runs in a row (5 minutes apart) find it so, expired or not; a crash counts like
    any other failure, and one that only times out needs four runs in a row. A health check that
    cannot run at all has the live environment checked the same way.
@@ -2073,8 +2083,8 @@ teardown itself does not finish (it is stopped after 10 minutes), one high-prior
 those commands for every project still holding `.releases/staged/`. It never blocks the
 rollback, and the older release ignores what is left.
 
-A rollback swaps the venvs back, restores the stash, and re-runs `upgrade --apply` with the
-previous release, so its overlays and Caddy sites are regenerated and projects restarted on
+A rollback swaps the venvs back, restores the stash the upgrade made (never just the newest in
+`stashes/`), and re-runs `upgrade --apply` with the previous release, so its overlays and Caddy sites are regenerated and projects restarted on
 them. Pause and quarantine markers are not restored from the stash: a project you resumed after
 the upgrade stays resumed. Nor are the users records: a service you gave to a new user with
 `data chown` after the upgrade keeps running as that user. If either the restore or the re-apply fails, you get a "ROLLBACK
@@ -2135,8 +2145,9 @@ The box contacts one boxmunge service, the version-check service at boxmunge.dev
   for `/v1/check?v=<installed version>`, with User-Agent `boxmunge/<installed version>`.
   Nothing else: no hostname, machine ID or project names.
 - **Failure reports**, when an upgrade fails: the version it tried, the version it came
-  from, the step that failed, a short reason (for example
-  `system_upgrade_failed: install_sh_exit_100`) and the time the box sent it.
+  from, the step that failed and a short reason (for example
+  `system_upgrade_failed: install_sh_exit_100`). The service records the time it
+  received the report.
 
 Like any connection, both carry the box's IP address. The service stores the network
 prefix it came from (IPv4 /24, IPv6 /48; an IPv6 address that embeds an IPv4 address
@@ -2169,10 +2180,24 @@ The box's other outbound requests go to third parties, never to a boxmunge servi
   blocklist;
 - alert channels the operator set up (Pushover, webhooks).
 
-There is no setting to turn version checks off. Stopping the timer
-(`systemctl disable --now boxmunge-auto-update.timer`) stops the scheduled checks, and
-with them automatic security updates and the alert when OS security updates stop
-arriving; a plain `upgrade` still checks.
+To send the version-check service nothing at all, set this in
+`/opt/boxmunge/config/boxmunge.yml` (as root):
+
+```yaml
+version_check:
+  enabled: false
+```
+
+The box then makes no update checks, neither to the service nor to GitHub instead,
+and sends no failure reports. The cost: it discovers no releases, so no security or
+break-fix release is installed automatically. Auto-update still runs (it keeps
+checking that OS security updates arrive) and logs that it skipped discovery;
+`health` reports `platform-updates` as `WARN` and `doctor` warns under "Update
+discovery", both saying that updates are not being discovered. A plain `upgrade`
+refuses with the same message. Watch <https://github.com/boxmunge/boxmunge/releases>
+and install a release with `upgrade --target X.Y.Z`, which asks nothing; it downloads
+the release from GitHub, like every upgrade. The value must be `true` or `false`.
+Set it back to `true` to discover releases again.
 
 ## Upgrading from 0.10.1 with a release staged
 

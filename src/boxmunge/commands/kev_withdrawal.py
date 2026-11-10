@@ -18,7 +18,8 @@ so it is not held for it again) or the catalog lists the CVE again.
 The hold applies only to withdrawn CVEs the images still contain: a scan or
 release without them is a fix. One priority-1 alert per withdrawal names
 the project, the CVE and the source; the quarantine record remembers which
-were sent (quarantine.KEV_WITHDRAWAL_HOLD).
+were delivered (quarantine.KEV_WITHDRAWAL_HOLD), so one that did not go out
+is sent again by the next scan.
 """
 from __future__ import annotations
 
@@ -56,8 +57,9 @@ def withdrawal_hold(
     paths: BoxPaths, project: str, decisions: Sequence[ProjectDecision],
 ) -> str | None:
     """Why the quarantine that ``decisions`` (a clear scan) would lift is
-    kept, or None. Alerts once per withdrawal. Raises QuarantineError when
-    the record cannot be read or written."""
+    kept, or None. Alerts once per withdrawal: sent first, recorded once
+    delivered. Raises QuarantineError when the record cannot be read or
+    written."""
     try:
         held = held_withdrawals(paths, project, decisions)
     except KevWithdrawalsError as e:
@@ -66,10 +68,9 @@ def withdrawal_hold(
         return None
     announced = dict((read_quarantine_state(project, paths) or {}).get(KEV_WITHDRAWAL_HOLD) or {})
     new = {cve: w for cve, w in held.items() if announced.get(cve) != w.at}
-    if new:
-        hold_for_kev_withdrawal(project, paths, {**announced, **{c: w.at for c, w in new.items()}})
-        for cve, w in new.items():
-            _alert(paths, project, cve, w.source)
+    delivered = {cve: w.at for cve, w in new.items() if _alert(paths, project, cve, w.source)}
+    if delivered:
+        hold_for_kev_withdrawal(project, paths, {**announced, **delivered})
     return (f"quarantine kept: CISA KEV no longer lists {_named(held)}, still in the images; "
             f"{_resume(project)}")
 
@@ -91,9 +92,11 @@ def gate_hold(
             f"{', '.join(held)}. Nothing was started."]
 
 
-def _alert(paths: BoxPaths, project: str, cve: str, source: str) -> None:
+def _alert(paths: BoxPaths, project: str, cve: str, source: str) -> bool:
+    """Whether the alert was delivered (notify logs every non-delivery)."""
     try:
-        send_alerts((format_kev_withdrawal_hold_alert(project, cve, source),), paths)
+        return send_alerts((format_kev_withdrawal_hold_alert(project, cve, source),), paths) > 0
     except Exception as e:  # noqa: BLE001 — alerting must never block scan
         log_warning("cve-scan", f"KEV withdrawal hold alert failed for {project}: {e}",
                     paths, project=project, detail={"error": str(e)})
+        return False

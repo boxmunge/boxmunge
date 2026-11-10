@@ -73,7 +73,8 @@ boxmunge server-setup you@your-server.example.com --email you@example.com</code>
        address. No hostname, machine identifier or anything about the
        server's projects is sent. If an upgrade fails, the server also
        reports the version it tried, the version it came from, the step that
-       failed, a short reason and the time it sent the report.</p>
+       failed and a short reason; this service records the time it received
+       the report.</p>
 
     <p>What this service stores:</p>
 
@@ -86,7 +87,9 @@ boxmunge server-setup you@your-server.example.com --email you@example.com</code>
             company, and so can a /24 be. Every server on one network shares
             an entry. These entries are deleted after 90 days.</li>
         <li>For each failure report: the report, with the same network
-            prefix. Reports are deleted after 90 days.</li>
+            prefix and the time it arrived. A report that repeats one the
+            same network sent for that version in the last six hours is not
+            stored. Reports are deleted after 90 days.</li>
         <li>A daily count of checks per version.</li>
     </ul>
 
@@ -122,12 +125,13 @@ boxmunge server-setup you@your-server.example.com --email you@example.com</code>
        to see which networks still run an old version and nudge those users
        to upgrade.</p>
 
-    <p>Opting out: boxmunge has no setting to turn version checks off. The
-       scheduled check runs from the <code>boxmunge-auto-update</code> timer;
-       stopping it (<code>systemctl disable --now boxmunge-auto-update.timer</code>)
-       stops the scheduled checks, and with them automatic security updates
-       and the alert when OS security updates stop arriving. Running an
-       upgrade by hand still checks.</p>
+    <p>Opting out: setting <code>version_check: {enabled: false}</code> in
+       the server's <code>/opt/boxmunge/config/boxmunge.yml</code> stops every
+       update check and failure report, and the server does not ask GitHub
+       instead. It then hears about no releases at all, so security updates
+       are no longer installed automatically; its <code>health</code> and
+       <code>doctor</code> reports say so, and its operator installs releases
+       by hand with <code>upgrade --target</code>.</p>
 
     <p>The source code for this service is
        <a href="https://github.com/boxmunge/boxmunge/tree/main/services/version-check">open

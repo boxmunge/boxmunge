@@ -156,7 +156,9 @@ under `balanced` neither is anything not being exploited.
 For every finding, `evaluate_finding` runs these gates in order:
 
 1. **On CISA KEV** → `QUARANTINE`. KEV is the floor: active exploitation
-   bypasses the AV filter, distro-status routing, the severity threshold,
+   bypasses the AV filter, distro-status routing, the severity threshold
+   (a KEV CVE no source has rated yet, unknown severity, quarantines too:
+   Trivy reports findings of every severity, unknown included),
    any suppression, and an upstream fix the image is not yet running. A
    suppression never hides a KEV-listed CVE: a CVE reviewed and suppressed
    before CISA listed it stops applying on the first scan after it appears on KEV, and the
@@ -394,7 +396,8 @@ project's images still contain such a CVE:
 
 The first such scan sends one priority-1 alert per withdrawal (`Quarantine
 kept — CISA KEV withdrew <CVE>`) naming the project, the CVE and the
-source. To accept the withdrawal, run `boxmunge security resume
+source. Only a delivered alert is recorded as sent, so if Pushover does
+not take it, the next scan sends it again. To accept the withdrawal, run `boxmunge security resume
 <project>`. The resume records the acceptance for that project, so a later
 quarantine of it is not held for that CVE again. A scan or release whose
 images no longer contain the withdrawn CVEs is a fix, and lifts the
@@ -414,12 +417,50 @@ fresh:
   the list. A source earlier in the list than the cache's own is not held
   to the cached date. Otherwise a later source stamping a newer date (a
   compromised mirror, or an internal mirror stamping its own sync time)
-  would lock the earlier ones out for good. The missing-ID check still
-  guards what such a catalog drops. A cache from a source no longer on the
-  list ranks below every listed one. The lagging check runs before the
-  missing-ID check, because a lagging catalog also lacks the entries added
-  since. A cached release date that is in the future is not used as the
-  baseline.
+  would lock the earlier ones out for good. A cache from a source no longer
+  on the list ranks below every listed one. The lagging check runs before
+  the missing-ID check, because a lagging catalog also lacks the entries
+  added since. A cached release date that is in the future is not used as
+  the baseline.
+
+When the sources disagree, the catalog is not rolled back either. Say
+`kev.sources` lists a mirror you run first and CISA second, and one night
+the mirror was down, so CISA's newer catalog was cached. If the mirror
+comes back with an older catalog that lacks CVEs the cached one lists, and
+that catalog is no newer than the one the mirror served last time, the
+mirror has not caught up: those CVEs were not withdrawn. Taking that
+catalog would drop the newest KEV entries, and a project not yet
+quarantined for one of them never would be. So the mirror is passed over
+and the later sources are tried. Each of them is held to the cached date,
+so the first that passes agrees with the cache or is newer. It is cached,
+and a normal-priority notice (`CISA KEV sources disagree — newer catalog
+kept`) names the source that lags and what it lacks. If no later source
+answers, the cached catalog is kept and the run alerts at priority 1, as
+for a rejected catalog. While an earlier source disagrees, a later source
+may not drop a CVE the earlier one still lists: that catalog is rejected
+too, until the earlier source's stall passes the bound below. From then
+on its list no longer holds back a withdrawal, so a mirror that stopped
+syncing cannot freeze the catalog for good. CISA's own feed never expires
+the guard: a later source may never drop a CVE that CISA still lists. If
+CISA's feed answers but stays frozen for weeks while a mirror withdraws
+one of its CVEs, every refresh is refused at priority 1 until CISA
+publishes again. That is deliberate: CISA's own list outranks any copy of
+it.
+
+Each refresh records the release date of the catalog every source served
+(`state/kev/sources.json`). An earlier source that has moved on (its
+catalog is newer than the last one it served, or it has served none
+before) wins by rank even when it lacks some cached CVEs: those go through
+the withdrawal rules above (up to 3 accepted and recorded, more rejected).
+Otherwise a later source that listed one CVE of its own, stamped a little
+ahead, would keep CISA locked out for good. So would an earlier catalog
+that drops nothing, which is always accepted. When the first source in
+`kev.sources`, or CISA's own feed wherever it is listed, is passed over on
+2 runs since it last served a catalog that was used (runs it does not
+answer do not count), or against a cached catalog released over 7 days
+ago, the notice becomes a priority-1 alert: `CISA KEV first source overridden by
+<source>`. If `sources.json` cannot be read, no catalog is accepted
+(priority 1) until root repairs or removes the file.
 
 **Fail-safe: toward uptime, never toward quarantine.** When the catalog is
 missing or stale, `is_known_exploited` returns `False`. The site is not taken
@@ -861,8 +902,11 @@ Rules:
   applies through 2026-07-31 and expires on 2026-08-01.
 - A suppression never applies to a CVE on the CISA KEV catalog. `suppress`
   refuses a KEV-listed CVE, and `suppress --current` skips KEV-listed CVEs
-  with a `NOTE:`. An existing suppression whose CVE is later added to KEV
-  stops applying on the next scan (see the decision order above).
+  with a `NOTE:`. Both judge against the cached catalog's CVEs even when it
+  is stale (the message says so): staleness only stops new KEV quarantines,
+  and once the catalog is fresh again such a suppression would not apply.
+  An existing suppression whose CVE is later added to KEV stops applying on
+  the next scan (see the decision order above).
 
 ### Audit trail (v0.7.0)
 
@@ -1132,6 +1176,7 @@ boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason 
 boxmunge security unsuppress <CVE> --project <name>
 boxmunge security resume <project>                      Lift CVE quarantine
 boxmunge security resume <project> --accept-stale-kev  Lift with no usable KEV catalog (audited)
+boxmunge prod-deploy <project> --accept-stale-kev     Deploy a fix with no usable KEV catalog (audited)
 ```
 
 The fleet view shows posture distribution, currently quarantined projects,
@@ -1277,13 +1322,23 @@ A refusal keeps the quarantine and names the exits that work:
   `boxmunge security resume <project> --accept-stale-kev` lifts anyway. It
   still needs a complete re-scan with no quarantine-level finding, says what
   it gives up, is logged before the lift and sends a priority-1 alert after
-  it. It brings the images the project runs now back online: for a fix
-  deploy the gate refused, those are the old images, until the deploy
-  (repeated after the resume) replaces them. Under `strict` or `paranoid`,
-  if that resume refuses a finding that is still quarantine-level in the old
-  images, the route is: `security suppress` it for the project, resume with
-  `--accept-stale-kev`, deploy the fix, then `security unsuppress` it. (A
-  deploy that carries the acceptance itself is planned for 0.11.5.)
+  it. It brings the images the project runs now back online.
+- **No usable catalog, for a fix deploy:** `prod-deploy <project>
+  --accept-stale-kev` carries the same acceptance through the deploy, so the
+  old images never come back. The release's images are still scanned in
+  full and must clear every quarantine-level finding. The acceptance is
+  logged before anything starts, and the lift's alert says it was lifted
+  with `--accept-stale-kev` (priority 1). The gate's refusal names the
+  exact command, for example `prod-deploy <project> --ref <release>
+  --accept-stale-kev`, which finishes the install the refusal left open.
+  With nothing to accept (a fresh catalog, a stale one that lists none of
+  the release's CVEs, or a project that is not quarantined) the flag says
+  so and changes nothing. A promote, a rollback, the TUI or MCP take no
+  acceptance: their refusal offers the resume above, then the deploy again
+  (under `strict` or `paranoid`, if that resume refuses a finding that is
+  still quarantine-level in the old images: `security suppress` it for the
+  project, resume with `--accept-stale-kev`, deploy the fix, then
+  `security unsuppress` it).
 
 Staging lifts nothing, so `stage` is not judged against the catalog; the
 promote is.

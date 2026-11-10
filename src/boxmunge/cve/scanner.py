@@ -236,18 +236,10 @@ def refresh_db() -> None:
     """
     cmd = ["trivy", "image", "--download-db-only"]
     try:
-        subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=_DB_REFRESH_TIMEOUT,
-        )
+        subprocess.run(cmd, capture_output=True, text=True, check=True,
+                       timeout=_DB_REFRESH_TIMEOUT)
     except FileNotFoundError:
-        _LOGGER.warning(
-            "trivy DB refresh skipped: %s", _TRIVY_NOT_FOUND_MSG,
-            extra=_extra(),
-        )
+        _LOGGER.warning("trivy DB refresh skipped: %s", _TRIVY_NOT_FOUND_MSG, extra=_extra())
     except subprocess.TimeoutExpired:
         _LOGGER.warning(
             "trivy DB refresh timed out after %ds — continuing with existing DB",
@@ -277,19 +269,17 @@ def scan_image(image_ref: str, *, timeout: int = _DEFAULT_TIMEOUT) -> ScanResult
     cmd = [
         "trivy", "image",
         "--format", "json",
-        "--severity", "LOW,MEDIUM,HIGH,CRITICAL",
+        # UNKNOWN too: a KEV CVE no source has rated yet must reach the KEV check.
+        "--severity", "UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL",
+        "--scanners", "vuln",
+        "--skip-db-update",  # each command runs refresh_db once before scanning
         "--no-progress",
         "--quiet",
-        image_ref,
+        "--", image_ref,
     ]
     try:
-        completed = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=timeout,
-        )
+        completed = subprocess.run(cmd, capture_output=True, text=True, check=True,
+                                   timeout=timeout)
     except FileNotFoundError as e:
         raise TrivyNotInstalledError(_TRIVY_NOT_FOUND_MSG) from e
     except subprocess.TimeoutExpired as e:

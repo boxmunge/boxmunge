@@ -116,6 +116,20 @@ def test_a_clean_scan_holds_the_quarantine_and_alerts_once(box) -> None:
     assert not _sent(pushover, LIFTED)
 
 
+def test_an_undelivered_hold_alert_is_sent_again_next_scan(box, monkeypatch) -> None:
+    """The record says which alerts went out: it is written only once one is
+    delivered, so a Pushover outage does not swallow the only alert."""
+    paths, pushover = box
+    monkeypatch.setattr("boxmunge.notify.send_notification", lambda *a, **k: False)
+    scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+    assert is_quarantined("demo", paths)
+    assert not _sent(pushover, HELD)
+    monkeypatch.setattr("boxmunge.notify.send_notification", pushover._send)
+    for _ in range(2):
+        scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+    assert len(_sent(pushover, HELD)) == 1
+
+
 def test_an_incomplete_scan_in_the_withdrawing_run_keeps_the_hold(box) -> None:
     """The withdrawing run's scan of the project failed; the next run's
     refresh withdraws nothing, and its clean scan must still hold."""

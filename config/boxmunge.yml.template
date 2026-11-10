@@ -1,6 +1,7 @@
 # boxmunge host configuration: a reference copy of the keys
 # /opt/boxmunge/config/boxmunge.yml accepts. bootstrap/init-host.sh writes
-# most of them at install; the rest (container_updates, auto_update) take
+# most of them at install; the rest (container_updates, auto_update,
+# version_check) take
 # the defaults in src/boxmunge/config.py until set, kev takes those in
 # src/boxmunge/cve/kev.py, and webhooks are off until set. Edited by hand,
 # as root.
@@ -50,6 +51,15 @@ container_updates:
 # breakfix must be true or false.
 auto_update:
   breakfix: true
+
+# The version-check service at boxmunge.dev: the box asks it for releases
+# (auto-update every 6 hours, and a plain `upgrade`) and reports failed
+# upgrades to it. enabled: false stops both, and the GitHub fallback too:
+# the box then discovers no releases, so security releases are NOT
+# installed automatically, and `health` and `doctor` say so. Install a
+# release by hand with `upgrade --target X.Y.Z`. Must be true or false.
+version_check:
+  enabled: true
 
 # CISA KEV catalog sources, tried in order before each CVE scan; the first
 # whose catalog passes the sanity checks is cached, and `boxmunge security`

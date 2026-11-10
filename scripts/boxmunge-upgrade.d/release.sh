@@ -73,6 +73,10 @@ start_download() {
 # every step checks its own result.
 FETCH_STEP=""
 FETCH_ERROR=""
+# download <dest> <url>: every download runs with upgrade.lock held, so a
+# stalled connection must not park the upgrade (and check-probation, which
+# skips while the lock is held) indefinitely.
+download() { curl -sLf -o "$1" --connect-timeout 30 --max-time 600 "$2"; }
 # shellcheck disable=SC2034  # FETCH_STEP is read by upgrade_to, in the shim itself
 fetch_failed() { FETCH_STEP="$1"; FETCH_ERROR="$2"; }
 
@@ -82,13 +86,13 @@ fetch_release() {
     local bundle="boxmunge-${version}.tar.gz"
 
     log "Downloading bundle from ${base}/${bundle}"
-    curl -sLf -o "$dir/$bundle" "$base/$bundle" \
+    download "$dir/$bundle" "$base/$bundle" \
         || { fetch_failed bundle_download "Failed to download bundle"; return 1; }
-    curl -sLf -o "$dir/SHA256SUMS" "$base/SHA256SUMS" \
+    download "$dir/SHA256SUMS" "$base/SHA256SUMS" \
         || { fetch_failed checksum_download "Failed to download SHA256SUMS"; return 1; }
-    curl -sLf -o "$dir/SHA256SUMS.sig" "$base/SHA256SUMS.sig" \
+    download "$dir/SHA256SUMS.sig" "$base/SHA256SUMS.sig" \
         || { fetch_failed signature_download "Failed to download SHA256SUMS.sig (release is unsigned or sig artifact missing)"; return 1; }
-    curl -sLf -o "$dir/SHA256SUMS.cert" "$base/SHA256SUMS.cert" \
+    download "$dir/SHA256SUMS.cert" "$base/SHA256SUMS.cert" \
         || { fetch_failed certificate_download "Failed to download SHA256SUMS.cert (release is unsigned or cert artifact missing)"; return 1; }
 
     # Verify cosign signature on SHA256SUMS BEFORE running sha256sum -c.

@@ -16,7 +16,7 @@ calls() { cat "$BOXMUNGE_ROOT/calls" 2>/dev/null || true; }
 
 # journal <direction> <phase>
 journal() {
-    mkdir -p -m 700 "$BOXMUNGE_ROOT/upgrade-root"
+    [[ -d "$BOXMUNGE_ROOT/upgrade-root" ]] || mkdir -m 700 "$BOXMUNGE_ROOT/upgrade-root"
     printf '{"version": 1, "direction": "%s", "phase": "%s", "offset": 1048576}\n' "$1" "$2" \
         > "$BOXMUNGE_ROOT/upgrade-root/userns-migration.json"
 }
