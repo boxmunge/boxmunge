@@ -119,6 +119,16 @@ run_shim check-probation
 expect 0 "promoted" "an earlier expires_at still ends the probation"
 drop_root
 
+# A temp file a run killed between writing and renaming left in
+# upgrade-root/ is removed by the next write of that file.
+on_probation
+mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+echo "half" > "$BOXMUNGE_ROOT/upgrade-root/.probation-expiry.AbC123"
+run_shim check-probation
+[[ ! -e "$BOXMUNGE_ROOT/upgrade-root/.probation-expiry.AbC123" && -f "$BOXMUNGE_ROOT/upgrade-root/probation-expiry" ]] \
+    && pass "a temp left by a killed root-file write is swept" || fail "temp left: $(ls -a "$BOXMUNGE_ROOT/upgrade-root")"
+drop_root
+
 # A clock stepped back after the upgrade (an NTP step, a VM restore) puts
 # expires_at more than a probation's length ahead. That is not the end of the
 # probation: it runs a probation's length from now.
