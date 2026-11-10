@@ -2,7 +2,7 @@
   "releases": [
     {
       "version": "0.11.4",
-      "class": "breakfix",
+      "class": "security",
       "breaking": false,
       "url": "https://github.com/boxmunge/boxmunge/releases/tag/v0.11.4"
     },
