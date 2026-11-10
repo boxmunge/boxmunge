@@ -27,6 +27,7 @@ import yaml
 from boxmunge import docker
 from boxmunge.compose_mounts import has_env_substitution, host_path_forms, outside_roots
 from boxmunge.compose_references import entry_base, env_file_paths, include_entries
+from boxmunge.fs_nofollow import open_dir_beneath
 
 
 class ComposeResolveError(Exception):
@@ -38,16 +39,20 @@ def _missing_env_files_present(compose_path: Path, base: Path | None = None) -> 
     """Make absent in-project service env files exist while Compose resolves.
 
     A bundle is validated in an extraction directory, where on-box files such
-    as secrets.env do not exist, and some Compose versions refuse to resolve
-    a model whose env_file is missing, even with --no-env-resolution. Each
+    as secrets.env do not exist, and Compose versions older than the one
+    this was last probed on (5.1.3 resolves without them) refuse a model
+    whose env_file is missing, even with --no-env-resolution: CI's did. Each
     missing env file that stays inside ``base`` (the directory Compose
-    resolves relative paths against, by default the compose file's) is
-    created empty for the duration of the call and removed afterwards.
+    resolves relative paths against, by default the compose file's), in a
+    directory that already exists with no link on the way from ``base``, is
+    created empty for the duration of the call and removed afterwards. No
+    directory is ever made: root resolves at every start check, in a tree
+    deploy can write.
     Validation never reads their values. A placeholder that somehow
     survived could not reach a live project: installing a release that
     carries secrets.env is refused.
     """
-    created: list[Path] = []
+    created: list[tuple[int, str]] = []
     base = base or compose_path.parent
     try:
         doc = yaml.safe_load(compose_path.read_text())
@@ -62,18 +67,39 @@ def _missing_env_files_present(compose_path: Path, base: Path | None = None) -> 
                 if (not isinstance(ref, str) or not ref or has_env_substitution(ref)
                         or outside_roots(ref, base, (base,))):
                     continue  # the reference walk reports these
-                target = Path(host_path_forms(ref, base)[0])
-                if not target.exists() and not target.is_symlink():
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    # O_EXCL|O_NOFOLLOW: a link planted after the check above
-                    # fails here instead of making root create its target.
-                    os.close(os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                                     | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644))
-                    created.append(target)
+                placeholder = _placeholder(base, Path(host_path_forms(ref, base)[0]))
+                if placeholder is not None:
+                    created.append(placeholder)
         yield
     finally:
-        for path in created:
-            path.unlink(missing_ok=True)
+        for dir_fd, name in created:
+            try:
+                os.unlink(name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+            finally:
+                os.close(dir_fd)
+
+
+def _placeholder(base: Path, target: Path) -> tuple[int, str] | None:
+    """Create ``target`` (a path under ``base``) empty if it is missing and
+    every directory from ``base`` to it exists and is not a link; return
+    (directory fd, name) to remove it by, or None. The directories are
+    walked one component at a time with O_NOFOLLOW (fs_nofollow), so a link
+    swapped in at any depth after the outside_roots check makes root
+    create nothing; the file itself is created O_EXCL|O_NOFOLLOW."""
+    rel = Path(os.path.relpath(target, base)).parts
+    try:
+        dir_fd = open_dir_beneath(base, rel[:-1])
+    except OSError:
+        return None  # missing, a link, or not under base: Compose reports it
+    try:
+        os.close(os.open(rel[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                         | os.O_CLOEXEC, 0o644, dir_fd=dir_fd))
+    except OSError:
+        os.close(dir_fd)
+        return None  # already there (or a link to anything): left as it is
+    return dir_fd, rel[-1]
 
 
 def _parse_config(out: str) -> dict[str, Any]:

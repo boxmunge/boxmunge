@@ -697,6 +697,8 @@ bypass the audit trail and risk breaking the schema.
 
 Because it is raw proxy configuration, it is operator-only: an operator places it in `/opt/boxmunge/projects/<project>/` on the server. A bundle that carries `caddy.override.conf` is refused, and deploys and rollbacks never remove or replace it.
 
+It must be a regular file of at most 1 MB, or a link to one that stays inside the project (a git project may keep it in `repo/` and link it, as boxmunge links `compose.yml`). A link out of the project, a FIFO, or a larger file is refused, naming the file, until it is replaced or removed: the project directory is writable by the deploy user, and root reads the file under `sudo`. An upgrade leaves a project whose override it refuses on its current site config and containers, and goes on with the rest. Nothing but its placement keeps it operator-only, and it is a free Caddy block: it can `reverse_proxy` any service alias on the shared proxy network, other projects' included. Review an override as you would any change to the box's proxy.
+
 Use this only when necessary. Projects using `caddy.override.conf`:
 
 - Take full responsibility for correct TLS, routing, and upstream configuration.

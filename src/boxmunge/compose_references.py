@@ -187,6 +187,12 @@ class _ReferenceWalk:
         doc = self._parsed(path)
         if not doc:
             return
+        if not extended and "models" in doc:
+            # Checked on the literal files: `config` drops unused top-level models.
+            self.problems.append(
+                f"{path.name}: declares top-level models:, which Docker Model Runner "
+                f"runs outside the project's containers. Remove it and run the "
+                f"model server as an ordinary service from an image.")
         for compose_paths, extra in include_entries(doc):
             self._include(path.name, compose_paths, extra, base, depth)
         services = doc.get("services") or {}

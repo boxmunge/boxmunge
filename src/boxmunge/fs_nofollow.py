@@ -15,7 +15,10 @@ import logging
 import os
 import pwd
 import stat
+from collections.abc import Sequence
 from pathlib import Path
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 def running_as_root() -> bool:
@@ -77,7 +80,8 @@ def fchown_deploy(fd: int, what: str) -> None:
         _warn_chown(what, e)
 
 
-def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
+def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600, *,
+                          dir_fd: int | None = None) -> int:
     """os.open that refuses a symlink, a non-regular file or an extra hard link.
 
     For root opening a name in a directory the deploy user can write: a
@@ -88,7 +92,8 @@ def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
     ordinary blocking descriptor.
     """
     try:
-        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, mode)
+        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, mode,
+                     dir_fd=dir_fd)
     except OSError as e:
         # ENXIO: a write-only open of a FIFO (or socket) nobody reads.
         for code, what in ((errno.ELOOP, "a symlink"), (errno.ENXIO, "a FIFO or socket")):
@@ -105,6 +110,40 @@ def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
         )
     fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
     return fd
+
+
+def open_dir_beneath(root: Path, parts: Sequence[str]) -> int:
+    """A descriptor of the directory ``root/parts...``, reached one
+    component at a time with O_NOFOLLOW: no component below ``root`` may be
+    a link, so one swapped in at any depth is refused (ELOOP or ENOTDIR),
+    not followed. Raises OSError."""
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in parts:
+            if part in ("", ".", ".."):
+                raise OSError(errno.EINVAL, f"{root}: {'/'.join(parts)} is not a plain "
+                              f"relative path")
+            child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def open_resolved_nofollow(path: Path, flags: int) -> int:
+    """open_regular_nofollow for a symlink-free absolute path (a realpath),
+    walked from / so that no component, at any depth, is followed if it has
+    been swapped for a link since the path was resolved. Raises OSError."""
+    parts = Path(path).parts
+    if not parts or parts[0] != "/":
+        raise OSError(errno.EINVAL, f"{path} is not an absolute path")
+    parent = open_dir_beneath(Path("/"), parts[1:-1])
+    try:
+        return open_regular_nofollow(Path(parts[-1]), flags, dir_fd=parent)
+    finally:
+        os.close(parent)
 
 
 # Far above any state record, compose file or catalog boxmunge writes or
@@ -295,9 +334,6 @@ def _chown_entry(name: str, dirfd: int, where: str, owner: tuple[int, int],
             os.fchown(fd, *owner)
     finally:
         os.close(fd)
-
-
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 def copy_entry_nofollow(src_dir: int, name: str, dest_dir: int) -> None:

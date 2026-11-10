@@ -5,6 +5,7 @@ import asyncio
 from textual.app import App
 
 from boxmunge.paths import BoxPaths
+from boxmunge.tui.confirm import ConfirmScreen
 from boxmunge.tui.dashboard import DashboardScreen
 from boxmunge.tui.project_detail import ProjectDetailScreen
 
@@ -35,7 +36,13 @@ class BoxmungeApp(App):
         self.push_screen(ProjectDetailScreen(project_name, self.paths))
 
     def run_action_with_confirm(self, action: str, project_name: str) -> None:
-        """Run an action in the background with notification."""
+        """Ask first; on an explicit yes, run the action in the background
+        and report how it went."""
+        from boxmunge.tui.actions import PROMPTS
+
+        def _answered(proceed: bool | None) -> None:
+            if proceed:
+                self.run_worker(_do_action(), exclusive=True)
 
         async def _do_action() -> None:
             from boxmunge.tui.actions import run_action
@@ -48,4 +55,5 @@ class BoxmungeApp(App):
                 if isinstance(screen, DashboardScreen):
                     screen.action_refresh()
 
-        self.run_worker(_do_action(), exclusive=True)
+        self.push_screen(ConfirmScreen(PROMPTS[action].format(project=project_name)),
+                         _answered)
