@@ -20,7 +20,7 @@ planted_fifo() {
     new_root a
     rm -f "$BOXMUNGE_ROOT/$STATE/$name"
     mkfifo "$BOXMUNGE_ROOT/$STATE/$name"
-    run_shim_within 10 "$BOXMUNGE_ROOT/$STATE/$name" "$@"
+    run_shim_unless_blocked "$BOXMUNGE_ROOT/$STATE/$name" "$@"
     expect 1 "$BOXMUNGE_ROOT/$STATE/$name" "$what: a FIFO $name is refused without blocking"
     expect 1 "Remove it" "$what: the refusal of a FIFO $name says to remove it"
     [[ -d "$BOXMUNGE_ROOT/env-a" && -d "$BOXMUNGE_ROOT/env-b" ]] \
