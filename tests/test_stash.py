@@ -3,6 +3,7 @@
 import io
 import json
 import tarfile
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,6 +18,7 @@ from boxmunge.stash import (
     prune_stashes,
     restore_stash,
 )
+from boxmunge import stash as stash_mod
 from boxmunge.paths import BoxPaths
 from boxmunge.version import write_installed_version
 
@@ -49,7 +51,7 @@ class TestCreateStash:
         write_installed_version(paths, "0.2.0", "abc1234")
         _setup_project(paths, "myapp")
 
-        archive = create_stash(paths)
+        archive = create_stash(paths).path
         assert archive.exists()
         assert archive.name.startswith("boxmunge-stash-")
         assert archive.name.endswith(".tar.gz")
@@ -83,7 +85,7 @@ class TestCreateStash:
         write_installed_version(paths, "0.2.0", "abc1234")
         _setup_project(paths, "myapp")
 
-        archive = create_stash(paths)
+        archive = create_stash(paths).path
         with tarfile.open(archive, "r:gz") as tar:
             names = tar.getnames()
         assert any("myapp/manifest.yml" in n for n in names)
@@ -98,7 +100,7 @@ class TestCreateStash:
         write_installed_version(paths, "0.2.0", "abc1234")
         _setup_project(paths, "myapp")
 
-        archive = create_stash(paths)
+        archive = create_stash(paths).path
         with tarfile.open(archive, "r:gz") as tar:
             names = tar.getnames()
         assert any("version" in n for n in names)
@@ -141,7 +143,7 @@ class TestRestoreStash:
         write_installed_version(paths, "0.2.0", "abc1234")
         _setup_project(paths, "myapp")
 
-        archive = create_stash(paths)
+        archive = create_stash(paths).path
 
         # Corrupt config to verify restore fixes it
         paths.config_file.write_text("hostname: corrupted\n")
@@ -160,10 +162,11 @@ class TestRestoreStash:
         write_installed_version(paths, "0.2.0", "abc1234")
         _setup_project(paths, "myapp")
 
-        create_stash(paths)  # older
-        import time; time.sleep(0.1)
+        with _at(datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)):
+            create_stash(paths)  # older
         paths.config_file.write_text("hostname: latest\nadmin_email: t@t\n")
-        create_stash(paths)  # newer
+        with _at(datetime(2026, 6, 1, 12, 0, 1, tzinfo=timezone.utc)):
+            create_stash(paths)  # newer
 
         paths.config_file.write_text("hostname: corrupted\n")
         restore_stash(paths)  # no archive arg = latest
@@ -287,7 +290,7 @@ class TestGitProjectLinks:
     def test_stash_holds_no_link_members(self, tmp_path: Path) -> None:
         paths = _make_paths(tmp_path)
         self._git_project(paths)
-        with tarfile.open(create_stash(paths)) as tar:
+        with tarfile.open(create_stash(paths).path) as tar:
             members = {m.name: m for m in tar.getmembers()}
         assert not [m.name for m in members.values() if m.issym() or m.islnk()]
         assert "projects/gitapp/manifest.yml" not in members
@@ -297,7 +300,7 @@ class TestGitProjectLinks:
     def test_round_trip_keeps_links_and_restores_files(self, tmp_path: Path) -> None:
         paths = _make_paths(tmp_path)
         repo = self._git_project(paths)
-        archive = create_stash(paths)
+        archive = create_stash(paths).path
         pdir = paths.project_dir("gitapp")
         (pdir / "secrets.env").write_text("SECRET=changed\n")
         (repo / "manifest.yml").write_text("# moved on in the repository\n")
@@ -334,7 +337,7 @@ class TestStashAtomicWrites:
         (paths.config_file).write_text("hostname: original\nadmin_email: t@t\n")
         write_installed_version(paths, "0.2.0", "abc1234")
         _setup_project(paths, "myapp")
-        archive = create_stash(paths)
+        archive = create_stash(paths).path
 
         # Mutate target so restore would change it
         paths.config_file.write_text("hostname: corrupt\n")
@@ -356,7 +359,7 @@ class TestStashSchemaVersion:
         (paths.config_file).write_text("hostname: t\nadmin_email: t@t\n")
         write_installed_version(paths, "0.5.3", "deadbee")
         _setup_project(paths, "myapp")
-        archive = create_stash(paths)
+        archive = create_stash(paths).path
         with tarfile.open(archive, "r:gz") as tar:
             names = tar.getnames()
             assert "boxmunge-stash-meta.json" in names
@@ -372,7 +375,7 @@ class TestStashSchemaVersion:
         (paths.config_file).write_text("hostname: t\nadmin_email: t@t\n")
         write_installed_version(paths, "0.5.3", "deadbee")
         _setup_project(paths, "myapp")
-        archive = create_stash(paths)
+        archive = create_stash(paths).path
         # Should restore without raising
         restore_stash(paths, archive)
 
@@ -432,7 +435,7 @@ class TestStashLogging:
         (paths.config_file).write_text("hostname: t\nadmin_email: t@t\n")
         write_installed_version(paths, "0.5.3", "deadbee")
         _setup_project(paths, "myapp")
-        archive = create_stash(paths)
+        archive = create_stash(paths).path
         with patch("boxmunge.stash.log_operation") as mock_log:
             restore_stash(paths, archive)
         assert mock_log.called
@@ -459,7 +462,7 @@ class TestRestoreSecretsLocking:
         secrets = (SecretsFile.host(paths) if scope == "host"
                    else SecretsFile.project(paths, "myapp"))
         original = secrets.path.read_text()
-        archive = create_stash(paths)
+        archive = create_stash(paths).path
         secrets.path.write_text("CHANGED='x'\n")
 
         with secrets.locked():
@@ -526,3 +529,73 @@ class TestOtherSymlinksRefused:
         assert (pdir / "manifest.yml").is_symlink()
         assert (repo / "manifest.yml").read_text() == "# repository\n"
         assert "links into the project's repo/" in paths.log_file.read_text()
+
+
+def _stash_dirs(tmp_path: Path) -> BoxPaths:
+    paths = BoxPaths(root=tmp_path / "bm")
+    for d in ["config", "projects", "state/deploy", "stashes", "logs"]:
+        (paths.root / d).mkdir(parents=True)
+    return paths
+
+
+def _at(when: datetime):
+    """Patch the stash clock, so the archive name is known in advance."""
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return when
+    return patch("boxmunge.stash.datetime", _Clock)
+
+
+class TestCreatedStashDigest:
+    def test_digest_is_of_the_bytes_written_not_of_the_name(self, tmp_path: Path) -> None:
+        """stashes/ is deploy-writable: the name can be renamed away and
+        another file dropped there while the archive is being written. The
+        digest is of what was written, read through the descriptor."""
+        import hashlib
+        paths = _stash_dirs(tmp_path)
+        moved = tmp_path / "renamed-away.tar.gz"
+        real_meta = stash_mod._meta_payload
+
+        def swap_mid_write(p: BoxPaths) -> dict:  # runs while the archive is open
+            (archive,) = p.stashes.iterdir()
+            archive.rename(moved)
+            archive.write_bytes(b"another file dropped at the name")
+            return real_meta(p)
+
+        with patch("boxmunge.stash._meta_payload", side_effect=swap_mid_write):
+            created = create_stash(paths)
+        data = moved.read_bytes()
+        assert created.size == len(data)
+        assert created.sha256 == hashlib.sha256(data).hexdigest()
+
+
+class TestPlantedStashName:
+    def test_a_file_already_at_the_name_is_refused_untouched(self, tmp_path: Path) -> None:
+        """stashes/ is root:deploy 0770: deploy can plant a file of its own at
+        the predictable name. Root must not write the platform secrets into
+        it (its owner could read and rewrite them); it refuses, naming it."""
+        paths = _stash_dirs(tmp_path)
+        paths.host_secrets.write_text("TOKEN=secret\n")
+        when = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        planted = paths.stashes / "boxmunge-stash-2026-06-01T120000.tar.gz"
+        planted.write_bytes(b"planted")
+        planted.chmod(0o644)
+        before = planted.stat()
+        with _at(when), pytest.raises(StashError) as exc:
+            create_stash(paths)
+        assert str(planted) in str(exc.value)
+        assert "sudo rm" in str(exc.value)
+        after = planted.stat()
+        assert planted.read_bytes() == b"planted"
+        assert (after.st_uid, after.st_mode, after.st_ino) == (before.st_uid, before.st_mode, before.st_ino)
+
+    def test_a_planted_link_at_the_name_is_refused(self, tmp_path: Path) -> None:
+        paths = _stash_dirs(tmp_path)
+        target = tmp_path / "elsewhere"
+        target.write_text("ROOT-ONLY\n")
+        when = datetime(2026, 6, 1, 12, 0, 0, tzinfo=timezone.utc)
+        (paths.stashes / "boxmunge-stash-2026-06-01T120000.tar.gz").symlink_to(target)
+        with _at(when), pytest.raises(StashError, match="already exists"):
+            create_stash(paths)
+        assert target.read_text() == "ROOT-ONLY\n"

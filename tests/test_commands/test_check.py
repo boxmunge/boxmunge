@@ -399,7 +399,8 @@ class TestCheckAllReadOnly:
         self._write_project(paths, "badapp", m2)
 
         # Stub the check so we don't depend on real smoke execution.
-        def _fake_run_check(name: str, paths: BoxPaths, verbose: bool = True) -> tuple:
+        def _fake_run_check(name: str, paths: BoxPaths, verbose: bool = True,
+                            periodic: bool = False) -> tuple:
             return (2, "down") if name == "badapp" else (0, "")
 
         monkeypatch.setattr(check_mod, "check_with_reason", _fake_run_check)
@@ -445,7 +446,8 @@ class TestCheckAllSkipsQuarantined:
         paths.project_quarantine_state("myapp").write_text("{}")
 
         run_calls: list[str] = []
-        def _fake_run_check(name: str, paths: BoxPaths, verbose: bool = True) -> tuple:
+        def _fake_run_check(name: str, paths: BoxPaths, verbose: bool = True,
+                            periodic: bool = False) -> tuple:
             run_calls.append(name)
             return 0, ""
 
