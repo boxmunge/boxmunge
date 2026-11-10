@@ -120,7 +120,7 @@ def deploy_without_bundle(project: str, paths: BoxPaths, *, missing: SourceError
         if not redeploy:
             return refuse_no_new_bundle(project, paths)
         note_waiting_bundle(project, paths)
-    elif redeploy:
+    elif redeploy and txn.source == "bundle":
         print(f"An install of {txn.ref} is open; --redeploy finishes it first.")
     if txn is not None and dry_run:
         problem = bundle_resume_problem(project, paths, txn, ref)

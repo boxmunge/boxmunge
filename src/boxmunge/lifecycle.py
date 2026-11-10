@@ -22,7 +22,7 @@ from typing import Any
 from boxmunge.cve.quarantine import is_quarantined, read_quarantine_state
 from boxmunge.pause import awaiting_deploy, is_paused, read_paused_state
 from boxmunge.paths import BoxPaths
-from boxmunge.redeploy_hint import redeploy_command, redeploy_either
+from boxmunge.redeploy_hint import deploy_ways, redeploy_either
 from boxmunge.userns.marker import SHIM, migration_in_progress
 
 
@@ -98,14 +98,13 @@ def lifecycle_block(project_name: str, paths: BoxPaths) -> Block | None:
                 refuse_message=(
                     f"Project '{project_name}' is paused, awaiting a deploy (`resume "
                     f"{project_name} --no-start`): it stays down behind its maintenance "
-                    f"page until a deploy (`prod-deploy {project_name}` of an upload, or "
-                    f"`{redeploy_command(paths, project_name)}`), `promote {project_name}` or "
+                    f"page until a deploy ({deploy_ways(paths, project_name)}), "
+                    f"`promote {project_name}` or "
                     f"`rollback {project_name}` starts it, or `boxmunge resume {project_name}` "
                     f"does."
                 ),
                 skip_message=(f"Skipped paused project '{project_name}' (awaiting a "
-                              f"deploy: {redeploy_command(paths, project_name)}, or "
-                              f"prod-deploy {project_name} of an upload)"),
+                              f"deploy: {deploy_ways(paths, project_name)})"),
             )
         return Block(
             reason=BlockReason.PAUSED,

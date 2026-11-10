@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 
 from boxmunge.bind_sources import BindSourceError, read_record
+from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.compose_version import compose_version_problem
 from boxmunge.config import ConfigError, load_config
@@ -127,7 +128,8 @@ def _records(paths: BoxPaths, inv: Inventory, r: Report) -> None:
                    for m in c.mounts
                    if m.kind in ("data", "readable") and m.source.startswith(prefix)}
         try:
-            recorded = set(read_record(paths.project_bind_record(p))["sources"])
+            recorded = set(read_record(paths.project_bind_record(p),
+                                       redo=redeploy_command(paths, p))["sources"])
         except BindSourceError:
             r.notes.append(f"{p}: no binds record (deployed before the start checks); its "
                            f"mounts come from its containers: {sorted(mounted) or 'none'}")

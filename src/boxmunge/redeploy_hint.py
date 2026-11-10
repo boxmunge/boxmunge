@@ -17,14 +17,37 @@ if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 
+def _is_git(paths: BoxPaths, project: str) -> bool:
+    return (paths.project_dir(project) / "repo").exists()
+
+
 def redeploy_command(paths: BoxPaths, project: str) -> str:
     """`prod-deploy ...` that deploys `project`'s installed release again."""
-    if not (paths.project_dir(project) / "repo").exists():
+    if not _is_git(paths, project):
         return f"prod-deploy {project} --redeploy"
     installed = read_state(paths.project_deploy_state(project)).get("current_ref")
     if not isinstance(installed, str) or not installed:
         return f"prod-deploy {project}"  # never deployed: its ref is what there is
     return f"prod-deploy {project} --ref {installed}"
+
+
+def deploy_ways(paths: BoxPaths, project: str) -> str:
+    """Both deploys that start `project` from where it stands, quoted: its
+    installed release again, or a new one (an upload's bundle, or the
+    newest commit on a git project's ref)."""
+    again = redeploy_command(paths, project)
+    new = f"prod-deploy {project}"
+    if again == new:
+        return f"`{new}`"
+    what = "for the newest commit on its ref" if _is_git(paths, project) else "after an upload"
+    return f"`{again}`, or `{new}` {what}"
+
+
+def deploy_from_pause(paths: BoxPaths, project: str) -> str:
+    """The redeploy of a paused project, quoted: a deploy is refused while
+    it is paused until `resume --no-start` hands the pause to it."""
+    return (f"`boxmunge resume {project} --no-start`, then "
+            f"`boxmunge {redeploy_command(paths, project)}`")
 
 
 def redeploy_either(project: str) -> str:

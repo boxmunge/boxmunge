@@ -196,7 +196,7 @@ def created(stale, monkeypatch):
         ProjectContainer(name=f"{NAME}-{svc}-1", service=svc, image_id="sha256:x",
                          repo_digests=(), running=False, health=None, oneoff=False,
                          exit_code=0, restart_policy="always") for svc in ("app", "db")])
-    monkeypatch.setattr("boxmunge.bind_sources.read_record", lambda p: {"sources": {}})
+    monkeypatch.setattr("boxmunge.bind_sources.read_record", lambda p, redo: {"sources": {}})
     monkeypatch.setattr("boxmunge.bind_sources.check_sources", lambda *a: None)
     return stale
 

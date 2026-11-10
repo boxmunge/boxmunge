@@ -34,6 +34,7 @@ failed start.
 from __future__ import annotations
 
 import functools
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -53,7 +54,8 @@ from boxmunge.log import log_error
 from boxmunge.notify import notify
 from boxmunge.overlay_users import stale_containers_problem, stale_overlay_problem
 from boxmunge.paths import RESERVED_PROJECT_NAMES
-from boxmunge.redeploy_hint import redeploy_command
+from boxmunge.pause import awaiting_deploy, is_paused
+from boxmunge.redeploy_hint import deploy_from_pause, redeploy_command
 from boxmunge.release_txn import load_txn, stale_reason, start_refusal
 from boxmunge.staged_release import (
     STAGING_OVERLAY, SlotError, load_slot, slot_dir, staging_target,
@@ -153,10 +155,10 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
         sources = bind_sources.model_sources(model, project_dir)
         record_path = paths.project_bind_record(project_name, staging=True)
         if record:
-            bind_sources.record(project_dir, sources, read_files, record_path,
-                                control_root=release)
+            bind_sources.record(project_dir, sources, bind_sources.control_hashes(
+                project_dir, read_files, control_root=release), record_path)
         else:
-            rec = bind_sources.read_record(record_path)
+            rec = bind_sources.read_record(record_path, redo=f"stage {project_name} again")
             bind_sources.check_sources(project_dir, sources, rec["sources"])
             bind_sources.check_control(project_dir, read_files, rec["control"],
                                        control_root=release, redo=f"stage {project_name} again")
@@ -168,7 +170,7 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
 def check_start(
     paths: BoxPaths, project_name: str, *, component: str,
     compose_files: list[str] | None = None, staging: bool = False, record: bool = False,
-    deploying: bool = False, txn: str | None = None,
+    deploying: bool = False, txn: str | None = None, regenerated: bool = False,
 ) -> None:
     """Re-validate the project and check every bind source it would mount.
 
@@ -183,7 +185,12 @@ def check_start(
     `record` (deploy, stage, upgrade) records the sources' kinds and the
     sha256 of every file boxmunge reads (those the reference walk found and
     the env files of the resolved model), instead of comparing them with the
-    record; missing sources are created first.
+    record; missing sources are created first. Deploy, stage and rollback
+    record a release they have just installed and validated. `regenerated`
+    (the upgrade, the user-namespace switch) renews the record in place,
+    from configs boxmunge regenerated: every control file it did not write
+    must still match the record first (bind_sources.check_kept_control), so
+    only a redeploy re-blesses a file a container rewrote.
 
     Unless `deploying`, the project's EXISTING containers' bind mounts are
     inspected too (stale_containers): a project deployed before these rules
@@ -205,6 +212,8 @@ def check_start(
         return
     if compose_files is None:
         raise ValueError("a production start check needs compose_files")
+    if regenerated and not record:
+        raise ValueError("`regenerated` renews a record: pass record=True with it")
     project_dir = paths.project_dir(project_name)
     record_path = paths.project_bind_record(project_name)
     _refuse_if_install_open(paths, project_name, component, txn)
@@ -224,14 +233,47 @@ def check_start(
         read_files = [*read_files, *compose_resolve.model_env_files(model, project_dir)]
         sources = bind_sources.model_sources(model, project_dir)
         if record:
-            bind_sources.record(project_dir, sources, read_files, record_path)
+            control = (bind_sources.check_kept_control(
+                project_dir, read_files, record_path, redo=_renewal_redo(paths, project_name))
+                if regenerated else bind_sources.control_hashes(project_dir, read_files))
+            bind_sources.record(project_dir, sources, control, record_path)
         else:
-            rec = bind_sources.read_record(record_path)
+            rec = bind_sources.read_record(record_path,
+                                           redo=redeploy_command(paths, project_name))
             bind_sources.check_sources(project_dir, sources, rec["sources"])
             bind_sources.check_control(project_dir, read_files, rec["control"],
                                        redo=redeploy_command(paths, project_name))
     except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
+
+
+def check_kept_files(paths: BoxPaths, project_name: str, *, component: str) -> None:
+    """Before an upgrade (or the user-namespace switch) regenerates anything
+    from a project's files (its Caddy site, overlay, maintenance page): the
+    control files it reads still hash to the record, so a file changed since
+    the deploy changes nothing live (bind_sources.check_kept_control). The
+    renewal itself checks again (check_start's `regenerated`). Raises
+    ComposeRefused."""
+    project_dir = paths.project_dir(project_name)
+    compose = project_dir / "compose.yml"
+    try:
+        # No compose.yml names no further files; its own absence is a
+        # mismatch against a recorded hash, and the validator refuses it.
+        read_files = (compose_references.walk_references(compose, (project_dir,))[1]
+                      if os.path.lexists(compose) else [])
+        bind_sources.check_kept_control(project_dir, read_files,
+                                        paths.project_bind_record(project_name),
+                                        redo=_renewal_redo(paths, project_name))
+    except (BindSourceError, OSError) as e:
+        raise _refused(paths, project_name, component, str(e)) from e
+
+
+def _renewal_redo(paths: BoxPaths, project_name: str) -> str:
+    """The redeploy a renewal's refusal names: a paused project's deploy is
+    refused until `resume --no-start` hands the pause to it."""
+    if is_paused(project_name, paths) and not awaiting_deploy(project_name, paths):
+        return deploy_from_pause(paths, project_name)
+    return redeploy_command(paths, project_name)
 
 
 # A container_bind_problems refusal: the containers must be replaced, which a
@@ -268,7 +310,7 @@ def compose_up_checked(
     compose_files: list[str] | None = None, staging: bool = False, record: bool = False,
     deploying: bool = False,
     force_recreate: bool = False, services: list[str] | None = None, start: bool = True,
-    txn: str | None = None,
+    txn: str | None = None, regenerated: bool = False,
 ) -> None:
     """check_start, then `docker compose up` (`start=False`: create without
     starting, which still mounts nothing yet but fixes every bind source in
@@ -286,7 +328,8 @@ def compose_up_checked(
     (compose_up_steps). Raises ComposeRefused, compose_up_steps.ComposeUpFailed once
     the up has run, or DockerError before it."""
     check_start(paths, project_name, component=component, compose_files=compose_files,
-                staging=staging, record=record, deploying=deploying, txn=txn)
+                staging=staging, record=record, deploying=deploying, txn=txn,
+                regenerated=regenerated)
     if staging:
         target = staging_target(paths, project_name)
         where = {"project_dir": target.cwd, "project_directory": target.project_directory,
@@ -354,7 +397,8 @@ def check_containers_start(paths: BoxPaths, project_name: str, names: list[str],
         if problems:
             raise BindSourceError(problems[0] + _REDEPLOY)
         sources = {bind_sources.project_rel(src, project_dir) for src, _rw in existing}
-        rec = bind_sources.read_record(paths.project_bind_record(project_name))
+        rec = bind_sources.read_record(paths.project_bind_record(project_name),
+                                       redo=redeploy_command(paths, project_name))
         bind_sources.check_sources(project_dir, sources, rec["sources"])
     except (BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e

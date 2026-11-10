@@ -225,7 +225,8 @@ def test_legacy_container_mounting_the_project_rw_is_refused(tmp_path, compose_c
     paths = _paths(tmp_path)
     project_dir = _project(paths, [".:/app"])  # a legacy read-write project-dir mount
     # Record as if an older deploy had (the rule did not exist then).
-    bind_sources.record(project_dir, {"."}, [], paths.project_bind_record(PROJECT))
+    bind_sources.record(project_dir, {"."}, bind_sources.control_hashes(project_dir, []),
+                        paths.project_bind_record(PROJECT))
     compose_project = PROJECT
     try:
         subprocess.run(
