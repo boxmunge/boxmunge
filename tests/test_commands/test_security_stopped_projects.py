@@ -25,7 +25,8 @@ from tests.test_commands.cve_helpers import Docker, make_box, scan_result, seed_
 _RUNNING = "sha256:" + "1" * 64
 _PULLED = "sha256:" + "2" * 64
 _BUILT = "sha256:" + "3" * 64
-_KEV = KevCatalog(cve_ids=frozenset(), fetched_at=datetime.now(timezone.utc))
+_KEV = KevCatalog(cve_ids=frozenset(), fetched_at=datetime.now(timezone.utc),
+                       released_at=datetime.now(timezone.utc), source="test")
 
 
 @pytest.fixture

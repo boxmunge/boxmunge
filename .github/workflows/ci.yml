@@ -17,7 +17,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # A new push to a pull request cancels its superseded run. A push to main
+  # is a group of its own (its run id): one merge never cancels the run of
+  # the merge before it, so every commit on main is tested.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:

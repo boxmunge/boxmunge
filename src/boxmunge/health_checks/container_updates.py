@@ -40,10 +40,7 @@ def check_container_updates(paths: BoxPaths) -> HealthCheck:
         try:
             data = json.loads(state_file.read_text())
             last_check = data.get("last_check")
-            # Python 3.10's fromisoformat does not accept a trailing Z.
-            ts = (datetime.fromisoformat(last_check.removesuffix("Z") + "+00:00"
-                                         if last_check.endswith("Z") else last_check)
-                  if last_check else None)
+            ts = datetime.fromisoformat(last_check) if last_check else None
             if ts is not None and ts.tzinfo is None:
                 raise ValueError(f"last_check {last_check!r} has no timezone")
         except (json.JSONDecodeError, OSError, UnicodeDecodeError,
