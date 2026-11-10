@@ -45,7 +45,7 @@ class Box:
 def box(paths, fake_containers, monkeypatch):
     the_box = Box(paths)
 
-    def smoke_one(container, script, service):
+    def smoke_one(container, script, service, periodic=False):
         the_box.ran.append(script)
         return SmokeResult(status=the_box.smoke, message=f"smoke {the_box.smoke}")
 
@@ -221,7 +221,7 @@ def _upgrade_migrate_restart(box, seen):
 
 def _stash(box, seen):
     from boxmunge.stash import create_stash
-    with tarfile.open(create_stash(box.paths)) as tar:
+    with tarfile.open(create_stash(box.paths).path) as tar:
         stashed = tar.extractfile("projects/myapp/manifest.yml").read().decode()
         assert not any(".releases" in name for name in tar.getnames())
     assert "POISON" not in stashed

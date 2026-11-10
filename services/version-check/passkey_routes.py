@@ -134,7 +134,7 @@ def create_blueprint(db_path: Path) -> Blueprint:
         if registered(secret) is not None:
             raise Refusal(403, CLOSED)
         code = body.get("code")
-        if not admin_auth.check_secret(code if isinstance(code, str) else ""):
+        if not admin_auth.check_secret(code if isinstance(code, str) else "", secret):
             raise Refusal(401, "wrong registration code")
 
     def redeem(challenge: bytes, purpose: str) -> None:

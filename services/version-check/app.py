@@ -5,8 +5,8 @@ Serves:
                                             auto-update) for the given version
 2. POST /v1/report-failure               — record an upgrade failure
 3. GET  /v1/failures?version=X           — query failure summary for a version
-4. POST /v1/circuit-breaker/trip?version=X   — suppress a broken release (auth required)
-5. POST /v1/circuit-breaker/reset?version=X  — re-enable a release (auth required)
+4. POST /v1/circuit-breaker/trip?version=X   — hold a release (Bearer CB_SECRET)
+5. POST /v1/circuit-breaker/reset?version=X  — release a hold (Bearer CB_SECRET)
 6. GET  /v1/admin/version-checks?last=N  — daily check counts by version (Bearer
                                             STATS_SECRET)
 7. GET  /v1/admin/stats?last=N           — the same as an HTML page, plus the network
@@ -22,10 +22,12 @@ rate-limited per client (per network once the client table is full; see
 request_limits.RequestLimiter), request bodies are capped, and check counts
 are buffered in memory and flushed periodically rather than written per
 request. Every limit is per gunicorn worker. Failure reports are accepted
-only for listed releases; repeats are not stored, and auto-trip (off by
-default; see _auto_trip_threshold) counts each reporter (IPv4 /24 or IPv6
-/48) once per version per six hours; see failure_store. The database schema changes only through db_schema migrations,
-run once before gunicorn starts.
+only for listed releases and repeats are not stored (failure_store). They
+never hold a release: they are unauthenticated, so they only alert the
+maintainer, counting each reporter (IPv4 /24 or IPv6 /48) once per version
+per six hours (failure_alert); only the maintainer trips the breaker. The
+database schema changes only through db_schema migrations, run once before
+gunicorn starts.
 
 Privacy: the database holds a client's network prefix (prefix_store), never
 its address. The address is held in memory for rate limiting and written
@@ -45,7 +47,9 @@ from flask import Flask, request, jsonify
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 import admin_auth
+import circuit_breaker
 import db
+import failure_alert
 import failure_store
 import passkey_routes
 import prefix_store
@@ -103,90 +107,24 @@ STATS_FAILURES_SHOWN = 100
 PREFIXES_SHOWN = 500
 
 
-# ---------------------------------------------------------------------------
-# Database
-# ---------------------------------------------------------------------------
-
-def _is_circuit_broken(db_path, version):
-    conn = db.connect(db_path)
-    try:
-        row = conn.execute(
-            "SELECT tripped FROM circuit_breaker WHERE version = ? AND tripped = 1",
-            (version,)).fetchone()
-    finally:
-        conn.close()
-    return row is not None
+REMOVED_AUTO_TRIP_KEY = "CIRCUIT_BREAKER_AUTO_THRESHOLD"
 
 
-def _trip_circuit_breaker(db_path, version, tripped_by):
-    now = datetime.now(timezone.utc).isoformat()
-    conn = db.connect(db_path)
-    try:
-        conn.execute(
-            """INSERT INTO circuit_breaker (version, tripped, tripped_by, tripped_at)
-               VALUES (?, 1, ?, ?)
-               ON CONFLICT (version) DO UPDATE SET tripped = 1, tripped_by = ?, tripped_at = ?""",
-            (version, tripped_by, now, tripped_by, now))
-        conn.commit()
-    finally:
-        conn.close()
+def _warn_removed_auto_trip() -> None:
+    """Say so at every start if a deploy still sets the removed auto-trip key.
 
-
-def _reset_circuit_breaker(db_path, version):
-    conn = db.connect(db_path)
-    try:
-        conn.execute("UPDATE circuit_breaker SET tripped = 0 WHERE version = ?", (version,))
-        conn.commit()
-    finally:
-        conn.close()
-
-
-def _auto_trip_threshold() -> int:
-    """CIRCUIT_BREAKER_AUTO_THRESHOLD: distinct reporters in 6 hours that trip a version.
-
-    0 (the default) disables auto-trip. Keep it off. Failure reports are
-    unauthenticated: anyone with N cheap addresses in N networks (N /24s,
-    or N IPv6 /48s) can send them, so with auto-trip on, N POSTs hold the
-    newest security release back from every box until the maintainer resets
-    the breaker. A reporter is the network prefix of the connection only.
-    Nothing a box puts in the body, a box ID least of all (it is whatever
-    the sender writes), may ever count towards the threshold. Enabling it
-    prints that warning to the service log at every start.
-
-    Anything that is not a non-negative integer stops the service from
-    starting, rather than silently leaving auto-trip off.
+    It used to let failure reports from N networks hold a release fleet-wide.
+    Reports are unauthenticated, so now they only alert (failure_alert), and
+    the setting does nothing. The service starts, but says so plainly.
     """
-    raw = os.environ.get("CIRCUIT_BREAKER_AUTO_THRESHOLD", "0")
-    try:
-        threshold = int(raw)
-    except ValueError:
-        threshold = -1
-    if threshold < 0:
-        raise ValueError(
-            f"CIRCUIT_BREAKER_AUTO_THRESHOLD must be a non-negative integer, got {raw!r}")
-    if threshold:
-        print(f"WARNING: CIRCUIT_BREAKER_AUTO_THRESHOLD={threshold}: failure reports from "
-              f"{threshold} networks hold a release from every box. Reports are "
-              "unauthenticated, so anyone with that many addresses can withhold a "
-              "security release fleet-wide. Unset it (0) unless you accept that.",
-              file=sys.stderr)
-    return threshold
-
-
-def _maybe_auto_trip(db_path: Path, version: str, threshold: int, now: datetime) -> None:
-    """Auto-trip circuit breaker if failure threshold is exceeded."""
-    if threshold == 0:
+    if REMOVED_AUTO_TRIP_KEY not in os.environ:
         return
-    if failure_store.count_recent(db_path, version, now) >= threshold:
-        _trip_circuit_breaker(db_path, version, "auto")
-
-
-def _check_cb_auth(app_config):
-    secret = app_config.get("CB_SECRET") or os.environ.get("CB_SECRET", "")
-    if not secret:
-        return False
-    auth = request.headers.get("Authorization", "")
-    return admin_auth.eq(auth, f"Bearer {secret}")
+    print(f"WARNING: {REMOVED_AUTO_TRIP_KEY} is set, but it was removed in 0.11.6 and "
+          "does nothing: failure reports never hold a release. When reports for a "
+          f"release come from {failure_alert.ALERT_NETWORKS} networks, the box's health "
+          "check alerts and the maintainer holds the release by hand "
+          f"(docs/DEVELOPMENT.md, \"Holding a broken release\"). Remove {REMOVED_AUTO_TRIP_KEY} "
+          "from the service's environment.", file=sys.stderr)
 
 
 def _query_version_checks(db_path: Path, days: int, listed: set[str]) -> dict:
@@ -272,7 +210,8 @@ def create_app() -> Flask:
     # cannot classify releases must not answer fleet update checks.
     releases = load_releases(RELEASES_PATH)
     listed_versions = {r["version"] for r in releases}
-    auto_trip_threshold = _auto_trip_threshold()
+    _warn_removed_auto_trip()
+    admin_auth.refuse_short_cb_secret()
     limiter = RequestLimiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_NETWORK_REQUESTS,
                              RATE_LIMIT_WINDOW_SECONDS, RATE_LIMIT_MAX_CLIENTS,
                              prefix_store.network_prefix)
@@ -322,10 +261,9 @@ def create_app() -> Flask:
             return jsonify({"error": "missing or malformed version parameter (want X.Y.Z)"}), 400
         prefix = prefix_store.network_prefix(request.remote_addr)
 
-        offers, held = apply_holds(
-            select_offers(releases, version),
-            lambda v: _is_circuit_broken(DB_PATH, v),
-        )
+        # One query per check, whatever the number of candidates.
+        tripped = circuit_breaker.tripped_versions(DB_PATH)
+        offers, held = apply_holds(select_offers(releases, version), tripped.__contains__)
         result = check_response(offers, held, find_blocked(releases, version))
         # The real version, listed or not (a dev build, a dropped release): it is
         # valid X.Y.Z, and the counter caps distinct versions per day.
@@ -369,12 +307,11 @@ def create_app() -> Flask:
                                      "(optionally prefixed \"boxmunge \")"}), 400
         now = datetime.now(timezone.utc)
         # A repeat of a report the same network already sent is accepted but
-        # not stored: the box needs no different answer. Auto-trip counts
-        # networks, not reports (failure_store).
-        if failure_store.record_failure(DB_PATH, version, installed_from, stage,
-                                        prefix_store.network_prefix(request.remote_addr), now,
-                                        detail or None):
-            _maybe_auto_trip(DB_PATH, version, auto_trip_threshold, now)
+        # not stored: the box needs no different answer. Reports never hold a
+        # release; the smoke script's failure_alert check alerts the maintainer.
+        failure_store.record_failure(DB_PATH, version, installed_from, stage,
+                                     prefix_store.network_prefix(request.remote_addr), now,
+                                     detail or None)
         return "", 204
 
     @app.route("/v1/failures")
@@ -386,22 +323,22 @@ def create_app() -> Flask:
 
     @app.route("/v1/circuit-breaker/trip", methods=["POST"])
     def cb_trip():
-        if not _check_cb_auth(app.config):
+        if not admin_auth.bearer_authorized(admin_auth.cb_secret()):
             return jsonify({"error": "unauthorized"}), 401
         version = _version_arg("version")
         if version is None:
             return jsonify({"error": "missing or malformed version parameter (want X.Y.Z)"}), 400
-        _trip_circuit_breaker(DB_PATH, version, tripped_by="api")
+        circuit_breaker.trip(DB_PATH, version, tripped_by="api")
         return jsonify({"status": "tripped", "version": version})
 
     @app.route("/v1/circuit-breaker/reset", methods=["POST"])
     def cb_reset():
-        if not _check_cb_auth(app.config):
+        if not admin_auth.bearer_authorized(admin_auth.cb_secret()):
             return jsonify({"error": "unauthorized"}), 401
         version = _version_arg("version")
         if version is None:
             return jsonify({"error": "missing or malformed version parameter (want X.Y.Z)"}), 400
-        _reset_circuit_breaker(DB_PATH, version)
+        circuit_breaker.reset(DB_PATH, version)
         return jsonify({"status": "reset", "version": version})
 
     @app.route("/v1/admin/version-checks")
@@ -420,7 +357,7 @@ def create_app() -> Flask:
         # Bearer STATS_SECRET only: the passkey session cookie does not open
         # this. A leaked STATS_SECRET is read-only over check counts; CB_SECRET
         # (which can suppress releases fleetwide) is separate.
-        if not admin_auth.bearer_authorized():
+        if not admin_auth.bearer_authorized(admin_auth.stats_secret()):
             return jsonify({"error": "unauthorized"}), 401
         counter.flush()
         days = _parse_last_param(request.args.get("last"))

@@ -178,8 +178,10 @@ hand: `make relock` (with the pip and pip-tools from `requirements-dev.txt`) upg
 no release younger than the same 7-day cooldown. It holds back the majors listed in
 `relock-holds.txt`: taking one is a decision of its own, made with whatever code change it needs.
 Re-lock before each release, respecting the cooldown (release step 1 below). CI fails a release
-pull request (a `release/*` branch) while a runtime pin is behind a same-major release that has been
-out for more than 14 days (`scripts/lock-freshness.py`).
+pull request (a `release/*` branch) while a runtime pin is behind a same-major release (for a
+calendar-versioned package such as certifi, any newer release) that has been out for more than 14
+days (`scripts/lock-freshness.py`). `requirements-dev.txt` may pin another version of a package a
+runtime lock also pins (click, idna, pygments): nothing installs them in one pip run.
 
 ## How a release reaches a server
 
@@ -291,10 +293,22 @@ deliberately). Trip it, then mark the hold on GitHub, so that boxes which
 cannot reach the service (and fall back to the GitHub releases list) hold it too:
 
 ```bash
-curl -X POST -H "Authorization: Bearer $CB_SECRET" \
-  'https://boxmunge.dev/v1/circuit-breaker/trip?version=X.Y.Z'
-gh release edit vX.Y.Z --title "vX.Y.Z [security] [held]"   # keep any class marker
+curl --fail-with-body -X POST -H "Authorization: Bearer $CB_SECRET" \
+  'https://boxmunge.dev/v1/circuit-breaker/trip?version=X.Y.Z' &&
+t=$(gh release view vX.Y.Z --json name -q .name) &&
+case "$t" in *"[held]"*) ;; *) gh release edit vX.Y.Z --title "$t [held]" ;; esac
 ```
+
+`--fail-with-body` matters: without it curl exits 0 on a refused trip (401, 429, 503), and
+GitHub would say held while the service still offers the release. The title keeps its class
+and breaking markers, and a title already marked `[held]` is left alone.
+
+`CB_SECRET` (set through the deploy shell, like `STATS_SECRET`) must be at least 32
+characters (`openssl rand -hex 32`): a shorter one stops the service from starting, naming
+it, and with none set the trip and reset endpoints refuse with 503. Wrong guesses of it share
+`STATS_SECRET`'s limit (10 per client per gunicorn worker in 15 minutes); past it, even the
+right secret is refused with 429 until the window passes, so trip from a client that has not
+been guessing.
 
 Boxes read `[held]` from the release title only, never from the notes (auto-generated notes
 quote contributors' PR titles), so only someone with write access to the repository can set
@@ -306,15 +320,27 @@ that GitHub matches the service with
 per held version, none when nothing is held); it fails on a hold missing on either side and
 on a `[held]` left in release notes, where it does nothing.
 
-Auto-trip (`CIRCUIT_BREAKER_AUTO_THRESHOLD`, a number of distinct reporting networks in six
-hours) is off (`0`) and should stay off. Failure reports are unauthenticated, so with it set
-to N, anyone with addresses in N networks (N IPv4 /24s, or N IPv6 /48s, which are cheap)
-holds the newest security release back from the whole fleet until the breaker is reset. The
-service prints that warning at every start while it is set. Only the network a report comes
-from counts; nothing in a report's body, a box ID least of all, may ever count towards the
-threshold, because the sender writes it. Failure reports stay useful without it: the stats
-page lists them, every distinct failure a network reports is kept, and
+Failure reports never hold a release: they are unauthenticated, so anyone with addresses in
+a few networks (IPv4 /24s, or IPv6 /48s, which are cheap) could send them, and only the
+maintainer trips the breaker. They alert instead. When reports for a release come from two or
+more distinct networks in six hours (`ALERT_NETWORKS` in `failure_alert.py`), and the release
+is not held, the service's smoke script fails as a warning with one line naming the release
+and the commands above for it. It does so only on boxmunge's periodic health check
+(`BOXMUNGE_CHECK=periodic`, which `check-all` alone sets): every other smoke run gates an
+operation (deploy, recover, a quarantine lift, resume, userns bring-up), and reports anyone
+can send must never hold one up. boxmunge's health check on the box that
+runs the service turns that into a Pushover alert after `health.alert_threshold` checks in a
+row, once per distinct message: the line carries no counts, so further reports do not alert
+again. The warning clears, with a recovery alert, at the first check after the release is held, or
+once its reports are older than six hours; a later crossing alerts again.
+Only the network a report comes from counts; nothing in a report's body, a box ID least of
+all, may ever count, because the sender writes it. Before holding, read the reports: the
+stats page lists them, every distinct failure a network reports is kept, and
 `/v1/failures?version=X.Y.Z` counts the reports (by stage) and the networks that sent them.
+The `CIRCUIT_BREAKER_AUTO_THRESHOLD` setting that used to let reports trip the breaker was
+removed in 0.11.6; a service started with it still set prints a warning saying so at every
+start, and it should be taken out of the service's environment.
+
 For sizing the `check-data` volume: a network stores at most 10 rows (about 200 bytes each)
 per listed version per six-hour window, so at most 40 a day per network and version, kept
 90 days.
