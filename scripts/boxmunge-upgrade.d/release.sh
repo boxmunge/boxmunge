@@ -186,13 +186,17 @@ cmd_repair_deps() {
     if missing="$(missing_requirement "$TMP_DOWNLOAD/boxmunge")"; then
         die "Bundle $version has no hash-pinned $missing; refusing an unpinned install. Nothing was changed."
     fi
+    # A live slot this breaks: during probation the health timer rolls it back.
+    local broken="inspect env-$ACTIVE_SLOT as supervisor"
+    [[ ! -e "$PROBATION_FILE" ]] \
+        || broken="$version is on probation, so the health timer rolls back to the previous release once two of its runs in a row (5 minutes apart) find it so"
     if ! install_pinned_deps "$TMP_DOWNLOAD/boxmunge" "$ACTIVE_SLOT"; then
         local state="its boxmunge-server still runs"
-        slot_works "$ACTIVE_SLOT" || state="its boxmunge-server NO LONGER RUNS: inspect env-$ACTIVE_SLOT as supervisor"
+        slot_works "$ACTIVE_SLOT" || state="its boxmunge-server NO LONGER RUNS ($broken)"
         die "pip could not install the hash-pinned dependencies of $version into the live slot $ACTIVE_SLOT (see above), and $state; retry once the cause (network, disk space) is fixed"
     fi
     slot_works "$ACTIVE_SLOT" \
-        || die "env-$ACTIVE_SLOT/bin/boxmunge-server no longer runs after the dependency install; inspect it as supervisor"
+        || die "env-$ACTIVE_SLOT/bin/boxmunge-server no longer runs after the dependency install; $broken"
     bm_log info upgrade "dependencies repaired" "{\"version\": \"$version\", \"slot\": \"$ACTIVE_SLOT\"}"
     log "Installed every hash-pinned dependency of $version into the live slot $ACTIVE_SLOT"
 }

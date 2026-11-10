@@ -2038,7 +2038,10 @@ How an upgrade is applied and undone:
    image by the old name, which the upgrade dropped, and its previous record lacks this
    release's mounts, so the scan and the start checks refuse it.
 4. A health check runs, then a 6-hour probation. A critical health result during probation
-   rolls back.
+   rolls back. So does a live environment whose `boxmunge-server` no longer starts, once two
+   health-timer runs in a row (5 minutes apart) find it so, expired or not; a crash counts like
+   any other failure, and one that only times out needs four runs in a row. A health check that
+   cannot run at all has the live environment checked the same way.
 
 If the upgrade is interrupted (crash, power loss) after the venvs swap but before probation
 starts, the next health-timer run rolls back to the previous release and sends a "ROLLBACK"
@@ -2075,7 +2078,18 @@ The previous release does not have to be there for probation to end: at expiry t
 timer promotes the release whether or not the previous venv still works. Only a rollback needs
 it. If a critical health result calls for a rollback and the previous venv is missing or broken,
 the shim refuses the rollback, logs an error (`log --component upgrade --level error`) and
-sends one alert, and the probation stays until it expires.
+sends one alert, and the probation stays until it expires. The log entry and the alert each count
+as done only once they went out (through either environment's Python); until then every
+health-timer run retries whichever did not, and writes `ALERT NOT DELIVERED` to the system
+journal (`journalctl -t boxmunge-upgrade`). If
+the live environment no longer starts either, nothing can promote or roll back: reinstall the
+release on probation into the live environment by running its installer as root (`sudo bash
+boxmunge-install.sh`, from that release's GitHub page), and the next health-timer run carries
+on with the probation. That repairs its packages, not its interpreter: if the environment's own
+Python does not start (`/opt/boxmunge/env-active/bin/python -V` fails, for instance after the
+system `python3` it was built from was removed or replaced by a newer version), the installer
+cannot help until that interpreter is back: the `home` line of
+`/opt/boxmunge/env-active/pyvenv.cfg` names the directory it was in.
 
 No other upgrade starts during probation: the standby venv holds the previous release, the
 only rollback target. `upgrade --repair-deps` is not an upgrade and does run: it installs the

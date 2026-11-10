@@ -196,11 +196,12 @@ class TestAutoTrip:
 
 class TestShimStages:
     def test_accepts_every_stage_the_upgrade_shim_reports(self, client):
-        """scripts/boxmunge-upgrade reports these stages; a report the
-        service rejects is silently lost on the box."""
+        """scripts/boxmunge-upgrade (with its libraries) reports these
+        stages; a report the service rejects is silently lost on the box."""
         import re
-        shim = Path(__file__).resolve().parents[3] / "scripts" / "boxmunge-upgrade"
-        text = shim.read_text()
+        scripts = Path(__file__).resolve().parents[3] / "scripts"
+        text = "\n".join(p.read_text() for p in
+                         [scripts / "boxmunge-upgrade", *sorted((scripts / "boxmunge-upgrade.d").glob("*.sh"))])
         # Literal stages passed straight to report_failure.
         stages = set(re.findall(r'report_failure "\$\w+" "\$\w+" "(\w+)"', text))
         # Defaults written as "${N:-stage}" inside helper functions.
