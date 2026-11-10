@@ -28,8 +28,15 @@ GRANT_MATRIX = [
 ]
 
 
-@pytest.mark.parametrize("principal,agent_allowed,allowed", GRANT_MATRIX,
-                         ids=lambda v: getattr(v, "id", repr(v)))
+def _case_id(value) -> str:
+    """A set's repr follows string hashing, which differs per process, so
+    pytest-xdist workers would collect different ids; sort it."""
+    if isinstance(value, set):
+        return "+".join(sorted(t.value for t in value)) or "none"
+    return getattr(value, "id", repr(value))
+
+
+@pytest.mark.parametrize("principal,agent_allowed,allowed", GRANT_MATRIX, ids=_case_id)
 @pytest.mark.parametrize("tier", list(Tier), ids=lambda t: t.value)
 def test_grant_matrix(principal, agent_allowed, allowed, tier) -> None:
     why = refusal(principal, tier, agent_allowed=agent_allowed)

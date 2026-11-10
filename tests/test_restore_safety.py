@@ -167,7 +167,9 @@ class TestVerifiedBeforeStop:
             assert _restore(box) == 1
         assert box.events == []
 
-    @pytest.mark.parametrize("plaintext", [b"", gzip.compress(bytes(range(256)) * 64)[:-12]])
+    # mtime=0 and ids: gzip stamps the time, so the id would differ per xdist worker.
+    @pytest.mark.parametrize("plaintext", [b"", gzip.compress(bytes(range(256)) * 64, mtime=0)[:-12]],
+                             ids=["empty", "truncated"])
     def test_empty_or_truncated_plaintext_leaves_prod_alone(self, box, plaintext, capsys):
         box.plaintext = plaintext
         assert _restore(box) == 1
