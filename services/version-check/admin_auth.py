@@ -24,7 +24,7 @@ from urllib.parse import quote
 
 from flask import current_app, make_response, redirect, request
 
-from request_limits import RateLimiter, client_key
+from request_limits import FULL, RateLimiter, client_key
 
 SESSION_COOKIE = "bm_admin"
 SESSION_SECONDS = 8 * 3600
@@ -33,6 +33,9 @@ LOGIN_PATH = "/v1/admin/login"
 MIN_SECRET_LENGTH = 32
 # Wrong STATS_SECRET guesses per client (IPv4 address or IPv6 /64) per
 # worker, before that client is refused outright for the rest of the window.
+# Per worker: gunicorn runs several (Dockerfile), and each counts on its own,
+# so a client gets GUESS_FAILURES per worker. Past GUESS_LIMITER_CLIENTS
+# tracked clients, every other client is refused until the window frees room.
 GUESS_FAILURES = 10
 GUESS_WINDOW_SECONDS = 15 * 60
 GUESS_LIMITER_CLIENTS = 10_000
@@ -53,11 +56,14 @@ class AdminNotConfigured(RuntimeError):
 
 
 class TooManyGuesses(RuntimeError):
-    """This client guessed STATS_SECRET wrong GUESS_FAILURES times in the window."""
+    """This client may not try STATS_SECRET now: it guessed wrong GUESS_FAILURES
+    times in the window, or (`table_full`) the limiter tracks
+    GUESS_LIMITER_CLIENTS other clients and could not count its guesses."""
 
-    def __init__(self) -> None:
-        super().__init__(f"too many wrong secrets from this client; try again in "
-                         f"{GUESS_WINDOW_SECONDS // 60} minutes")
+    def __init__(self, table_full: bool = False) -> None:
+        who = ("too many clients are guessing the admin secret" if table_full
+               else "too many wrong secrets from this client")
+        super().__init__(f"{who}; try again in {GUESS_WINDOW_SECONDS // 60} minutes")
 
 
 def guess_limiter() -> RateLimiter:
@@ -90,16 +96,22 @@ def check_secret(candidate: str) -> bool:
     """Compare a guess with STATS_SECRET in constant time, within the client's guess limit.
 
     A client past the limit is refused before the comparison, so even the
-    right secret does not get through until the window rolls over.
+    right secret does not get through until the window rolls over. So is a
+    client the limiter has no room to track (fail closed): a guess that
+    could not be counted would be a free one.
     """
     secret = stats_secret()
     limiter = current_app.extensions[GUESSES]
     client = client_key(request.remote_addr)
     if limiter.exhausted(client):
         raise TooManyGuesses()
+    if limiter.full_for(client):
+        raise TooManyGuesses(table_full=True)
     if eq(candidate, secret):
         return True
-    limiter.allow(client)  # records the failure
+    refused = limiter.admit(client)  # records the failure
+    if refused is not None:  # another request used the last guess or slot meanwhile
+        raise TooManyGuesses(table_full=refused == FULL)
     return False
 
 

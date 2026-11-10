@@ -154,8 +154,9 @@ def prepare_release_users(paths: BoxPaths, target: ReleaseTarget, manifest: dict
         offset = remap_offset(paths)
     except RemapError as e:
         raise DeployRefused([str(e)]) from e
+    rerun = f"boxmunge rollback {target.project}" if component == "rollback" else None
     refusals, data_warnings = deploy_checks.release_problems(
-        paths, target, model, services, facts, users, offset)
+        paths, target, model, services, facts, users, offset, rerun=rerun)
     for warning in warnings + data_warnings:
         print(f"  WARNING: {warning}")
         log_warning(component, warning, paths, project=target.project)

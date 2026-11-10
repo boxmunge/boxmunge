@@ -75,7 +75,7 @@ def test_anonymous_data_from_compose_and_image_volume() -> None:
 
 def _quiet(monkeypatch):
     monkeypatch.setattr(dc, "replacement_problems", lambda *a: [])
-    monkeypatch.setattr(dc, "user_change_problems", lambda *a: [])
+    monkeypatch.setattr(dc, "user_change_problems", lambda *a, **k: [])
 
 
 def test_anonymous_volumes_refuse_remapped_and_warn_otherwise(paths, monkeypatch) -> None:

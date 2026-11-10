@@ -31,6 +31,7 @@ from pathlib import Path
 
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
+from boxmunge.fs_nofollow import read_text_nofollow
 
 # Share of the scanned projects one CVE (or the run) may newly quarantine
 # before the breaker trips. Never below 2: one project quarantining alone is
@@ -109,7 +110,7 @@ def read_held(paths: BoxPaths) -> dict[str, frozenset[str]]:
     if not path.exists():
         return {}
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(read_text_nofollow(path))
         held = data["held"]
         if not isinstance(held, dict):
             raise TypeError("'held' is not a mapping")
@@ -124,7 +125,7 @@ def alert_pending(paths: BoxPaths) -> bool:
     if not path.exists():
         return False
     try:
-        return json.loads(path.read_text()).get("alert_pending") is True
+        return json.loads(read_text_nofollow(path)).get("alert_pending") is True
     except (OSError, ValueError, AttributeError) as e:
         raise BreakerError(f"cannot read {path}: {e}") from e
 

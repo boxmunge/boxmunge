@@ -190,13 +190,21 @@ def _owner_uid(target: ReleaseTarget, model: dict[str, Any], m: Mount,
 
 
 def _change_problem(target: ReleaseTarget, name: str, new: ServiceUser, before: str | None,
-                    after: str, data: list[Mount]) -> str:
+                    after: str, data: list[Mount], rerun: str | None) -> str:
     where = ", ".join(str(m.source or m.target) for m in data)
     was = f"ran as {before} and now resolves" if before else "resolves"
     head = (f"service {name} {was} to {after} ({describe(new)}), and keeps data in "
             f"{where} that {'the old user' if before else 'another user'} owns. Its files "
             f"would be unwritable.")
     ids = new.nonroot_ids()
+    if rerun is not None:
+        # A release put back (a rollback) says who it runs as; only its data
+        # can change, back to that user.
+        chown = (f"`boxmunge data chown {target.project} {name} {ids[0]}:{ids[1]}`" if ids
+                 else f"`boxmunge data chown {target.project} {name} <uid>:<gid>` with "
+                      f"{after}'s ids")
+        return (f"{head} The release being put back runs it as {after}: give the data back "
+                f"to it with {chown}, then run `{rerun}` again")
     if ids:
         return (f"{head} Either keep the old user (declare `security.user` with it, or "
                 f"`security.user: image` with a reason when the image runs as it), or run "
@@ -210,10 +218,12 @@ def _change_problem(target: ReleaseTarget, name: str, new: ServiceUser, before: 
 
 def user_change_problems(paths: BoxPaths, target: ReleaseTarget, model: dict[str, Any],
                          services: dict[str, dict], users: dict[str, ServiceUser],
-                         offset: int) -> list[str]:
+                         offset: int, *, rerun: str | None = None) -> list[str]:
     """A service whose user changes over data the old user owns; with no
     earlier user to compare (a first deploy, or containers removed), a
-    numeric user over data someone else owns."""
+    numeric user over data someone else owns. `rerun`: the command that
+    puts an older release back (a rollback), which the remedy names in
+    place of a deploy."""
     recorded = read_users(paths, target.project, staging=target.staging)
     running = docker_containers.container_users(target.compose_project)
     problems = []
@@ -231,7 +241,7 @@ def user_change_problems(paths: BoxPaths, target: ReleaseTarget, model: dict[str
             owners = [_owner_uid(target, model, m, offset) for m in data]
             if all(uid in (None, int(after)) for uid in owners):
                 continue
-        problems.append(_change_problem(target, name, new, before, after, data))
+        problems.append(_change_problem(target, name, new, before, after, data, rerun))
     return problems
 
 
@@ -357,8 +367,10 @@ def readability_problems(services: dict[str, dict]) -> list[str]:
 
 def release_problems(paths: BoxPaths, target: ReleaseTarget, model: dict[str, Any],
                      services: dict[str, dict], facts: dict[str, ImageFacts],
-                     users: dict[str, ServiceUser], offset: int) -> tuple[list[str], list[str]]:
-    """(refusals, warnings) for a release about to start."""
+                     users: dict[str, ServiceUser], offset: int, *,
+                     rerun: str | None = None) -> tuple[list[str], list[str]]:
+    """(refusals, warnings) for a release about to start. `rerun`: see
+    user_change_problems."""
     label = f"{target.compose_project}-check"
 
     def fresh(key: str) -> bool:
@@ -376,7 +388,8 @@ def release_problems(paths: BoxPaths, target: ReleaseTarget, model: dict[str, An
         warnings += [f"{a} (until then it will block userns-migrate)" for a in anonymous]
     if not target.staging:
         refusals += replacement_problems(target, model, services)
-        refusals += user_change_problems(paths, target, model, services, users, offset)
+        refusals += user_change_problems(paths, target, model, services, users, offset,
+                                         rerun=rerun)
     return refusals, warnings
 
 

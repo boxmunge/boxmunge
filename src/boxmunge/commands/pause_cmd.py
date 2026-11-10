@@ -134,17 +134,19 @@ def pause_locked(project_name: str, paths: BoxPaths, reason: str | None,
     if hosts is None:
         return 1
 
-    snap = None
-    if is_paused(project_name, paths):
+    finishing = is_paused(project_name, paths)
+    if finishing:
         print(f"Finishing the incomplete pause of '{project_name}'...")
-    else:
-        try:
-            snap = pause_snapshot.take(paths, project_name, no_snapshot)
-        except (pause_snapshot.PauseRefused, DockerError, ManifestError,
-                ReleaseStateError, StateError) as e:
-            print(f"ERROR: Cannot pause '{project_name}': {e}.", file=sys.stderr)
-            return 1
-        write_paused_state(project_name, paths, reason=reason)
+    try:
+        snap = (pause_snapshot.for_finishing if finishing else pause_snapshot.take)(
+            paths, project_name, no_snapshot)
+    except (pause_snapshot.PauseRefused, DockerError, ManifestError,
+            ReleaseStateError, StateError) as e:
+        print(f"ERROR: Cannot pause '{project_name}': {e}.", file=sys.stderr)
+        return 1
+    if not finishing:
+        write_paused_state(project_name, paths, reason=reason,
+                           snapshot=snap.as_record() if snap is not None else None)
 
     # Swap Caddy site config BEFORE stopping containers — visitors should
     # never see "504 Bad Gateway" between container stop and config swap.

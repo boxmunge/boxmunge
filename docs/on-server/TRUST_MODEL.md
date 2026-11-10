@@ -254,8 +254,11 @@ writes there too (timers, upgrades). Root opens those files without following a 
 symlink and refuses anything but a plain file with one link (the operational log, lock files,
 the container-update lock, stash archives, decrypted restore snapshots). It sets owner and mode
 on the open descriptor, never by name after the fact (atomic state writes, backup dumps and
-temps). A planted link makes the operation fail with an error naming the path, instead of
-redirecting root to another file. Remove the link and re-run.
+temps). Root reads the `state/` records (deploy, pause, quarantine, health, scan, breaker,
+KEV, alert and update records) the same way: without following a link, refusing a FIFO or
+other non-regular file without blocking on it, and refusing a file over 64 MiB. A planted
+link makes the operation fail with an error naming the path, instead of redirecting root to
+another file. Remove the link and re-run.
 
 A platform rollback restores exactly the stash its upgrade made, never whichever is newest in
 `stashes/`: the shim records the stash's name, size and sha256 root-only, copies that archive
@@ -440,9 +443,15 @@ version-check circuit breaker can hold a broken security or break-fix
 release fleet-wide. A box honours a hold whenever the service answers: a
 held release is never installed. GitHub is consulted only when the service
 cannot be reached at all; an error answer from the service (a 429, a 5xx, a
-malformed body) fails the check instead, because GitHub cannot know about
-holds. While the service is unreachable a hold cannot be seen, so a held
-release could still arrive through the GitHub fallback until it returns.
+malformed body) fails the check instead. On GitHub a hold is the `[held]`
+marker in a release's title, which only someone with write access to the
+repository can set (release notes, which quote contributors' PR titles, do
+not count, and the release workflow refuses to publish a release carrying
+it). The maintainer adds it when tripping the breaker, so a box that cannot
+reach the service still honours the hold; until it is added, GitHub's
+answer lags the service's, which is why an error answer is never a reason to
+ask GitHub. A box whose `boxmunge.yml` sets `version_check.enabled: false`
+asks neither, and gets no automatic updates at all.
 
 The class and the breaking flag are decided from `releases.json` alone. The
 release workflow refuses to build a tag that is not listed there with a

@@ -114,13 +114,13 @@ class TestCheckAllIsolation:
         self, fleet: BoxPaths, monkeypatch, capsys,
     ) -> None:
         checked: list[str] = []
-        real = check_mod.run_check
+        real = check_mod.check_with_reason
 
         def _spy(name, paths, verbose=True):
             checked.append(name)
             return real(name, paths, verbose)
 
-        monkeypatch.setattr(check_mod, "run_check", _spy)
+        monkeypatch.setattr(check_mod, "check_with_reason", _spy)
         _corrupt(fleet.project_quarantine_state("aaa"))
         rc = run_check_all(fleet, read_only=True)
         assert checked == ["bbb", "ccc"]
