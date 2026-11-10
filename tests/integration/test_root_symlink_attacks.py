@@ -17,7 +17,7 @@ import boxmunge
 
 pytestmark = pytest.mark.integration
 
-IMAGE = "python:3.12-slim"
+IMAGE = "python:3.13-slim"
 SRC = Path(boxmunge.__file__).parents[1]
 ATTACK = Path(__file__).parent / "uid_attacks" / "attack.py"
 UNTOUCHED = {"uid": 0, "gid": 0, "mode": "0o600", "content": "ROOT-ONLY\n"}
