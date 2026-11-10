@@ -346,11 +346,13 @@ def test_files_left_with_unmapped_owners_are_in_the_rollback_alert(paths, monkey
     monkeypatch.setattr(steps, "notify", lambda p, title, body, **kw: sent.append((title, body)))
     monkeypatch.setattr(steps, "crowdsec_tails_caddy", lambda: None)
     j = Journal(ROLLBACK, "rolled-back", S, items={
-        "rb-project:a": "up", "left:rb:/srv/a": "2 entries with ids outside both ranges ..."})
+        "rb-project:a": "up", "left:rb:/srv/a": "2 entries with ids outside both ranges ...",
+        "left:/srv/b": "1 entry ..."})
     steps.report_back(paths, j, "rb-project", "userns migration rolled back", "userns-rollback")
     title, body = sent[0]
-    assert title == ("userns migration rolled back; files in 1 tree(s) keep owners "
+    assert title == ("userns migration rolled back; files in 2 tree(s) keep owners "
                      "outside both id ranges")
+    assert "WARNING: /srv/b: 1 entry ..." in body  # a forward shift's key, too
     assert "a: up" in body
     assert "WARNING: /srv/a: 2 entries with ids outside both ranges ..." in body
     assert "chown" in body

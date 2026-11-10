@@ -113,7 +113,7 @@ def left_alone(j: Journal) -> list[str]:
     service may not be able to use them on the old daemon. The rollback
     still completes (the box must come back up, and no rerun could do
     better); the operator chowns those entries by hand."""
-    return [f"WARNING: {k.removeprefix('left:rb:')}: {v}. Give them the owner the "
+    return [f"WARNING: {k.removeprefix('left:').removeprefix('rb:')}: {v}. Give them the owner the "
             f"service expects (chown, as root)" for k, v in sorted(j.items.items())
             if k.startswith("left:")]
 
