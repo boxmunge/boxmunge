@@ -108,6 +108,10 @@ def test_a_stopped_backup_service_is_dumped_offline_and_paired(
 @pytest.mark.parametrize("state, why, way_out", [
     ("quarantined", "CVE-quarantined", "boxmunge security resume shop"),
     ("paused", "paused", "boxmunge resume shop"),
+    # A lift while paused starts nothing: resume does, once it is lifted.
+    ("paused+quarantined", "paused and CVE-quarantined",
+     "`boxmunge security resume shop` once its images are clean (it stays paused), "
+     "then `boxmunge resume shop`"),
     ("monitor", "health monitor stopped", "boxmunge recover shop"),
     ("stopped", "app is stopped", "prod-deploy shop"),
     ("installing", "an install is open", "that install's ways out"),
@@ -127,6 +131,10 @@ def test_a_dump_that_cannot_run_offline_names_the_states_way_out_first(
     elif state == "paused":
         from boxmunge.pause import write_paused_state
         write_paused_state("shop", paths, reason="maintenance")
+    elif state == "paused+quarantined":
+        from boxmunge.pause import write_paused_state
+        write_paused_state("shop", paths, reason="maintenance")
+        _quarantine(paths)
     elif state == "awaiting":
         from boxmunge.pause import mark_awaiting_deploy, write_paused_state
         write_paused_state("shop", paths, reason="maintenance")
