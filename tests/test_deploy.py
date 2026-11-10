@@ -5,6 +5,7 @@ from contextlib import redirect_stdout
 from unittest.mock import patch
 
 
+from boxmunge.commands.smoke_result import SmokeResult
 from boxmunge.commands.deploy import run_deploy
 from boxmunge.compose import prepare_compose_override
 from boxmunge.paths import BoxPaths
@@ -28,6 +29,7 @@ backup:
 
 
 class TestDeployEnvFiles:
+    @patch("boxmunge.commands.check._smoke_one", new=lambda *a, **k: SmokeResult("ok", ""))
     @patch("boxmunge.compose_guard.compose_up")
     @patch("boxmunge.commands.deploy.caddy_reload")
     def test_compose_override_includes_env_files(self, mock_reload, mock_up, paths):
