@@ -93,6 +93,33 @@ run_shim check-probation
 expect 2 "stashes/$PLANTED is a symlink" "no record: a newest-named link is refused, not skipped"
 drop_root
 
+# The record carries the stash's size and sha256 (an older shim's has only
+# its name): a different root-made stash renamed onto the recorded name is
+# refused; the right one is restored.
+digest() { python3 -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1"; }
+box
+stash="$BOXMUNGE_ROOT/stashes/$RECORDED"
+echo "1.5.0 $RECORDED $(wc -c < "$stash" | tr -d ' ') $(digest "$stash")" > "$BOXMUNGE_ROOT/upgrade-root/upgrade-stash"
+run_shim check-probation
+expect 1 "Rollback complete" "a stash matching its recorded size and sha256 is restored"
+restored "$RECORDED" "the upgrade's stash" && pass "the recorded, hash-checked stash is restored" || fail "$(calls)"
+drop_root
+box
+stash="$BOXMUNGE_ROOT/stashes/$RECORDED"
+echo "1.5.0 $RECORDED $(wc -c < "$stash" | tr -d ' ') $(digest "$stash")" > "$BOXMUNGE_ROOT/upgrade-root/upgrade-stash"
+mv "$BOXMUNGE_ROOT/stashes/$OLD_STASH" "$stash"
+run_shim check-probation
+expect 2 "stashes/$RECORDED is not the stash this upgrade made (its size or sha256 differs from the record)" \
+    "another root-made stash under the recorded name is refused"
+[[ "$(calls)" != *restore* && -z "$(ls -A "$BOXMUNGE_ROOT/upgrade-root/rollback-stash")" ]] \
+    && pass "a mismatched stash: nothing restored, no copy left" || fail "restored: $(calls)"
+drop_root
+box
+echo "1.5.0 $RECORDED 12 nothex" > "$BOXMUNGE_ROOT/upgrade-root/upgrade-stash"
+run_shim check-probation
+expect 2 "upgrade-stash is malformed" "a malformed stash record is refused"
+drop_root
+
 # A record of another upgrade is not this one's.
 box
 echo "1.4.9 $OLD_STASH" > "$BOXMUNGE_ROOT/upgrade-root/upgrade-stash"

@@ -99,4 +99,4 @@ def test_install_sh_takes_the_shim_path_when_it_is_recognised() -> None:
         'bash "${SCRIPT_DIR}/bootstrap/run-by-old-shim.sh")"\n')
     assert install.index('if [[ "${1:-}" == "--upgrade-shim" ]]; then\n    FROM_UPGRADE_SHIM=1') < asked
     assert install.index("is the unbuilt source shim") < asked
-    assert asked < install.index("\n# Docker Compose version.")
+    assert asked < install.index("\n# Docker Compose 2.35.0 or newer (bootstrap/compose-version.sh)")

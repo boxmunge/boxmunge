@@ -18,11 +18,13 @@
 # the rollback target.
 PROBATION_EXPIRY_FILE="$UPGRADE_ROOT_DIR/probation-expiry"
 read_probation() {
-    local out content recorded=""
+    local out content recorded="" record_re='^[ab] [0-9]+$'
     refuse_symlink "$PROBATION_FILE"
     content="$(read_untrusted "$PROBATION_FILE")" || exit 1
     refuse_symlink "$PROBATION_EXPIRY_FILE"
     [[ ! -e "$PROBATION_EXPIRY_FILE" ]] || recorded="$(cat "$PROBATION_EXPIRY_FILE")"
+    [[ -z "$recorded" || "$recorded" =~ $record_re ]] \
+        || die_logged "$PROBATION_EXPIRY_FILE is malformed; remove it (the next run records the expiry again)"
     out="$(BM_PROBATION="$content" BM_RECORDED="$recorded" BM_SLOT="$ACTIVE_SLOT" BM_HOURS="$PROBATION_HOURS" python3 - <<'PYPROB'
 import json, os, re, sys
 from datetime import datetime, timedelta, timezone
@@ -36,9 +38,7 @@ if expires.tzinfo is None:
 now = datetime.now(timezone.utc)
 cap = now + timedelta(hours=int(os.environ["BM_HOURS"]))
 recorded, note = None, ""
-m = re.fullmatch(r"([ab]) ([0-9]+)\n?", os.environ["BM_RECORDED"])
-if os.environ["BM_RECORDED"] and not m:
-    sys.exit("upgrade-root/probation-expiry is malformed; remove it (the next run records the expiry again)")
+m = re.fullmatch(r"([ab]) ([0-9]+)", os.environ["BM_RECORDED"])  # checked by the caller
 if m and m.group(1) == os.environ["BM_SLOT"]:
     recorded = datetime.fromtimestamp(int(m.group(2)), timezone.utc)
 if recorded is None:
