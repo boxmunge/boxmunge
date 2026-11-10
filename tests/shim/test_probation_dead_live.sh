@@ -142,7 +142,7 @@ for rc in 126 127; do
     drop_root
 done
 
-box 'if [[ "$1" == health ]]; then exit 1; fi; exit 0' "$SOON"
+box 'if [[ "$1" == health ]]; then exec health-report 1; fi; exit 0' "$SOON"
 run_shim check-probation
 expect 0 "" "health warnings (exit 1) do not roll back"
 [[ "$(live)" == "$BOXMUNGE_ROOT/env-a" ]] && probation_left && pass "the probation carries on" \

@@ -72,5 +72,19 @@ grep -q "title=boxmunge upgrade failed msg=The platform stash failed, so the upg
     || fail "version is $(cat "$BOXMUNGE_ROOT/config/version")"
 drop_root
 
+# A stash create that succeeds but does not say which stash it made leaves
+# the rollback nothing it can trust: the upgrade stops there too.
+new_root a
+echo "1.4.0" > "$BOXMUNGE_ROOT/config/version"
+mock_server a 'if [[ "$1 $2" == "stash create" ]]; then echo "done"; exit 0; fi
+[[ "$1" != --version ]] || echo "boxmunge 1.4.0"; exit 0'
+rm "$BOXMUNGE_ROOT/env-a/bin/python"
+stub "$BOXMUNGE_ROOT/env-a/bin/python" '[[ "$1" != "-" ]] || cat >/dev/null; exit 0'
+run_shim target 1.5.0
+expect 1 "stash create did not name the stash it made" "an unnamed stash stops the upgrade"
+[[ "$(readlink "$BOXMUNGE_ROOT/env-active")" == *env-a && ! -e "$BOXMUNGE_ROOT/env-b" ]] \
+    && pass "an unnamed stash: the proven slot stays live" || fail "an unnamed stash: live=$(readlink "$BOXMUNGE_ROOT/env-active")"
+drop_root
+
 rm -rf "$FIXTURE" "$RELEASE"
 finish

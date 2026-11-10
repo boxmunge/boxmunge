@@ -179,7 +179,7 @@ recover_interrupted_upgrade() {
 # starts, so a new one never inherits them.
 clear_probation_markers() {
     rm -f "$UPGRADE_ROOT_DIR/rollback-impossible" "$UPGRADE_ROOT_DIR/rollback-impossible.logged" \
-        "$UPGRADE_ROOT_DIR/live-slot-failed" "$PROBATION_EXPIRY_FILE"
+        "$UPGRADE_ROOT_DIR/live-slot-failed" "$PROBATION_EXPIRY_FILE" "$HEALTH_BASELINE_FILE" "$HEALTH_UNJUDGED_FILE"
 }
 
 # rollback_impossible <version> <prev_slot> <why>: the release on probation
@@ -304,6 +304,7 @@ cmd_check_probation() {
     inactive="$(standby_slot)"
     if ! load_probation; then
         clear_probation_markers
+        rm -rf "$STASH_RECORD_FILE" "$STASH_COPY_DIR"
         # No probation, so a standby venv is an orphan: left by a rollback, an
         # upgrade that failed before its swap, or a promotion made from the
         # deploy context (deploy cannot rmtree root-owned dirs).
@@ -323,39 +324,35 @@ cmd_check_probation() {
         remove_slot "$prev_slot"
         rm -f "$PROBATION_FILE"
         clear_probation_markers
+        rm -rf "$STASH_RECORD_FILE" "$STASH_COPY_DIR"
         interruptions "$version" 0
         log "Version $version promoted"
         bm_log info upgrade "probation passed" "{\"version\": \"$version\"}"
         exit 0
     fi
 
-    # Probation health check semantics:
-    #   exit 2        -> CRITICAL: real health regression -> rollback
-    #   exit 126/127  -> health could not run at all (timeout's exit when the
-    #                    command cannot be executed or found): the live slot
-    #                    is checked again, as above, and rolled back if it
-    #                    still does not run on the next fire
-    #   other 124+    -> OPERATIONAL: timed out / killed (e.g. multiple
-    #                    sequential docker subprocess timeouts on a busy host
-    #                    can exceed our budget without any platform
-    #                    regression). Skip rollback; the next health-timer
-    #                    fire will retry.
-    #   else          -> healthy (or warnings only) -> continue probation
-    # --kill-after=10 escalates SIGTERM -> SIGKILL if the health subprocess
-    # ignores the initial SIGTERM (e.g. wedged docker socket). Without it,
-    # `timeout 180` waits indefinitely for an unresponsive process and
-    # successive timer fires stack stuck health invocations.
-    local health_exit=0
-    timeout --kill-after=10 180 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
-
-    case "$health_exit" in
-        2) probation_failed "$version" "$prev_slot" "failed its probation health check" ;;
-        126|127)
-            log "WARN: the probation health check of $version could not run (exit $health_exit); checking the live slot"
+    # The health check (health.sh), 180 s. A health error the baseline from
+    # before the upgrade lacks rolls back. One that could not run at all
+    # (126/127) has the live slot checked again, as above, and rolled back if
+    # it still does not run on the next fire. One that gave no verdict (it did
+    # not finish, or gave no valid report) is counted (health_unjudged).
+    local baseline
+    baseline="$(probation_baseline)"
+    health_run 180 "$baseline"
+    case "${HEALTH_VERDICT%% *}" in
+        failed)
+            log "New health errors since the upgrade: ${HEALTH_VERDICT#failed }"
+            probation_failed "$version" "$prev_slot" "failed its probation health check" \
+                "new_health_errors: ${HEALTH_VERDICT#failed }" ;;
+        not_run)
+            log "WARN: the probation health check of $version could not run (exit ${HEALTH_VERDICT#not_run }); checking the live slot"
             check_live_slot "$version" "$prev_slot"
             log "WARN: the live slot runs; the next health-timer run checks $version again" ;;
-        *) [[ "$health_exit" -lt 124 ]] \
-            || log "WARN: probation health check timed out (exit $health_exit) for $version — skipping rollback, next health-timer will retry" ;;
+        ok)
+            rm -f "$HEALTH_UNJUDGED_FILE"
+            [[ "$HEALTH_VERDICT" == ok ]] \
+                || log "WARN: health errors that were there before the upgrade, not counted against $version: ${HEALTH_VERDICT#ok }" ;;
+        *) health_unjudged "$version" "$prev_slot" "$baseline" ;;
     esac
 
     exit 0

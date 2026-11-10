@@ -24,7 +24,7 @@
 #   userns-commit              operator only: delete the old root after the soak
 #
 # In the source tree the functions live in boxmunge-upgrade.d/ (state, slots,
-# probation, release, system, userns). The release build (scripts/build-shim.py)
+# probation, health, release, system, userns). The release build (scripts/build-shim.py)
 # inlines them, so the shim a box runs is this one self-contained file:
 # whatever installs it (install.sh, or an older release's shim
 # self-updating) copies only this file.
@@ -115,7 +115,7 @@ die_logged() {
 SHIM_LIB_DIR="$(dirname "$SHIM_PATH")/boxmunge-upgrade.d"
 [[ -d "$SHIM_LIB_DIR" ]] \
     || die "This is the unbuilt source shim and $SHIM_LIB_DIR is missing; install a release bundle, whose shim is built"
-for lib in state slots probation release system userns; do
+for lib in state slots probation health release system userns; do
     # shellcheck source=/dev/null
     source "$SHIM_LIB_DIR/$lib.sh"
 done
@@ -233,6 +233,19 @@ upgrade_to() {
     from_version="${from_version:-unknown}"
     standby="$(standby_slot)"
 
+    # 0. BASELINE: the health of the release being replaced, so a problem that
+    # was there before the upgrade does not roll this one back (health.sh).
+    log "Checking health before the upgrade..."
+    local baseline
+    health_run 180
+    baseline="$(health_baseline_line)"
+    case "$baseline" in
+        "") log "WARN: health gave no report before the upgrade ($HEALTH_VERDICT); every health error after it counts against $version" ;;
+        report) ;;
+        report\ *) log "Health errors before the upgrade, not counted against $version:${baseline#report}" ;;
+        unanswered) log "WARN: health did not finish before the upgrade either; that alone does not count against $version" ;;
+    esac
+
     # 1. PREPARE
     log "Preparing standby venv (slot $standby)..."
     require_free_space
@@ -297,6 +310,8 @@ upgrade_to() {
     stash_out="$("$(active_venv)/bin/boxmunge-server" stash create 2>&1)" \
         || stash_failed "$version" "$stash_out"
     log "$stash_out"
+    record_stash "$version" "$stash_out" \
+        || stash_failed "$version" "stash create did not name the stash it made (no 'Stash created: <name>' line): $stash_out"
 
     # 3a. Refresh tree-level templates that aren't shipped in the venv.
     # Today: the canary project, used by `boxmunge self-test`. Without this,
@@ -331,23 +346,22 @@ upgrade_to() {
         do_rollback "$version" "$from_version" "apply" "$prev_slot"
     }
 
-    # 6. VERIFY
+    # 6. VERIFY. The post-swap quick check (60 s; probation does the long
+    # validation). Only a health error the baseline lacks rolls back here.
+    # One that gives no verdict (it did not run, finish or report) is left to
+    # check-probation, which counts it: swap_to has just run this slot's
+    # boxmunge-server, so one such run is more likely a blip than a broken
+    # release worth blocklisting.
     log "Running health check..."
-    # Bound the immediate post-swap health check. A wedged docker socket
-    # or stuck subprocess could otherwise hang here indefinitely. Use
-    # --kill-after=10 to escalate SIGTERM -> SIGKILL if the process refuses
-    # to die. Budget is shorter than probation's 180s because this is the
-    # post-swap quick check; probation does the long-running validation.
-    # Only exit 2 rolls back here. A health that cannot run at all (126/127)
-    # is left to check-probation, which re-checks the live slot and rolls
-    # back if it still does not run on the next health-timer fire: swap_to
-    # has just run this slot's boxmunge-server, so one failure here is more
-    # likely a blip than a broken release worth blocklisting.
-    local health_exit=0
-    timeout --kill-after=10 60 "$(active_venv)/bin/boxmunge-server" health --json >/dev/null 2>&1 || health_exit=$?
-    if [[ "$health_exit" -eq 2 ]]; then
-        do_rollback "$version" "$from_version" "health_immediate" "$prev_slot"
-    fi
+    health_run 60 "$baseline"
+    case "${HEALTH_VERDICT%% *}" in
+        failed)
+            log "New health errors after the swap: ${HEALTH_VERDICT#failed }"
+            do_rollback "$version" "$from_version" "health_immediate" "$prev_slot" "new_health_errors: ${HEALTH_VERDICT#failed }" ;;
+        ok) [[ "$HEALTH_VERDICT" == ok ]] \
+                || log "WARN: health errors that were there before the upgrade, not counted against $version: ${HEALTH_VERDICT#ok }" ;;
+        *) log "WARN: the health check after the swap gave no verdict ($HEALTH_VERDICT); the probation checks again" ;;
+    esac
 
     # 7. ENTER PROBATION
     log "Entering probation for $version..."
@@ -358,6 +372,7 @@ from boxmunge.paths import BoxPaths
 write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT'], hours=int(os.environ['BM_HOURS']))
 "
     clear_probation_markers
+    [[ -z "$baseline" ]] || write_root_file "$HEALTH_BASELINE_FILE" "$ACTIVE_SLOT $baseline"
     bm_log info upgrade "probation entered" "{\"version\": \"$version\", \"prev_slot\": \"$prev_slot\", \"hours\": $PROBATION_HOURS}"
     rm -f "$(inflight_marker "$ACTIVE_SLOT")"
     refresh_docs_for_slot "$ACTIVE_SLOT"
