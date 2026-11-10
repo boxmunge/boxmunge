@@ -27,7 +27,9 @@ st /stub/bin/sha256sum "if [[ \"\$1\" == -c ]]; then cat >/dev/null; exit 0; fi;
 st /mockvenv/bin/pip 'echo "$0 $*" >> /tmp/pip.log; [[ "$1" != show ]] || echo "Version: 1.5.0"'
 # `upgrade --apply` runs while the old shim, which locks only the legacy
 # upgrade-state/upgrade.lock, is mid-upgrade and has installed the new shim:
-# the new shim must see that upgrade and stay out of it.
+# the new shim must see that upgrade and stay out of it. Then it records the
+# version, as the real apply does, noting the one it found (install.sh must
+# not have recorded 1.5.0 before the swap).
 st /mockvenv/bin/boxmunge-server 'case "$1" in
     --version) echo "boxmunge 1.5.0";;
     upgrade) if [[ "$2" == --apply ]]; then
@@ -35,6 +37,8 @@ st /mockvenv/bin/boxmunge-server 'case "$1" in
             rc=0; bash /opt/boxmunge/bin/boxmunge-upgrade $c > "/tmp/during-${c%% *}.log" 2>&1 || rc=$?
             echo "rc=$rc" >> "/tmp/during-${c%% *}.log"
         done
+        cp /opt/boxmunge/config/version /tmp/version-before-apply
+        echo "1.5.0+abc1234" > /opt/boxmunge/config/version
     fi;;
 esac; exit 0'
 st /mockvenv/bin/python 'if [[ "$1" == "-" ]]; then cat >/dev/null; exit 0; fi
@@ -87,7 +91,7 @@ echo "LEFTOVER_LIBS=$([[ -e "$R/bin/boxmunge-upgrade.d" ]] && echo yes || echo n
 mcp="$(grep -- '--require-hashes' /tmp/pip.log 2>/dev/null | grep -- '/requirements-mcp.txt' | cut -d' ' -f1 | sort -u | tr '\n' ',')"
 echo "MCP_INSTALLED_BY=${mcp:-none}"
 echo "ENV_A_PIP_CALLS=$(grep -cE '^/opt/boxmunge/env-(a|active)/bin/pip install' /tmp/pip.log 2>/dev/null || true)"
-echo "VERSION=$(cat "$R/config/version")"
+echo "VERSION_BEFORE_APPLY=$(cat /tmp/version-before-apply 2>/dev/null || echo none)"
 for c in "check-probation" "run 1.5.1 https://example.com/x" "target 1.5.1"; do
     rc=0
     # shellcheck disable=SC2086  # word-split the subcommand on purpose

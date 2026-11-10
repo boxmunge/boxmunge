@@ -97,7 +97,8 @@ def test_old_shim_hop_leaves_a_working_shim(bundle: Path, old_shim: str, mode: s
         assert facts["during_check-probation_rc"] == "0", log
         assert "Another upgrade is in progress; skipping" in facts["during_check-probation_out"], log
         assert facts["LIVE"] == "/opt/boxmunge/env-b" and facts["PROBATION"] == "yes", log
-        # The new shim honours the probation the old one started.
+        # The new shim honours the probation the old one started (it has no
+        # root record of it, and is adopted on the evidence of the upgrade).
         assert facts["run_rc"] == "0" and "is on probation" in facts["run_out"], log
         assert facts["target_rc"] == "1" and "is on probation" in facts["target_out"], log
     else:
@@ -114,4 +115,4 @@ def test_old_shim_hop_leaves_a_working_shim(bundle: Path, old_shim: str, mode: s
         # into it, and the version recorded only by the new release's apply.
         assert facts["MCP_INSTALLED_BY"] == "/opt/boxmunge/env-b/bin/pip,", log
         assert facts["ENV_A_PIP_CALLS"] == "0", log
-        assert facts["VERSION"] == "1.4.0", log
+        assert facts["VERSION_BEFORE_APPLY"] == "1.4.0", log
