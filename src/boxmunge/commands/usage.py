@@ -266,8 +266,9 @@ Usage: boxmunge security [--json]
 
 Container security and CVE policy: fleet or per-project view, scan,
 suppressions, and lifting a quarantine. --until is at most 90 days ahead.
---accept-stale-kev lifts a quarantine the CISA KEV catalog cannot back (stale
-and listing a CVE involved, or missing); it is logged and alerted.
+--accept-stale-kev lifts a quarantine although there is no usable CISA KEV
+catalog; it is logged and alerted. It never overrides a stale catalog that
+lists a CVE still in the images: deploy a release without it instead.
 Operator only (refused by the deploy shell): --host suppressions, and
 scan --apply-held, which applies quarantines the CVE circuit breaker held.""",
     "bundle": """\

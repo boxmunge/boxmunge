@@ -16,9 +16,12 @@ end a quarantine judge the catalog first, the same way:
 - **no usable catalog** (never fetched, or the cache is unreadable): refused
   under every posture, since nothing at all can be checked.
 
-`security resume <project> --accept-stale-kev` is the audited way past a
-refusal, for an operator who has judged the risk (security_resume). Every
-refusal names it, and the ways to get fresh data first.
+`security resume <project> --accept-stale-kev` is the audited way past the
+no-usable-catalog refusal, for an operator who has judged the risk
+(security_resume). It never overrides a stale catalog that lists a CVE
+still in the images: a fresh catalog could not lift that either, and a
+release without the CVE already gets through. Every refusal names the
+exits that work from where the operator is.
 
 The scan's automatic lift is unattended, so it takes only the fresh case
 (security_enforce.clears_quarantine). Staging lifts nothing, so the deploy
@@ -39,11 +42,14 @@ ACCEPT_FLAG = "--accept-stale-kev"
 @dataclass(frozen=True)
 class KevLiftCheck:
     """``stale`` is why the catalog cannot be trusted (None: fresh).
-    ``refusal`` is why the lift must not go ahead (None: it may), and ``gap``
-    what a lift that goes ahead on a stale catalog could not check."""
+    ``refusal`` is why the lift must not go ahead (None: it may);
+    ``acceptable`` whether `--accept-stale-kev` may override it (only when
+    there is no usable catalog). ``gap`` is what a lift that goes ahead on
+    a stale catalog could not check."""
 
     stale: str | None = None
     refusal: str | None = None
+    acceptable: bool = False
     gap: str | None = None
 
 
@@ -52,12 +58,40 @@ def fresh_data_advice() -> str:
     return ("Get a fresh catalog: `boxmunge security scan` fetches it from each source in "
             "`kev.sources` in boxmunge.yml (by default CISA's feed, then CISA's GitHub "
             "mirror cisagov/kev-data); if no source answers from this box, add one it can "
-            "reach to `kev.sources`")
+            "reach to `kev.sources`, for example an https copy of the feed you host")
 
 
-def accept_advice(project: str) -> str:
-    return (f"Or, having judged the risk, lift it anyway: `boxmunge security resume "
-            f"{project} {ACCEPT_FLAG}` (logged and alerted)")
+def resume_exits(project: str, check: KevLiftCheck) -> list[str]:
+    """What gets a project ``security resume`` refused out of quarantine."""
+    exits = [f"{fresh_data_advice()}, then retry."]
+    if check.acceptable:
+        exits.append(f"Or, having judged the risk, lift it anyway: `boxmunge security resume "
+                     f"{project} {ACCEPT_FLAG}` (logged and alerted). It brings the images "
+                     f"the project runs now back online.")
+    else:
+        exits.append(f"Or deploy a release without those CVEs: `prod-deploy {project}` (its "
+                     f"images are scanned first). {ACCEPT_FLAG} does not apply: a fresh "
+                     f"catalog would refuse this lift too.")
+    return exits
+
+
+def gate_exits(project: str, check: KevLiftCheck) -> list[str]:
+    """What gets a fix deploy the gate refused through."""
+    if not check.acceptable:
+        return ["Ship a release without those CVEs.",
+                f"Or: {fresh_data_advice()}; then deploy again."]
+    return [
+        f"{fresh_data_advice()}; then deploy again.",
+        f"Or lift the quarantine first with `boxmunge security resume {project} "
+        f"{ACCEPT_FLAG}` (logged and alerted), then deploy again. That resume brings the "
+        f"images the project ran when it was quarantined back online until this release "
+        f"replaces them.",
+        f"Under strict or paranoid, if that resume refuses a finding that is still "
+        f"quarantine-level in those images: `boxmunge security suppress <CVE> --project "
+        f"{project} --until <YYYY-MM-DD> --reason <text>`, then the resume with "
+        f"{ACCEPT_FLAG}, then this deploy, then `boxmunge security unsuppress <CVE> "
+        f"--project {project}`.",
+    ]
 
 
 def check_kev_for_lift(quarantined_cve: str, decisions: Sequence[ProjectDecision],
@@ -68,7 +102,7 @@ def check_kev_for_lift(quarantined_cve: str, decisions: Sequence[ProjectDecision
     if stale is None:
         return KevLiftCheck()
     if kev.unreadable is not None or kev.fetched_at is None:
-        return KevLiftCheck(stale, refusal=(
+        return KevLiftCheck(stale, acceptable=True, refusal=(
             f"there is no usable CISA KEV catalog ({stale}), so boxmunge cannot tell "
             f"whether {quarantined_cve} or anything in the images is actively exploited"))
     in_images = {f.finding.cve_id for d in decisions for f in d.findings} & kev.cve_ids

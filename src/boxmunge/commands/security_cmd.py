@@ -62,7 +62,7 @@ Usage:
   boxmunge security unsuppress <CVE> (--project <name>|--host)
   boxmunge security resume <project>                   Lift CVE quarantine
   boxmunge security resume <project> --accept-stale-kev
-                             Lift although the KEV catalog cannot back it (audited)
+                             Lift with no usable KEV catalog (audited)
 
 --host suppressions and scan --apply-held are operator-only (refused by the
 deploy shell). --until is at most 90 days ahead.

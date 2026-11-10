@@ -7,10 +7,11 @@ and shows no quarantine-level finding. A failed image scan, an image the
 per-project budget skipped, or a service whose image cannot be identified
 keeps the quarantine, because boxmunge cannot show the finding is resolved.
 So does a CISA KEV catalog that cannot back the lift (cve.lift_rule, the
-rule the deploy gate shares): a stale one that lists the quarantine's CVE
-or a CVE in the images, or none at all. `--accept-stale-kev` lifts anyway,
-for an operator who has judged that risk: it is logged before the lift and
-alerted after it, and says what it gives up. A lift on a stale catalog the
+rule the deploy gate shares): a stale one that lists a CVE still in the
+images, or none at all. With no usable catalog, `--accept-stale-kev` lifts
+anyway, for an operator who has judged that risk: it is logged before the
+lift and alerted after it, and says what it gives up. It never overrides a
+stale catalog that lists a CVE in the images; a fix deploy is the exit. A lift on a stale catalog the
 rule allows is alerted the same way, naming what could not be checked.
 """
 from __future__ import annotations
@@ -21,7 +22,7 @@ from datetime import datetime, timezone
 from boxmunge.commands.quarantine_lift import restore_from_quarantine
 from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project_locked
 from boxmunge.cve.lift_rule import (
-    ACCEPT_FLAG, KevLiftCheck, accept_advice, check_kev_for_lift, fresh_data_advice,
+    ACCEPT_FLAG, KevLiftCheck, check_kev_for_lift, fresh_data_advice, resume_exits,
 )
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.quarantine import (
@@ -160,20 +161,23 @@ def security_resume_locked(paths: BoxPaths, project: str, *,
         return 1
     check = check_kev_for_lift(record["cve_id"], scan.decisions, kev,
                                datetime.now(timezone.utc).date())
-    if check.refusal is not None and not accept_stale_kev:
+    if check.refusal is not None and not (accept_stale_kev and check.acceptable):
         _err(f"ERROR: Cannot resume '{project}' — the re-scan is clear, but "
              f"{check.refusal}. The quarantine stays in place.")
-        _err(f"  {fresh_data_advice()}, then retry.")
-        _err(f"  {accept_advice(project)}.")
+        for line in resume_exits(project, check):
+            _err(f"  {line}")
         return 1
-    if accept_stale_kev and check.refusal is None:
-        print(f"  {ACCEPT_FLAG}: nothing to accept, the KEV catalog backs this lift.")
-    elif accept_stale_kev:
+    if accept_stale_kev and check.refusal is not None:
         print(f"  {ACCEPT_FLAG}: lifting although {check.refusal}. A CVE that is actively "
               f"exploited may come back online.")
-        log_warning("security-resume", f"{ACCEPT_FLAG}: lift accepted on an unusable KEV "
+        log_warning("security-resume", f"{ACCEPT_FLAG}: lift accepted with no usable KEV "
                     f"catalog", paths, project=project,
                     detail={"reason": check.refusal, "kev_stale": check.stale})
+    elif accept_stale_kev:
+        print(f"  {ACCEPT_FLAG}: nothing to accept: "
+              + ("the KEV catalog is fresh." if check.stale is None else
+                 "the KEV catalog is stale but lists no CVE in the images, so the lift goes "
+                 "ahead without it (and is alerted as a lift on a stale catalog)."))
 
     what = ("every image the lift will start" if scan.basis == BASIS_STARTUP_IMAGES
             else "every container's image")

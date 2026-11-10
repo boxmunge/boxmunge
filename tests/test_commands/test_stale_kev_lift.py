@@ -121,7 +121,19 @@ def test_resume_refuses_the_same_kev_image_on_a_stale_catalog(
     assert is_quarantined("demo", paths)
     err = capsys.readouterr().err
     assert f"{KEV_CVE} (the quarantine's CVE)" in err and "stays in place" in err
-    assert "kev.sources" in err and "--accept-stale-kev" in err
+    assert "kev.sources" in err and "prod-deploy demo" in err
+    assert "--accept-stale-kev does not apply" in err
+
+
+def test_accept_stale_kev_never_overrides_a_listed_cve_in_the_images(
+        tmp_path, monkeypatch, capsys) -> None:
+    """A fresh catalog would refuse this lift too; a fix deploy is the exit."""
+    paths = _resume_box(tmp_path, monkeypatch, [CRIT])
+    _write_kev(paths, KEV_CVE, age_days=20)
+    assert cmd_security_resume(["demo", "--accept-stale-kev"], paths) == 1
+    assert is_quarantined("demo", paths)
+    assert "--accept-stale-kev does not apply" in capsys.readouterr().err
+    assert not [t for t, _, _ in paths.pushover.sent if "accept" in t]
 
 
 def test_resume_lifts_on_a_stale_catalog_listing_nothing_involved_and_alerts(
@@ -143,7 +155,21 @@ def test_resume_refuses_with_no_catalog_under_every_posture(
     assert is_quarantined("demo", paths)
     err = capsys.readouterr().err
     assert "no usable CISA KEV catalog" in err and "--accept-stale-kev" in err
-    assert "rests on" not in err
+    assert "back online" in err and "rests on" not in err
+
+
+@pytest.mark.parametrize("age,needle", [(0, "the KEV catalog is fresh"),
+                                        (20, "stale but lists no CVE in the images")])
+def test_accept_stale_kev_with_nothing_to_accept_says_why(
+        tmp_path, monkeypatch, capsys, age, needle) -> None:
+    paths = _resume_box(tmp_path, monkeypatch, [], cve=OTHER_CVE)
+    _write_kev(paths, KEV_CVE, age_days=age)
+    assert cmd_security_resume(["demo", "--accept-stale-kev"], paths) == 0
+    out = capsys.readouterr().out
+    assert "nothing to accept" in out and needle in out
+    assert "backs this lift" not in out
+    log = paths.log_file.read_text() if paths.log_file.exists() else ""
+    assert "accepted with no usable" not in log
 
 
 def test_accept_stale_kev_lifts_logs_and_alerts(tmp_path, monkeypatch, capsys) -> None:
@@ -208,7 +234,8 @@ def test_gate_refuses_the_same_kev_image_on_a_stale_catalog(gate_box, capsys) ->
         gate.clear_release(gate_box, production_target(gate_box, "demo"), _manifest())
     text = str(e.value)
     assert "still in the images" in text and "nothing was started" in text
-    assert "kev.sources" in text and "--accept-stale-kev" in text
+    assert "Ship a release without those CVEs" in text and "kev.sources" in text
+    assert "--accept-stale-kev" not in text
     assert "Scan: clear" not in capsys.readouterr().out
 
 
@@ -220,11 +247,17 @@ def test_gate_lifts_a_fix_on_a_stale_catalog_listing_the_quarantine_cve(gate_box
     assert clearance.kev_gap is not None
 
 
-def test_gate_refuses_with_no_catalog_under_strict_too(gate_box) -> None:
+def test_gate_refuses_with_no_catalog_under_strict_too_naming_the_exits(gate_box) -> None:
     seed_quarantine(gate_box, cve_id=OTHER_CVE)
-    with pytest.raises(gate.QuarantineRefused, match="no usable CISA KEV catalog"):
+    with pytest.raises(gate.QuarantineRefused, match="no usable CISA KEV catalog") as e:
         gate.clear_release(gate_box, production_target(gate_box, "demo"),
                            _manifest({"posture": "strict"}))
+    text = str(e.value)
+    assert "https copy of the feed you host" in text
+    assert "security resume demo --accept-stale-kev" in text
+    assert "ran when it was quarantined back online" in text
+    assert "security suppress <CVE> --project demo" in text
+    assert "security unsuppress <CVE> --project demo" in text
 
 
 def test_gate_clears_on_a_stale_catalog_listing_nothing_and_carries_the_gap(gate_box) -> None:

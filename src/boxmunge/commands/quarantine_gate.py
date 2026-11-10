@@ -45,7 +45,7 @@ from boxmunge.compose_images import built_image_name
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.lift_rule import (
-    KevLiftCheck, accept_advice, check_kev_for_lift, fresh_data_advice,
+    KevLiftCheck, check_kev_for_lift, gate_exits,
 )
 from boxmunge.cve.policy_explain import HARDENING_UPCOMING_FIX, hardening_cause
 from boxmunge.cve.policy import Disposition, FindingDisposition
@@ -275,9 +275,8 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
     if kev_check.refusal is not None:
         raise QuarantineRefused([
             f"The scan is clear, but {kev_check.refusal}.",
-            f"The quarantine stays in place and nothing was started in {where}. "
-            f"{fresh_data_advice()}, then deploy again. {accept_advice(project)}, then "
-            f"deploy again."])
+            f"The quarantine stays in place and nothing was started in {where}.",
+            *gate_exits(project, kev_check)])
     upcoming = _upcoming_lines(scan, services)
     if upcoming and profile.upcoming is not None:
         print(f"  WARNING: from 0.12 this release would still be quarantined for "

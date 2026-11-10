@@ -1131,7 +1131,7 @@ boxmunge security scan --apply-held                     Apply breaker-held quara
 boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason <text>
 boxmunge security unsuppress <CVE> --project <name>
 boxmunge security resume <project>                      Lift CVE quarantine
-boxmunge security resume <project> --accept-stale-kev  Lift although the KEV catalog cannot back it (audited)
+boxmunge security resume <project> --accept-stale-kev  Lift with no usable KEV catalog (audited)
 ```
 
 The fleet view shows posture distribution, currently quarantined projects,
@@ -1264,19 +1264,30 @@ of a fix to production judge the catalog the same way:
 - **No usable catalog** (never fetched, or the cache is unreadable): the
   lift is refused under every posture.
 
-A refusal keeps the quarantine and names the way out. First, get fresh
-data: `boxmunge security scan` fetches the catalog from each source in
-`kev.sources` (by default CISA's feed, then CISA's GitHub mirror
-`cisagov/kev-data`); if no source answers from this box, add one it can
-reach to `kev.sources`. If that is not possible and the operator has judged
-the risk, `boxmunge security resume <project> --accept-stale-kev` lifts
-anyway. It still needs a complete re-scan with no quarantine-level finding,
-and it says what it gives up, is logged before the lift and sends a
-priority-1 alert after it. A deploy refused this way can be repeated once
-the catalog is fresh, or after the accepted resume.
+A refusal keeps the quarantine and names the exits that work:
+
+- **Fresh data**, always: `boxmunge security scan` fetches the catalog from
+  each source in `kev.sources` (by default CISA's feed, then CISA's GitHub
+  mirror `cisagov/kev-data`). If no source answers from this box, add one it
+  can reach to `kev.sources`, for example an https copy of the feed you host.
+- **A stale catalog listing a CVE still in the images:** ship a release
+  without it. A fresh catalog would refuse this lift too, so
+  `--accept-stale-kev` does not apply.
+- **No usable catalog,** once the operator has judged the risk:
+  `boxmunge security resume <project> --accept-stale-kev` lifts anyway. It
+  still needs a complete re-scan with no quarantine-level finding, says what
+  it gives up, is logged before the lift and sends a priority-1 alert after
+  it. It brings the images the project runs now back online: for a fix
+  deploy the gate refused, those are the old images, until the deploy
+  (repeated after the resume) replaces them. Under `strict` or `paranoid`,
+  if that resume refuses a finding that is still quarantine-level in the old
+  images, the route is: `security suppress` it for the project, resume with
+  `--accept-stale-kev`, deploy the fix, then `security unsuppress` it. (A
+  deploy that carries the acceptance itself is planned for 0.11.5.)
 
 Staging lifts nothing, so `stage` is not judged against the catalog; the
 promote is.
+
 ## Recovering a quarantined project
 
 1. **Inspect what triggered the quarantine:**
@@ -1323,8 +1334,9 @@ promote is.
    - the per-project scan budget ran out before every image was scanned;
    - an image the lift would start is not in the local image store;
    - the CISA KEV catalog cannot back the lift: it is stale and lists a CVE
-     still in the images, or there is none (see "Lifting
-     on a stale catalog"; `--accept-stale-kev` is the audited override).
+     still in the images, or there is none (see "Lifting on a stale
+     catalog"; with no usable catalog, `--accept-stale-kev` is the audited
+     override).
 
    The error lists each image or service that was not covered. Fix the
    cause and retry; an incomplete re-scan is never treated as clean.
