@@ -362,4 +362,8 @@ class TestPausedPreRuleContainers:
         with patch("boxmunge.commands.upgrade_steps.log_error") as logged:
             assert "alpha" in apply_projects(paths)[1].refused
         message = logged.call_args.args[1]
-        assert "resume alpha" in message and "redeploy" not in message
+        # A deploy is refused while it is paused: one is named only after the
+        # resume that hands the pause to it.
+        assert "resume alpha" in message
+        assert message.count("redeploy") == message.count(
+            "`boxmunge resume alpha --no-start`, then `boxmunge prod-deploy alpha --redeploy`")
