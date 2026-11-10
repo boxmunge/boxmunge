@@ -53,7 +53,8 @@ from boxmunge.log import log_error
 from boxmunge.notify import notify
 from boxmunge.overlay_users import stale_containers_problem, stale_overlay_problem
 from boxmunge.paths import RESERVED_PROJECT_NAMES
-from boxmunge.redeploy_hint import redeploy_command
+from boxmunge.pause import awaiting_deploy, is_paused
+from boxmunge.redeploy_hint import deploy_from_pause, redeploy_command
 from boxmunge.release_txn import load_txn, stale_reason, start_refusal
 from boxmunge.staged_release import (
     STAGING_OVERLAY, SlotError, load_slot, slot_dir, staging_target,
@@ -232,7 +233,7 @@ def check_start(
         sources = bind_sources.model_sources(model, project_dir)
         if record:
             control = (bind_sources.check_kept_control(
-                project_dir, read_files, record_path, redo=redeploy_command(paths, project_name))
+                project_dir, read_files, record_path, redo=_renewal_redo(paths, project_name))
                 if regenerated else bind_sources.control_hashes(project_dir, read_files))
             bind_sources.record(project_dir, sources, control, record_path)
         else:
@@ -242,6 +243,14 @@ def check_start(
                                        redo=redeploy_command(paths, project_name))
     except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
+
+
+def _renewal_redo(paths: BoxPaths, project_name: str) -> str:
+    """The redeploy a renewal's refusal names: a paused project's deploy is
+    refused until `resume --no-start` hands the pause to it."""
+    if is_paused(project_name, paths) and not awaiting_deploy(project_name, paths):
+        return deploy_from_pause(paths, project_name)
+    return redeploy_command(paths, project_name)
 
 
 # A container_bind_problems refusal: the containers must be replaced, which a

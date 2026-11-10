@@ -43,6 +43,13 @@ def deploy_ways(paths: BoxPaths, project: str) -> str:
     return f"`{again}`, or `{new}` {what}"
 
 
+def deploy_from_pause(paths: BoxPaths, project: str) -> str:
+    """The redeploy of a paused project, quoted: a deploy is refused while
+    it is paused until `resume --no-start` hands the pause to it."""
+    return (f"`boxmunge resume {project} --no-start`, then "
+            f"`boxmunge {redeploy_command(paths, project)}`")
+
+
 def redeploy_either(project: str) -> str:
     """Both forms, for a message written where the project's kind is not
     known (no BoxPaths at hand)."""
