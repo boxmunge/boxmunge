@@ -10,7 +10,10 @@ import pytest
 import yaml
 
 from boxmunge.compose_guard import ComposeRefused, check_start
-from tests.test_compose_guard import NAME, _deploy, _restart, box  # noqa: F401 (fixture)
+from tests import test_compose_guard as guard
+from tests.test_compose_guard import NAME, _deploy, _restart
+
+box = guard.box  # the fixture, shared with the start-check tests
 
 
 def _upgrade_record(paths) -> None:
