@@ -155,8 +155,11 @@ def override_refusal(paths: BoxPaths, project: str) -> str | None:
     return None
 
 
-def prepare_caddy_config(paths: BoxPaths, manifest: dict[str, Any]) -> None:
-    """Generate or copy Caddy site config for a project.
+def prepare_caddy_config(paths: BoxPaths, manifest: dict[str, Any]) -> str:
+    """Generate or copy Caddy site config for a project, and return the
+    text written. A caller that needs the text takes it from here: deploy
+    can replace a name in caddy/sites, so reading the file back as root
+    reads whatever deploy put there.
 
     Writes either the generated site block or, if a host operator has
     placed a project-specific override file, a copy of that override.
@@ -179,6 +182,7 @@ def prepare_caddy_config(paths: BoxPaths, manifest: dict[str, Any]) -> None:
         )
     with caddy_config_lock(paths.state):
         write_site(paths.caddy, site_conf, content)
+    return content
 
 
 def generate_staging_caddy_config(

@@ -137,7 +137,7 @@ def real_lift(monkeypatch):
     monkeypatch.setattr(security_scan_core, "scan_image", lambda ref, timeout: _sr(ref))
     rendered: list[str] = []
     monkeypatch.setattr(quarantine_lift, "prepare_caddy_config",
-                        lambda p, m: (rendered.append("caddy"), render_site(p, m)))
+                        lambda p, m: (rendered.append("caddy"), render_site(p, m))[1])
     monkeypatch.setattr(quarantine_lift, "prepare_compose_override",
                         lambda p, m, component=None: rendered.append("override"))
     monkeypatch.setattr(quarantine_lift, "run_smoke", lambda p, paths_: (True, "ok"))
