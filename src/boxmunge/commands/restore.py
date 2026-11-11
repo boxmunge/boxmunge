@@ -33,6 +33,7 @@ from boxmunge.backup import (
 from boxmunge.commands.backup_cmd import list_snapshots, sweep_stale_dumps
 from boxmunge.commands.confirm import confirm
 from boxmunge.commands.health_state import is_monitor_stopped
+from boxmunge.checked_start import CheckedStart
 from boxmunge.compose_guard import (
     ComposeRefused, check_start, compose_up_canary, compose_up_checked,
 )
@@ -321,11 +322,13 @@ def _replace_data(
     project_dir = paths.project_dir(project_name)
     compose_files = _compose_files(paths, project_name)
     # Checked before the stop: a project that may not be started again must
-    # not be taken down.
+    # not be taken down. Both starts below run on this check while every
+    # file it read is unchanged, and check again in full otherwise.
+    checked = None
     if not canary:
         try:
-            check_start(paths, project_name, component="restore",
-                        compose_files=compose_files, txn=txn)
+            checked = check_start(paths, project_name, component="restore",
+                                  compose_files=compose_files, txn=txn)
         except ComposeRefused as e:
             print(f"  ERROR: {e}", file=sys.stderr)
             print("  Production was not touched.", file=sys.stderr)
@@ -339,7 +342,7 @@ def _replace_data(
         except DockerError as e:
             print(f"  WARN: Stop failed (may not be running): {e}")
         print(f"  Starting {service} for restore...")
-        _start_service(paths, project_name, compose_files, service, canary, txn)
+        _start_service(paths, project_name, compose_files, service, canary, txn, checked)
         _wait_ready(project_name, service)
         print("  Restoring data...")
         _run_restore_command(project_dir, project_name, service, restore_command, plaintext)
@@ -355,7 +358,7 @@ def _replace_data(
         else:
             print("  Starting all services..." if restored
                   else "  Restarting all services...")
-            started = _start_all(paths, project_name, compose_files, canary, txn)
+            started = _start_all(paths, project_name, compose_files, canary, txn, checked)
 
     if not restored:
         if safety is not None:
@@ -380,11 +383,11 @@ def _replace_data(
 
 def _start_service(
     paths: BoxPaths, project_name: str, compose_files: list[str], service: str,
-    canary: bool, txn: str | None = None,
+    canary: bool, txn: str | None = None, checked: CheckedStart | None = None,
 ) -> None:
     """Start one service for the restore, through the start checks (no
     rebuild, so the exact deployed image comes back)."""
-    _up(paths, project_name, compose_files, canary, txn, services=[service])
+    _up(paths, project_name, compose_files, canary, txn, checked, services=[service])
 
 
 def _wait_ready(project_name: str, service: str) -> None:
@@ -432,21 +435,22 @@ def _run_restore_command(
 
 
 def _up(paths: BoxPaths, project_name: str, compose_files: list[str], canary: bool,
-        txn: str | None = None, **kwargs) -> None:
+        txn: str | None = None, checked: CheckedStart | None = None, **kwargs) -> None:
     if canary:
         compose_up_canary(paths, project_name, compose_files=compose_files, **kwargs)
     else:
         compose_up_checked(paths, project_name, component="restore",
-                           compose_files=compose_files, txn=txn, **kwargs)
+                           compose_files=compose_files, txn=txn, earlier=checked, **kwargs)
 
 
 def _start_all(paths: BoxPaths, project_name: str, compose_files: list[str],
-               canary: bool, txn: str | None = None) -> bool:
+               canary: bool, txn: str | None = None,
+               checked: CheckedStart | None = None) -> bool:
     """Start every service. The backup service is still running from the
     restore and may hold the pre-restore data open or in memory, so it is
     recreated rather than left as it is."""
     try:
-        _up(paths, project_name, compose_files, canary, txn, force_recreate=True)
+        _up(paths, project_name, compose_files, canary, txn, checked, force_recreate=True)
     except DockerError as e:
         print(f"  ERROR: Start failed: {e}", file=sys.stderr)
         return False

@@ -181,9 +181,17 @@ def check_start(
     paths: BoxPaths, project_name: str, *, component: str,
     compose_files: list[str] | None = None, staging: bool = False, record: bool = False,
     deploying: bool = False, txn: str | None = None, regenerated: bool = False,
+    earlier: CheckedStart | None = None,
 ) -> CheckedStart:
     """Re-validate the project and check every bind source it would mount.
     Returns what it checked: the resolved model the start runs.
+
+    `earlier` is what this operation's own check of the same production
+    start returned (resume and restore check before they touch a
+    container). The refusals that read the box's state and its containers
+    run again; while every file and bind source is as that check read it
+    (checked_start.unchanged), its validation and its model stand, and
+    `earlier` is returned. Anything else is checked in full.
 
     A `staging` start is checked against the slot (_check_staging), with
     staging's compose files; `compose_files` and `txn` are production's and
@@ -216,19 +224,28 @@ def check_start(
     Raises ComposeRefused.
     """
     if staging:
-        if compose_files is not None or txn is not None:
+        if compose_files is not None or txn is not None or earlier is not None:
             raise ValueError("a staging start runs the slot's own files and no install "
-                             "transaction; pass neither compose_files nor txn")
+                             "transaction; pass none of compose_files, txn and earlier")
         return _check_staging(paths, project_name, component=component, record=record)
     if compose_files is None:
         raise ValueError("a production start check needs compose_files")
     if regenerated and not record:
         raise ValueError("`regenerated` renews a record: pass record=True with it")
+    if earlier is not None and record:
+        raise ValueError("a start on an earlier check records nothing: pass one or the other")
     project_dir = paths.project_dir(project_name)
     record_path = paths.project_bind_record(project_name)
     _refuse_if_install_open(paths, project_name, component, txn)
     _refuse_if_legacy_stage(paths, project_name, component)
     _refuse_stale_overlay(paths, project_name, component, compose_files, deploying, txn)
+    if earlier is not None and checked_start.unchanged(
+            earlier, project_name, project_dir, compose_files):
+        stale = None if deploying else stale_containers(
+            paths, project_name, component=component, compose_files=compose_files)
+        if stale is not None:
+            raise _refused(paths, project_name, component, stale + _REDEPLOY)
+        return earlier
     try:
         validate_release_tree(project_dir, project_name, paths, component,
                               lenient_values=True)
@@ -327,6 +344,7 @@ def compose_up_checked(
     deploying: bool = False,
     force_recreate: bool = False, services: list[str] | None = None, start: bool = True,
     txn: str | None = None, regenerated: bool = False,
+    earlier: CheckedStart | None = None,
 ) -> None:
     """check_start, then `docker compose up` of the model it resolved
     (`start=False`: create without starting, which still mounts nothing yet
@@ -345,7 +363,8 @@ def compose_up_checked(
     the up has run, or DockerError before it."""
     checked = check_start(paths, project_name, component=component,
                           compose_files=compose_files, staging=staging, record=record,
-                          deploying=deploying, txn=txn, regenerated=regenerated)
+                          deploying=deploying, txn=txn, regenerated=regenerated,
+                          earlier=earlier)
     if staging:
         target = staging_target(paths, project_name)
         where = {"project_dir": target.cwd, "project_directory": target.project_directory,

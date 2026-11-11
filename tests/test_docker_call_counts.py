@@ -94,11 +94,12 @@ def test_resume(deployed) -> None:
         assert run_pause("myapp", deployed, yes=True, no_snapshot=True) == 0
     with docker_calls() as seen:
         assert run_resume("myapp", deployed, yes=True, skip_security_checks=True) == 0
-    _expect(seen, compose_config=5, docker_info=2, other=11)
+    _expect(seen, compose_config=3, docker_info=1, other=11)
 
 
-def test_restore(box, monkeypatch) -> None:
-    """Stop, start the backup service, restore into it, start everything."""
+def _restore(box, monkeypatch, while_restoring=lambda: None) -> tuple[int, DockerCalls]:
+    """Stop, start the backup service, restore into it, start everything.
+    `while_restoring` runs once the backup service is up."""
     place_bundle(box, timestamp=V1, files={
         "manifest.yml": manifest_text(backup="db-dump"),
         "dump.sh": "#!/bin/sh\n", "restore.sh": "#!/bin/sh\n"})
@@ -116,6 +117,7 @@ def test_restore(box, monkeypatch) -> None:
 
     def answer(cmd, stdout=None, **_kw):
         if cmd[:2] == ["docker", "inspect"]:
+            while_restoring()
             return "running healthy"
         if "exec" in cmd and hasattr(stdout, "write"):
             stdout.write(b"current data")   # the safety snapshot's dump
@@ -123,5 +125,43 @@ def test_restore(box, monkeypatch) -> None:
 
     FakeSystemContainer(box, handler=age).install(monkeypatch)
     with patch("boxmunge.commands.restore.time.sleep"), docker_calls(answer) as seen:
-        assert run_restore("myapp", box, snapshot=SNAPSHOT, yes=True) == 0
-    _expect(seen, compose_config=6, docker_info=3, other=13)
+        return run_restore("myapp", box, snapshot=SNAPSHOT, yes=True), seen
+
+
+def test_restore(box, monkeypatch) -> None:
+    rc, seen = _restore(box, monkeypatch)
+    assert rc == 0
+    _expect(seen, compose_config=2, docker_info=1, other=13)
+
+
+# -- one check, later starts: what changed in between is still refused --------
+
+def _rewrite_compose(paths) -> None:
+    compose = paths.project_dir("myapp") / "compose.yml"
+    compose.write_text(compose.read_text() + "    privileged: true\n")
+
+
+def test_a_file_changed_while_restore_ran_the_backup_service_refuses_the_last_start(
+        box, monkeypatch, capsys) -> None:
+    """The backup service's container runs between restore's check and its
+    last start. That start runs on the check only while every file is as
+    the check read it; here it checks in full and refuses."""
+    rc, seen = _restore(box, monkeypatch, while_restoring=lambda: _rewrite_compose(box))
+    assert rc == 1
+    assert "Refused to start myapp" in capsys.readouterr().err
+    assert len(seen.other_matching("compose", " up ")) == 1     # the backup service's
+
+
+def test_a_file_changed_during_resumes_pull_refuses_the_start(deployed, capsys) -> None:
+    with docker_calls():
+        assert run_pause("myapp", deployed, yes=True, no_snapshot=True) == 0
+
+    def pull_window(*_a, **_k):
+        _rewrite_compose(deployed)
+        return {}
+
+    with patch("boxmunge.commands.resume_cmd._services_to_pull", pull_window), \
+            docker_calls() as seen:
+        assert run_resume("myapp", deployed, yes=True) == 1
+    assert "Refused to start myapp" in capsys.readouterr().err
+    assert not seen.other_matching("compose", " up ")
