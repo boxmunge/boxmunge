@@ -406,12 +406,14 @@ See `agent-help writable` and `PROJECT_CONVENTIONS.md` for the schema reference.
   beside the original and renames it over it, and on any failure leaves the original and alerts. Before a
   rollback swaps back, the release being rolled back from tears down every staged release
   (`staging-teardown-all`), since an older release does not know `.releases/staged/`.
-- Stages left by boxmunge 0.10.1 (`legacy_stage.py`, the only code that knows the old layout): 0.10.1 staged
-  into the project directory (`.releases/prestage/` held production's release, `state/staging/<project>.json`
-  recorded the stage). Such a project is detected read-only, left exactly as it is by the upgrade, refused for
-  every start and lifecycle command, backed up with the manifest of the release its containers run, and
-  resolved by `boxmunge-server legacy-stage <project>` (see OPERATIONS.md, "Upgrading from 0.10.1 with a
-  release staged"). `state/legacy-stages.json` dedupes its daily alert and records a started resolution.
+- Stages left by boxmunge 0.10.1 or earlier (`unresolved_stage.py`, the only code that knows the old layout,
+  read-only): those releases staged into the project directory (`.releases/prestage/` held production's
+  release, `state/staging/<project>.json` recorded the stage), and 0.11.0 to 0.11.6 resolve such a stage with
+  `legacy-stage`, recording it in `state/legacy-stages.json`. This release has no code that handles one: the
+  upgrade's dry run, and the apply before it touches a project, refuse while any project holds one or awaits
+  a deploy after a discard, naming each project and the command the release the box still runs accepts (see
+  OPERATIONS.md, "Upgrading with a release staged by 0.10.1 or earlier"). The check is skipped on a box
+  that already runs 0.11.7 or later.
 
 ## CVE Policy Module
 
