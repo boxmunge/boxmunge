@@ -33,7 +33,9 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from boxmunge.compose_build import local_build_inputs
-from boxmunge.compose_mounts import host_path_forms, is_bind_entry, volume_source
+from boxmunge.compose_mounts import (
+    file_entries, path_within, project_rel, service_bind_entries,
+)
 
 # Project entries boxmunge reads or runs, relative to the project directory.
 # repo/.git, not repo/: git runs hooks from it on the next deploy's fetch.
@@ -48,7 +50,9 @@ CONTROL_ENTRIES: tuple[str, ...] = (
 
 
 def _within(path: str, root: str) -> bool:
-    return root == "." or path == root or path.startswith(root + "/")
+    """path_within for project-relative paths, where `.` is the project
+    directory and holds them all."""
+    return root == "." or path_within(path, root)
 
 
 def _project_rels(path: str, base_dir: Path, project_dir: Path) -> set[str]:
@@ -57,23 +61,13 @@ def _project_rels(path: str, base_dir: Path, project_dir: Path) -> set[str]:
     compose file is validated, which during intake is not the project
     directory yet) is relative to it; any other one to the project dir."""
     rels: set[str] = set()
-    for form in {os.path.normpath(path), os.path.realpath(path)}:
+    for form in {os.path.abspath(path), os.path.realpath(path)}:
         for root in (base_dir, project_dir):
-            for spelling in {os.path.normpath(root), os.path.realpath(root)}:
-                if form == spelling or form.startswith(spelling + "/"):
-                    rels.add(os.path.relpath(form, spelling))
-                    break
-            else:
-                continue
-            break
+            rel = project_rel(form, root, literal=True)
+            if rel is not None:
+                rels.add(rel)
+                break
     return rels
-
-
-def _read_only(entry: Any) -> bool:
-    if isinstance(entry, dict):
-        return entry.get("read_only") is True
-    parts = entry.split(":")
-    return len(parts) >= 3 and "ro" in parts[2].split(",")
 
 
 def service_binds(doc: dict[str, Any], base_dir: Path) -> list[tuple[str, str, str, bool]]:
@@ -85,20 +79,12 @@ def service_binds(doc: dict[str, Any], base_dir: Path) -> list[tuple[str, str, s
     for svc_name, svc in (doc.get("services") or {}).items():
         if not isinstance(svc, dict):
             continue
-        for entry in svc.get("volumes") if isinstance(svc.get("volumes"), list) else ():
-            src = volume_source(entry)
-            if src is not None and is_bind_entry(entry):
-                binds.append((f"service {svc_name}", "bind source",
-                              host_path_forms(src, base_dir)[0], not _read_only(entry)))
+        binds += [(f"service {svc_name}", "bind source", bind.path, bind.read_write)
+                  for bind in service_bind_entries(svc_name, svc, base_dir)]
         for what, path in local_build_inputs(svc.get("build"), base_dir):
             binds.append((f"service {svc_name}", what, path, False))
-    for section in ("secrets", "configs"):
-        entries = doc.get(section)
-        for key, decl in (entries.items() if isinstance(entries, dict) else ()):
-            path = decl.get("file") if isinstance(decl, dict) else None
-            if isinstance(path, str):
-                binds.append((f"{section} {key}", "bind source",
-                              host_path_forms(path, base_dir)[0], False))
+    binds += [(f"{bind.section} {bind.name}", "bind source", bind.path, False)
+              for bind in file_entries(doc, base_dir)]
     return binds
 
 
