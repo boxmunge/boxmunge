@@ -18,18 +18,16 @@ day holds at most max_prefixes_per_day distinct prefixes, each with at most
 max_versions_per_prefix versions.
 """
 
-import atexit
 import ipaddress
 import re
 import sys
-import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
 import db
-from request_limits import utc_today
+from request_limits import FlushBuffer, utc_today
 
 RETENTION_DAYS = 90
 UNLISTED = "unlisted"
@@ -107,7 +105,7 @@ def by_prefix(db_path: Path, limit: int) -> tuple[list[dict], int]:
     return list(entries.values()), total
 
 
-class PrefixLog:
+class PrefixLog(FlushBuffer):
     """Sightings buffered in memory; written every `flush_interval` seconds,
     when `max_pending` are buffered, before the admin page reads, and at exit.
 
@@ -117,73 +115,74 @@ class PrefixLog:
     flush that drops any says so on stderr.
     """
 
+    name = "prefix-log"
+
     def __init__(self, db_path: Path, flush_interval: float, max_pending: int,
                  listed: frozenset[str], max_prefixes_per_day: int = MAX_PREFIXES_PER_DAY,
                  max_versions_per_prefix: int = MAX_VERSIONS_PER_PREFIX_PER_DAY,
                  clock: Callable[[], float] = time.monotonic,
                  today: Callable[[], date] = utc_today) -> None:
-        self.db_path, self.listed = db_path, listed
-        self.flush_interval, self.max_pending = flush_interval, max_pending
+        self.listed = listed
         self.max_prefixes_per_day = max_prefixes_per_day
         self.max_versions_per_prefix = max_versions_per_prefix
-        self._clock, self._today = clock, today
-        self._lock = threading.Lock()
+        self._today = today
         self._pending: set[tuple[str, str, str]] = set()
-        self._last_flush = clock()
-        atexit.register(self.flush)
+        super().__init__(db_path, flush_interval, max_pending, clock)
 
     def record(self, prefix: str, version: str) -> None:
         stored = version if version in self.listed else UNLISTED
+        sighting = (self._today().isoformat(), prefix, stored)
         with self._lock:
-            self._pending.add((self._today().isoformat(), prefix, stored))
-            due = (len(self._pending) >= self.max_pending
-                   or self._clock() - self._last_flush >= self.flush_interval)
+            if self._admit(sighting):
+                self._pending.add(sighting)
+            due = self._due()
         if due:
             self.flush()
 
-    def flush(self) -> None:
-        with self._lock:
-            pending, self._pending = self._pending, set()
-            self._last_flush = self._clock()
-        if not pending:
-            return
+    @staticmethod
+    def _empty() -> set:
+        return set()
+
+    @staticmethod
+    def _size(batch: set) -> int:
+        return len(batch)
+
+    def _write(self, conn, pending: set) -> int:
+        """Insert what the caps allow; returns how many sightings they dropped."""
         dropped = 0
-        conn = db.connect(self.db_path, isolation_level=None)
-        try:
-            # One write transaction, so another worker's flush cannot add
-            # rows between the count and the insert.
-            conn.execute("BEGIN IMMEDIATE")
-            known: dict[str, dict[str, set[str]]] = {}
-            rows = []
-            # Oldest version first (numeric order, unlisted last), so a cap
-            # never drops the oldest version a network reported.
-            for day, prefix, version in sorted(
-                    pending, key=lambda s: (s[0], s[1], _version_order(s[2]))):
-                if day not in known:
-                    known[day] = {}
-                    for p, v in conn.execute(
-                            "SELECT prefix, version FROM prefix_checks WHERE date = ?", (day,)):
-                        known[day].setdefault(p, set()).add(v)
-                versions = known[day].get(prefix)
-                if versions is None and len(known[day]) >= self.max_prefixes_per_day:
-                    dropped += 1
-                    continue
-                versions = known[day].setdefault(prefix, set())
-                if version not in versions and len(versions) >= self.max_versions_per_prefix:
-                    dropped += 1
-                    continue
-                versions.add(version)
-                rows.append((day, prefix, version))
-            conn.executemany("INSERT OR IGNORE INTO prefix_checks (date, prefix, version) "
-                             "VALUES (?, ?, ?)", rows)
-            conn.execute("COMMIT")
-        except BaseException:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
-            raise
-        finally:
-            conn.close()
+        known: dict[str, dict[str, set[str]]] = {}
+        rows = []
+        # Oldest version first (numeric order, unlisted last), so a cap
+        # never drops the oldest version a network reported.
+        for day, prefix, version in sorted(
+                pending, key=lambda s: (s[0], s[1], _version_order(s[2]))):
+            if day not in known:
+                known[day] = {}
+                for p, v in conn.execute(
+                        "SELECT prefix, version FROM prefix_checks WHERE date = ?", (day,)):
+                    known[day].setdefault(p, set()).add(v)
+            versions = known[day].get(prefix)
+            if versions is None and len(known[day]) >= self.max_prefixes_per_day:
+                dropped += 1
+                continue
+            versions = known[day].setdefault(prefix, set())
+            if version not in versions and len(versions) >= self.max_versions_per_prefix:
+                dropped += 1
+                continue
+            versions.add(version)
+            rows.append((day, prefix, version))
+        conn.executemany("INSERT OR IGNORE INTO prefix_checks (date, prefix, version) "
+                         "VALUES (?, ?, ?)", rows)
+        return dropped
+
+    def _committed(self, dropped: int) -> None:
         if dropped:
             print(f"prefix-log: dropped {dropped} sighting(s) beyond the daily caps "
                   f"({self.max_prefixes_per_day} prefixes, {self.max_versions_per_prefix} "
                   f"versions per prefix)", file=sys.stderr, flush=True)
+
+    def _merge(self, batch: set) -> int:
+        room = max(self.max_pending - len(self._pending), 0)
+        fresh = sorted(batch - self._pending)
+        self._pending.update(fresh[:room])
+        return max(len(fresh) - room, 0)
