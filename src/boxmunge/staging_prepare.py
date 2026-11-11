@@ -177,7 +177,7 @@ def precheck_candidate(paths: BoxPaths, project: str, manifest: dict[str, Any],
             f"ref you staged>.")
     check_dir = workspace / "staging-check"
     check_dir.mkdir()
-    write_staging_files(paths, project, manifest, tree, check_dir)
+    user_compose = write_staging_files(paths, project, manifest, tree, check_dir)
     validate_staging_base(paths, project, manifest, check_dir, tree)
     with resolving():
         staging = staging_model(staging_target_for(tree, check_dir, project))
@@ -185,8 +185,8 @@ def precheck_candidate(paths: BoxPaths, project: str, manifest: dict[str, Any],
         now = production_model(paths, project)
         if now is not None:
             productions.append(("production", now))
-        productions.append(("production after promoting this release",
-                            candidate_model(paths, project, tree, manifest, check_dir)))
+        productions.append(("production after promoting this release", candidate_model(
+            paths, project, tree, manifest, check_dir, user_compose=user_compose)))
     _refuse_shared(paths, project, staging, tree, productions)
     if copy_sources(manifest) is None:  # with copy_data, the plan says (after the swap)
         require_staging_files(staging, paths.project_dir(project), set())

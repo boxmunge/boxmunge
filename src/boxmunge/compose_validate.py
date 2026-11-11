@@ -374,13 +374,15 @@ def validate_user_compose(
         )
 
     # File references are checked on the literal files, everything else on the model.
-    references, read_files = compose_references.walk_references(compose_path, roots, base=base_dir)
+    references, read_files, sources = compose_references.walk_sources(
+        compose_path, roots, base=base_dir, parsed=doc)
     if references:
         raise ComposeSecurityError(f"{references[0]} Then upload the fixed release and "
                                    f"deploy it: prod-deploy {project_name}.")
     try:
         doc = compose_resolve.resolve_compose_config(
-            compose_path, project_name, project_directory=project_directory)
+            compose_path, project_name, project_directory=project_directory,
+            sources=sources)
     except compose_resolve.ComposeResolveError as e:
         raise ComposeSecurityError(f"could not resolve compose.yml: {e}") from e
     services = doc.get("services") or {}

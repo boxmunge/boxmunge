@@ -26,7 +26,7 @@ import yaml
 
 from boxmunge import docker
 from boxmunge.compose_mounts import has_env_substitution, host_path_forms, outside_roots
-from boxmunge.compose_references import entry_base, env_file_paths, include_entries
+from boxmunge.compose_references import ComposeSources, env_file_paths, walk_sources
 from boxmunge.fs_nofollow import open_dir_beneath
 
 
@@ -35,15 +35,16 @@ class ComposeResolveError(Exception):
 
 
 @contextmanager
-def _missing_env_files_present(compose_path: Path, base: Path | None = None) -> Iterator[None]:
+def _missing_env_files_present(written: dict[str, Any] | None, base: Path) -> Iterator[None]:
     """Make absent in-project service env files exist while Compose resolves.
+    ``written`` is the compose file as written (None: it cannot be read).
 
     A bundle is validated in an extraction directory, where on-box files such
     as secrets.env do not exist, and Compose versions older than the one
     this was last probed on (5.1.3 resolves without them) refuse a model
     whose env_file is missing, even with --no-env-resolution: CI's did. Each
     missing env file that stays inside ``base`` (the directory Compose
-    resolves relative paths against, by default the compose file's), in a
+    resolves relative paths against), in a
     directory that already exists with no link on the way from ``base``, is
     created empty for the duration of the call and removed afterwards. No
     directory is ever made: root resolves at every start check, in a tree
@@ -53,12 +54,8 @@ def _missing_env_files_present(compose_path: Path, base: Path | None = None) -> 
     carries secrets.env is refused.
     """
     created: list[tuple[int, str]] = []
-    base = base or compose_path.parent
-    try:
-        doc = yaml.safe_load(compose_path.read_text())
-    except (OSError, yaml.YAMLError):
-        doc = None  # Compose reports the real problem when it resolves.
-    services = doc.get("services") if isinstance(doc, dict) else None
+    # Unreadable: Compose reports the real problem when it resolves.
+    services = written.get("services") if written is not None else None
     try:
         for svc in (services.values() if isinstance(services, dict) else []):
             if not isinstance(svc, dict):
@@ -120,37 +117,35 @@ def _parse_config(out: str) -> dict[str, Any]:
     return doc
 
 
-def _literal_service_names(path: Path, root: Path, seen: set[tuple[Path, Path]],
-                           base: Path | None = None) -> set[str]:
-    """Service names a compose file and the files it includes declare.
-    ``base`` resolves the file's relative paths (see compose_references.entry_base)."""
-    base = base or path.parent
-    if (path, base) in seen or not path.is_file():
-        return set()
-    seen.add((path, base))
+def _as_written(compose_path: Path, cwd: Path) -> tuple[list[str], ComposeSources | None]:
+    """What the reference walk refuses, and the compose files as written,
+    for a caller that has not walked them (validate_user_compose has, and
+    passes its walk's). A path outside ``cwd`` is not among the refusals:
+    validation's walk has a second root, the project directory a release
+    elsewhere is installed in, which this one is not told. No files when
+    one cannot be read: Compose reports the real problem when it resolves."""
     try:
-        doc = yaml.safe_load(path.read_text())
-    except yaml.YAMLError:
-        return set()  # Compose reports the real problem when it resolves.
-    if not isinstance(doc, dict):
-        return set()
-    services = doc.get("services")
-    names = set(services) if isinstance(services, dict) else set()
-    for name in names:
-        if not isinstance(name, str):
-            raise ComposeResolveError(
-                f"{path.name}: service name {name!r} is not text to boxmunge's "
-                f"YAML reader, which (YAML 1.1) reads unquoted on/off/yes/no as "
-                f"booleans and bare digits as numbers, while Compose reads the "
-                f"name as text. Quote the service name (for example 'on':) or "
-                f"rename the service."
-            )
-    for compose_paths, _extra in include_entries(doc):
-        new_base = entry_base(compose_paths, base)
-        for ref in compose_paths if new_base is not None else []:
-            if isinstance(ref, str) and not outside_roots(ref, base, (root,)):
-                names |= _literal_service_names(
-                    Path(host_path_forms(ref, base)[0]), root, seen, new_base)
+        problems, _, sources = walk_sources(compose_path, (cwd,), base=cwd)
+    except OSError:
+        return [], None
+    return [problem for problem in problems if problem not in sources.outside], sources
+
+
+def _declared_services(sources: ComposeSources) -> set[str]:
+    """Service names the project's compose files declare: the top file and
+    the files it includes."""
+    names: set[str] = set()
+    for path in sources.project_files:
+        for name in sources.services(path):
+            if not isinstance(name, str):
+                raise ComposeResolveError(
+                    f"{path.name}: service name {name!r} is not text to boxmunge's "
+                    f"YAML reader, which (YAML 1.1) reads unquoted on/off/yes/no as "
+                    f"booleans and bare digits as numbers, while Compose reads the "
+                    f"name as text. Quote the service name (for example 'on':) or "
+                    f"rename the service."
+                )
+            names.add(name)
     return names
 
 
@@ -184,9 +179,13 @@ def declared_read_only(compose_path: Path) -> dict[str, bool]:
         raise ComposeResolveError(f"cannot read {compose_path.name} as written: {e}") from e
     if not isinstance(doc, dict):
         raise ComposeResolveError(f"{compose_path.name}: top level must be a mapping")
-    services = doc.get("services") or {}
+    return _read_only_of(compose_path.name, doc)
+
+
+def _read_only_of(file_name: str, written: dict[str, Any]) -> dict[str, bool]:
+    services = written.get("services") or {}
     if not isinstance(services, dict):
-        raise ComposeResolveError(f"{compose_path.name}: 'services' must be a mapping")
+        raise ComposeResolveError(f"{file_name}: 'services' must be a mapping")
     declared: dict[str, bool] = {}
     for name, svc in services.items():
         if not isinstance(svc, dict) or "read_only" not in svc:
@@ -194,7 +193,7 @@ def declared_read_only(compose_path: Path) -> dict[str, bool]:
         value = svc["read_only"]
         if not isinstance(value, bool):
             raise ComposeResolveError(
-                f"{compose_path.name}: service {name!r} has read_only: {value!r}, "
+                f"{file_name}: service {name!r} has read_only: {value!r}, "
                 f"which is not a boolean. Write an unquoted true or false "
                 f"(boxmunge does not guess what an interpolated or quoted "
                 f"value means)."
@@ -203,24 +202,30 @@ def declared_read_only(compose_path: Path) -> dict[str, bool]:
     return declared
 
 
-def restore_read_only_false(model: dict[str, Any], compose_path: Path) -> None:
-    """Put each `read_only: false` the file declares back into the resolved
-    model, in place. The user's literal value wins over the model."""
+def restore_read_only_false(model: dict[str, Any], declared: dict[str, bool]) -> None:
+    """Put each `read_only: false` the file declares (declared_read_only)
+    back into the resolved model, in place. The user's literal value wins
+    over the model."""
     services = model.get("services")
     if not isinstance(services, dict):
         return
-    for name, value in declared_read_only(compose_path).items():
+    for name, value in declared.items():
         svc = services.get(name)
         if value is False and isinstance(svc, dict):
             svc["read_only"] = False
 
 
 def resolve_compose_config(compose_path: Path, project_name: str, *,
-                           project_directory: Path | None = None) -> dict[str, Any]:
+                           project_directory: Path | None = None,
+                           sources: ComposeSources | None = None) -> dict[str, Any]:
     """Return the fully resolved compose model for one compose file, with
     every profile: validation and the overlay cover profiled services too.
     ``project_directory`` resolves a compose file kept beside the release
-    it describes (staging's base, in the slot).
+    it describes (staging's base, in the slot). ``sources`` are the files
+    as a reference walk from ``compose_path`` parsed them, where the caller
+    has run one; they are walked here otherwise, and what that walk refuses
+    is raised (_as_written): validation refuses it first, and a walk that
+    stopped short of a file Compose read has not counted that file's services.
 
     `read_only: false` is restored from the literal file (see above).
 
@@ -230,8 +235,12 @@ def resolve_compose_config(compose_path: Path, project_name: str, *,
     cwd = project_directory or compose_path.parent
     files = [str(compose_path)] if project_directory else [compose_path.name]
     extra = {"project_directory": project_directory} if project_directory else {}
+    unwalked: list[str] = []
+    if sources is None:
+        unwalked, sources = _as_written(compose_path, cwd)
+    written = sources.documents.get(compose_path) if sources is not None else None
     try:
-        with _missing_env_files_present(compose_path, cwd):
+        with _missing_env_files_present(written, cwd):
             out = docker.compose_config(cwd, files, project_name=project_name,
                                         all_profiles=True, **extra)
     except docker.DockerError as e:
@@ -239,8 +248,15 @@ def resolve_compose_config(compose_path: Path, project_name: str, *,
             f"`docker compose config` could not resolve {compose_path.name}: {e}"
         ) from e
     model = _parse_config(out)
+    if sources is None or written is None:
+        raise ComposeResolveError(
+            f"cannot read {compose_path.name} as written: Compose resolved it, but "
+            f"boxmunge's YAML reader cannot parse it, so the services it declares "
+            f"cannot be checked against the model")
+    if unwalked:
+        raise ComposeResolveError(unwalked[0])
     resolved = model.get("services")
-    missing = _literal_service_names(compose_path, cwd, set(), cwd) - {
+    missing = _declared_services(sources) - {
         str(name) for name in (resolved if isinstance(resolved, dict) else ())}
     if missing:
         raise ComposeResolveError(
@@ -249,7 +265,7 @@ def resolve_compose_config(compose_path: Path, project_name: str, *,
             f"hardened. Upgrade Docker Compose (it must resolve every profile), "
             f"or remove the services."
         )
-    restore_read_only_false(model, compose_path)
+    restore_read_only_false(model, _read_only_of(compose_path.name, written))
     return model
 
 
@@ -282,7 +298,7 @@ def resolve_deployed_config(
         ) from e
     model = _parse_config(out)
     if user_compose is not None:
-        restore_read_only_false(model, user_compose)
+        restore_read_only_false(model, declared_read_only(user_compose))
     return model
 
 

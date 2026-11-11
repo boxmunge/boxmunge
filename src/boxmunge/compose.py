@@ -370,7 +370,9 @@ def prepare_compose_override(
     services = _user_services(user_compose)
     build_services = {name: svc.get("image") for name, svc in services.items()
                       if isinstance(svc, dict) and svc.get("build") is not None}
-    named = built_images.name_running_builds(project_name, build_services)
+    # No build service has no container whose image wants a name.
+    named = built_images.name_running_builds(project_name, build_services) \
+        if build_services else []
     if named:
         log_operation(component, f"named the images {project_name}'s containers run: "
                       f"{', '.join(describe_image(n) for n in named)}", paths,
