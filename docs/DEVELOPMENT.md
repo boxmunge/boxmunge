@@ -174,6 +174,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `overlay_users.py` | `_overlay_users` | the generated compose overlay | `projects/<p>/` |
 | `upgrade_state.py` | `_read_json` | `probation.json`, `blocklist.json` | `upgrade-state/` |
 | `health_checks/upgrade_slot.py` | `check_upgrade_slot` | `active-slot` | `upgrade-state/` |
+| `commands/quarantine_gate.py` | `lift_after_deploy` | `<p>.conf`, the site a lift republishes (capped at the size of a site file) | `caddy/sites/` |
 
 These open a no-follow, non-blocking descriptor themselves (`open_regular_nofollow` or
 `open_resolved_nofollow`, read-only) and read from it, so each sets its own bound:
