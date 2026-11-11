@@ -171,7 +171,8 @@ def test_references_inside_project_accepted(paths: BoxPaths) -> None:
 # ---------------------------------------------------------------------------
 
 def test_overlay_reads_services_from_resolved_model(paths: BoxPaths, monkeypatch) -> None:
-    compose = _project(paths, {"compose.yml": {"include": ["parts/db.yml"], "services": {}}})
+    compose = _project(paths, {"compose.yml": {"include": ["parts/db.yml"], "services": {}},
+                               "parts/db.yml": {"services": {"db": {"image": "postgres"}}}})
     resolved = _resolved_service()
     resolved["services"]["db"] = {"image": "postgres"}
     _resolved_as(monkeypatch, resolved)
@@ -283,3 +284,48 @@ def test_a_file_boxmunge_cannot_parse_is_not_resolved_blind(paths: BoxPaths, mon
     _resolved_as(monkeypatch, _resolved_service())
     with pytest.raises(ComposeError, match="as written"):
         load_user_compose(compose, "myapp")
+
+
+@pytest.mark.parametrize("files, refusal", [
+    ({"compose.yml": "include: [a/one.yml]\nservices:\n  web:\n    image: nginx\n",
+      "a/one.yml": "include: [two.yml]\n", "a/two.yml": "include: [three.yml]\n",
+      "a/three.yml": "services:\n  deep:\n    image: x\n"}, "nests includes deeper"),
+    ({"compose.yml": "include:\n  - path: parts/db.yml\n    project_directory: parts\n"
+                     "services:\n  web:\n    image: nginx\n",
+      "parts/db.yml": "services:\n  db:\n    image: postgres\n"},
+     "entry sets project_directory"),
+    ({"compose.yml": "include: [parts/db.yml]\nservices:\n  web:\n    image: nginx\n",
+      "parts/db.yml": "services: [\n"}, "db.yml: cannot parse"),
+])
+def test_a_walk_that_stopped_short_is_not_resolved_on_fewer_files(
+        paths: BoxPaths, monkeypatch, files, refusal) -> None:
+    """Validation refuses each of these first. Were one to reach the
+    overlay's resolve, the walk has not read every file Compose did, so the
+    services it counted are not all the model must have: its refusal is
+    raised, not dropped."""
+    compose = _project(paths, files)
+    _resolved_as(monkeypatch, _resolved_service())
+    with pytest.raises(ComposeError, match=refusal):
+        load_user_compose(compose, "myapp")
+
+
+@pytest.mark.parametrize("named", [
+    "services:\n  web:\n    image: nginx\n    env_file: {live}/shared.env\n",
+    "include: [{live}/inc.yml]\nservices:\n  web:\n    image: nginx\n",
+], ids=["env_file", "include"])
+def test_a_release_elsewhere_may_name_a_file_in_the_project_directory(
+        paths: BoxPaths, tmp_path, monkeypatch, named) -> None:
+    """Validation walks a release that is not installed yet (a bundle being
+    diffed, a slot) with the project directory as a second root, so it
+    accepts an absolute path into it. The resolve walks the release alone:
+    that path is validation's to judge, not a walk that stopped short."""
+    live = paths.project_dir("myapp")
+    _project(paths, {"shared.env": "A=1\n", "inc.yml": {"services": {"db": {"image": "x"}}}})
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "compose.yml").write_text(named.format(live=live))
+    resolved = _resolved_service()
+    resolved["services"]["db"] = {"image": "x"}
+    _resolved_as(monkeypatch, resolved)
+    _validate(release / "compose.yml", paths)
+    assert "web" in load_user_compose(release / "compose.yml", "myapp")["services"]

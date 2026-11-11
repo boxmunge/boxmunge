@@ -117,15 +117,18 @@ def _parse_config(out: str) -> dict[str, Any]:
     return doc
 
 
-def _as_written(compose_path: Path, cwd: Path) -> ComposeSources | None:
-    """The compose files as written, for a caller that has not walked them
-    (validate_user_compose has, and passes its walk's). What the walk
-    refuses is validation's to report. None when a file cannot be read:
-    Compose reports the real problem when it resolves."""
+def _as_written(compose_path: Path, cwd: Path) -> tuple[list[str], ComposeSources | None]:
+    """What the reference walk refuses, and the compose files as written,
+    for a caller that has not walked them (validate_user_compose has, and
+    passes its walk's). A path outside ``cwd`` is not among the refusals:
+    validation's walk has a second root, the project directory a release
+    elsewhere is installed in, which this one is not told. No files when
+    one cannot be read: Compose reports the real problem when it resolves."""
     try:
-        return walk_sources(compose_path, (cwd,), base=cwd)[2]
+        problems, _, sources = walk_sources(compose_path, (cwd,), base=cwd)
     except OSError:
-        return None
+        return [], None
+    return [problem for problem in problems if problem not in sources.outside], sources
 
 
 def _declared_services(sources: ComposeSources) -> set[str]:
@@ -220,7 +223,9 @@ def resolve_compose_config(compose_path: Path, project_name: str, *,
     ``project_directory`` resolves a compose file kept beside the release
     it describes (staging's base, in the slot). ``sources`` are the files
     as a reference walk from ``compose_path`` parsed them, where the caller
-    has run one; they are walked here otherwise.
+    has run one; they are walked here otherwise, and what that walk refuses
+    is raised (_as_written): validation refuses it first, and a walk that
+    stopped short of a file Compose read has not counted that file's services.
 
     `read_only: false` is restored from the literal file (see above).
 
@@ -230,8 +235,9 @@ def resolve_compose_config(compose_path: Path, project_name: str, *,
     cwd = project_directory or compose_path.parent
     files = [str(compose_path)] if project_directory else [compose_path.name]
     extra = {"project_directory": project_directory} if project_directory else {}
+    unwalked: list[str] = []
     if sources is None:
-        sources = _as_written(compose_path, cwd)
+        unwalked, sources = _as_written(compose_path, cwd)
     written = sources.documents.get(compose_path) if sources is not None else None
     try:
         with _missing_env_files_present(written, cwd):
@@ -247,6 +253,8 @@ def resolve_compose_config(compose_path: Path, project_name: str, *,
             f"cannot read {compose_path.name} as written: Compose resolved it, but "
             f"boxmunge's YAML reader cannot parse it, so the services it declares "
             f"cannot be checked against the model")
+    if unwalked:
+        raise ComposeResolveError(unwalked[0])
     resolved = model.get("services")
     missing = _declared_services(sources) - {
         str(name) for name in (resolved if isinstance(resolved, dict) else ())}

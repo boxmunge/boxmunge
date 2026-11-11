@@ -84,6 +84,7 @@ class _ReferenceWalk:
     def __init__(self, roots: tuple[Path, ...]) -> None:
         self.roots = roots
         self.problems: list[str] = []
+        self.outside: list[str] = []  # those of the problems that depend on the roots
         self.files: list[Path] = []
         self.documents: dict[Path, dict[str, Any]] = {}  # each compose file, parsed once
         self.project_files: list[Path] = []  # the top file and its includes
@@ -115,11 +116,12 @@ class _ReferenceWalk:
             return False
         if outside:
             norm, _ = host_path_forms(ref, base)
-            self.problems.append(
+            self.outside.append(
                 f"{what} {ref!r} resolves to {norm}, outside the project "
                 f"directory. Keep every compose, extends, include, env_file and "
                 f"label_file path inside the project."
             )
+            self.problems.append(self.outside[-1])
             return False
         if read:
             self.files.append(Path(host_path_forms(ref, base)[0]))
@@ -241,7 +243,7 @@ def walk_sources(
         walk.documents[compose_path] = parsed
     walk.visit(compose_path, base)
     return walk.problems, walk.files, ComposeSources(
-        walk.documents, walk.project_files, walk.extends)
+        walk.documents, walk.project_files, walk.extends, tuple(walk.outside))
 
 
 def walk_references(
@@ -258,10 +260,12 @@ class ComposeSources:
     them: ``documents`` holds every one it could parse (top file, includes,
     extends files), ``project_files`` those whose services the project has
     (the top file and its includes), ``extends`` each service's `extends`
-    parent."""
+    parent, ``outside`` those of the walk's problems that are a path outside
+    its roots (a walk with other roots may not have them)."""
     documents: dict[Path, dict[str, Any]]
     project_files: list[Path]
     extends: dict[tuple[Path, str], tuple[Path, str]]
+    outside: tuple[str, ...]
 
     def services(self, path: Path) -> dict[str, Any]:
         services = self.documents.get(path, {}).get("services")
