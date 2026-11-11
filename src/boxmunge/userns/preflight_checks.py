@@ -12,14 +12,14 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from boxmunge.compose_images import image_phrase
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.paths import BoxPaths
 from boxmunge.userns.daemon_config import (
     DEFAULT_DATA_ROOT, DEFAULT_NAMESPACE, MANAGED_CONTAINERD, SYSTEM_CONTAINERD,
 )
-from boxmunge.userns.images import high_ids_refusal
-from boxmunge.userns.inventory import CONTAINERD_STORE, Inventory, outermost
-from boxmunge.userns.layers import image_high_ids
+from boxmunge.userns.inventory import CONTAINERD_STORE, ImageEntry, Inventory, outermost
+from boxmunge.userns.layers import LayerScanError, image_high_ids
 from boxmunge.userns.shift import Direction, scan_tree
 from boxmunge.userns.walk import closed_to_other
 
@@ -151,10 +151,13 @@ def volumes(inv: Inventory, r: Report, *, forward: bool) -> None:
                 f"docker volume rm {v.name}")
 
 
-def images(inv: Inventory, r: Report, *, scan: bool) -> None:
-    """`scan`: stream every carried image (one `docker save` each) for ids
-    above 65535, as --check does. The migration itself reads them from the
-    tars it saves (images.save_all), and passes False."""
+def _names(img: ImageEntry) -> str:
+    """An image's tags (or, untagged, its digest references) as the
+    operator reads them: `image <ref>`, or a built image's description."""
+    return ", ".join(image_phrase(ref) for ref in (img.tags or img.refs))
+
+
+def images(inv: Inventory, r: Report) -> None:
     loose = [img.id[7:19] for img in inv.images if not img.carried]
     if loose:
         r.notes.append(f"{len(loose)} image(s) with no tag that no container runs are not "
@@ -167,9 +170,15 @@ def images(inv: Inventory, r: Report, *, scan: bool) -> None:
             r.notes.append(f"{', '.join(img.refs)}: pulled again by digest once its layers are "
                            f"loaded (docker load keeps no digests); its registry must answer "
                            f"during the downtime")
-        problem = high_ids_refusal(img, lambda: image_high_ids(img.id)) if scan else None
-        if problem:
-            r.refusals.append(problem)
+        try:
+            high = image_high_ids(img.id)
+        except LayerScanError as e:
+            r.refusals.append(f"{_names(img)}: {e}")
+            continue
+        if high:
+            r.refusals.append(f"{_names(img)} has files owned by ids above 65535 "
+                              f"({', '.join(high[:5])}), which a remapped daemon cannot load. "
+                              f"Rebuild or replace it and redeploy")
 
 
 def registries(inv: Inventory, r: Report) -> None:

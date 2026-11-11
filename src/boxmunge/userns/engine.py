@@ -103,8 +103,7 @@ def _phase0(paths: BoxPaths, j: Journal | None, timers: TimerControl,
     inv = take_inventory(paths)
     if j is not None and j.inventory:
         inv = inv.with_running_from(Inventory.from_json(j.inventory))
-    report = preflight(paths, inv, direction=FORWARD, offset=s, images_dir=images_dir,
-                       scan_images=False)  # save_all reads the tars it writes instead
+    report = preflight(paths, inv, direction=FORWARD, offset=s, images_dir=images_dir)
     print(report.text())
     if not report.ok:
         raise PreflightRefused(report)
@@ -247,7 +246,7 @@ def migrate(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,
         try:
             j.failed = None
             if not j.reached("switched"):
-                save_all(inv.images, j, images_dir, save, refuse_high_ids=True)
+                save_all(inv.images, j, images_dir, save)
                 if not j.reached("prepared"):
                     _prepare(paths, j, inv, save)
                 disk_before_downtime(inv, images_dir)
