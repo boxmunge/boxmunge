@@ -211,3 +211,75 @@ def test_quoted_yaml_keyword_service_name_accepted(paths: BoxPaths) -> None:
     compose = project_dir / "compose.yml"
     compose.write_text("services:\n  'on':\n    image: nginx\n")
     _validate(compose, paths)
+
+
+# ---------------------------------------------------------------------------
+# One walk reads the files as written; resolution works from what it parsed
+# ---------------------------------------------------------------------------
+
+def _yaml_reads(monkeypatch) -> list[str]:
+    """The first line of every document boxmunge (not a test double) parses."""
+    import sys
+    reads: list[str] = []
+    real = yaml.safe_load
+
+    def counted(stream):
+        if sys._getframe(1).f_globals.get("__name__", "").startswith("boxmunge"):
+            reads.append(str(stream).splitlines()[0] if str(stream).strip() else "")
+        return real(stream)
+
+    monkeypatch.setattr(yaml, "safe_load", counted)
+    return reads
+
+
+_INCLUDING = {
+    "compose.yml": "# top\ninclude: [parts/db.yml]\nservices:\n  web:\n"
+                   "    extends: {file: base.yml, service: app}\n    read_only: false\n",
+    "parts/db.yml": "# db\nservices:\n  db:\n    image: postgres\n",
+    "base.yml": "# base\nservices:\n  app:\n    image: nginx\n",
+}
+
+
+def _including_model() -> dict:
+    resolved = _resolved_service()
+    resolved["services"]["db"] = {"image": "postgres"}
+    return resolved
+
+
+def test_validation_parses_each_compose_file_once(paths: BoxPaths, monkeypatch) -> None:
+    """The top file was parsed five times a validation: for the top-level
+    checks, the reference walk, the env file stand-ins, the service names
+    the model must have, and `read_only`."""
+    compose = _project(paths, _INCLUDING)
+    _resolved_as(monkeypatch, _including_model())
+    reads = _yaml_reads(monkeypatch)
+    _validate(compose, paths)
+    assert sorted(reads) == ["# base", "# db", "# top"]
+
+
+def test_the_overlays_model_parses_each_compose_file_once(paths: BoxPaths, monkeypatch) -> None:
+    compose = _project(paths, _INCLUDING)
+    _resolved_as(monkeypatch, _including_model())
+    reads = _yaml_reads(monkeypatch)
+    model = load_user_compose(compose, "myapp")
+    assert sorted(reads) == ["# base", "# db", "# top"]
+    assert model["services"]["web"]["read_only"] is False
+
+
+def test_an_included_files_service_missing_from_the_model_fails_closed(
+        paths: BoxPaths, monkeypatch) -> None:
+    compose = _project(paths, _INCLUDING)
+    _resolved_as(monkeypatch, _resolved_service())
+    with pytest.raises(ComposeSecurityError, match="left out service.s. db"):
+        _validate(compose, paths)
+    with pytest.raises(ComposeError, match="left out service.s. db"):
+        load_user_compose(compose, "myapp")
+
+
+def test_a_file_boxmunge_cannot_parse_is_not_resolved_blind(paths: BoxPaths, monkeypatch) -> None:
+    """Compose resolved it, boxmunge's reader cannot say what it declares:
+    the services the model must have, and `read_only: false`, are unknown."""
+    compose = _project(paths, {"compose.yml": "services: [\n"})
+    _resolved_as(monkeypatch, _resolved_service())
+    with pytest.raises(ComposeError, match="as written"):
+        load_user_compose(compose, "myapp")

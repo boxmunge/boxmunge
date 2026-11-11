@@ -157,7 +157,9 @@ def test_model_check_refuses_what_a_diverging_walk_would_miss(
     """Belt and braces: with the literal walk blinded, the env_file real
     Compose resolves outside the project is still refused."""
     compose = _write(box.project_dir("evil"), ESCAPES["path list env_file"][0])
-    monkeypatch.setattr(compose_references, "walk_references", lambda *a, **kw: ([], []))
+    walk = compose_references.walk_sources
+    monkeypatch.setattr(compose_references, "walk_sources",
+                        lambda *a, **kw: ([], [], walk(*a, **kw)[2]))
     with pytest.raises(ComposeSecurityError, match=r"env_file .*victim/secrets.env.*outside"):
         validate_user_compose(compose, box, project_name="evil")
 
