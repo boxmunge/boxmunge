@@ -134,17 +134,6 @@ def test_staging_follow_streams_the_slot(box) -> None:
     assert kw["service"] == "web"
 
 
-def test_staging_logs_of_a_0_10_1_stage_read_the_project_dir(box) -> None:
-    pdir = box.project_dir("myapp")
-    (pdir / "compose.boxmunge-staging.yml").write_text("services: {}\n")
-    rc, cap, _ = _run(["myapp", "--staging"])
-    assert rc == 0
-    kw = cap.call_args.kwargs
-    assert kw["project_name"] == "myapp-staging"
-    assert kw["compose_files"] == ["compose.yml", "compose.boxmunge-staging.yml"]
-    assert cap.call_args.args[0] == pdir
-
-
 def test_staging_logs_with_nothing_staged_name_the_way_on(box, capsys) -> None:
     rc, cap, _ = _run(["myapp", "--staging"])
     assert rc == 1

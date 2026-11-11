@@ -134,8 +134,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Full history: the scope step compares with the base, and
-          # test_legacy_upgrade.py installs 0.10.1 from `git archive v0.10.1`.
+          # Full history: the scope step compares with the base.
           fetch-depth: 0
       - name: Can this change affect the Docker tests?
         id: scope

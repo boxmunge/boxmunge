@@ -8,8 +8,7 @@ v0.10.1 release tarball with `boxmunge server-setup --local-bundle`, deploys
 v1 of a small busybox project, then runs its steps in order over ssh: each is
 (description, user, command, expected exit code[, text a refusal must print]).
 `deploy` steps go through the deploy shell; `root` steps run with sudo as
-supervisor (operator-only commands such as legacy-stage run as root via
-boxmunge-server).
+supervisor.
 
 The beta is this tree's `make bundle`, relabelled as release BETA_VERSION
 and reached by 0.10.1's own upgrade shim (`boxmunge-upgrade target`): on the
@@ -19,8 +18,7 @@ the shim does (sha256sum -c, pip with hashes, dry-run, stash, swap,
 install.sh, apply, probation) is real.
 
 Usage:
-    ./tests/vm/vm-staging.py <scenario>   # discard | keep-then-rollback |
-                                          # hotfix-during-stage | probation-rollback
+    ./tests/vm/vm-staging.py <scenario>   # hotfix-during-stage | probation-rollback
     ./tests/vm/vm-staging.py teardown     # kill a VM left from a failed run
 
 Manual, like vm-test.py: not run in CI. On failure the VM is left running.
@@ -54,8 +52,7 @@ REFS = {"v1": "2026-10-16T09", "v2": "2026-10-16T10", "v1_hotfix": "2026-10-16T1
 LABELS = {"v1": "v1", "v2": "v2", "v1_hotfix": "v1-hotfix"}
 HOURS = {"v1": "09", "v2": "10", "v1_hotfix": "11"}
 SHIM = "/opt/boxmunge/bin/boxmunge-upgrade"
-IDS = {"vmstage": "01VMSTAGE00000000000000001", "vmstage2": "01VMSTAGE00000000000000002",
-       "vmgit": "01VMSTAGE00000000000000003"}
+IDS = {"vmstage": "01VMSTAGE00000000000000001", "vmgit": "01VMSTAGE00000000000000003"}
 UPLOADED = '"$(getent passwd supervisor | cut -d: -f6)/vm-staging"'
 
 # Probation is ended or failed the way tests/shim does it: through its state
@@ -82,51 +79,7 @@ def no_staging(project: str) -> str:
     return f'test -z "$(docker ps -aq --filter label=com.docker.compose.project={project}-staging)"'
 
 
-def stage_and_recreate(project: str) -> list[tuple[str, str, str, int]]:
-    """A 0.10.1 stage whose production was started from the staged files, the
-    way 0.10.1's resume does it (from the project dir)."""
-    return [(f"0.10.1 stages {project} v2", "deploy", f"stage {project} --ref {{v2}}", 0),
-            (f"0.10.1 pauses {project}", "deploy", f"pause {project} --yes", 0),
-            (f"0.10.1 resumes {project} from the staged files", "deploy",
-             f"resume {project} --yes", 0)]
-
-
 SCENARIOS: dict[str, dict] = {
-    "discard": {"projects": ["vmstage"], "steps": [
-        ("0.10.1 stages v2", "deploy", "stage vmstage --ref {v2}", 0),
-        ("upgrade to the beta", "root", UPGRADE, 0),
-        ("the stage was left as is", "root",
-         f"{runs('vmstage', 'v1')} && {runs('vmstage-staging', 'v2')}", 0),
-        ("and recorded for its alert", "root",
-         "grep -q '\"vmstage\"' /opt/boxmunge/state/legacy-stages.json", 0),
-        ("legacy-stage refused during probation", "root",
-         "boxmunge-server legacy-stage vmstage --discard", 1, "is on probation until"),
-        ("end probation", "root", END_PROBATION, 0),
-        ("legacy-stage --discard", "root", "boxmunge-server legacy-stage vmstage --discard", 0),
-        ("production runs v1, staging is gone", "root",
-         f"{runs('vmstage', 'v1')} && {no_staging('vmstage')}", 0),
-        ("a deploy works again", "deploy", "prod-deploy vmstage --ref {v1_hotfix}", 0),
-        ("production runs the hotfix", "root", runs("vmstage", "v1-hotfix"), 0),
-    ]},
-    "keep-then-rollback": {"projects": ["vmstage", "vmstage2"], "steps": [
-        *stage_and_recreate("vmstage"),
-        *stage_and_recreate("vmstage2"),
-        ("both run the staged v2", "root",
-         f"{runs('vmstage', 'v2')} && {runs('vmstage2', 'v2')}", 0),
-        ("upgrade to the beta", "root", UPGRADE, 0),
-        ("end probation", "root", END_PROBATION, 0),
-        ("legacy-stage --keep-staged", "root",
-         "boxmunge-server legacy-stage vmstage --keep-staged", 0),
-        ("rollback", "deploy", "rollback vmstage --yes", 0),
-        ("production runs v1", "root", f"{runs('vmstage', 'v1')} && {no_staging('vmstage')}", 0),
-        ("--discard of a recreated stage needs confirming", "root",
-         "boxmunge-server legacy-stage vmstage2 --discard", 1,
-         "rerun with --discard --confirm-recreated"),
-        ("legacy-stage --discard --confirm-recreated", "root",
-         "boxmunge-server legacy-stage vmstage2 --discard --confirm-recreated", 0),
-        ("the second runs v1", "root",
-         f"{runs('vmstage2', 'v1')} && {no_staging('vmstage2')}", 0),
-    ]},
     "hotfix-during-stage": {"projects": ["vmstage"], "steps": [
         ("upgrade to the beta first", "root", UPGRADE, 0),
         ("stage v2", "deploy", "stage vmstage --ref {v2}", 0),

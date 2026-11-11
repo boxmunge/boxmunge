@@ -19,15 +19,17 @@ from boxmunge.commands.upgrade_steps import (
     ManifestMigration,
     Regeneration,
     Restart,
+    UnresolvedStages,
     UpgradeGateError,
     check_upgrade,
     git_ownership_warnings,
     restart_projects,
 )
-from boxmunge.commands.upgrade_notify import notify_locked_skips, notify_refused
+from boxmunge.commands.upgrade_notify import (
+    notify_locked_skips, notify_refused, notify_unresolved_stages,
+)
 from boxmunge.deploy_dirs import fix_command, prepare_deploy_dirs
 from boxmunge.docker import caddy_reload, DockerError
-from boxmunge.legacy_stage import staged_by
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import ManifestError
 from boxmunge.migration import MigrationError
@@ -40,18 +42,21 @@ from boxmunge.version import read_installed_version, write_installed_version, ge
 
 def _run_dry(paths: BoxPaths) -> int:
     """Pre-flight for the shim: render every project's migrated manifest and
-    configs in memory. Writes, locks and logs nothing. Returns 0 if --apply
-    would get through migration and regeneration, 1 otherwise."""
+    configs in memory. Changes and locks nothing, and logs and alerts only
+    a refusal for an unresolved stage. Returns 0 if --apply would get
+    through migration and regeneration, 1 otherwise."""
     print("boxmunge upgrade --dry-run")
     print("==========================\n")
     try:
         report = check_upgrade(paths)
     except Exception as e:
         semver, _ = parse_version_string(get_build_version())
-        print(f"  ERROR: {e}", file=sys.stderr)
-        print(f"  The upgrade shim blocklists this version after a failed dry run: once it "
-              f"is fixed, run `sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist "
-              f"{semver}` and retry.", file=sys.stderr)
+        retry = (f"The upgrade shim blocklists this version after a failed dry run: once it "
+                 f"is fixed, run `sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist "
+                 f"{semver}` and retry.")
+        print(f"  ERROR: {e}\n  {retry}", file=sys.stderr)
+        if isinstance(e, UnresolvedStages):
+            notify_unresolved_stages(paths, semver, f"{e}\n{retry}")
         return 1
     for line in report:
         print(f"  {line}")
@@ -101,11 +106,7 @@ def _migrate_regenerate_reload(
     if regen.refused:
         print("  Refused projects keep their previous configs and containers and "
               "are not restarted. Fix the cause each line names and redeploy.")
-    for name, kind in sorted(excluded.legacy.items()):
-        print(f"  LEFT AS IS: {name}: a release staged by {staged_by(kind)} ({kind}); "
-              f"resolve it with boxmunge-server legacy-stage {name}")
-    for name, why in sorted({**excluded.install, **excluded.undetermined,
-                             **excluded.unreadable}.items()):
+    for name, why in sorted({**excluded.install, **excluded.unreadable}.items()):
         print(f"  LEFT AS IS: {name}: {why}")
     if excluded.busy:
         print(f"  Skipped (busy; keeps its previous configs until its next deploy, resume "

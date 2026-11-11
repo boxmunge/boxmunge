@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
+from boxmunge import unresolved_stage
 from boxmunge.caddy import generate_caddy_config, override_refusal, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.upgrade_offline import (
@@ -27,9 +28,6 @@ from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.release_txn import InstallTxn, load_txn, stale_reason, start_refusal
 from boxmunge.docker import DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
-from boxmunge.legacy_stage import (
-    LegacyStage, awaiting_deploy_refusal, cannot_tell_left_as_is, legacy_stage, staged_by,
-)
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import (
@@ -42,10 +40,25 @@ from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.fleet import report_project_failure
 from boxmunge.paths import BoxPaths, InvalidProjectName, validate_project_name
 from boxmunge.security_overlay import services_with_off_profile
+from boxmunge.version import read_installed_version
 
 
 class UpgradeGateError(Exception):
     """A step the upgrade cannot succeed without failed; the shim rolls back."""
+
+
+class UnresolvedStages(UpgradeGateError):
+    """refuse_unresolved_stages's refusal; the dry run alerts it."""
+
+
+def refuse_unresolved_stages(paths: BoxPaths, names: list[str]) -> None:
+    """Raise, before anything is changed, while a project holds a stage
+    0.10.1 or earlier made that the release this box still runs has not
+    resolved (boxmunge.unresolved_stage): the restart would start it from
+    the staged files."""
+    refusal = unresolved_stage.refusal(paths, names, read_installed_version(paths))
+    if refusal is not None:
+        raise UnresolvedStages(refusal)
 
 
 def _project_dirs(paths: BoxPaths) -> Iterator[Path]:
@@ -68,7 +81,7 @@ def _project_dirs(paths: BoxPaths) -> Iterator[Path]:
 def require_manifest(project_dir: Path) -> Path:
     """The project's manifest.yml; ManifestError, with the fix, for a link
     whose target is missing. Only called for a project that is not excluded
-    (exclusion() reads no manifest), so a legacy stage never fails here."""
+    (exclusion() reads no manifest)."""
     path = project_dir / "manifest.yml"
     if path.is_symlink() and not path.exists():
         raise ManifestError(
@@ -78,18 +91,11 @@ def require_manifest(project_dir: Path) -> Path:
 
 
 def exclusion(paths: BoxPaths, name: str) -> (
-        LegacyStage | InstallTxn | ReleaseStateError | OSError | UnreadableRecord | None):
-    """Why the upgrade leaves `name` exactly as it is, or None: a stage left by
-    0.10.1, an OSError when it cannot be told whether one is on disk, an
-    open install, an install record this release cannot read, or a pause or
+        InstallTxn | ReleaseStateError | UnreadableRecord | None):
+    """Why the upgrade leaves `name` exactly as it is, or None: an open
+    install, an install record this release cannot read, or a pause or
     quarantine record it cannot read. Read-only; the one decision behind the
     dry run and the apply."""
-    try:
-        stage = legacy_stage(paths, name)
-    except OSError as e:
-        return e
-    if stage is not None:
-        return stage
     try:
         txn = load_txn(paths, name)
     except ReleaseStateError as e:
@@ -313,16 +319,10 @@ def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
     why = exclusion(paths, name)
     if why is None:
         return None
-    if isinstance(why, LegacyStage):
-        return (f"{name}: a release staged by {staged_by(why.kind)} ({why.kind}) will be "
-                f"left as is; after the upgrade, resolve it with boxmunge-server legacy-stage "
-                f"{name}")
     if isinstance(why, InstallTxn):
         line = f"{name}: an install ({why.ref}, {why.phase}) is open; the project will be left as is"
         unreadable = _unreadable_release_files(paths, name, why)[1]
         return line if unreadable is None else f"{line} ({unreadable})"
-    if isinstance(why, OSError):
-        return f"{name}: the project will be left as is: {cannot_tell_left_as_is(name, why)}"
     if isinstance(why, UnreadableRecord):
         return f"{name}: the project will be left as is: {why.text}"
     return f"{name}: {why}; the project will be left as is"
@@ -345,7 +345,9 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
     nothing is written, locked or logged. Raises on anything that would make
     --apply fail. Returns one report line per project."""
     report = []
-    for project_dir in _project_dirs(paths):
+    project_dirs = list(_project_dirs(paths))
+    refuse_unresolved_stages(paths, [project_dir.name for project_dir in project_dirs])
+    for project_dir in project_dirs:
         name = project_dir.name
         owner = repo_ownership_advice(project_dir)
         if owner is not None:
@@ -353,11 +355,6 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
         left = _left_as_is_line(paths, name)
         if left is not None:
             report.append(left)
-            continue
-        awaiting = awaiting_deploy_refusal(paths, name)
-        if awaiting is not None:   # the apply's check_kept_files refuses it the same way
-            report.append(f"{name}: would be refused and left on its current configs and "
-                          f"containers, not restarted: {awaiting}")
             continue
         manifest = load_manifest_as_written(require_manifest(project_dir))
         migrated = _migrated(project_dir, manifest)

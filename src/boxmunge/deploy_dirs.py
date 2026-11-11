@@ -32,10 +32,10 @@ if TYPE_CHECKING:
 
 # Under state/. health and deploy: per-project health and deploy records
 # (written by the root health timer as well as deploy-run commands); scans:
-# CVE scan results; kev: the CISA catalog cache; staging: records of a
-# release staged by 0.10.1; start-refused and project-alerts: alert
-# throttles; secrets-locks: writer locks for secrets files.
-STATE_DIRS = ("health", "deploy", "scans", "kev", "staging",
+# CVE scan results; kev: the CISA catalog cache; start-refused and
+# project-alerts: alert throttles; secrets-locks: writer locks for secrets
+# files.
+STATE_DIRS = ("health", "deploy", "scans", "kev",
               "start-refused", "project-alerts", "secrets-locks")
 # Under projects/<name>/: `security suppress` writes suppressions.yml here.
 PROJECT_DIRS = ("security",)
