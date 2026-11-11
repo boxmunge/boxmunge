@@ -3,7 +3,7 @@
 without being checked. Every call of a read helper in src/ is exercised by
 a row of test_root_state_reads.py or named in ELSEWHERE, and is listed in
 docs/DEVELOPMENT.md ("Reader and lock inventory"); a read that goes around
-the helpers changes RAW_READS. F11 was a reader none of these knew about."""
+the helpers raises a module's count past RAW_READS. F11 was a reader none of these knew about."""
 from __future__ import annotations
 
 import ast
@@ -114,7 +114,9 @@ def _goes_around_the_helpers(call: ast.Call) -> bool:
 
 # Reads that go around the helpers, counted per module, as they stood when
 # the inventory was taken (0.11.9). A baseline, not a certificate for each
-# one: the count makes a new one a decision somebody has to take.
+# one: the count makes a new one a decision somebody has to take. Only a
+# rise fails. A lower count is welcome, and the baseline may be lowered to
+# match when convenient.
 RAW_READS: dict[str, int] = {
     "api/actions/logs.py": 1, "api/dev/fixture_host.py": 3, "api/jobs.py": 2, "backup.py": 1,
     "bind_mounts.py": 1, "commands/bundle_cmd.py": 1, "commands/caddy_status.py": 1,
@@ -135,10 +137,9 @@ RAW_READS: dict[str, int] = {
 def test_no_new_read_goes_around_the_helpers() -> None:
     found = dict(Counter(module for module, _fn, call in _calls()
                          if _goes_around_the_helpers(call) and module != "fs_nofollow.py"))
-    changed = sorted(m for m in found.keys() | RAW_READS.keys()
-                     if found.get(m, 0) != RAW_READS.get(m, 0))
-    assert not changed, (
-        f"reads that go around fs_nofollow changed in {changed}. If deploy can write the "
-        "path and root may read it, read it with fs_nofollow.read_text_nofollow_or_none "
-        "and add a row to READERS in test_root_state_reads.py. Otherwise set the module's count in RAW_READS: "
-        f"{ {m: found.get(m, 0) for m in changed} }")
+    grown = sorted(m for m, count in found.items() if count > RAW_READS.get(m, 0))
+    assert not grown, (
+        f"new reads go around fs_nofollow in {grown}. If deploy can write the path and "
+        "root may read it, read it with fs_nofollow.read_text_nofollow_or_none and add a "
+        "row to READERS in test_root_state_reads.py. Otherwise set the module's count in "
+        f"RAW_READS: { {m: found[m] for m in grown} }")
