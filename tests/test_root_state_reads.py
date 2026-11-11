@@ -42,7 +42,7 @@ from boxmunge.health_checks.container_updates import check_container_updates
 from boxmunge.notify import _unconfigured_logged_recently
 from boxmunge.os_update_alert import read_os_update_state
 from boxmunge.paths import BoxPaths
-from boxmunge.project_registry import unfinished_removals
+from boxmunge.project_registry import read_registry, unfinished_removals
 from boxmunge.project_alerts import alert_state, alert_once
 from boxmunge import start_alerts
 from boxmunge.state import StateError, read_state
@@ -69,7 +69,7 @@ def _logged_unreadable(outcome: Outcome, paths: BoxPaths, value: Any) -> bool:
 class Reader:
     name: str
     path: Callable[[BoxPaths], Path]
-    record: Any                       # what a valid file there holds
+    record: Any                       # what a valid file there holds: text, or JSON of it
     read: Callable[[BoxPaths], Any]   # the reader, as root calls it
     # Whether its outcome with a dangling link at the name is the specified one.
     dangling: Callable[[Outcome, BoxPaths], bool] = _refused
@@ -168,6 +168,10 @@ READERS = [
            dangling=lambda o, _p: o == ("value", False)),
     Reader("project_alerts", lambda p: alert_state(p, P, "production-down"), {"key": {"k": 1}},
            _alerted, dangling=lambda o, p: _logged_unreadable(o, p, True)),
+    # Text, one name per line. A dangling link must not read as "no registry
+    # yet", which would rebuild it from the project directories.
+    Reader("project registry", lambda p: p.state / "projects.txt", f"{P}\n",
+           lambda p: sorted(read_registry(p).names)),
 ]
 
 
@@ -194,7 +198,7 @@ def _outcome(fn: Callable[[], Any], fifo: Path | None = None, seconds: float = 5
 
 def _write(path: Path, record: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record))
+    path.write_text(record if isinstance(record, str) else json.dumps(record))
 
 
 @pytest.fixture(params=READERS, ids=[r.name for r in READERS])
