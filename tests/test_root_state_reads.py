@@ -10,7 +10,10 @@ the same record behind a symlink must then not give the same answer, and a
 FIFO there must not block. A link whose target is gone is not "no record":
 each reader refuses it, or does what it does with a record it cannot read
 (see `dangling` on each row), never what it does when nothing is there
-(fs_nofollow.read_text_nofollow_or_none is the one existence rule)."""
+(fs_nofollow.read_text_nofollow_or_none is the one existence rule).
+
+test_root_reader_inventory.py keeps the rows complete: every call of a
+read helper in src/ is exercised by a row here or named there."""
 from __future__ import annotations
 
 import json
@@ -26,8 +29,9 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge import (
-    bind_sources, data_dirs, fs_nofollow, legacy_stage, pause, release, release_txn, run_as,
-    staged_release, upgrade_state, user_drift,
+    bind_mounts, bind_sources, compose_up_steps, data_dirs, fs_nofollow, legacy_stage,
+    legacy_stage_ops, overlay_users, pause, release, release_txn, run_as, staged_release,
+    upgrade_state, user_drift,
 )
 from boxmunge.bind_sources import read_record
 from boxmunge.blocked_update import read_blocked_state
@@ -253,6 +257,14 @@ DANGLING_ONLY: list[tuple[str, Callable[[BoxPaths], Path], Callable[[BoxPaths], 
     ("bind record control", lambda p: p.project_bind_record(P),
      lambda p: bind_sources.control_file_unchanged(p.project_dir(P), p.project_bind_record(P),
                                                    "compose.yml")),
+    ("overlay users", lambda p: p.project_compose_override(P),
+     lambda p: overlay_users._overlay_users(p.project_compose_override(P))),
+    ("overlay build names", lambda p: p.project_compose_override(P),
+     lambda p: compose_up_steps.restore_build_names(p, P, P, p.project_compose_override(P), "t")),
+    ("compose binds", lambda p: p.project_compose(P),
+     lambda p: bind_mounts._entries(p.project_compose(P), nofollow=True)),
+    ("prestage meta.json", lambda p: p.project_releases(P) / "prestage" / "meta.json",
+     lambda p: legacy_stage_ops._prestage_ref(p, P)),
 ]
 
 
@@ -332,3 +344,15 @@ def test_read_state_reports_a_link_as_a_state_error(paths, tmp_path) -> None:
 
 def test_read_state_of_a_missing_file_is_the_default(paths) -> None:
     assert read_state(paths.project_deploy_state(P), {"a": 1}) == {"a": 1}
+
+
+def test_a_refused_start_is_recorded_over_a_link(paths, tmp_path) -> None:
+    """start_alerts.record rewrites its throttle: a link at the name is
+    replaced by the record, never written or read through."""
+    path = paths.state / "start-refused" / f"{P}.json"
+    path.parent.mkdir(parents=True)
+    path.symlink_to(tmp_path / "gone.json")
+    start_alerts.record(paths, P, "r", NOW)
+    assert not path.is_symlink() and not (tmp_path / "gone.json").exists()
+    assert start_alerts.alerted_recently(paths, P, "r", NOW)
+
