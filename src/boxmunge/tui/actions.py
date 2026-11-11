@@ -6,6 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
+from boxmunge.commands.capture import capture_tool_call
 from boxmunge.commands.deploy_no_bundle import REFUSAL
 from boxmunge.paths import BoxPaths
 
@@ -46,7 +47,6 @@ def _handlers(project: str, paths: BoxPaths) -> dict[str, Callable[[], int]]:
 def run_action(action: str, project: str, paths: BoxPaths) -> Outcome:
     """Run `action` for `project`. A failure's message is the command's
     output from its first ERROR line (its last lines if it printed none)."""
-    from boxmunge.mcp_tools import capture_tool_call
     handler = _handlers(project, paths).get(action)
     if handler is None:
         raise ValueError(f"unknown TUI action {action!r}")

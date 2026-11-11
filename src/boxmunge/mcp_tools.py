@@ -4,63 +4,11 @@
 These are consumed by mcp_server.py which registers them as MCP tools.
 """
 
-import io
 import subprocess
-from contextlib import redirect_stderr, redirect_stdout
-from typing import Any, Callable
+from typing import Any
 
+from boxmunge.commands.capture import capture_tool_call
 from boxmunge.paths import BoxPaths
-
-
-def capture_tool_call(
-    func: Callable[[], int],
-    data: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Execute a function, capturing its stdout, stderr and exit code.
-
-    stdout and stderr share one buffer so messages keep their order, and
-    errors (printed to stderr as `ERROR: ...`) reach the caller. stdin is
-    empty for the duration, so a stray input() fails instead of waiting.
-
-    Returns a standardised result dict:
-    {
-        "success": bool,
-        "exit_code": int,
-        "data": dict,
-        "messages": list[str],
-    }
-    """
-    captured = io.StringIO()
-    try:
-        with redirect_stdout(captured), redirect_stderr(captured), _empty_stdin():
-            exit_code = func()
-    except Exception as e:
-        return {
-            "success": False,
-            "exit_code": 1,
-            "data": data or {},
-            "messages": captured.getvalue().splitlines() + [f"ERROR: {e}"],
-        }
-
-    return {
-        "success": exit_code == 0,
-        "exit_code": exit_code,
-        "data": data or {},
-        "messages": captured.getvalue().splitlines(),
-    }
-
-
-class _empty_stdin:
-    """Swap sys.stdin for an empty stream; input() then raises EOFError."""
-
-    def __enter__(self) -> None:
-        import sys
-        self._saved = sys.stdin
-        sys.stdin = io.StringIO("")
-
-    def __exit__(self, *exc: object) -> None:
-        import sys
-        sys.stdin = self._saved
 
 
 def run_subprocess_tool(argv: list[str]) -> dict[str, Any]:

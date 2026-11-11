@@ -178,7 +178,7 @@ The catalog is the authority on parameters and result fields; this table is the 
 | `project.get` | `project` | `lifecycle` (running, paused, quarantined, monitor_stopped, pre_registered, registered), `health`, `deploy` with history, `staging` (`active`, and the staged release's `id`, `ref` and `state`: starting, ready or retired; null when nothing is staged), `paused`, `quarantine`, `install` (an install that has not finished: `id`, `source` bundle, staged, rollback or git, `ref`, and `phase`: committed, previous_kept, installed, data_restored, hook_started or switching, or abandoning / abandoned_code while `--abandon` puts the replaced release back; null when none is open) |
 | `project.health` | `project` | Runs the smoke checks now: `exit_code`, `status`, `smoke` |
 | `project.logs` | `project`, `service`?, `tail`? (1-1000, default 100) | `lines` of container log output |
-| `oplog.query` | `project`?, `component`?, `level`?, `since`? (`30m`, `6h`, `7d`), `tail`? (default 50) | `entries` of the operational log; `detail` is compact JSON text or null |
+| `oplog.query` | `project`?, `component`?, `level`?, `since`? (`30m`, `6h`, `7d`), `tail`? (1-1000, default 50) | The newest `tail` matching `entries` of the operational log, oldest first, read across its daily archives; `detail` is compact JSON text or null |
 | `security.summary` | none | Fleet CVE view: posture counts, quarantined and at-risk projects, suppressions, breaker holds, KEV catalog source and freshness |
 | `security.project` | `project` | `status` (normal, quarantined, at_risk_running), `findings` with dispositions, `quarantine`, `active_suppressions`, `off_services` |
 | `backups.list` | `project` | `snapshots`, newest first: `name`, `kind`, `taken_at`, `size` |

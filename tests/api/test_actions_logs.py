@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import json
+import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
 from boxmunge.api.dev.fixture_host import FixtureHost
 from boxmunge.api.principal import Principal, Tier
 from boxmunge.api.result import ActionError, ErrorCode
+from boxmunge.commands.log_cmd import query_log
 from boxmunge.docker import DockerError
+from boxmunge.log_rotation import archive_path
 from tests.api.fakes import StubHost, make_invoker
 
 WEBUI = Principal.plugin("webui", Tier.OBSERVE)
@@ -115,3 +120,86 @@ def test_since_reaching_back_more_than_ten_years_is_invalid(fixture_paths, since
 
 def test_since_of_exactly_ten_years_is_served(fixture_paths) -> None:
     assert len(_call(fixture_paths, "oplog.query", {"since": "3650d"})["entries"]) > 0
+
+
+def _archive(paths, days_ago: int, *msgs: str) -> Path:
+    """The rotated archive of the UTC day `days_ago` days back, as the log
+    handler leaves it: older than everything in the fixture's active log."""
+    when = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    path = archive_path(paths.log_file, when.date())
+    path.write_text("".join(json.dumps({
+        "ts": (when + timedelta(microseconds=i)).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+        "level": "info", "component": "deploy", "project": "shop", "msg": msg,
+    }) + "\n" for i, msg in enumerate(msgs)))
+    return path
+
+
+def _msgs(entries) -> list[str]:
+    return [e["msg"] for e in entries]
+
+
+def test_oplog_reads_the_rotated_archives_that_log_reads(fixture_paths) -> None:
+    """One reader for the action and the CLI's `log`: a window that reaches
+    back past the last rotation returns the archived entries too."""
+    _archive(fixture_paths, 6, "six days ago")
+    _archive(fixture_paths, 5, "five days ago")
+    active = _msgs(_call(fixture_paths, "oplog.query", {"since": "4d"})["entries"])
+    week = _call(fixture_paths, "oplog.query", {"since": "7d"})["entries"]
+    assert _msgs(week) == ["six days ago", "five days ago", *active]
+    assert _msgs(week) == _msgs(query_log(fixture_paths, since="7d", tail=50).entries)
+    assert _msgs(_call(fixture_paths, "oplog.query", {"since": "132h"})["entries"]) == [
+        "five days ago", *active]
+    assert week[0] == {"ts": week[0]["ts"], "level": "info", "component": "deploy",
+                       "project": "shop", "msg": "six days ago", "detail": None}
+
+
+def test_oplog_tail_bounds_the_result_across_archives(fixture_paths) -> None:
+    active = _msgs(_call(fixture_paths, "oplog.query", {})["entries"])
+    _archive(fixture_paths, 5, *(f"old-{i}" for i in range(1100)))
+    default = _msgs(_call(fixture_paths, "oplog.query", {"since": "7d"})["entries"])
+    assert len(default) == 50
+    assert default == [f"old-{i}" for i in range(1100 - 50 + len(active), 1100)] + active
+    assert _msgs(_call(fixture_paths, "oplog.query", {"tail": len(active) + 1})["entries"]) == [
+        "old-1099", *active]
+    assert len(_call(fixture_paths, "oplog.query", {"tail": 1000})["entries"]) == 1000
+    assert _error(fixture_paths, "oplog.query", {"tail": 1001}).code is ErrorCode.INVALID_PARAMS
+
+
+@pytest.mark.parametrize("line", [
+    b'{"ts": "2026-\n', b'["not", "an", "entry"]\n', b'{"msg": "an entry with no ts"}\n',
+    b'{"ts": "\xff\xfe"}\n',
+], ids=["torn", "not-an-object", "missing-keys", "undecodable"])
+def test_oplog_bad_line_in_an_archive_it_reads_fails_naming_the_line(fixture_paths, line) -> None:
+    archive = _archive(fixture_paths, 5, "five days ago")
+    with archive.open("ab") as log:
+        log.write(line)
+    error = _error(fixture_paths, "oplog.query", {"since": "7d"})
+    assert error.code is ErrorCode.FAILED
+    assert f"{archive}:2" in error.message
+    # As `log`: an archive the query does not reach is not read.
+    assert len(_call(fixture_paths, "oplog.query", {"tail": 3})["entries"]) == 3
+    assert len(_call(fixture_paths, "oplog.query", {"since": "2d"})["entries"]) > 3
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "dangling"])
+def test_oplog_archive_that_is_a_link_is_refused_not_read_through(
+        fixture_paths, tmp_path, kind) -> None:
+    """logs/ is deploy-writable: a name there is never read through a link."""
+    real = _archive(fixture_paths, 5, "five days ago")
+    elsewhere = real.rename(tmp_path / "elsewhere")
+    if kind == "hardlink":
+        os.link(elsewhere, real)
+    else:
+        real.symlink_to(elsewhere if kind == "symlink" else tmp_path / "gone")
+    error = _error(fixture_paths, "oplog.query", {"since": "7d"})
+    assert error.code is ErrorCode.FAILED
+    assert str(real) in error.message and "not a plain regular file" in error.message
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any mode")
+def test_oplog_unreadable_archive_fails_naming_it(fixture_paths) -> None:
+    archive = _archive(fixture_paths, 5, "five days ago")
+    archive.chmod(0)
+    error = _error(fixture_paths, "oplog.query", {"since": "7d"})
+    assert error.code is ErrorCode.FAILED
+    assert str(archive) in error.message and "Permission denied" in error.message
