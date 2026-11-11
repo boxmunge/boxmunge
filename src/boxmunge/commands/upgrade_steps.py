@@ -47,6 +47,10 @@ class UpgradeGateError(Exception):
     """A step the upgrade cannot succeed without failed; the shim rolls back."""
 
 
+class UnresolvedStages(UpgradeGateError):
+    """refuse_unresolved_stages's refusal; the dry run alerts it."""
+
+
 def refuse_unresolved_stages(paths: BoxPaths, names: list[str]) -> None:
     """Raise, before anything is changed, while a project holds a stage
     0.10.1 or earlier made that the release this box still runs has not
@@ -54,7 +58,7 @@ def refuse_unresolved_stages(paths: BoxPaths, names: list[str]) -> None:
     the staged files."""
     refusal = unresolved_stage.refusal(paths, names, read_installed_version(paths))
     if refusal is not None:
-        raise UpgradeGateError(refusal)
+        raise UnresolvedStages(refusal)
 
 
 def _project_dirs(paths: BoxPaths) -> Iterator[Path]:

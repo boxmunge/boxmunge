@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from boxmunge import unresolved_stage
+from boxmunge.commands import upgrade_cmd
 from boxmunge.commands.upgrade_cmd import run_upgrade
 from boxmunge.commands.upgrade_steps import UpgradeGateError, check_upgrade
 from boxmunge.manifest import CURRENT_SCHEMA_VERSION
@@ -162,6 +163,77 @@ class TestAfterTheStageIsNoLongerDetected:
         assert "then run `prod-deploy shop`" in _refusal(box)
 
 
+class TestAChoiceLegacyStageDoesNotOfferForTheKind:
+    """0.11.6 offers a leftover or pre0101 stage --discard alone, and refuses
+    that while another choice is recorded; with no stage on disk its
+    --keep-staged keeps a pre0101 record for good. Such a record (planted,
+    or edited by hand) is cleared by removing it."""
+
+    def _line(self, box, kind: str) -> str:
+        return (f"  - shop: its record says a resolution was started with --keep-staged, "
+                f"which legacy-stage does not offer for a {kind} stage; remove shop's "
+                f"entry from {box.state / 'legacy-stages.json'}, then run `boxmunge-server "
+                f"legacy-stage shop`, which shows what is left to resolve, if anything")
+
+    @pytest.mark.parametrize("kind", ["pre0101", "leftover"])
+    def test_with_no_stage_on_disk_the_entry_is_removed(self, box, kind):
+        _project(box, "shop")
+        _record(box, shop={"kind": kind, "choice": "keep-staged"})
+        assert self._line(box, kind) in _refusal(box).splitlines()
+        _record(box)
+        assert _refusal(box) is None
+
+    @pytest.mark.parametrize("make, kind", [(_leftover, "leftover"), (_pre0101, "pre0101")])
+    def test_with_the_stage_on_disk_the_entry_is_removed(self, box, make, kind):
+        make(box)
+        _record(box, shop={"kind": "bundle", "choice": "keep-staged"})
+        assert self._line(box, kind) in _refusal(box).splitlines()
+        _record(box)
+        assert f"is unresolved ({kind}); run `boxmunge-server legacy-stage shop`" in _refusal(box)
+
+    @pytest.mark.parametrize("make", [_bundle, _git])
+    def test_a_kind_that_offers_keep_staged_still_names_it(self, box, make):
+        make(box)
+        _record(box, shop={"kind": "leftover", "choice": "keep-staged"})
+        assert "run `boxmunge-server legacy-stage shop --keep-staged`" in _refusal(box)
+
+
+class TestShapesThatMustNotReadClean:
+    @pytest.mark.parametrize("choice", [["discard"], {"a": 1}, 1, 0, False, "", "bogus"])
+    def test_a_recorded_choice_that_is_not_a_choice_refuses(self, box, choice):
+        """0.11.6 names --<choice> back for whatever is recorded, so it can
+        resolve none of these: never "nothing was started"."""
+        _project(box, "shop")
+        _record(box, shop={"kind": "bundle", "choice": choice})
+        text = _refusal(box)
+        assert text.startswith("Cannot tell which projects hold a release")
+        assert (f"(ValueError: shop's recorded choice {choice!r} is not null or one of "
+                f"('discard', 'keep-staged'))") in text
+
+    def test_such_a_record_of_a_project_that_is_gone_is_not_read(self, box):
+        _project(box, "shop")
+        _record(box, gone={"kind": "bundle", "choice": ["discard"]})
+        assert _refusal(box) is None
+
+    def test_a_releases_that_is_a_file_refuses(self, box):
+        pdir = _project(box, "shop", live=False)
+        (pdir / ".releases").write_text("x")
+        text = _refusal(box)
+        assert text.startswith("Cannot tell which projects hold a release")
+        assert f"(NotADirectoryError: [Errno 20] Not a directory: '{pdir / '.releases'}" in text
+
+    def test_a_state_staging_that_is_a_file_refuses(self, box):
+        _project(box, "shop")
+        (box.state / "staging").write_text("x")
+        text = _refusal(box)
+        assert text.startswith("Cannot tell which projects hold a release")
+        assert f"(NotADirectoryError: [Errno 20] Not a directory: '{box.state / 'staging'}" in text
+
+    def test_a_project_directory_that_is_gone_holds_no_stage(self, box):
+        _project(box, "shop")
+        assert unresolved_stage.refusal(box, ["gone", "shop"], RUNS) is None
+
+
 class TestTheWholeRefusal:
     def test_names_every_project_and_how_to_go_on(self, box):
         _bundle(box, "alpha")
@@ -170,7 +242,7 @@ class TestTheWholeRefusal:
         _record(box, gamma={"kind": "pre0101", "choice": "discard"})
         lines = _refusal(box).splitlines()
         assert lines[0] == (
-            "2 projects hold a release that boxmunge 0.10.1 or earlier staged over "
+            "2 projects (alpha, gamma) hold a release that boxmunge 0.10.1 or earlier staged over "
             "production's files, and it is not resolved. An upgrade restarts every "
             "project, and this release neither starts a project from staged files nor "
             "has the legacy-stage command that resolves them. On this box, on the "
@@ -189,8 +261,9 @@ class TestTheWholeRefusal:
             f"This box runs boxmunge {installed.split('+')[0]}, which does not resolve "
             f"every such stage safely (before 0.11.6, legacy-stage --discard starts "
             f"production from the files of a stage made before 0.10.1). Upgrade it to 0.11.6 "
-            f"first, with `sudo /opt/boxmunge/bin/boxmunge-upgrade target 0.11.6`. Then, on "
-            f"0.11.6:")
+            f"first, with `sudo /opt/boxmunge/bin/boxmunge-upgrade target 0.11.6`. There, a "
+            f"`legacy-stage` choice waits for that upgrade's probation to end (six hours). "
+            f"Then, on 0.11.6:")
         assert "`boxmunge-server legacy-stage shop`" in lines[1]
 
     @pytest.mark.parametrize("installed", ["0.11.7", "0.11.7+abc1234", "0.12.0", "1.0.0"])
@@ -201,12 +274,20 @@ class TestTheWholeRefusal:
         _bundle(box)
         assert _refusal(box, installed) is None
 
-    @pytest.mark.parametrize("installed", ["", "0.0.0", "garbage"])
-    def test_an_unknown_installed_version_is_checked(self, box, installed):
+    @pytest.mark.parametrize("installed", [
+        "", "0.0.0", "garbage", "0.11.7rc1", "0.11.7-rc1", "v0.11.7", "0.11.6rc1"])
+    def test_an_installed_version_that_is_no_plain_release_is_checked(self, box, installed):
+        """Refused all the same, but never told it is below 0.11.6: it
+        may not be."""
         _bundle(box)
-        text = _refusal(box, installed)
-        assert "This box runs a release it has no record of, which does not" in text
-        assert "legacy-stage shop" in text
+        lines = _refusal(box, installed).splitlines()
+        assert lines[0].endswith(
+            "them. This box runs a release it has no record of (`boxmunge-server version` "
+            "shows which). The commands below are those boxmunge 0.11.6 accepts; a "
+            "release before it does not resolve every such stage safely, and is upgraded "
+            "to 0.11.6 first:")
+        assert "boxmunge-upgrade target" not in lines[0]
+        assert "`boxmunge-server legacy-stage shop`" in lines[1]
 
     def test_a_clean_box_is_not_refused(self, box):
         _project(box, "alpha")
@@ -233,16 +314,79 @@ class TestTheWholeRefusal:
         assert str(box.project_dir("shop")) in text
 
 
+@pytest.fixture
+def alerts(monkeypatch) -> list[dict]:
+    """What the dry run of a build of 0.11.7 alerts."""
+    sent: list[dict] = []
+
+    def notify(paths, title, body, **kwargs):
+        sent.append({"title": title, "body": body, **kwargs})
+        return True
+    monkeypatch.setattr("boxmunge.notify.notify", notify)
+    monkeypatch.setattr(upgrade_cmd, "get_build_version", lambda: "0.11.7+abc1234")
+    return sent
+
+
+RETRY = ("The upgrade shim blocklists this version after a failed dry run: once it is fixed, "
+         "run `sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.7` and retry.")
+
+
 class TestTheUpgrade:
-    def test_the_dry_run_refuses_and_says_how_to_retry(self, box, capsys):
+    def test_the_dry_run_refuses_and_says_how_to_retry(self, box, capsys, alerts):
         _pre0101(box)
-        before = sorted(p for p in box.root.rglob("*"))
+        before = sorted(p for p in box.root.rglob("*") if box.logs not in p.parents)
         assert run_upgrade(box, dry_run=True) == 1
         err = capsys.readouterr().err
-        assert "ERROR: 1 project holds a release that boxmunge 0.10.1 or earlier" in err
+        assert "ERROR: 1 project (shop) holds a release that boxmunge 0.10.1 or earlier" in err
         assert "`boxmunge-server legacy-stage shop`" in err
-        assert "boxmunge-upgrade clear-blocklist" in err
-        assert sorted(p for p in box.root.rglob("*")) == before
+        assert RETRY in err
+        assert sorted(p for p in box.root.rglob("*") if box.logs not in p.parents) == before
+
+    def test_the_refused_dry_run_alerts_once_naming_the_projects_and_the_release(
+            self, box, alerts):
+        """The shims of 0.11.0 to 0.11.6 alert nothing for a failed dry run,
+        and deploy can plant what refuses it: someone has to be told."""
+        _project(box, "shop")
+        state = box.state / "staging" / "shop.json"
+        state.parent.mkdir(parents=True)
+        state.write_text(json.dumps({"active": True}))
+        assert run_upgrade(box, dry_run=True) == 1
+        [alert] = alerts
+        assert alert["title"] == "upgrade to 0.11.7 refused — unresolved stage"
+        assert alert["priority"] == 1 and alert["component"] == "upgrade"
+        assert alert["body"] == (
+            "The upgrade to boxmunge 0.11.7 was refused before it changed anything.\n"
+            + unresolved_stage.refusal(box, ["shop"], RUNS) + "\n" + RETRY)
+        assert "1 project (shop) holds" in alert["body"]
+
+    def test_the_refusal_is_in_the_log_the_alert_points_at(self, box, alerts):
+        """Pushover cuts a long alert and says to see the boxmunge log."""
+        _bundle(box)
+        run_upgrade(box, dry_run=True)
+        [entry] = [json.loads(line) for line in box.log_file.read_text().splitlines()]
+        assert entry["level"] == "error" and entry["component"] == "upgrade"
+        assert entry["msg"].startswith("Upgrade to 0.11.7 refused: 1 project (shop) holds")
+        assert "`boxmunge-server legacy-stage shop`" in entry["msg"]
+
+    def test_a_dry_run_that_cannot_tell_alerts_that(self, box, alerts):
+        _project(box, "shop")
+        (box.state / "legacy-stages.json").write_text("garbage")
+        assert run_upgrade(box, dry_run=True) == 1
+        [alert] = alerts
+        assert "0.11.7" in alert["title"] and alert["priority"] == 1
+        assert "\nCannot tell which projects hold a release" in alert["body"]
+
+    def test_a_dry_run_failing_for_anything_else_does_not_alert(self, box, alerts, capsys):
+        _project(box, "shop")
+        (box.project_dir("shop") / "manifest.yml").write_text("- not a manifest\n")
+        assert run_upgrade(box, dry_run=True) == 1
+        assert alerts == []
+        assert RETRY in capsys.readouterr().err
+
+    def test_a_clean_dry_run_does_not_alert(self, box, alerts):
+        _project(box, "shop")
+        assert run_upgrade(box, dry_run=True) == 0
+        assert alerts == []
 
     def test_check_upgrade_raises_before_reading_any_project(self, box):
         _project(box, "alpha")

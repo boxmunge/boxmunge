@@ -384,10 +384,10 @@ auto-update installs security and break-fix releases by itself.
 before the box goes any further.** From 0.11.7 on there is no `legacy-stage` command, and the
 upgrade refuses while a project still holds such a stage, or holds the files of one that
 `--discard` dropped and no `prod-deploy` has replaced. The refusal names each project and the
-command 0.11.6 accepts for it (on 0.11.5 it tells you to upgrade to 0.11.6 first). No
-project is touched, but the release that refused is now blocklisted on your box: once every
-project it named is resolved, run the `clear-blocklist` command the refusal prints, then
-upgrade again.
+command 0.11.6 accepts for it (on 0.11.5 it tells you to upgrade to 0.11.6 first), and is
+sent as a priority-1 alert. No project is touched, but the release that refused is now
+blocklisted on your box: once every project it named is resolved, run the `clear-blocklist`
+command the refusal prints, then upgrade again.
 
 ## If the upgrade stops
 

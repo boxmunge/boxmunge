@@ -2199,13 +2199,15 @@ still carries such a stage is therefore refused by the upgrade's dry run, before
 touched:
 
 ```
-ERROR: 1 project holds a release that boxmunge 0.10.1 or earlier staged over production's files, and it is not resolved. An upgrade restarts every project, and this release neither starts a project from staged files nor has the legacy-stage command that resolves them. On this box, on the release it runs now (boxmunge 0.11.6):
+ERROR: 1 project (myapp) holds a release that boxmunge 0.10.1 or earlier staged over production's files, and it is not resolved. An upgrade restarts every project, and this release neither starts a project from staged files nor has the legacy-stage command that resolves them. On this box, on the release it runs now (boxmunge 0.11.6):
   - myapp: a release staged by boxmunge 0.10.1 is unresolved (bundle); run `boxmunge-server legacy-stage myapp` and take one of the choices it shows
 Then retry the upgrade.
 ```
 
-The box keeps running the release it is on. Each line names one project and the command the
-release the box still runs accepts for it:
+The box keeps running the release it is on. The refusal is also logged as an error (`log
+--component upgrade`) and sent as one priority-1 Pushover alert that names the release and the
+projects, because an auto-update's dry run has nobody watching it. Each line names one project
+and the command the release the box still runs accepts for it:
 
 - **`a release staged by ... is unresolved (<kind>)`**: run `sudo boxmunge-server legacy-stage
   <project>`, which shows what production runs and the choices it allows (`--discard`,
@@ -2218,11 +2220,19 @@ release the box still runs accepts for it:
   replaced them`**: `--discard` of a stage made before 0.10.1 stops staging but cannot put
   production's files back. Upload the bundle of the release production should run, then run
   `prod-deploy <project>`.
+- **`its record says a resolution was started with --keep-staged, which legacy-stage does not
+  offer for a <kind> stage`**: the project's entry in `state/legacy-stages.json` was edited by
+  hand, and no `legacy-stage` command finishes it. Remove that project's entry from the file
+  the line names, then run `sudo boxmunge-server legacy-stage <project>`: it shows the choices
+  for the stage, or says the project has none.
 
 On a box below 0.11.6 the refusal says to upgrade to 0.11.6 first (`sudo
 /opt/boxmunge/bin/boxmunge-upgrade target 0.11.6`) and to resolve the stage there: before
 0.11.6, `legacy-stage --discard` starts production from the files of a stage made before
-0.10.1. That release's own OPERATIONS.md (`/opt/boxmunge/docs/OPERATIONS.md` on the box)
+0.10.1. On 0.11.6, a `legacy-stage` choice waits for that upgrade's probation to end (six
+hours). If the box has no record of the release it runs, the refusal says so instead:
+`boxmunge-server version` shows the release, and the commands it lists are the ones 0.11.6
+accepts. That release's own OPERATIONS.md (`/opt/boxmunge/docs/OPERATIONS.md` on the box)
 describes `legacy-stage` in full.
 
 A failed dry run blocklists the release on the box, and the refusal ends by saying so. Once
@@ -2234,10 +2244,11 @@ sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist <version>
 
 then run the upgrade again.
 
-If the upgrade cannot tell (it cannot read `state/legacy-stages.json`, `legacy-stage`'s record,
-or cannot examine a project directory), it refuses the same way with `Cannot tell which
-projects hold a release ...`, naming the error. Repair what it names, then clear the blocklist
-and retry.
+If the upgrade cannot tell (it cannot read `state/legacy-stages.json`, `legacy-stage`'s record;
+a project's entry there records a choice that is not `discard` or `keep-staged`; or it cannot
+examine a project directory, for example because `.releases` or `state/staging` is a file), it
+refuses and alerts the same way with `Cannot tell which projects hold a release ...`, naming
+the error. Repair what it names, then clear the blocklist and retry.
 
 An install left open by an interrupted deploy (see "An interrupted or failed install") is also
 left as is by the upgrade. A record that no longer matches the files, after a platform rollback to

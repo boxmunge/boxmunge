@@ -411,7 +411,8 @@ See `agent-help writable` and `PROJECT_CONVENTIONS.md` for the schema reference.
   release, `state/staging/<project>.json` recorded the stage), and 0.11.0 to 0.11.6 resolve such a stage with
   `legacy-stage`, recording it in `state/legacy-stages.json`. This release has no code that handles one: the
   upgrade's dry run, and the apply before it touches a project, refuse while any project holds one or awaits
-  a deploy after a discard, naming each project and the command the release the box still runs accepts (see
+  a deploy after a discard, naming each project and the command the release the box still runs accepts; the
+  dry run's refusal is the one dry-run failure that alerts (priority 1), since the 0.11 shims send nothing (see
   OPERATIONS.md, "Upgrading with a release staged by 0.10.1 or earlier"). The check is skipped on a box
   that already runs 0.11.7 or later.
 

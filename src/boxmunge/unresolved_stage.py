@@ -34,11 +34,11 @@ FIRST_WITHOUT = (0, 11, 7)  # no legacy-stage command, and no such stage either
 
 
 def _mode(path: Path) -> int | None:
-    """The mode of whatever is at `path`, or None when nothing is. Any other
-    error (EACCES) is raised: it must not read as "no stage"."""
+    """The mode of whatever is at `path`, or None when nothing is. Any other error
+    (EACCES, a file where .releases or state/staging belongs) is raised, never "no stage"."""
     try:
         return os.lstat(path).st_mode
-    except (FileNotFoundError, NotADirectoryError):
+    except FileNotFoundError:
         return None
 
 
@@ -55,8 +55,7 @@ def _state_active(paths: BoxPaths, project: str) -> bool:
 
 def _deployed(paths: BoxPaths, project: str) -> bool:
     """Whether 0.10.1 or later deployed it: live.json, a regular file."""
-    mode = _mode(paths.project_releases(project) / "live.json")
-    return mode is not None and stat.S_ISREG(mode)
+    return stat.S_ISREG(_mode(paths.project_releases(project) / "live.json") or 0)
 
 
 def _kind(paths: BoxPaths, project: str) -> str | None:
@@ -83,7 +82,9 @@ def _records(paths: BoxPaths) -> dict[str, dict]:
 
 def _problem(paths: BoxPaths, project: str, record: dict) -> str | None:
     """What `project` must have done before the upgrade, or None."""
-    choice = record.get("choice") if record.get("choice") in CHOICES else None
+    choice = record.get("choice")
+    if choice is not None and choice not in CHOICES:  # 0.11.6 can finish no such record
+        raise ValueError(f"{project}'s recorded choice {choice!r} is not null or one of {CHOICES}")
     kind = _kind(paths, project)
     if kind is None:  # no longer detected: finished, unless the record says otherwise
         kind = record.get("kind")
@@ -98,40 +99,51 @@ def _problem(paths: BoxPaths, project: str, record: dict) -> str | None:
     if choice is None:
         return (f"a release staged by {by} is unresolved ({kind}); run `boxmunge-server "
                 f"legacy-stage {project}` and take one of the choices it shows")
+    if choice == "keep-staged" and kind in ("pre0101", "leftover"):
+        # Planted or edited by hand. 0.11.6 offers such a stage --discard alone, and refuses
+        # that over another recorded choice; --keep-staged never drops a pre0101 record.
+        return (f"its record says a resolution was started with --keep-staged, which "
+                f"legacy-stage does not offer for a {kind} stage; remove {project}'s entry "
+                f"from {paths.state / 'legacy-stages.json'}, then run `boxmunge-server "
+                f"legacy-stage {project}`, which shows what is left to resolve, if anything")
     return (f"the resolution of a release staged by {by} was started with --{choice} and is "
             f"not finished; run `boxmunge-server legacy-stage {project} --{choice}`")
 
 
 def refusal(paths: BoxPaths, projects: list[str], installed: str) -> str | None:
-    """Why a box running the release `installed` must not be upgraded, or
-    None: each project whose stage is unresolved, or discarded and awaiting
-    a deploy, with the command that release accepts for it."""
+    """Why a box running the release `installed` must not be upgraded, or None: each project
+    whose stage is unresolved or awaits a deploy, with the command that release accepts."""
     semver = parse_version_string(installed)[0]
     running = version_tuple(semver) or (0,)
     if running >= FIRST_WITHOUT:
         return None
     try:
         records = _records(paths)
-        found = [(p, _problem(paths, p, records.get(p, {}))) for p in projects]
+        held = {p: why for p in projects if (why := _problem(paths, p, records.get(p, {})))}
     except (OSError, ValueError) as e:
         return (f"Cannot tell which projects hold a release that boxmunge 0.10.1 or earlier "
                 f"staged over production's files ({type(e).__name__}: {e}). Repair what that "
                 f"names (legacy-stage's record of them is {paths.state / 'legacy-stages.json'}, "
                 f"a JSON object holding one object per project), then retry the upgrade.")
-    lines = [f"  - {project}: {problem}" for project, problem in found if problem]
-    if not lines:
+    if not held:
         return None
     if running >= RESOLVES:
         where = f"On this box, on the release it runs now (boxmunge {semver}):"
-    else:
-        runs = f"boxmunge {semver}" if any(running) else "a release it has no record of"
-        where = (f"This box runs {runs}, which does not resolve every such stage safely "
-                 f"(before 0.11.6, legacy-stage --discard starts production from the files of "
-                 f"a stage made before 0.10.1). Upgrade it to 0.11.6 first, with `sudo "
-                 f"/opt/boxmunge/bin/boxmunge-upgrade target 0.11.6`. Then, on 0.11.6:")
-    hold = "1 project holds" if len(lines) == 1 else f"{len(lines)} projects hold"
+    elif any(running):
+        where = (f"This box runs boxmunge {semver}, which does not resolve every such stage safely "
+                 f"(before 0.11.6, legacy-stage --discard starts production from the files of a "
+                 f"stage made before 0.10.1). Upgrade it to 0.11.6 first, with `sudo "
+                 f"/opt/boxmunge/bin/boxmunge-upgrade target 0.11.6`. There, a `legacy-stage` "
+                 f"choice waits for that upgrade's probation to end (six hours). Then, on 0.11.6:")
+    else:  # no version file, or not a plain release: it may not be an older one
+        where = ("This box runs a release it has no record of (`boxmunge-server version` shows "
+                 "which). The commands below are those boxmunge 0.11.6 accepts; a release before "
+                 "it does not resolve every such stage safely, and is upgraded to 0.11.6 first:")
+    who = ", ".join(held)
+    hold = f"1 project ({who}) holds" if len(held) == 1 else f"{len(held)} projects ({who}) hold"
     return "\n".join([
-        f"{hold} a release that boxmunge 0.10.1 or earlier staged over production's files, "
-        f"and it is not resolved. An upgrade restarts every project, and this release neither "
-        f"starts a project from staged files nor has the legacy-stage command that resolves "
-        f"them. {where}", *lines, "Then retry the upgrade."])
+        f"{hold} a release that boxmunge 0.10.1 or earlier staged over production's files, and "
+        f"it is not resolved. An upgrade restarts every project, and this release neither starts "
+        f"a project from staged files nor has the legacy-stage command that resolves them. {where}",
+        *(f"  - {project}: {problem}" for project, problem in held.items()),
+        "Then retry the upgrade."])
