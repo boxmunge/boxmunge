@@ -192,8 +192,11 @@ class Docker:
         return call
 
 
-def render_site(paths: BoxPaths, manifest: dict) -> None:
-    """Stand-in for caddy.prepare_caddy_config: writes the project's site."""
+def render_site(paths: BoxPaths, manifest: dict) -> str:
+    """Stand-in for caddy.prepare_caddy_config: writes the project's site
+    and returns its text."""
     site = paths.project_caddy_site(manifest["project"])
     site.parent.mkdir(parents=True, exist_ok=True)
-    site.write_text(f"{manifest['project']}.example.com {{}}\n")
+    content = f"{manifest['project']}.example.com {{}}\n"
+    site.write_text(content)
+    return content
