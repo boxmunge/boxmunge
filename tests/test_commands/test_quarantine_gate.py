@@ -450,3 +450,25 @@ def test_manifest_in_force_is_read_only_for_a_quarantined_project(box) -> None:
     assert gate.manifest_in_force(box.paths, "demo") is None  # reported as unknown
     box.paths.project_quarantine_state("demo").unlink()
     assert gate.manifest_in_force(box.paths, "demo") is None
+
+
+def test_lift_refuses_a_site_file_replaced_by_a_link(box, monkeypatch, tmp_path, capsys) -> None:
+    """caddy/sites is group-writable by deploy, and the lift republishes the
+    site's text in a world-readable file: under sudo it must not follow a
+    link deploy put at that name."""
+    root_only = tmp_path / "root-only"
+    root_only.write_text("a secret only root can read\n")
+    monkeypatch.setattr(gate, "_verify_running", lambda *a, **k: {})
+    monkeypatch.setattr(gate, "_release_policies", lambda *a: {})
+    published: list[str] = []
+    monkeypatch.setattr(gate, "lift_quarantine", lambda project, paths, **kw: published.append(
+        kw["project_caddy_site_content"]))
+    site = box.paths.project_caddy_site("demo")
+    site.parent.mkdir(parents=True, exist_ok=True)
+    site.symlink_to(root_only)
+
+    rc = gate.lift_after_deploy(box.paths, "demo", "demo-r2", box.clear(), txn=None,
+                                component="deploy")
+
+    assert (rc, published) == (1, [])
+    assert "lifting the quarantine" in capsys.readouterr().err
