@@ -128,3 +128,29 @@ def test_one_sentence_when_the_daemon_is_not_the_journalled_one(paths, monkeypat
                          f"see docker-userns in health"}
     monkeypatch.setattr(sw.uo, "remap_offset", lambda paths: S)
     sw.require_remapped(paths, S)
+
+
+_OLD = {"address": "/run/containerd/containerd.sock", "namespace": "moby"}
+_PRIOR = {"driver_type": "io.containerd.snapshotter.v1", "containerd": _OLD}
+
+
+@pytest.mark.parametrize("address, namespace", [
+    (_OLD["address"], "moby"),                          # the old namespace, reused
+    ("/srv/c.sock", f"moby-{S}.{S}"),                   # another containerd
+    (_OLD["address"], "moby-7.7"),                      # another namespace
+], ids=["namespace reused", "containerd changed", "namespace changed"])
+@pytest.mark.parametrize("at", [State.APPLIED, State.COMMITTING], ids=lambda s: s.value)
+def test_a_containerd_refusal_names_only_commands_its_state_accepts(at, address, namespace) -> None:
+    """Once a commit began there is no rollback: the way out is to put the
+    daemon's flags back and commit again."""
+    j = Journal(FORWARD, "applied", S, prior_store=_PRIOR, applied_at="2026-10-16T00:00:00+00:00",
+                items={COMMIT_STARTED: "100"} if at is State.COMMITTING else {})
+    live = {"Containerd": {"Address": address, "Namespaces": {"Containers": namespace}}}
+    with pytest.raises(MigrationError) as e:
+        cm._check_containerd(j, live)
+    named = _COMMAND.findall(str(e.value))
+    assert named, str(e.value)
+    for command in named:
+        _GATES[command][0](j)
+    if at is State.COMMITTING:
+        assert named == ["userns-commit"]

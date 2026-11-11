@@ -136,12 +136,16 @@ def _old_volumes_with_data(old_root: Path) -> list[str]:
     return left
 
 
-def _check_containerd(prior: dict, info: dict, s: int) -> None:
+def _check_containerd(j: Journal, info: dict) -> None:
     """The old daemon's containerd, as phase 0 recorded it, against the one
     the remapped daemon reports. The migration changed only the remap keys,
     so the remapped daemon must use the same containerd, in the namespace
     dockerd derives from the old one (moby-<s>.<s>); in the old namespace
-    itself (containerd-namespace set), the commit would empty the live one."""
+    itself (containerd-namespace set), the commit would empty the live one.
+    Once the commit began deleting the old root there is no rollback, so the
+    refusals then say to put the daemon's flags back and commit again."""
+    prior, s = j.prior_store, j.offset
+    began = COMMIT_STARTED in j.items
     if "containerd" not in prior:
         raise MigrationError(
             "this migration was journalled before boxmunge recorded the old daemon's "
@@ -155,14 +159,17 @@ def _check_containerd(prior: dict, info: dict, s: int) -> None:
         raise MigrationError(
             f"the remapped daemon uses the old daemon's containerd namespace {namespace} "
             f"(containerd-namespace is set), so commit cannot tell the old images from the "
-            f"live ones. Run userns-rollback, remove containerd-namespace from daemon.json or "
-            f"dockerd's flags, and migrate again")
+            f"live ones. " + ("Remove containerd-namespace from daemon.json or dockerd's "
+                              "flags, then run userns-commit again" if began else
+                              "Run userns-rollback, remove containerd-namespace from "
+                              "daemon.json or dockerd's flags, and migrate again"))
     want = f"{old['namespace']}-{s}.{s}"
     if (address, namespace) != (old["address"], want):
         raise MigrationError(
             f"the remapped daemon uses containerd at {address}, namespace {namespace}, not "
             f"{old['address']}, namespace {want} as the migration left it; daemon.json or "
-            f"dockerd's flags changed during the soak. Put them back, or run userns-rollback")
+            f"dockerd's flags changed during the soak. Put them back"
+            + (", then run userns-commit again" if began else ", or run userns-rollback"))
 
 
 def _refuse(j: Journal | None) -> Journal:
@@ -178,7 +185,7 @@ def _checked(paths: BoxPaths, j: Journal | None, now: datetime) -> Journal:
         raise MigrationError(f"soak until {(applied + SOAK).isoformat()} before committing")
     require_remapped(paths, j.offset)
     if j.prior_store["driver_type"] == CONTAINERD_STORE:
-        _check_containerd(j.prior_store, uo.docker_info(), j.offset)
+        _check_containerd(j, uo.docker_info())
     left = _old_volumes_with_data(Path(Inventory.from_json(j.inventory).root))
     if left:
         raise MigrationError(
