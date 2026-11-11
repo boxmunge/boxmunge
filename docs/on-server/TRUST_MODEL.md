@@ -138,9 +138,10 @@ What closes them:
   staged release lives in its own tree (`.releases/staged/`), so the
   project directory stays production's; a staging start is checked against
   that tree and must mount nothing of production's. A project staged by
-  boxmunge 0.10.1, which put the staged release's files in the project
-  directory, has every production start refused until `legacy-stage`
-  resolves it. While an install is open (`.releases/install.json`), only
+  boxmunge 0.10.1 or earlier, which put the staged release's files in the
+  project directory, never reaches a start: the upgrade to this release
+  refuses until the release the box runs has resolved it. While an install
+  is open (`.releases/install.json`), only
   the install itself starts production. A start that fails the check
   does not happen: it is logged, alerted at high priority, and the
   running containers are left as they are.
@@ -249,7 +250,7 @@ failure counts (keyed by the live slot, not by the version in `probation.json`),
 the health report from just before the upgrade (`health-baseline`: a health
 error already there then does not roll the release back) and the name of the
 stash the upgrade made (`upgrade-stash`). One upgrade runs at a time because
-the shim, `auto-update`, `check-probation` and `legacy-stage` all hold that
+the shim, `auto-update` and `check-probation` all hold that
 lock, which deploy cannot replace. Shims up to 0.10.1 locked
 `upgrade-state/upgrade.lock` instead, and the one that installs this release
 keeps running until its upgrade ends, so every taker locks that file too (after
@@ -298,7 +299,7 @@ service, staging or build container can, and no smoke script can; nor can the da
 remapped box (on an unremapped one it is real root, running only boxmunge's own scripts). Read-write binds
 may not be the project directory, a control entry or `.releases`, and remapped container uids
 are "other" on those 0755 directories. So root operations that walk these paths by name
-(`legacy-stage` restore and chown, `install_release` when root runs it, slot teardown, stash
+(`install_release` when root runs it, slot teardown, stash
 restore, project-delete under sudo) are protected against a planted final component, but not
 against a parent swapped by deploy. That is acceptable because deploy is root-equivalent. It
 becomes a boundary if deploy ever loses docker access, or if agent trust is split from operator

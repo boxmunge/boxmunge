@@ -126,7 +126,7 @@ def backup_locked(
     snapshot passes production's own, read before any install starts, and
     promote passes the production release's while the staged release's
     files are on disk. ``compose_file`` goes with it when the running
-    release's compose file is not the project dir's (legacy-stage).
+    release's compose file is not the project dir's (an open install).
 
     Paused projects refuse with rc=1 (operator-driven backup against a
     paused project is almost certainly wrong). Quarantined projects skip

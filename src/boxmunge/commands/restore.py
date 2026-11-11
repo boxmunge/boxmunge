@@ -42,7 +42,6 @@ from boxmunge.docker_run import docker_env
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.fs_nofollow import open_regular_nofollow
 from boxmunge.lifecycle import refuse_if_blocked
-from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import is_paused
@@ -164,8 +163,6 @@ def restore_locked(project_name: str, paths: BoxPaths, snapshot: str | None,
     project the health monitor stopped gets its data back but is left
     stopped, for `recover`.
     """
-    if refuse_if_legacy_stage(paths, project_name):
-        return 1
     sweep_stale_dumps(paths, project_name)
     # A rollback's own restore may run on a pause handed to a deploy; the
     # rollback's start ends that pause.

@@ -206,7 +206,7 @@ def _check_member_safe(member: tarfile.TarInfo) -> None:
 # would put a quarantined project back in rotation. They are left as they are.
 #
 # The users records say who each service runs as over its data. Only the
-# commands that decide users (deploy, promote, rollback, stage, legacy-stage)
+# commands that decide users (deploy, promote, rollback, stage)
 # and `data chown` write them, never an upgrade; the record the stash holds
 # is only older. Restored after a `data chown`, it would make the rollback's
 # regenerated overlay start the service as its old user over data its new

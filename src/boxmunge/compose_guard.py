@@ -10,13 +10,6 @@ first re-runs deploy's own validation (`validate_release_tree`) on the
 files on disk and checks every bind source of the compose model it is
 about to run (see boxmunge.bind_sources).
 
-A stage left by boxmunge 0.10.1 (boxmunge.legacy_stage) put the staged
-release's files in the project directory, so every production start of
-such a project is refused: it could recreate production from the staged
-release (and run its migrations on production data). A stage in the slot
-leaves the project directory as production's, so production starts as
-usual.
-
 While an install transaction is open (.releases/install.json), a
 production start is refused unless it is the core resuming that install:
 the project directory may hold a half-installed release.
@@ -51,7 +44,6 @@ from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import compose_up, start_containers
 from boxmunge.docker_run import DockerError
 from boxmunge.intake import IntakeError, validate_release_tree
-from boxmunge.legacy_stage import awaiting_deploy_refusal, legacy_stage_refusal
 from boxmunge.log import log_error
 from boxmunge.notify import notify
 from boxmunge.overlay_users import stale_containers_problem, stale_overlay_problem
@@ -116,16 +108,6 @@ def _refuse_stale_overlay(paths: BoxPaths, project_name: str, component: str,
     problem = stale_overlay_problem(paths, project_name)
     if problem is not None:
         raise _refused(paths, project_name, component, problem, tampering=False)
-
-
-def _refuse_if_legacy_stage(paths: BoxPaths, project_name: str, component: str) -> None:
-    """A legacy stage in place, or a discarded pre-0.10.1 one whose staged
-    files no deploy has replaced yet: either way the project directory holds
-    files production does not run."""
-    refusal = (legacy_stage_refusal(paths, project_name)
-               or awaiting_deploy_refusal(paths, project_name))
-    if refusal is not None:
-        raise _refused(paths, project_name, component, refusal, tampering=False)
 
 
 def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
@@ -198,8 +180,7 @@ def check_start(
     mean nothing there. A production start needs `compose_files`.
 
     A production start while an install transaction is open is refused
-    unless `txn` is that transaction's id (the core resuming it). A
-    production start of a project staged by boxmunge 0.10.1 is refused.
+    unless `txn` is that transaction's id (the core resuming it).
 
     `record` (deploy, stage, upgrade) records the sources' kinds and the
     sha256 of every file boxmunge reads (those the reference walk found and
@@ -237,7 +218,6 @@ def check_start(
     project_dir = paths.project_dir(project_name)
     record_path = paths.project_bind_record(project_name)
     _refuse_if_install_open(paths, project_name, component, txn)
-    _refuse_if_legacy_stage(paths, project_name, component)
     _refuse_stale_overlay(paths, project_name, component, compose_files, deploying, txn)
     if earlier is not None:
         # The containers first, against the files the check walked: what it
@@ -288,9 +268,6 @@ def check_kept_files(paths: BoxPaths, project_name: str, *, component: str) -> N
     the deploy changes nothing live (bind_sources.check_kept_control). The
     renewal itself checks again (check_start's `regenerated`). Raises
     ComposeRefused."""
-    awaiting = awaiting_deploy_refusal(paths, project_name)
-    if awaiting is not None:
-        raise _refused(paths, project_name, component, awaiting, tampering=False)
     project_dir = paths.project_dir(project_name)
     compose = project_dir / "compose.yml"
     try:
@@ -422,10 +399,8 @@ def check_containers_start(paths: BoxPaths, project_name: str, names: list[str],
     without following links, of the kind recorded at deploy. The containers
     to start (`names`) must run as the users record says. Raises
     ComposeRefused, also while an install transaction is open (no install
-    resumes by restarting stopped containers) and for a project staged by
-    boxmunge 0.10.1, as check_start does."""
+    resumes by restarting stopped containers), as check_start does."""
     _refuse_if_install_open(paths, project_name, component, None)
-    _refuse_if_legacy_stage(paths, project_name, component)
     project_dir = paths.project_dir(project_name)
     try:
         existing = docker_containers.container_bind_sources(project_name)

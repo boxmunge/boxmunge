@@ -31,7 +31,6 @@ from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.lifecycle import BlockReason, is_blocked, paused_refusal
-from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import (
@@ -155,8 +154,6 @@ def resume_locked(
     Returns the exit code and, if the post-resume smoke test failed, its
     message, so the caller can alert after releasing the lock.
     """
-    if refuse_if_legacy_stage(paths, project_name):
-        return 1, None
     if not _refuse_unless_resumable(project_name, paths):
         return 1, None
     install = open_install_reason(paths, project_name)
@@ -345,8 +342,6 @@ def hand_to_deploy_locked(project_name: str, paths: BoxPaths) -> int:
     resume cannot start and only a deploy can repair. It stays paused for
     everything else until that deploy starts it. A quarantined project's
     deploy is scanned first (quarantine_gate). Caller holds the lock."""
-    if refuse_if_legacy_stage(paths, project_name):
-        return 1
     block = is_blocked(project_name, paths)
     if block is not None and block.reason is BlockReason.MIGRATING:
         print(f"ERROR: {block.refuse_message}", file=sys.stderr)

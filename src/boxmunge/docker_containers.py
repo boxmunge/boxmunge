@@ -249,18 +249,6 @@ def _docker_time(value: str) -> datetime:
         raise DockerError(f"unreadable container time {value!r}: {e}") from e
 
 
-def created_times(project_name: str) -> dict[str, datetime]:
-    """Each container of the compose project (running or not) -> its
-    creation time. Raises DockerError when Docker cannot be asked."""
-    listed = _run(["docker", "ps", "-a", "--no-trunc", *compose_project_filter(project_name),
-                   "--format", "{{.ID}}"], capture=True)
-    ids = listed.stdout.split()
-    if not ids:
-        return {}
-    return {str(doc.get("Name", "")).lstrip("/"): _docker_time(str(doc.get("Created", "")))
-            for doc in _inspect(["docker", "container", "inspect", *ids])}
-
-
 @dataclass(frozen=True)
 class StartState:
     service: str

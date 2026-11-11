@@ -70,8 +70,7 @@ def decide_release_users(project_name: str, paths: BoxPaths, manifest: dict,
     removed if that refuses it. `previous` is the manifest the install
     replaced (quarantine_gate.manifest_in_force). `pull`: build with
     --pull (commands/deploy_build). `carry_record`: the
-    release may predate its services' declarations (a rollback, or
-    legacy-stage putting back a release 0.10.1 deployed), so the users
+    release may predate its services' declarations (a rollback), so the users
     record stands where it does not say, and a project no deploy has
     decided users for only builds (deploy_images.prepare_release_users).
     Raises DeployRefused (QuarantineRefused) or DockerError."""
