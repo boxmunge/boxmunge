@@ -39,12 +39,24 @@ def _files(call: str) -> list[str]:
     return re.findall(r"-r (\S+)", call)
 
 
+def _installs(calls: list[str]) -> list[str]:
+    return [call for call in calls if call.startswith("install")]
+
+
 def test_every_server_lock_installs_with_hashes(tmp_path: Path) -> None:
     proc, calls = _run(tmp_path)
     assert proc.returncode == 0, proc.stderr
-    assert all("--require-hashes" in call for call in calls), calls
-    installed = {Path(f).name for call in calls for f in _files(call)}
+    installs = _installs(calls)
+    assert installs and all("--require-hashes" in call for call in installs), calls
+    installed = {Path(f).name for call in installs for f in _files(call)}
     assert installed == {p.name for p in REPO.glob("requirements*.txt")}
+
+
+def test_pip_check_runs_after_the_last_install(tmp_path: Path) -> None:
+    """A later pip call replaces an earlier pin silently; only pip check sees it."""
+    _proc, calls = _run(tmp_path)
+    assert calls[-1] == "check"
+    assert all(call.startswith("install") for call in calls[:-1]), calls
 
 
 def test_the_box_set_installs_together_as_the_shim_installs_it(tmp_path: Path) -> None:

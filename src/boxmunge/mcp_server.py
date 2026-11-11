@@ -34,6 +34,7 @@ from boxmunge.mcp_tools import (
     _tool_upgrade,
     _tool_validate,
 )
+from boxmunge.version import get_build_version, parse_version_string
 
 # ---------------------------------------------------------------------------
 # MCP tool definitions (name, description, inputSchema, handler)
@@ -358,7 +359,13 @@ def isolate_protocol_streams() -> tuple[BinaryIO, BinaryIO]:
 
 
 async def serve_stdio(server: Any) -> None:
-    """Run the MCP server over the original stdin/stdout, isolated from tools."""
+    """Run the MCP server over the original stdin/stdout, isolated from tools.
+
+    mcp's stdio_server() diverts fds 0 and 1 itself, but best-effort: when it
+    cannot, it serves the wire in place without saying so. Ours raises
+    instead, and passing the streams explicitly skips mcp's claim, so the
+    descriptors are moved once.
+    """
     from io import TextIOWrapper
 
     import anyio
@@ -381,23 +388,46 @@ def create_mcp_server() -> Any:
     Requires the `mcp` package to be installed.
     """
     from mcp.server import Server
-    from mcp.types import TextContent, Tool
+    from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
-    server = Server("boxmunge")
+    tools = ListToolsResult(tools=[
+        Tool(name=d["name"], description=d["description"], input_schema=d["inputSchema"])
+        for d in _TOOL_DEFS
+    ])
 
-    tool_objects = [
-        Tool(name=defn["name"], description=defn["description"],
-             inputSchema=defn["inputSchema"])
-        for defn in _TOOL_DEFS
-    ]
+    async def on_list_tools(ctx: Any, params: Any) -> ListToolsResult:
+        return tools
 
-    @server.list_tools()
-    async def handle_list_tools() -> list[Tool]:
-        return tool_objects
+    async def on_call_tool(ctx: Any, params: Any) -> CallToolResult:
+        # A tool that raises is a tool error: the agent reads it as an
+        # isError result. mcp 2 would make it a JSON-RPC error, which MCP
+        # keeps for protocol failures and clients need not show the model.
+        try:
+            result = call_tool(params.name, params.arguments)
+        except Exception as e:
+            return CallToolResult(
+                content=[TextContent(type="text", text=str(e) or type(e).__name__)],
+                is_error=True)
+        return CallToolResult(content=[TextContent(type="text",
+                                                   text=json.dumps(result, default=str))])
 
-    @server.call_tool()
-    async def handle_call_tool(name: str, arguments: dict | None) -> list[TextContent]:
-        result = call_tool(name, arguments)
-        return [TextContent(type="text", text=json.dumps(result, default=str))]
-
+    server = Server("boxmunge", version=parse_version_string(get_build_version())[0],
+                    on_list_tools=on_list_tools, on_call_tool=on_call_tool)
+    _drop_tracing(server)
     return server
+
+
+def _drop_tracing(server: Any) -> None:
+    """Remove the OpenTelemetry middleware mcp 2 installs on every server.
+
+    The box runs no collector and sends nothing anywhere: without it no span
+    is recorded at all, whatever is later installed into the venv or set in
+    OTEL_* variables, and no client trace context is read from `_meta`.
+    """
+    names = [type(m).__name__ for m in server.middleware]
+    if names != ["OpenTelemetryMiddleware"]:
+        raise RuntimeError(
+            f"mcp's default server middleware is now {names}, not the tracing "
+            "middleware alone: review what it does before dropping it in "
+            "boxmunge.mcp_server._drop_tracing")
+    server.middleware.clear()

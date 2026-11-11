@@ -10,7 +10,7 @@ dependencies = [
 
 [project.optional-dependencies]
 tui = ["textual>=0.50"]
-mcp = ["mcp>=1.0"]
+mcp = ["mcp>=2.3"]
 
 [project.scripts]
 boxmunge-server = "boxmunge.cli:main"
