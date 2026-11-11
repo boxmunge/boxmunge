@@ -40,10 +40,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 
-from boxmunge import bind_sources, chown_hold, compose_references, compose_resolve
+from boxmunge import bind_sources, chown_hold, checked_start, compose_references
+from boxmunge import compose_resolve
 from boxmunge import docker_containers, start_alerts
 from boxmunge import compose_up_steps as up_steps
 from boxmunge.bind_sources import BindSourceError
+from boxmunge.checked_start import CheckedStart
 from boxmunge.compose_own_files import container_bind_problems
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import compose_up, start_containers
@@ -127,7 +129,7 @@ def _refuse_if_legacy_stage(paths: BoxPaths, project_name: str, component: str) 
 
 
 def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
-                   record: bool) -> None:
+                   record: bool) -> CheckedStart:
     """Staging runs from the slot: validate the staged release there,
     resolve the model from it, prove I3 on that model, and check (or record)
     its bind sources against the project dir as staging's own record, whose
@@ -159,24 +161,29 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
         sources = bind_sources.model_sources(model, project_dir)
         record_path = paths.project_bind_record(project_name, staging=True)
         if record:
-            bind_sources.record(project_dir, sources, bind_sources.control_hashes(
-                project_dir, read_files, control_root=release), record_path)
+            control = bind_sources.control_hashes(project_dir, read_files, control_root=release)
+            kinds = bind_sources.record(project_dir, sources, control, record_path)
         else:
             rec = bind_sources.read_record(record_path, redo=f"stage {project_name} again")
-            bind_sources.check_sources(project_dir, sources, rec["sources"])
-            bind_sources.check_control(project_dir, read_files, rec["control"],
-                                       control_root=release, redo=f"stage {project_name} again")
+            kinds = rec["sources"]
+            bind_sources.check_sources(project_dir, sources, kinds)
+            control = bind_sources.check_control(
+                project_dir, read_files, rec["control"], control_root=release,
+                redo=f"stage {project_name} again")
     except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError,
             ReleaseStateError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
+    return checked_start.issue(project_name, target.files, model, sources, kinds, read_files,
+                               control, control_root=release)
 
 
 def check_start(
     paths: BoxPaths, project_name: str, *, component: str,
     compose_files: list[str] | None = None, staging: bool = False, record: bool = False,
     deploying: bool = False, txn: str | None = None, regenerated: bool = False,
-) -> None:
+) -> CheckedStart:
     """Re-validate the project and check every bind source it would mount.
+    Returns what it checked: the resolved model the start runs.
 
     A `staging` start is checked against the slot (_check_staging), with
     staging's compose files; `compose_files` and `txn` are production's and
@@ -212,8 +219,7 @@ def check_start(
         if compose_files is not None or txn is not None:
             raise ValueError("a staging start runs the slot's own files and no install "
                              "transaction; pass neither compose_files nor txn")
-        _check_staging(paths, project_name, component=component, record=record)
-        return
+        return _check_staging(paths, project_name, component=component, record=record)
     if compose_files is None:
         raise ValueError("a production start check needs compose_files")
     if regenerated and not record:
@@ -240,15 +246,18 @@ def check_start(
             control = (bind_sources.check_kept_control(
                 project_dir, read_files, record_path, redo=_renewal_redo(paths, project_name))
                 if regenerated else bind_sources.control_hashes(project_dir, read_files))
-            bind_sources.record(project_dir, sources, control, record_path)
+            kinds = bind_sources.record(project_dir, sources, control, record_path)
         else:
             rec = bind_sources.read_record(record_path,
                                            redo=redeploy_command(paths, project_name))
-            bind_sources.check_sources(project_dir, sources, rec["sources"])
-            bind_sources.check_control(project_dir, read_files, rec["control"],
-                                       redo=redeploy_command(paths, project_name))
+            kinds = rec["sources"]
+            bind_sources.check_sources(project_dir, sources, kinds)
+            control = bind_sources.check_control(project_dir, read_files, rec["control"],
+                                                 redo=redeploy_command(paths, project_name))
     except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
+    return checked_start.issue(project_name, compose_files, model, sources, kinds, read_files,
+                               control)
 
 
 def check_kept_files(paths: BoxPaths, project_name: str, *, component: str) -> None:
@@ -319,10 +328,10 @@ def compose_up_checked(
     force_recreate: bool = False, services: list[str] | None = None, start: bool = True,
     txn: str | None = None, regenerated: bool = False,
 ) -> None:
-    """check_start, then `docker compose up` (`start=False`: create without
-    starting, which still mounts nothing yet but fixes every bind source in
-    the containers it creates). Staging runs from the slot, with its own
-    files. A production up of every service clears the slot's
+    """check_start, then `docker compose up` of the model it resolved
+    (`start=False`: create without starting, which still mounts nothing yet
+    but fixes every bind source in the containers it creates). Staging runs
+    from the slot, with its own files. A production up of every service clears the slot's
     production_stopped marker and sweeps 0.10.1's live-scripts copy.
 
     No start pulls or builds (`--pull never --no-build`, whatever a
@@ -334,9 +343,9 @@ def compose_up_checked(
     image the local image store no longer has is recreated
     (compose_up_steps). Raises ComposeRefused, compose_up_steps.ComposeUpFailed once
     the up has run, or DockerError before it."""
-    check_start(paths, project_name, component=component, compose_files=compose_files,
-                staging=staging, record=record, deploying=deploying, txn=txn,
-                regenerated=regenerated)
+    checked = check_start(paths, project_name, component=component,
+                          compose_files=compose_files, staging=staging, record=record,
+                          deploying=deploying, txn=txn, regenerated=regenerated)
     if staging:
         target = staging_target(paths, project_name)
         where = {"project_dir": target.cwd, "project_directory": target.project_directory,
@@ -354,10 +363,7 @@ def compose_up_checked(
                            project_name=compose_project, start=start, pinned=True, **where)
     up_steps.restore_build_names(paths, project_name, compose_project, overlay, component)
     redo = f"stage {project_name}" if staging else redeploy_command(paths, project_name)
-    try:
-        images = up_steps.start_images(run_dir, files, compose_project, services, where)
-    except compose_resolve.ComposeResolveError as e:
-        raise _refused(paths, project_name, component, str(e)) from e
+    images = up_steps.start_images(checked.model, compose_project, services)
     # Before the up: Compose creates in dependency order and fails only at
     # the service whose image is missing, after those ahead of it.
     missing = docker_containers.absent_images(images)

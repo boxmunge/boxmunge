@@ -65,28 +65,28 @@ def test_a_production_start(deployed) -> None:
     with docker_calls() as seen:
         compose_up_checked(deployed, "myapp", component="recover",
                            compose_files=["compose.yml", "compose.boxmunge.yml"])
-    _expect(seen, compose_config=3, docker_info=1, other=4)
+    _expect(seen, compose_config=2, docker_info=1, other=4)
 
 
 def test_a_bundle_deploy(deployed) -> None:
     with docker_calls() as seen:
         assert run_deploy("myapp", deployed, ref=V2) == 0
-    _expect(seen, compose_config=8, docker_info=3, other=14)
+    _expect(seen, compose_config=7, docker_info=3, other=14)
 
 
 def test_a_first_deploy_costs_what_a_redeploy_does(box) -> None:
     with docker_calls() as seen:
         assert run_deploy("myapp", box, ref=V1) == 0
-    _expect(seen, compose_config=8, docker_info=3, other=14)
+    _expect(seen, compose_config=7, docker_info=3, other=14)
 
 
 def test_stage_then_promote(deployed) -> None:
     with docker_calls() as seen:
         assert run_stage("myapp", deployed, ref=V2) == 0
-    _expect(seen, compose_config=20, docker_info=6, other=5)
+    _expect(seen, compose_config=19, docker_info=6, other=5)
     with docker_calls() as seen:
         assert run_promote("myapp", deployed) == 0
-    _expect(seen, compose_config=11, docker_info=3, other=17)
+    _expect(seen, compose_config=10, docker_info=3, other=17)
 
 
 def test_resume(deployed) -> None:
@@ -94,7 +94,7 @@ def test_resume(deployed) -> None:
         assert run_pause("myapp", deployed, yes=True, no_snapshot=True) == 0
     with docker_calls() as seen:
         assert run_resume("myapp", deployed, yes=True, skip_security_checks=True) == 0
-    _expect(seen, compose_config=6, docker_info=2, other=17)
+    _expect(seen, compose_config=5, docker_info=2, other=17)
 
 
 def test_restore(box, monkeypatch) -> None:
@@ -124,4 +124,4 @@ def test_restore(box, monkeypatch) -> None:
     FakeSystemContainer(box, handler=age).install(monkeypatch)
     with patch("boxmunge.commands.restore.time.sleep"), docker_calls(answer) as seen:
         assert run_restore("myapp", box, snapshot=SNAPSHOT, yes=True) == 0
-    _expect(seen, compose_config=8, docker_info=3, other=13)
+    _expect(seen, compose_config=6, docker_info=3, other=13)
