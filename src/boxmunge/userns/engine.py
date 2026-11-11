@@ -37,7 +37,9 @@ from boxmunge.userns.durable import NotDurable, barrier
 from boxmunge.userns.images import IMAGES_DIR, load_all, save_all
 from boxmunge.userns.inventory import PROXY_NETWORK, Inventory, take_inventory
 from boxmunge.userns.marker import clear_marker, set_marker
-from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
+from boxmunge.userns.journal import (
+    FORWARD, Journal, State, finish_hint, load_journal, save_journal, state,
+)
 from boxmunge.userns.preflight import PreflightRefused, preflight
 from boxmunge.userns.shift import Direction, scan_tree, shift_tree
 from boxmunge.userns.switch import (
@@ -212,15 +214,12 @@ def _ensure_remapped(paths: BoxPaths, j: Journal, daemon: DaemonControl) -> None
 
 
 def _refuse_rerun(j: Journal | None) -> Journal | None:
-    if j is not None and j.direction == FORWARD and j.phase in ("applied", "committed"):
-        raise MigrationError(f"the migration is already {j.phase}; "
-                             + ("nothing to do" if j.phase == "committed"
-                                else "soak, then userns-commit, or userns-rollback"))
-    if j is not None and j.direction == ROLLBACK and j.phase != "rolled-back":
-        raise MigrationError(f"a rollback stopped at {j.phase}; finish it with userns-rollback")
-    if j is not None and j.direction == ROLLBACK:
-        return None  # a rolled-back box starts over from phase 0
-    return j
+    """The journal to resume, or None to start from phase 0 (a rolled-back
+    box starts over)."""
+    now = state(j)
+    if now not in (State.NONE, State.MIGRATING, State.ROLLED_BACK):
+        raise MigrationError(finish_hint(j))
+    return j if now is State.MIGRATING else None
 
 
 def migrate(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,

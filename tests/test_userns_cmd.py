@@ -78,7 +78,7 @@ def test_check_reports_a_journal_instead_of_scanning(paths, monkeypatch, capsys)
             "boxmunge-upgrade userns-migrate" in capsys.readouterr().out)
     save_journal(paths, Journal(FORWARD, "committed", S, fresh_install=True))
     assert userns_cmd.run_check(paths) == 0
-    assert "VERDICT: already committed" in capsys.readouterr().out
+    assert "VERDICT: the userns migration is already committed" in capsys.readouterr().out
 
 
 def test_check_after_a_rollback_runs_the_preflight(paths, monkeypatch, capsys) -> None:

@@ -138,7 +138,7 @@ def test_rerun_after_applied_refuses(paths, box) -> None:
 
 def test_a_rollback_in_progress_blocks_the_migration(paths, box) -> None:
     save_journal(paths, Journal(ROLLBACK, "rb-saved", S))
-    with pytest.raises(en.MigrationError, match="finish it with userns-rollback"):
+    with pytest.raises(en.MigrationError, match="finish it: userns-rollback"):
         _migrate(paths)
 
 

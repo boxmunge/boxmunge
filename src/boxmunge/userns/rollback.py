@@ -23,7 +23,6 @@ from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import load_registered_projects
 from boxmunge.userns import offset as uo
 from boxmunge.userns.bringup import bring_up, quiesce
-from boxmunge.userns.commit import COMMIT_STARTED
 from boxmunge.userns.daemon_ctl import DaemonControl, TimerControl, daemon_answers
 from boxmunge.userns.durable import NotDurable, barrier
 from boxmunge.userns.engine import Save, project_locks, shift_journalled
@@ -31,7 +30,9 @@ from boxmunge.userns.images import IMAGES_DIR, load_all, remove_tars, save_all
 from boxmunge.userns.inventory import Inventory, outermost, take_containers, take_inventory
 from boxmunge.userns.marker import clear_marker, migration_in_progress, set_marker
 from boxmunge.userns.steps import report_back
-from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
+from boxmunge.userns.journal import (
+    FORWARD, ROLLBACK, Journal, State, finish_hint, load_journal, save_journal, state,
+)
 from boxmunge.userns.preflight import PreflightRefused, preflight
 from boxmunge.userns.shift import Direction
 from boxmunge.userns.switch import (
@@ -211,15 +212,8 @@ def _refuse_soak_edit(j: Journal) -> None:
 
 
 def _refuse(j: Journal | None) -> Journal:
-    if j is None:
-        raise MigrationError("there is no userns migration to roll back")
-    if j.direction == FORWARD and (j.phase == "committed" or COMMIT_STARTED in j.items):
-        raise MigrationError("the migration is committed (or its commit began): the old root "
-                             "is gone, so it cannot be rolled back"
-                             + ("; finish it with userns-commit" if j.phase != "committed"
-                                else ""))
-    if j.direction == ROLLBACK and j.phase == "rolled-back":
-        raise MigrationError("the migration was already rolled back")
+    if state(j) not in (State.MIGRATING, State.APPLIED, State.ROLLING_BACK):
+        raise MigrationError(f"cannot roll back: {finish_hint(j)}")
     return j
 
 

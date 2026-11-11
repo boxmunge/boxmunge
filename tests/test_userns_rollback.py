@@ -277,7 +277,7 @@ def test_an_abort_that_fails_is_journalled_and_alerted(paths, monkeypatch, tmp_p
 @pytest.mark.parametrize("journal, match", [
     (None, "no userns migration"),
     (Journal(FORWARD, "committed", S), "committed"),
-    (Journal(FORWARD, "applied", S, items={"commit-before": "10"}), "finish it with userns-commit"),
+    (Journal(FORWARD, "applied", S, items={"commit-before": "10"}), "finish it: userns-commit"),
     (Journal(ROLLBACK, "rolled-back", S), "already rolled back"),
 ])
 def test_refusals(paths, journal, match) -> None:

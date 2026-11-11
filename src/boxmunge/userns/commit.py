@@ -29,14 +29,14 @@ from boxmunge.userns import offset as uo
 from boxmunge.userns.durable import barrier
 from boxmunge.userns.images import IMAGES_DIR, remove_tars
 from boxmunge.userns.inventory import CONTAINERD_STORE, Inventory
-from boxmunge.userns.journal import FORWARD, Journal, load_journal, save_journal
+from boxmunge.userns.journal import (
+    COMMIT_STARTED, Journal, State, finish_hint, load_journal, save_journal, state,
+)
 from boxmunge.userns.preflight_checks import dir_size
 from boxmunge.userns.switch import MigrationError, remove_docker_tree
 
 COMPONENT = "userns-commit"
 SOAK = timedelta(hours=48)
-# Journalled before the first deletion: from then on there is no rollback.
-COMMIT_STARTED = "commit-before"
 _GC_LEASE = "boxmunge-userns-commit-gc"
 _LISTINGS = {"containers": ("containers", "ls", "-q"), "images": ("images", "ls", "-q"),
              "leases": ("leases", "ls", "-q"), "content blobs": ("content", "ls", "-q")}
@@ -171,10 +171,14 @@ def _check_containerd(prior: dict, info: dict, s: int) -> None:
             f"dockerd's flags changed during the soak. Put them back, or run userns-rollback")
 
 
+def _refuse(j: Journal | None) -> Journal:
+    if state(j) not in (State.APPLIED, State.COMMITTING):
+        raise MigrationError(f"nothing to commit: {finish_hint(j)}")
+    return j
+
+
 def _checked(paths: BoxPaths, j: Journal | None, now: datetime) -> Journal:
-    if j is None or j.direction != FORWARD or j.phase != "applied":
-        raise MigrationError(f"nothing to commit (journal: "
-                             f"{'none' if j is None else f'{j.direction} {j.phase}'})")
+    j = _refuse(j)
     applied = datetime.fromisoformat(str(j.applied_at))
     if now - applied < SOAK:
         raise MigrationError(f"soak until {(applied + SOAK).isoformat()} before committing")
