@@ -1735,7 +1735,13 @@ downtime. `NOTE:` lines report the prior store and the estimated downtime.
 
 `userns-migrate` takes every project lock, runs the checks again, saves every image to
 `/var/lib/boxmunge-userns/images/`, backs up every project (`premigrate`, the last two kept), syncs
-the backups off-site and checks the free space again. Downtime starts there: it disables the
+the backups off-site and checks the free space again. One check moves: `--check` streams every image
+to look for ids above 65535, while the migration reads them from each tar as it writes it, so it
+saves an image once. An image with such an id (one deployed since the last `--check`) therefore
+stops the migration during the save, after its report said `ready` and before any backup or
+downtime. The error names every such image; the other images' tars are kept and the journal is at
+`started`. Replace the image, redeploy and run `userns-migrate` again, or abandon the migration with
+`userns-rollback`. Downtime starts after the free-space check: it disables the
 boxmunge timers (a reboot does not start them) and stops every container, switches the daemon (the
 stopped daemon's bridge interfaces are deleted, as a reboot would; Docker makes them again), loads
 the images, moves each volume into the remapped root, shifts the owners of volume and bind data by

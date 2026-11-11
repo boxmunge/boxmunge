@@ -4,8 +4,10 @@ from __future__ import annotations
 import pytest
 
 from boxmunge.userns import images as im
+from boxmunge.userns import layers
 from boxmunge.userns.inventory import ImageEntry
 from boxmunge.userns.journal import FORWARD, Journal
+from tests.test_userns_layers import _layer, _save
 
 S = 1048576
 IMAGES = [ImageEntry("sha256:" + "a" * 64, ["postgres:16", "postgres:latest"], 10, True),
@@ -121,3 +123,61 @@ def test_an_untagged_unreferenced_image_is_not_carried(tmp_path, monkeypatch) ->
     loose = ImageEntry("sha256:" + "e" * 64, [], 1, False)
     im.save_all([loose], Journal(FORWARD, "started", S), tmp_path / "b" / "img", lambda: None)
     im.load_all([loose], Journal(FORWARD, "switched", S), tmp_path, lambda: None)
+
+
+def _tagged(n: int, tag: str) -> ImageEntry:
+    return ImageEntry("sha256:" + str(n) * 64, [tag], 1, True)
+
+
+def _saver(monkeypatch, tars: dict[str, bytes]) -> list[list[str]]:
+    """`docker save -o <tar> <tag>` writes that tag's bytes; nothing else runs."""
+    calls: list[list[str]] = []
+
+    def run(cmd, capture=False, timeout=None):
+        assert cmd[:3] == ["docker", "save", "-o"], cmd
+        calls.append(cmd)
+        open(cmd[3], "wb").write(tars[cmd[4]])
+    monkeypatch.setattr(im, "_run", run)
+    monkeypatch.setattr(layers.subprocess, "Popen",
+                        lambda *a, **kw: pytest.fail("saved an image a second time"))
+    return calls
+
+
+def test_high_ids_are_read_from_the_tar_just_saved_and_every_offender_named(
+        tmp_path, monkeypatch) -> None:
+    """The forward migration's check: no second `docker save`. A refused
+    image leaves no tar and no journal entry; the others are saved, so one
+    run names every offender and a rerun saves only what was replaced."""
+    clean = _save(("blobs/sha256/a", _layer(0))).getvalue()
+    high = _save(("blobs/sha256/b", _layer(70000))).getvalue()
+    zstd = _save(("blobs/sha256/z", b"\x28\xb5\x2f\xfd" + b"\0" * 600)).getvalue()
+    images = [_tagged(1, "bad:1"), _tagged(2, "good:1"), _tagged(3, "packed:1"),
+              _tagged(4, "fine:1")]
+    calls = _saver(monkeypatch, {"bad:1": high, "good:1": clean, "packed:1": zstd,
+                                 "fine:1": clean})
+    j = Journal(FORWARD, "started", S)
+    directory = tmp_path / "b" / "img"
+    with pytest.raises(im.ImageError) as refused:
+        im.save_all(images, j, directory, lambda: None, refuse_high_ids=True)
+    assert str(refused.value) == (
+        "image bad:1 has files owned by ids above 65535 (etc/f (70000:70000)), which a "
+        "remapped daemon cannot load. Rebuild or replace it and redeploy; "
+        "image packed:1: blobs/sha256/z is a zstd-compressed layer, which boxmunge cannot read")
+    assert j.items == {f"image:{images[1].id}": "saved", f"image:{images[3].id}": "saved"}
+    assert sorted(f.name for f in directory.iterdir()) == [f"{'2' * 64}.tar", f"{'4' * 64}.tar"]
+    assert len(calls) == 4  # one save each
+    calls.clear()
+    with pytest.raises(im.ImageError):
+        im.save_all(images, j, directory, lambda: None, refuse_high_ids=True)
+    assert [c[4] for c in calls] == ["bad:1", "packed:1"]  # the saved ones are kept
+
+
+def test_a_rollback_s_save_reads_no_tar(tmp_path, monkeypatch) -> None:
+    """The unremapped daemon it goes back to loads any id."""
+    high = _save(("blobs/sha256/b", _layer(70000))).getvalue()
+    _saver(monkeypatch, {"bad:1": high})
+    monkeypatch.setattr(im, "high_ids", lambda stream: pytest.fail("read the tar"))
+    j = Journal(FORWARD, "applied", S)
+    im.save_all([_tagged(1, "bad:1")], j, tmp_path / "b" / "img", lambda: None,
+                prefix="rb-image")
+    assert j.items == {f"rb-image:{'sha256:' + '1' * 64}": "saved"}

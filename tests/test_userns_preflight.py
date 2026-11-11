@@ -143,6 +143,18 @@ def test_high_ids_in_an_image_are_refused(paths, quiet, monkeypatch) -> None:
     assert "ids above 65535" in text and "1 image(s) with no tag that no container runs" in text
 
 
+def test_the_migration_s_own_run_keeps_the_image_notes_and_saves_no_image(
+        paths, quiet, monkeypatch) -> None:
+    """userns-migrate reads the ids from the tars it writes (images.save_all);
+    only --check streams every image for them."""
+    monkeypatch.setattr(checks, "image_high_ids", lambda image_id: pytest.fail("streamed"))
+    inv = _inv(quiet, images=[ImageEntry("sha256:i", ["x:1"], 1, True),
+                              ImageEntry("sha256:u", [], 1, False)])
+    report = pf.preflight(paths, inv, direction=FORWARD, offset=S,
+                          images_dir=Path(inv.root) / "img", scan_images=False)
+    assert report.ok and "1 image(s) with no tag that no container runs" in report.text()
+
+
 def test_shift_problems_are_refused_per_tree(paths, quiet, monkeypatch) -> None:
     monkeypatch.setattr(checks, "scan_tree", lambda tree, s, d: Scan(["x: uid 70000"], 3))
     uploads = paths.project_dir("shop") / "uploads"

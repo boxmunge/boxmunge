@@ -192,7 +192,9 @@ def preflight(paths: BoxPaths, inv: Inventory, *, direction: str, offset: int,
               images_dir: Path, scan_images: bool = True,
               extra_binds: list[str] | None = None) -> Report:
     """`extra_binds`: bind data a rollback also unshifts (the forward
-    inventory's, which the remapped daemon may no longer mount)."""
+    inventory's, which the remapped daemon may no longer mount).
+    `scan_images`: False from the migration, which finds an image's ids
+    above 65535 in the tar it saves; --check streams every image for them."""
     r = Report()
     forward = direction == FORWARD
     checks.docker_version(inv, r)
@@ -216,8 +218,7 @@ def preflight(paths: BoxPaths, inv: Inventory, *, direction: str, offset: int,
         except ManifestError as e:
             r.refusals.append(str(e))
         _undeclared_root(paths, r)
-        if scan_images:
-            checks.images(inv, r)
+        checks.images(inv, r, scan=scan_images)
     checks.disk(inv, r, images_dir)
     _notes(paths, inv, r)
     return r
