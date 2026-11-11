@@ -32,7 +32,6 @@ from boxmunge.intake import (
     report_refusal, validate_release_tree,
 )
 from boxmunge.lifecycle import refuse_if_blocked
-from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.production_stopped import start_again
@@ -64,8 +63,7 @@ def _sha256(path: Path) -> str:
 
 def _eligible(project: str, paths: BoxPaths) -> bool:
     """Step 1, under the lock: not blocked, registered, no open install."""
-    if refuse_if_blocked(project, paths, ships_fix=True, staging=True) \
-            or refuse_if_legacy_stage(paths, project):
+    if refuse_if_blocked(project, paths, ships_fix=True, staging=True):
         return False
     if not is_registered(project, paths):
         print(f"ERROR: Project '{project}' is not registered on this server. "

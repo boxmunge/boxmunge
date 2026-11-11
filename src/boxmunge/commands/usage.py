@@ -100,21 +100,6 @@ longer match, after a platform rollback or a hand edit, or one that cannot
 be read. Check first that production is what .releases/live.json says. A
 record that still matches is refused: rerun, --abandon, rollback or deploy
 a fix instead. Operator-only: run it as root, as boxmunge-server.""",
-    "legacy-stage": """\
-Usage: boxmunge legacy-stage <project> [--discard [--confirm-recreated] | --keep-staged]
-
-Resolve a release staged by boxmunge 0.10.1 before this upgrade. Without a
-flag, shows what production runs and the choices, and changes nothing.
---discard throws the staged release away and puts production's back (with
---confirm-recreated when production was already started from the staged
-files); --keep-staged treats it as promoted. A stage made before 0.10.1
-(pre0101) wrote over production's files and kept no copy: its --discard
-stops staging and starts nothing, and every start is refused until a
-prod-deploy of production's release (or a stage and promote of the staged
-one, which needs no copy_data: production's data stays where it is).
-Refused while a platform rollback is
-still possible (probation). If interrupted, run the same command again.
-Operator-only: run it as root, as boxmunge-server.""",
     "staging-teardown-all": """\
 Usage: boxmunge staging-teardown-all --reason platform-rollback
 

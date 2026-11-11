@@ -321,7 +321,9 @@ deploy> log --tail 60
   sudo boxmunge-server legacy-stage myapp --discard  # drop the staged release, keep production's
   ```
 
-  `--keep-staged` is the other choice: it treats the staged release as promoted.
+  `--keep-staged` is the other choice: it treats the staged release as promoted. Resolve it
+  on 0.11.6, before you upgrade any further: later releases have no `legacy-stage` (see
+  "Keep going").
 - **`LEFT AS IS: ... (leftover)` on a box that was on 0.9 or 0.10.0.** This is a stage from
   one of those releases, and 0.11.5's `legacy-stage` misreads it. It says production runs
   "the release a 0.10.1 promote installed" and offers only `--discard`. But `--discard`
@@ -397,6 +399,15 @@ Once every project has been deployed and probation is over, take a fresh backup 
 
 You are now on 0.11. `upgrade` installs the newest release when you choose to, and
 auto-update installs security and break-fix releases by itself.
+
+**A project the upgrade `LEFT AS IS` because of a staged release must be resolved on 0.11.6
+before the box goes any further.** From 0.11.7 on there is no `legacy-stage` command, and the
+upgrade refuses while a project still holds such a stage, or holds the files of one that
+`--discard` dropped and no `prod-deploy` has replaced. The refusal names each project and the
+command 0.11.6 accepts for it (on 0.11.5 it tells you to upgrade to 0.11.6 first), and is
+sent as a priority-1 alert. No project is touched, but the release that refused is now
+blocklisted on your box: once every project it named is resolved, run the `clear-blocklist`
+command the refusal prints, then upgrade again.
 
 ## If the upgrade stops
 

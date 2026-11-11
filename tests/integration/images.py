@@ -49,7 +49,7 @@ NOT_IMAGES = frozenset({
     "boxmunge-remap:boxmunge-remap",   # user:group
     "boxmunge.invalid/projb/web:latest",  # built by the test
     "container:projb-db-1",            # network_mode
-    "deploy:deploy", "root:deploy", "root:docker",  # user:group
+    "deploy:deploy", "root:docker",    # user:group
     "example.com/app:c", "example.com/app:cache",  # never pulled: config only
     "host:port.", "host:repo",         # prose
     "myapp-frontend:3000",             # host:port

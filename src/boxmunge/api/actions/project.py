@@ -21,7 +21,6 @@ from boxmunge.commands.inbox_cmd import collect_inbox
 from boxmunge.commands.status import HEALTH_STATES
 from boxmunge.cve.quarantine import read_quarantine_state
 from boxmunge.data_dirs import ReleaseStateError
-from boxmunge.legacy_stage import EvidenceError, cannot_tell, evidence, legacy_stage
 from boxmunge.pause import read_paused_state
 from boxmunge.project_registry import is_registered
 from boxmunge.paths import BoxPaths
@@ -34,8 +33,6 @@ LIFECYCLES = ("registered", "pre_registered", "quarantined", "paused", "monitor_
 
 INSTALL_VIEW = nullable(obj({"id": STRING, "source": enum(*SOURCES), "ref": STRING,
                              "phase": enum(*PHASES, *ABANDON_PHASES)}))
-LEGACY_VIEW = nullable(obj({"kind": enum("bundle", "git", "leftover", "pre0101"),
-                            "evidence": nullable(enum("untouched", "recreated", "unknown"))}))
 
 PROJECT_VIEW = obj({
     "project": STRING,
@@ -58,7 +55,6 @@ PROJECT_VIEW = obj({
     "paused": nullable(obj({"paused_at": TIMESTAMP, "reason": NULLABLE_STRING})),
     "quarantine": nullable(QUARANTINE_SCHEMA),
     "install": INSTALL_VIEW,
-    "legacy_stage": LEGACY_VIEW,
 })
 
 CHECK_RESULT = obj({
@@ -78,25 +74,6 @@ def _install_view(paths: BoxPaths, name: str) -> dict[str, Any] | None:
         raise StateError(f"The install record of {name} is unreadable: {e}") from e
     return None if txn is None else {"id": txn.id, "source": txn.source, "ref": txn.ref,
                                      "phase": txn.phase}
-
-
-def _legacy_view(paths: BoxPaths, name: str) -> dict[str, Any] | None:
-    """A stage left by 0.10.1. Its evidence asks Docker (and git) what
-    production runs; when that cannot be read the stage is still reported,
-    as "unknown". A detection that cannot tell is not a "no stage"."""
-    try:
-        stage = legacy_stage(paths, name)
-    except OSError as e:
-        raise StateError(cannot_tell(name, e)) from e
-    if stage is None:
-        return None
-    if stage.kind in ("leftover", "pre0101"):
-        return {"kind": stage.kind, "evidence": None}
-    try:
-        found = evidence(paths, name, stage).classification
-    except (EvidenceError, OSError):
-        found = "unknown"
-    return {"kind": stage.kind, "evidence": found}
 
 
 def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
@@ -155,7 +132,6 @@ def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
         "quarantine": None if quarantine is None else quarantine_view(
             quarantine, paths.project_quarantine_state(name)),
         "install": _install_view(paths, name),
-        "legacy_stage": _legacy_view(paths, name),
     }
 
 

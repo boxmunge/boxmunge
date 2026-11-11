@@ -18,7 +18,6 @@ from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_confi
 from boxmunge.compose_version import compose_version_problem
 from boxmunge.config import ConfigError, load_config
 from boxmunge.cve.quarantine import QuarantineError, is_quarantined, quarantine_action_complete
-from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.pause import pause_incomplete, read_paused_state
@@ -57,9 +56,9 @@ def _daemon_json(r: Report) -> None:
 
 
 def _project_state(paths: BoxPaths, p: str, r: Report) -> None:
-    for reason in (open_install_reason(paths, p), legacy_stage_refusal(paths, p)):
-        if reason:
-            r.refusals.append(reason)
+    reason = open_install_reason(paths, p)
+    if reason:
+        r.refusals.append(reason)
     if has_slot(paths, p) or slot_debris(paths, p):
         r.refusals.append(f"{p}: a release is staged (or a stage left debris); promote or "
                           f"unstage it first: the migration carries production only")

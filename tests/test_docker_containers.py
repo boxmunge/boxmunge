@@ -14,7 +14,6 @@ from boxmunge.docker_run import DockerError
 # Bound at import: conftest's fake_containers replaces the module attributes.
 project_containers = docker_containers.project_containers
 local_image = docker_containers.local_image
-created_times = docker_containers.created_times
 start_states = docker_containers.start_states
 running_without_image = docker_containers.running_without_image
 
@@ -204,17 +203,6 @@ def test_docker_failure_is_not_an_empty_answer(monkeypatch):
         project_containers("demo")
 
 
-def test_created_times_read_docker_nanosecond_times(daemon):
-    web, worker = _container("demo-web-1", "web"), _container("demo-worker-1", "worker")
-    web["Created"] = "2026-10-01T12:00:00.123456789Z"
-    worker["Created"] = "2026-10-01T14:00:00+02:00"
-    daemon["containers"] = [web, worker]
-    assert created_times("demo") == {
-        "demo-web-1": datetime(2026, 10, 1, 12, 0, 0, 123456, tzinfo=timezone.utc),
-        "demo-worker-1": datetime(2026, 10, 1, 12, 0, tzinfo=timezone.utc)}
-    assert "label=com.docker.compose.project=demo" in daemon["calls"][0]
-
-
 def test_start_states_say_who_runs_and_when_each_last_started(daemon):
     web, never = _container("demo-web-1", "web", running=False), _container("demo-db-1", "db")
     web["State"]["StartedAt"] = "2026-10-01T12:00:00.123456789Z"
@@ -227,16 +215,17 @@ def test_start_states_say_who_runs_and_when_each_last_started(daemon):
             "db", True, datetime(1, 1, 1, tzinfo=timezone.utc))}
 
 
-def test_created_times_of_no_containers_is_empty(daemon):
-    assert created_times("demo") == {}
+def test_start_states_of_no_containers_are_empty(daemon):
+    assert start_states("demo") == {}
+    assert "label=com.docker.compose.project=demo" in daemon["calls"][0]
 
 
-def test_an_unreadable_created_time_fails_loudly(daemon):
+def test_an_unreadable_start_time_fails_loudly(daemon):
     web = _container("demo-web-1", "web")
-    web["Created"] = "yesterday"
+    web["State"]["StartedAt"] = "yesterday"
     daemon["containers"] = [web]
     with pytest.raises(DockerError, match="yesterday"):
-        created_times("demo")
+        start_states("demo")
 
 
 def _completed(returncode: int, stdout: str = "", stderr: str = "") -> MagicMock:

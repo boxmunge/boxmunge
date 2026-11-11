@@ -1131,7 +1131,6 @@ several findings are involved the title names the worst and adds
 | `[boxmunge:<project>] Quarantine kept — CISA KEV withdrew <CVE>` (once; `security resume` accepts it) | priority-1 |
 | `[<hostname>] CVE scan incomplete — <N> projects not fully scanned` | priority-1 |
 | `[<hostname>] <project>: quarantine lifted by deploying <ref>` | normal; priority-1 when the release relaxed the policy or the policy at quarantine time is unknown |
-| `[<hostname>] <project>: quarantine held` (a release staged by boxmunge 0.10.1 is open; resolve it with `boxmunge-server legacy-stage <project>`) | priority-1 |
 
 Alerting is best-effort. The durable record is the on-disk scan state
 under `state/scans/<project>.json`. If Pushover isn't configured, or

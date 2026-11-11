@@ -162,6 +162,29 @@ class TestDryRun:
         assert BRIDGE_COMMAND in err
         assert "manifest" not in err
 
+    def test_the_floor_is_refused_before_an_unresolved_stage(
+            self, tmp_path: Path, capsys, monkeypatch) -> None:
+        """A 0.10.1 box that holds a stage in the old layout is told the floor,
+        whose remedy (the bridge release) is where that stage is resolved. The
+        unresolved-stage refusal, and its alert, wait for a box at the floor."""
+        paths = _box(tmp_path, "0.10.1+abc1234")
+        staged = paths.project_dir("shop")
+        staged.mkdir(parents=True)
+        (staged / "compose.staging-base.yml").write_text("services: {}\n")
+        (staged / "compose.boxmunge-staging.yml").write_text("services: {}\n")
+        sent: list[str] = []
+        monkeypatch.setattr("boxmunge.notify.notify", lambda _paths, title, *_a, **_k: sent.append(title))
+        before = _snapshot(paths.root)
+
+        assert run_upgrade(paths, dry_run=True) == 1
+
+        err = capsys.readouterr().err
+        assert "cannot be installed over 0.10.1" in err
+        assert BRIDGE_COMMAND in err
+        assert "staged" not in err and "legacy-stage" not in err
+        assert sent == []
+        assert _snapshot(paths.root) == before
+
     def test_passes_at_the_floor(self, tmp_path: Path, capsys) -> None:
         paths = _box(tmp_path, "0.11.0+abc1234")
         assert run_upgrade(paths, dry_run=True) == 0
