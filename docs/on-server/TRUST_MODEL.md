@@ -251,17 +251,21 @@ the health report from just before the upgrade (`health-baseline`: a health
 error already there then does not roll the release back) and the name of the
 stash the upgrade made (`upgrade-stash`). One upgrade runs at a time because
 the shim, `auto-update` and `check-probation` all hold that
-lock, which deploy cannot replace. Shims up to 0.10.1 locked
-`upgrade-state/upgrade.lock` instead, and the one that installs this release
-keeps running until its upgrade ends, so every taker locks that file too (after
-the root-only one). Deploy could hold that legacy lock to stall upgrades and
-probation checks, so every lock taker makes it root-only (0600; shims up to
-0.10.1 created it 0644), and root replaces a lock file there that is not
-root's with its own, with a warning: deploy cannot newly open it. A deploy
-process that opened it before that keeps its lock (an open descriptor is not
-revoked); that is reported, not prevented: an hour of `check-probation` runs
-that cannot take the lock is an error in the operational log, repeated every
-hour it lasts. 0.11.7 removes the legacy lock.
+lock, which deploy cannot replace. The shim also locks
+`upgrade-state/upgrade.lock`, the only lock of shims up to 0.10.1, after the
+root-only one. No exclusion depends on it any more (an upgrade starts from
+0.11.0 or later, and every shim and release since then takes the root-only
+lock). It is kept for one caller: `userns migrate`, `rollback` and `commit` of
+releases 0.11.0 to 0.11.6 refuse to run unless the shim calling them holds
+both locks, and after a rollback this shim calls the previous release's.
+Deploy could hold that legacy lock to stall upgrades and probation checks, so
+the shim makes it root-only (0600; shims up to 0.10.1 created it 0644), and
+replaces a lock file there that is not root's with its own, with a warning:
+deploy cannot newly open it. A deploy process that opened it before that keeps
+its lock (an open descriptor is not revoked); that is reported, not prevented:
+an hour of `check-probation` runs that cannot take the lock is an error in the
+operational log, repeated every hour it lasts. The shim stops taking the
+legacy lock once no upgrade can start from a release before 0.11.7.
 
 ### Files root writes in deploy-writable directories
 
@@ -282,9 +286,7 @@ A platform rollback restores exactly the stash its upgrade made, never whichever
 anything if the file at the name does not match them), copies that archive
 into `upgrade-root/rollback-stash/` (opened without following a link, and only if it is a plain
 file root owns, which deploy cannot write, with the recorded size and sha256, so no other stash
-renamed onto the name passes), and has the previous release restore the copy. A stash with link
-members, made by a release before 0.10.2, is recorded by name alone: the upgrade rewrites it
-without them. A missing
+renamed onto the name passes), and has the previous release restore the copy. A missing
 or replaced stash stops the rollback as "ROLLBACK PARTIAL", naming the file.
 
 This protects the last path component only. Deploy can still swap an intermediate directory it

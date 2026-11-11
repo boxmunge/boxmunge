@@ -7,11 +7,10 @@ constant here — it drifts.
 
 
 def __getattr__(name: str) -> str:
-    # The upgrade shims of v0.6.x to v0.9.1 import-test the new release with
-    # `print(boxmunge.__version__)` before they install its shim; without it
-    # those boxes can never upgrade (tests/integration/test_shim_hop.py).
-    # Remove with the 0.11.7 upgrade floor.
+    # The upgrade shims of 0.5.8 to 0.9.1 pre-flight a new release with
+    # `print(boxmunge.__version__)`. Those boxes are below the upgrade floor,
+    # and this traceback is the only place the release can tell them so.
     if name == "__version__":
-        from boxmunge.version import get_build_version
-        return get_build_version()
+        from boxmunge.upgrade_floor import package_version_refusal
+        raise AttributeError(package_version_refusal())
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

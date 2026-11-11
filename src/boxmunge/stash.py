@@ -151,7 +151,7 @@ def create_stash(paths: BoxPaths) -> CreatedStash:
                 tar.add(path, arcname=arcname)
 
             # Schema-version marker — must be last so partial archives lack it
-            # and are detected as legacy/corrupt by restore_stash.
+            # and are refused by restore_stash.
             meta_bytes = json.dumps(_meta_payload(paths), indent=2).encode()
             meta_info = tarfile.TarInfo(name=META_FILENAME)
             meta_info.size = len(meta_bytes)
@@ -235,23 +235,16 @@ def _allowed_owner(member: tarfile.TarInfo) -> tuple[int, int] | None:
     return member.uid, member.gid
 
 
-def _validate_meta(tar: tarfile.TarFile, archive: Path, paths: BoxPaths) -> None:
-    """Validate stash schema version. Allows legacy stashes (no meta) with a warning.
-
-    Legacy stashes are stashes created by boxmunge < 0.5.3 (before the meta
-    file existed). Real instances of these exist on disk on every fleet
-    host, so we treat their absence as "format_version 0" — restorable but
-    flagged.
-    """
+def _validate(tar: tarfile.TarFile, archive: Path) -> None:
+    """Refuse, before anything is written, a stash this release did not or
+    could not have made: no meta file (written last, so the archive was cut
+    short), a newer format, or a link member (create_stash leaves links out)."""
     try:
         meta_member = tar.getmember(META_FILENAME)
     except KeyError:
-        log_warning(
-            "stash",
-            f"stash {archive.name} has no format_version marker — treating as v0",
-            paths,
-        )
-        return
+        raise StashError(
+            f"stash {archive.name} has no {META_FILENAME}: it is incomplete, or "
+            f"older than this release can restore") from None
 
     extracted = tar.extractfile(meta_member)
     if extracted is None:
@@ -270,6 +263,12 @@ def _validate_meta(tar: tarfile.TarFile, archive: Path, paths: BoxPaths) -> None
             f"supports (max {STASH_FORMAT_VERSION}). Upgrade boxmunge-server "
             f"before restoring."
         )
+    for member in tar.getmembers():
+        _check_member_safe(member)
+        if member.issym():
+            raise StashError(
+                f"stash {archive.name} holds the link member {member.name!r}: no "
+                f"release from 0.11.0 on stashes a link, so it is not restored")
 
 
 def _secrets_lock(paths: BoxPaths, member_name: str) -> AbstractContextManager:
@@ -329,20 +328,10 @@ def restore_stash(paths: BoxPaths, archive: Path | None = None) -> Path:
     projects_root = paths.projects.resolve()
 
     with _open_archive(archive) as raw, tarfile.open(fileobj=raw, mode="r:gz") as tar:
-        _validate_meta(tar, archive, paths)
+        _validate(tar, archive)
 
         for member in tar.getmembers():
             if member.name == META_FILENAME or _is_kept_on_disk(member.name):
-                continue
-
-            _check_member_safe(member)
-
-            # Stashes made before links were left out hold a git project's
-            # manifest.yml and compose.yml as links into its checkout. The
-            # links are still on disk; refusing them would abort the rollback.
-            if member.issym():
-                log_warning("stash", f"Skipped symlink member {member.name!r} "
-                            f"(left as it is on disk)", paths)
                 continue
 
             if member.name.startswith("config/"):

@@ -631,17 +631,23 @@ scanner's Caddy line reaches a scenario. Check it with `cscli metrics` (source
 `docker:boxmunge-caddy`). `health` (`caddy`) reports an error for a `boxmunge-caddy` from any other
 compose project.
 
-A tmpfs at `/var/log/caddy` (up to 320 MB, room for the old configs' own rotation), inside the
-container only, lets a rollback to an earlier release (whose site configs write there) still start
-Caddy. Nothing reads it, so CrowdSec sees no HTTP traffic until the box is upgraded again; the
-rollback's log and alert say so.
+Caddy's container has no writable log path: its root filesystem is read-only and nothing is
+mounted at `/var/log/caddy`. A `caddy.override.conf` or a hand-placed file in `caddy/sites/` that
+writes a log file there stops Caddy from loading its config. Use the log block boxmunge generates
+(stdout) instead.
 
-Earlier releases wrote `/opt/boxmunge/caddy/logs/access.log`. The upgrade rewrites the
-generated log block in `caddy/sites/`, removes `caddy/logs` and CrowdSec's old file entry, and stops
-if a `caddy.override.conf` or a hand-placed file in `caddy/sites/` still mentions `/var/log/caddy`:
-Caddy no longer mounts it, so that config would stop Caddy from starting. Replace its log block
-with the one boxmunge generates, clear the version from the blocklist (`boxmunge-upgrade
-clear-blocklist <version>`) and upgrade again.
+Releases 0.11.0 to 0.11.6 mounted a tmpfs there, so such a file worked on them. An install or
+upgrade to 0.11.7 or later looks for `/var/log/caddy` in `caddy/sites/*.conf`, in the site files
+waiting in `caddy/.site-journal/` and in every `projects/*/caddy.override.conf`, before it changes
+anything. If one names it, the install stops and lists the files, and the box stays on its
+release with its sites up. In each file, remove the log block or make it `output stdout`. An
+upgrade that stopped this way blocklisted the release it was installing, so clear that and
+upgrade again:
+
+```
+sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist <version>
+sudo /opt/boxmunge/bin/boxmunge-upgrade target <version>
+```
 
 ---
 
@@ -1851,8 +1857,10 @@ self-test
 
 ## Upgrading the Platform
 
-A box still on 0.9 or 0.10 cannot get here by `upgrade` alone: follow
-[UPGRADING.md](UPGRADING.md), "Upgrading from 0.9 or 0.10".
+An upgrade starts from 0.11.0 or later. From 0.11.7 on, a release refuses to be installed over
+anything older: the upgrade stops at its pre-flight with the box unchanged, and names the way
+through, `sudo /opt/boxmunge/bin/boxmunge-upgrade target 0.11.6`. For a box still on 0.9 or
+0.10, follow [UPGRADING.md](UPGRADING.md), "Upgrading from 0.9 or 0.10".
 
 Apply platform updates:
 
@@ -2367,17 +2375,9 @@ The server's `mcp` package is part of every install. `install.sh` and every plat
 whose bundle lacks that file, or whose MCP install fails, stops at pre-flight with the current
 release still live, like any other dependency failure.
 
-An upgrade is run by the box's current upgrade shim, which installs only the requirements files
-it knows; shims up to 0.10.1 do not know `requirements-mcp.txt`. From 0.11.3 on, the new release's
-own `install.sh`, which shims from 0.7.0 run before the venv swap, installs it into the new
-environment. A shim up to 0.10.0 runs `install.sh` without `--upgrade-shim`; `install.sh`
-recognises it by the upgrade lock it holds and still leaves the previous release, the rollback
-target, alone. If pip fails there (a network blip, a full disk), on the hop from 0.10.1 or from an
-older shim alike, `install.sh` exits 75 and the old shim blocklists the release as
-`system_upgrade_failed: install_sh_exit_75`, with the previous release still live. Fix the cause, then run
-`sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.3` (for the release concerned) and
-`upgrade` again. A box upgraded to 0.11.0, 0.11.1 or 0.11.2 by an older shim, or to any release by
-a 0.6.x shim (which never runs `install.sh`), comes up without MCP.
+A box upgraded to 0.11.0, 0.11.1 or 0.11.2 from 0.10.1 or earlier, or to any 0.11 release from
+0.6.x, came up without MCP (the upgrade shim of those older releases did not install
+`requirements-mcp.txt`), and stays without it until it is repaired.
 
 If the package is missing, `mcp-serve` exits 1 and `doctor` fails its "MCP package installed"
 check, both with the repair: `upgrade --repair-deps` from the deploy shell, or as `supervisor`:

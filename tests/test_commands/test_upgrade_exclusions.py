@@ -15,6 +15,12 @@ from boxmunge.upgrade_exclusions import Exclusions, apply_projects, notify_exclu
 from tests.stage_helpers import V1, staging_docker_off
 
 
+@pytest.fixture(autouse=True)
+def _box_at_the_upgrade_floor(paths) -> None:
+    """The dry run refuses a box that records no release, or one below 0.11.0."""
+    paths.version_file.write_text("0.11.0\n")
+
+
 def _deployed(paths) -> None:
     from boxmunge.commands.deploy import run_deploy
     from boxmunge.project_registry import add_project
@@ -76,18 +82,6 @@ def test_dry_run_reports_an_open_install_and_leaves_it(paths) -> None:
                       f"will be left as is"]
 
 
-def test_apply_rewrites_the_stash_first(paths) -> None:
-    order: list[str] = []
-    with patch("boxmunge.commands.upgrade_cmd.sanitize_latest_stash",
-               lambda p: order.append("stash") or type("R", (), {"changed": False, "dropped": [], "error": None})()), \
-            patch("boxmunge.commands.upgrade_cmd.apply_projects",
-                  side_effect=lambda p: order.append("apply") or _empty()), \
-            patch("boxmunge.commands.upgrade_cmd.caddy_reload"), \
-            patch("boxmunge.commands.upgrade_cmd.write_installed_version"):
-        assert _run_apply(paths, "0.10.1", "0.11.0") == 0
-    assert order[:2] == ["stash", "apply"]
-
-
 def test_apply_passes_the_excluded_set_to_the_restart(paths) -> None:
     excluded = Exclusions(install={"b": "why"}, busy=["c"])
     seen = {}
@@ -98,9 +92,8 @@ def test_apply_passes_the_excluded_set_to_the_restart(paths) -> None:
         return Restart()
 
     from boxmunge.commands.upgrade_steps import ManifestMigration, Regeneration
-    with patch("boxmunge.commands.upgrade_cmd.sanitize_latest_stash"), \
-            patch("boxmunge.commands.upgrade_cmd.apply_projects",
-                  return_value=(ManifestMigration(), Regeneration(), excluded)), \
+    with patch("boxmunge.commands.upgrade_cmd.apply_projects",
+               return_value=(ManifestMigration(), Regeneration(), excluded)), \
             patch("boxmunge.commands.upgrade_cmd.notify_exclusions"), \
             patch("boxmunge.commands.upgrade_cmd.restart_projects", restart), \
             patch("boxmunge.commands.upgrade_cmd.caddy_reload"), \
@@ -112,9 +105,8 @@ def test_apply_passes_the_excluded_set_to_the_restart(paths) -> None:
 def test_the_apply_log_tells_each_kind_of_exclusion_apart(paths) -> None:
     excluded = Exclusions(install={"b": "why"}, busy=["c"], unreadable={"e": "record"})
     from boxmunge.commands.upgrade_steps import ManifestMigration, Regeneration, Restart
-    with patch("boxmunge.commands.upgrade_cmd.sanitize_latest_stash"), \
-            patch("boxmunge.commands.upgrade_cmd.apply_projects",
-                  return_value=(ManifestMigration(), Regeneration(), excluded)), \
+    with patch("boxmunge.commands.upgrade_cmd.apply_projects",
+               return_value=(ManifestMigration(), Regeneration(), excluded)), \
             patch("boxmunge.commands.upgrade_cmd.notify_exclusions"), \
             patch("boxmunge.commands.upgrade_cmd.restart_projects", return_value=Restart()), \
             patch("boxmunge.commands.upgrade_cmd.caddy_reload"), \

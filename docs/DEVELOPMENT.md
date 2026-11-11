@@ -239,6 +239,28 @@ The full trust chain is in `docs/on-server/TRUST_MODEL.md`.
 The client is published to PyPI by `.github/workflows/publish-cli.yml` on a `cli-v*` tag, using
 PyPI Trusted Publishing, so no API token exists anywhere.
 
+### The upgrade floor
+
+A release installs only over 0.11.0 or later: `UPGRADE_FLOOR` in `src/boxmunge/upgrade_floor.py`,
+and the same value in `bootstrap/upgrade-floor.sh` for an `install.sh` run by hand (a test keeps
+the two equal). Below the floor the release refuses in the old shim's pre-flight, before that
+shim changes anything, and names the bridge release (`BRIDGE_RELEASE`, 0.11.6): the last
+release that installs over an older box. `tests/integration/test_shim_hop.py` runs released
+shims against the tree. Below the floor it proves the refusal leaves the box on its release and
+still able to install the bridge release; from the floor up, that the hop completes.
+
+Code that exists only for a source below the floor is deleted. Code kept for a source above it
+says, where it lives, which floor retires it. Today that is 0.11.1 (the `report_failure` probe
+in the shim; re-owning root-made directories in `deploy_dirs.py`), 0.11.5 (a rollback with no
+recorded stash), 0.11.6 (adopting a probation with no root record) and 0.11.7 (the shim's
+legacy lock; `bootstrap/caddy-log-path.sh`, which refuses a box whose Caddy configs write a log
+under `/var/log/caddy`; `unresolved_stage.py`, which refuses a box that still holds a stage
+0.10.1 or earlier made).
+
+To raise the floor, announce it in the release notes of the release that becomes the bridge,
+then in the next release change the constants in both files, move the hop test's shims across,
+and delete what the new floor retires.
+
 ## The version-check admin pages
 
 `services/version-check` serves two maintainer-only views of update checks and failure reports,

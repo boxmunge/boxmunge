@@ -1,20 +1,33 @@
 #!/usr/bin/env bash
-# tests/integration/shim_hop.sh <fail|ok> <old-shim> — run as root in a
-# throwaway container by test_shim_hop.py.
+# tests/integration/shim_hop.sh <floor|ok|fail> <old-shim> <installed> — run
+# as root in a throwaway container by test_shim_hop.py, whose image holds this
+# tree's package, numbered $NEW, installed in /relvenv.
 #
-# A box on release 1.4.0, running an older release's upgrade shim, upgrades
-# to a 1.5.0 bundle built from this tree (mounted at /bundle). The old shim
-# does what it always did: installs the bundle's scripts/boxmunge-upgrade
-# over itself, then, if it is new enough, re-runs the bundle's install.sh.
-# install.sh here is a stand-in: `fail` exits like an apt outage, `ok` runs
-# the real install.sh's steps that tell a shim's run from one by hand (with
-# or without --upgrade-shim) and act on it: the venv install, the
-# shim install and the version record. Then the installed shim must work.
-# Network, signing, pip and the venv are stubbed; pip records what it is asked
-# for.
+# A box on release <installed>, running an older release's upgrade shim,
+# targets a $NEW bundle built from this tree (mounted at /bundle). The
+# pre-flight the old shim runs in the venv it built (its import test,
+# `--version` and `upgrade --dry-run`) is this tree's real code, run exactly
+# as that shim invokes it: it decides whether the old shim goes any further.
+#
+#   floor    <installed> is below the upgrade floor. The pre-flight must
+#            refuse and leave the box as it was. Then the box takes the way
+#            out the refusal names: `target $BRIDGE` (a stand-in bundle that
+#            ships the real $BRIDGE shim) and `clear-blocklist $NEW`.
+#   ok|fail  <installed> is at or above the floor. The old shim installs the
+#            bundle's scripts/boxmunge-upgrade over itself and runs the
+#            bundle's install.sh, a stand-in: `fail` exits like an apt outage,
+#            `ok` runs the real install.sh's steps that tell a shim's run from
+#            one by hand and act on it (the floor check, the venv install, the
+#            shim install and the version record). Then the installed shim
+#            must work.
+# Network, signing, pip and the venvs are stubbed: a venv is the stubs plus a
+# `release` file naming what pip "installed" into it. pip records its calls.
 # shellcheck disable=SC2016  # stub bodies are literal bash
 set -uo pipefail
-MODE="$1" OLD="$2"
+MODE="$1" OLD="$2" WAS="$3"
+NEW="$(/relvenv/bin/pip show boxmunge-server | sed -n 's/^Version: //p')"
+BRIDGE="$(/relvenv/bin/python -c 'from boxmunge.upgrade_floor import BRIDGE_RELEASE; print(BRIDGE_RELEASE)')"
+NEXT=99.0.0  # a release that does not exist
 R=/opt/boxmunge
 mkdir -p /stub/bin /rel /mockvenv/bin
 REALPY="$(command -v python3)" REALSHA="$(command -v sha256sum)"
@@ -24,89 +37,147 @@ st /stub/bin/curl 'cp "/rel/$(basename "${@: -1}")" "$3"'
 st /stub/bin/cosign 'exit 0'
 st /stub/bin/visudo 'exit 0'
 st /stub/bin/sha256sum "if [[ \"\$1\" == -c ]]; then cat >/dev/null; exit 0; fi; exec $REALSHA \"\$@\""
-st /mockvenv/bin/pip 'echo "$0 $*" >> /tmp/pip.log; [[ "$1" != show ]] || echo "Version: 1.5.0"'
-# `upgrade --apply` runs while the old shim, which locks only the legacy
-# upgrade-state/upgrade.lock, is mid-upgrade and has installed the new shim:
-# the new shim must see that upgrade and stay out of it. Then it records the
-# version, as the real apply does, noting the one it found (install.sh must
-# not have recorded 1.5.0 before the swap).
-st /mockvenv/bin/boxmunge-server 'case "$1" in
-    --version) echo "boxmunge 1.5.0";;
-    upgrade) if [[ "$2" == --apply ]]; then
-        for c in "target 1.5.1" check-probation; do
+st /mockvenv/bin/pip 'echo "$0 $*" >> /tmp/pip.log
+venv="$(dirname "$0")/.."
+[[ "$1" != show ]] || echo "Version: $(cat "$venv/release")"
+src="${*: -1}"; src="${src%\[tui\]}"
+[[ "$1" != install || ! -f "$src/pyproject.toml" ]] \
+    || sed -n "s/^version = \"\(.*\)\"$/\1/p" "$src/pyproject.toml" > "$venv/release"'
+# The pre-flight of the $NEW release is the real one. Its `upgrade --apply`
+# runs while the old shim is mid-upgrade and has installed the new shim: with
+# /tmp/watch-apply, the new shim must see that upgrade and stay out of it.
+# Then the apply records the version, as the real one does, noting the one it
+# found (install.sh must not have recorded $NEW before the swap).
+st /mockvenv/bin/boxmunge-server 'rel="$(cat "$(dirname "$0")/../release")"
+case "$1 ${2:-}" in
+    "--version "*) [[ "$rel" != '"$NEW"' ]] || exec /relvenv/bin/boxmunge-server --version
+        echo "boxmunge $rel" ;;
+    "upgrade --dry-run") [[ "$rel" != '"$NEW"' ]] || exec /relvenv/bin/boxmunge-server upgrade --dry-run ;;
+    "upgrade --apply")
+        [[ -e /tmp/watch-apply ]] && for c in "target '"$NEXT"'" check-probation; do
             rc=0; bash /opt/boxmunge/bin/boxmunge-upgrade $c > "/tmp/during-${c%% *}.log" 2>&1 || rc=$?
             echo "rc=$rc" >> "/tmp/during-${c%% *}.log"
         done
         cp /opt/boxmunge/config/version /tmp/version-before-apply
-        echo "1.5.0+abc1234" > /opt/boxmunge/config/version
-    fi;;
+        echo "$rel+abc1234" > /opt/boxmunge/config/version ;;
+    "stash create") n="boxmunge-stash-$(date -u +%Y-%m-%dT%H%M%S).tar.gz"
+        tar czf "/opt/boxmunge/stashes/$n" -T /dev/null; chmod 0600 "/opt/boxmunge/stashes/$n"
+        echo "Stash created: $n" ;;
+    "health --json") echo "{\"healthy\": true, \"exit_code\": 0, \"checks\": [{\"name\": \"docker\", \"status\": \"ok\", \"detail\": \"\"}]}" ;;
 esac; exit 0'
-# Every old shim's pre-flight import test (`import boxmunge; print(
-# boxmunge.__version__)` up to v0.9.1, `get_build_version()` after) runs for
-# real, exactly as written, against the release's own package: it decides
-# whether the old shim gets as far as installing the new one.
+# The blocklist is written as every release since 0.6.3 writes it.
+cat > /stub/blocklist.py <<'EOF'
+import json, os
+path = "/opt/boxmunge/upgrade-state/blocklist.json"
+data = json.load(open(path)) if os.path.exists(path) else {}
+if "BM_REASON" in os.environ:
+    data[os.environ["BM_VERSION"]] = {"reason": os.environ["BM_REASON"], "failed_at": "2026-01-01T00:00:00+00:00"}
+else:
+    data.pop(os.environ["BM_VERSION"], None)
+json.dump(data, open(path, "w"))
+EOF
+# Every old shim's import test (`import boxmunge; print(boxmunge.__version__)`
+# up to v0.9.1, `get_build_version()` after) runs as written in /relvenv.
 st /mockvenv/bin/python 'if [[ "$1" == "-" ]]; then cat >/dev/null; exit 0; fi
+rel="$(cat "$(dirname "$0")/../release")"
 case "$2" in
     *write_probation*) printf "{\"version\": \"%s\", \"previous_slot\": \"%s\", \"started_at\": \"x\", \"expires_at\": \"%s\"}\n" \
         "$BM_VERSION" "$BM_PREV_SLOT" "$(date -u -d "+6 hours" +%Y-%m-%dT%H:%M:%S+00:00)" > /opt/boxmunge/upgrade-state/probation.json ;;
-    *get_build_version*|*__version__*)
-        exec '"$REALPY"' -I -c "import sys; sys.path.insert(0, \"/rel/boxmunge/src\"); $2" ;;
+    *add_to_blocklist*|*remove_from_blocklist*) exec '"$REALPY"' -I /stub/blocklist.py ;;
+    *get_build_version*|*__version__*) [[ "$rel" != '"$NEW"' ]] || exec /relvenv/bin/python -c "$2"
+        echo "$rel" ;;
 esac
 exit 0'
 
-# The release: the built bundle, numbered 1.5.0, with install.sh replaced by
-# the stand-in.
-cp -R /bundle/boxmunge /rel/boxmunge
-sed -i 's/^version = ".*"$/version = "1.5.0"/' /rel/boxmunge/pyproject.toml
-case "$MODE" in
-    fail) printf '#!/usr/bin/env bash\necho "apt-get update failed (simulated)"; exit 100\n' > /rel/boxmunge/install.sh ;;
-    ok) { printf '#!/usr/bin/env bash\nset -e\nSCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\nBOXMUNGE_ROOT=/opt/boxmunge\n'
-          sed -n '/^FROM_UPGRADE_SHIM=0$/,/^fi$/p' /bundle/boxmunge/install.sh
-          grep -F 'bootstrap/run-by-old-shim.sh")"' /bundle/boxmunge/install.sh
-          sed -n '/^if \[\[ "${FROM_UPGRADE_SHIM}" -eq 0 \]\]; then$/,/^fi$/p' /bundle/boxmunge/install.sh
-          sed -n '/^# Install the boxmunge-upgrade shim/,/bin\/boxmunge-upgrade.d"$/p' /bundle/boxmunge/install.sh
-          sed -n '/^INSTALLED_VERSION=/,/^fi$/p' /bundle/boxmunge/install.sh
-        } > /rel/boxmunge/install.sh ;;
-    *) echo "usage: shim_hop.sh <fail|ok> <old-shim>" >&2; exit 2 ;;
-esac
-tar czf /rel/boxmunge-1.5.0.tar.gz -C /rel boxmunge
-echo "0  boxmunge-1.5.0.tar.gz" > /rel/SHA256SUMS
+# release <version> <shim> <install.sh>: the built bundle as that release.
+release() {
+    mkdir "/rel/$1"
+    cp -R /bundle/boxmunge "/rel/$1/boxmunge"
+    sed -i "s/^version = \".*\"$/version = \"$1\"/" "/rel/$1/boxmunge/pyproject.toml"
+    cp "$2" "/rel/$1/boxmunge/scripts/boxmunge-upgrade"
+    cp "$3" "/rel/$1/boxmunge/install.sh"
+    tar czf "/rel/boxmunge-$1.tar.gz" -C "/rel/$1" boxmunge
+    (cd /rel && sha256sum "boxmunge-$1.tar.gz" >> SHA256SUMS)
+}
 touch /rel/SHA256SUMS.sig /rel/SHA256SUMS.cert
+I=/bundle/boxmunge/install.sh
+case "$MODE" in
+    floor) printf '#!/usr/bin/env bash\ntouch /tmp/install-sh-ran\n' > /tmp/install.sh
+           printf '#!/usr/bin/env bash\nexit 0\n' > /tmp/install-bridge.sh
+           release "$BRIDGE" "/t/old_shims/boxmunge-upgrade-v$BRIDGE" /tmp/install-bridge.sh ;;
+    fail) printf '#!/usr/bin/env bash\necho "apt-get update failed (simulated)"; exit 100\n' > /tmp/install.sh ;;
+    ok) { printf '#!/usr/bin/env bash\nset -e\nSCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\nBOXMUNGE_ROOT=/opt/boxmunge\n'
+          sed -n '/^FROM_UPGRADE_SHIM=0$/,/^fi$/p' "$I"
+          grep -F 'bootstrap/upgrade-floor.sh"' "$I"
+          sed -n '/^if \[\[ "${FROM_UPGRADE_SHIM}" -eq 0 \]\]; then$/,/^fi$/p' "$I"
+          grep -F 'bootstrap/install-shim.sh"' "$I"
+          sed -n '/^INSTALLED_VERSION=/,/^fi$/p' "$I"
+        } > /tmp/install.sh ;;
+    *) echo "usage: shim_hop.sh <floor|ok|fail> <old-shim> <installed>" >&2; exit 2 ;;
+esac
+release "$NEW" /bundle/boxmunge/scripts/boxmunge-upgrade /tmp/install.sh
 
-# The box: 1.4.0 live in slot a, the old shim installed, and a library
-# directory left by a pre-release build of the split.
-mkdir -p "$R"/{upgrade-state,bin/boxmunge-upgrade.d,state,config,docs,env-a}
+# The box: <installed> live in slot a, with the old shim. Releases before
+# 0.10.1 kept docs/ as a plain directory.
+mkdir -p "$R"/{upgrade-state,bin,state/deploy,config,projects,caddy/sites,env-a/boxmunge-docs}
+install -d -m 0770 "$R/stashes"
+printf 'hostname: box.example.com\nadmin_email: ops@example.com\n' > "$R/config/boxmunge.yml"
 cp -R /mockvenv/bin "$R/env-a/"
-st "$R/env-a/bin/boxmunge-server" 'case "$1" in --version) echo "boxmunge 1.4.0";; esac; exit 0'
-echo 1.4.0 > "$R/config/version"
+echo "$WAS" > "$R/env-a/release"
+echo "$WAS+abc1234" > "$R/config/version"
 echo a > "$R/upgrade-state/active-slot"
 ln -s "$R/env-a" "$R/env-active"
-echo docs > "$R/docs/OPERATIONS.md"
+echo docs > "$R/env-a/boxmunge-docs/OPERATIONS.md"
+case "$WAS" in
+    0.[0-9].*|0.10.0) cp -R "$R/env-a/boxmunge-docs" "$R/docs" ;;
+    *) cp -R "$R/env-a/boxmunge-docs" "$R/.docs.seed"; ln -s .docs.seed "$R/docs" ;;
+esac
 install -m 0755 "$OLD" "$R/bin/boxmunge-upgrade"
 export PATH="/stub/bin:$PATH" BOXMUNGE_SUDOERS_FILE=/tmp/sudoers-boxmunge
 
-rc=0
-bash "$R/bin/boxmunge-upgrade" target 1.5.0 > /tmp/hop.log 2>&1 || rc=$?
-echo "HOP rc=$rc"
-echo "SHIM_IS_BUNDLED=$(cmp -s "$R/bin/boxmunge-upgrade" /bundle/boxmunge/scripts/boxmunge-upgrade && echo yes || echo no)"
-echo "LIVE=$(readlink "$R/env-active")"
-echo "PROBATION=$([[ -f "$R/upgrade-state/probation.json" ]] && echo yes || echo no)"
-echo "LEFTOVER_LIBS=$([[ -e "$R/bin/boxmunge-upgrade.d" ]] && echo yes || echo no)"
-# Which venvs' pip got the hash-pinned requirements-mcp.txt.
-mcp="$(grep -- '--require-hashes' /tmp/pip.log 2>/dev/null | grep -- '/requirements-mcp.txt' | cut -d' ' -f1 | sort -u | tr '\n' ',')"
-echo "MCP_INSTALLED_BY=${mcp:-none}"
+shim() {  # shim <log> <args...>: run the installed shim, print its exit code
+    local log="$1" rc=0; shift
+    bash "$R/bin/boxmunge-upgrade" "$@" > "$log" 2>&1 || rc=$?
+    echo "$rc"
+}
+box_facts() {  # box_facts <prefix>
+    echo "${1}LIVE=$(readlink "$R/env-active")"
+    echo "${1}PROBATION=$([[ -f "$R/upgrade-state/probation.json" ]] && echo yes || echo no)"
+    echo "${1}BLOCKLIST=$($REALPY -c 'import json, sys; print(",".join(sorted(json.load(open(sys.argv[1])))) or "none")' \
+        "$R/upgrade-state/blocklist.json" 2>/dev/null || echo none)"
+    echo "${1}VERSION_RECORD=$(cat "$R/config/version")"
+}
+[[ "$MODE" != ok ]] || touch /tmp/watch-apply
+echo "HOP rc=$(shim /tmp/hop.log target "$NEW")"
+rm -f /tmp/watch-apply
+box_facts ""
+for shim in "$OLD" /bundle/boxmunge/scripts/boxmunge-upgrade "/t/old_shims/boxmunge-upgrade-v$BRIDGE"; do
+    ! cmp -s "$R/bin/boxmunge-upgrade" "$shim" || echo "SHIM_IS=$(basename "$shim")"
+done
+echo "INSTALL_SH_RAN=$([[ -e /tmp/install-sh-ran ]] && echo yes || echo no)"
 echo "ENV_A_PIP_CALLS=$(grep -cE '^/opt/boxmunge/env-(a|active)/bin/pip install' /tmp/pip.log 2>/dev/null || true)"
 echo "VERSION_BEFORE_APPLY=$(cat /tmp/version-before-apply 2>/dev/null || echo none)"
-for c in "check-probation" "run 1.5.1 https://example.com/x" "target 1.5.1"; do
-    rc=0
-    # shellcheck disable=SC2086  # word-split the subcommand on purpose
-    out="$(bash "$R/bin/boxmunge-upgrade" $c 2>&1)" || rc=$?
-    echo "CMD ${c%% *} rc=$rc :: $(echo "$out" | tr '\n' ' ' | cut -c1-2000)"
+if [[ "$MODE" == floor ]]; then
+    echo "BRIDGE rc=$(shim /tmp/bridge.log target "$BRIDGE")"
+    box_facts BRIDGE_
+    echo "BRIDGE_SHIM_IS_THE_BRIDGE_RELEASES=$(cmp -s "$R/bin/boxmunge-upgrade" "/t/old_shims/boxmunge-upgrade-v$BRIDGE" && echo yes || echo no)"
+    echo "CLEAR rc=$(shim /tmp/clear.log clear-blocklist "$NEW")"
+    box_facts CLEARED_
+else
+    for c in "check-probation" "run $NEXT https://example.com/x" "target $NEXT"; do
+        # shellcheck disable=SC2086  # word-split the subcommand on purpose
+        rc="$(shim /tmp/cmd.log $c)"
+        echo "CMD ${c%% *} rc=$rc :: $(tr '\n' ' ' < /tmp/cmd.log | cut -c1-2000)"
+    done
+    for f in /tmp/during-*.log; do
+        [[ -e "$f" ]] || continue
+        name="${f#/tmp/during-}"
+        echo "DURING ${name%.log} $(tail -n 1 "$f") :: $(head -n -1 "$f" | tr '\n' ' ' | cut -c1-2000)"
+    done
+fi
+for log in hop bridge clear; do
+    [[ -e "/tmp/$log.log" ]] || continue
+    echo "--- $log log"
+    cat "/tmp/$log.log"
 done
-for f in /tmp/during-*.log; do
-    [[ -e "$f" ]] || continue
-    name="${f#/tmp/during-}"
-    echo "DURING ${name%.log} $(tail -n 1 "$f") :: $(head -n -1 "$f" | tr '\n' ' ' | cut -c1-2000)"
-done
-echo "--- hop log"
-cat /tmp/hop.log
+echo "--- end"

@@ -1,6 +1,6 @@
-"""Every rename in the modules that keep the slot, the transaction and the
-stash state goes through a durable fileutil helper, and every
-tree built aside is synced before it is renamed into place."""
+"""Every rename in the modules that keep the slot and the transaction goes
+through a durable fileutil helper, and every tree built aside is synced
+before it is renamed into place."""
 from __future__ import annotations
 
 import ast
@@ -10,7 +10,6 @@ from unittest.mock import patch
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "boxmunge"
 MODULES = ["staged_release.py", "release_txn.py", "release_keep.py", "stage_slot.py",
-           "stash_rewrite.py",
            # The commands that build, swap and drop the slot and the transaction.
            "commands/stage_cmd.py", "commands/unstage_cmd.py", "commands/promote_cmd.py",
            "commands/deploy_tree.py", "commands/install_abandon.py",

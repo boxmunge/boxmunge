@@ -245,7 +245,7 @@ class TestStashTraversalGuards:
         assert (paths.config / "foo..bar").read_bytes() == b"hello"
 
     def test_symlink_member_is_never_created(self, tmp_path: Path) -> None:
-        """A link member is skipped, not extracted: nothing is created at its
+        """A link member refuses the whole stash: nothing is created at its
         name and its target is never touched."""
         paths = _make_paths(tmp_path)
         victim = tmp_path / "victim"
@@ -255,7 +255,8 @@ class TestStashTraversalGuards:
         info.type = tarfile.SYMTYPE
         info.linkname = str(victim)
         _build_malicious_archive(archive, [(info, None)])
-        restore_stash(paths, archive)
+        with pytest.raises(StashError, match="link member 'config/evil'"):
+            restore_stash(paths, archive)
         assert not (paths.config / "evil").exists()
         assert not (paths.config / "evil").is_symlink()
         assert victim.read_text() == "untouched"
@@ -273,8 +274,9 @@ class TestStashTraversalGuards:
 
 class TestGitProjectLinks:
     """A git project's manifest.yml and compose.yml are symlinks into repo/.
-    They are never stashed, and restore leaves them alone: an older stash
-    that holds them as link members must not abort a rollback."""
+    They are never stashed, and restore leaves them alone. A stash that
+    holds a link member was made by a release before 0.11.0, below the
+    upgrade floor: it is refused before anything is written."""
 
     def _git_project(self, paths: BoxPaths) -> Path:
         pdir = paths.project_dir("gitapp")
@@ -311,7 +313,7 @@ class TestGitProjectLinks:
         assert (repo / "manifest.yml").read_text() == "# moved on in the repository\n"
         assert (pdir / "secrets.env").read_text() == "SECRET=stashed\n"
 
-    def test_older_stash_with_link_members_restores(self, tmp_path: Path) -> None:
+    def test_a_stash_with_link_members_is_refused_whole(self, tmp_path: Path) -> None:
         paths = _make_paths(tmp_path)
         repo = self._git_project(paths)
         pdir = paths.project_dir("gitapp")
@@ -321,13 +323,13 @@ class TestGitProjectLinks:
         secrets = tarfile.TarInfo(name="projects/gitapp/secrets.env")
         secrets.mode = 0o600
         archive = paths.stashes / "boxmunge-stash-old.tar.gz"
-        _build_malicious_archive(archive, [(link, None), (secrets, b"SECRET=old\n")])
-        restore_stash(paths, archive)
+        # The link comes last: the members before it must not be written.
+        _build_malicious_archive(archive, [(secrets, b"SECRET=old\n"), (link, None)])
+        with pytest.raises(StashError, match="link member 'projects/gitapp/manifest.yml'"):
+            restore_stash(paths, archive)
         assert (pdir / "manifest.yml").is_symlink()
         assert (pdir / "manifest.yml").resolve() == (repo / "manifest.yml").resolve()
-        assert (pdir / "secrets.env").read_text() == "SECRET=old\n"
-        log = paths.log_file.read_text()
-        assert "projects/gitapp/manifest.yml" in log and "symlink" in log
+        assert (pdir / "secrets.env").read_text() == "SECRET=stashed\n"
 
 
 class TestStashAtomicWrites:
@@ -394,25 +396,21 @@ class TestStashSchemaVersion:
         with pytest.raises(StashError, match="newer than this installation"):
             restore_stash(paths, archive)
 
-    def test_restore_legacy_no_meta_warns(self, tmp_path: Path) -> None:
-        """Legacy stashes (created before meta file existed) restore w/ warning."""
+    def test_a_stash_without_meta_is_refused(self, tmp_path: Path) -> None:
+        """The meta file is written last: an archive without one is cut short
+        (or older than 0.5.3), and nothing of it is restored."""
         paths = _make_paths(tmp_path)
+        paths.config_file.write_text("hostname: current\nadmin_email: t@t\n")
         archive = paths.stashes / "legacy.tar.gz"
-        # Build a legacy-format stash (no meta file) using direct tarfile
         with tarfile.open(archive, "w:gz") as tar:
             payload = b"hostname: legacy\nadmin_email: t@t\n"
             info = tarfile.TarInfo(name="config/boxmunge.yml")
             info.size = len(payload)
             tar.addfile(info, io.BytesIO(payload))
 
-        with patch("boxmunge.stash.log_warning") as mock_warn:
+        with pytest.raises(StashError, match="legacy.tar.gz has no boxmunge-stash-meta.json"):
             restore_stash(paths, archive)
-        assert mock_warn.called
-        # Verify the warning mentions absent format marker
-        call_args = mock_warn.call_args
-        assert "format_version" in call_args.args[1] or "format_version" in str(call_args)
-        # And the file actually got restored
-        assert paths.config_file.read_text() == "hostname: legacy\nadmin_email: t@t\n"
+        assert paths.config_file.read_text() == "hostname: current\nadmin_email: t@t\n"
 
 
 class TestStashLogging:

@@ -3,9 +3,9 @@
 
 Run through the upgrade shim (`sudo /opt/boxmunge/bin/boxmunge-upgrade
 userns-migrate [--check] | userns-rollback | userns-commit`), which holds
-upgrade.lock (and the legacy lock) and refuses a migration during a
-probation. migrate, rollback and commit refuse to run unless they inherited
-both of the shim's locks, held, so they cannot race an upgrade.
+upgrade.lock and refuses a migration during a probation. migrate, rollback
+and commit refuse to run unless they inherited that lock, held, so they
+cannot race an upgrade.
 Not in the deploy shell's command list.
 """
 from __future__ import annotations
@@ -32,9 +32,9 @@ from boxmunge.userns.volumes import VolumeError
 
 _SUBCOMMANDS = ("check", "migrate", "rollback", "commit")
 _SHIM = "sudo /opt/boxmunge/bin/boxmunge-upgrade"
-# scripts/boxmunge-upgrade.d/state.sh, acquire_lock: the root-only lock on
-# descriptor 9, the legacy one older shims take on 8.
-SHIM_LOCK_FDS = (9, 8)
+# scripts/boxmunge-upgrade.d/state.sh, acquire_lock: the descriptor the shim
+# holds the root-only lock on.
+SHIM_LOCK_FD = 9
 
 
 def _held_on(fd: int, path: Path) -> bool:
@@ -55,11 +55,10 @@ def _held_on(fd: int, path: Path) -> bool:
     return False
 
 
-def require_upgrade_lock_held(paths: BoxPaths, fds: tuple[int, int] = SHIM_LOCK_FDS) -> None:
-    """Refuse unless the shim took both upgrade locks on these descriptors
-    and handed them down, so no upgrade can run beside the migration."""
-    locks = (paths.upgrade_lock, paths.legacy_upgrade_lock)
-    if not all(_held_on(fd, path) for fd, path in zip(fds, locks)):
+def require_upgrade_lock_held(paths: BoxPaths, fd: int = SHIM_LOCK_FD) -> None:
+    """Refuse unless the shim took the upgrade lock on this descriptor and
+    handed it down, so no upgrade can run beside the migration."""
+    if not _held_on(fd, paths.upgrade_lock):
         raise SystemExit(f"ERROR: run this through the shim: {_SHIM} userns-<subcommand>")
 
 
