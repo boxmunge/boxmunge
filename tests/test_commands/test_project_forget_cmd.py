@@ -2,14 +2,17 @@
 """project-forget: drop a registry entry whose project directory is gone."""
 from __future__ import annotations
 
+import fcntl
+import os
 from types import SimpleNamespace
 
 import pytest
 
 from boxmunge.commands import project_forget_cmd
 from boxmunge.commands.project_forget_cmd import cmd_project_forget, run_project_forget
+from boxmunge.fileutil import LockError, open_shared_lockfile, project_lock
 from boxmunge.project_registry import (
-    forget_advice, is_registered, missing_among, read_registry,
+    add_project, forget_advice, is_registered, missing_among, read_registry,
 )
 from tests.test_commands.cve_helpers import make_box
 
@@ -73,16 +76,69 @@ def test_cli_entry_exits_with_the_result(tmp_path, monkeypatch):
     assert exc.value.code == 0
 
 
-def test_forget_unlinks_the_lock_files_and_names_the_kept_volumes(tmp_path, monkeypatch, capsys):
+def test_forget_names_the_kept_volumes(tmp_path, monkeypatch, capsys):
     paths = _drifted(tmp_path)
-    paths.secrets_locks.mkdir()
-    (paths.secrets_locks / "gone.lock").write_text("")
     monkeypatch.setattr("boxmunge.docker_containers.project_volumes",
                         lambda p: ["gone_pgdata"])
     assert run_project_forget("gone", paths) == 0
-    assert not paths.project_lock_file("gone").exists()
-    assert not (paths.secrets_locks / "gone.lock").exists()
     assert "Docker volumes are kept: gone_pgdata" in capsys.readouterr().out
+
+
+def _lock_files(paths):
+    return {"project": paths.project_lock_file("gone"),
+            "secrets": paths.project_secrets_lock("gone")}
+
+
+def _try_lock(path) -> int:
+    """A new opener's exclusive, non-blocking flock; raises OSError if held."""
+    fd = open_shared_lockfile(path)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise
+    return fd
+
+
+@pytest.mark.parametrize("which", ["project", "secrets"])
+def test_a_lock_opened_before_forget_and_taken_after_it_still_excludes(tmp_path, which):
+    """F07, with real flocks. A command opened the lock file before forget
+    ran and takes the flock after it: the next opener of the name must find
+    the same inode, and so be refused."""
+    paths = _drifted(tmp_path)
+    lock = _lock_files(paths)[which]
+    early = open_shared_lockfile(lock)
+    try:
+        assert run_project_forget("gone", paths) == 0
+        fcntl.flock(early, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert lock.stat().st_ino == os.fstat(early).st_ino
+        with pytest.raises(OSError):
+            _try_lock(lock)
+    finally:
+        os.close(early)
+    os.close(_try_lock(lock))  # released: the next command gets it
+
+
+def test_a_command_that_locks_as_forget_lets_go_excludes_the_next(tmp_path, monkeypatch):
+    """F07, the audit's interleaving: another command takes the project lock
+    the moment forget releases it. While it holds, a command for the same
+    name (the project re-added, say) is refused, not handed a second lock."""
+    paths = _drifted(tmp_path)
+    held: list[int] = []
+    monkeypatch.setattr(project_forget_cmd, "log_operation",
+                        lambda *a, **k: held.append(_try_lock(paths.project_lock_file("gone"))))
+    try:
+        assert run_project_forget("gone", paths) == 0
+        assert len(held) == 1
+        add_project("gone", paths)
+        with pytest.raises(LockError, match="Another operation is in progress for 'gone'"):
+            with project_lock("gone", paths):
+                pass
+    finally:
+        for fd in held:
+            os.close(fd)
+    with project_lock("gone", paths):  # the holder is done: the next one runs
+        pass
 
 
 def test_forget_as_non_root_fails_cleanly(tmp_path, monkeypatch, capsys):
