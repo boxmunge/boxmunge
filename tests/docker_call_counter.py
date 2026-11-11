@@ -38,8 +38,7 @@ for _name, _real in _BOOKKEEPING.items():
 _QUERIES = (
     (docker_containers, ("project_containers", "project_volumes", "local_image",
                          "container_bind_sources", "running_without_image", "absent_images",
-                         "container_mounts", "container_users", "created_times",
-                         "start_states")),
+                         "container_mounts", "container_users", "start_states")),
     (compose_inventory, ("running_inventory",)),
     (restart_hold, ("project_restart_policies", "set_restart_policy")),
 )

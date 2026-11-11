@@ -255,17 +255,6 @@ def test_an_overlay_gone_stale_since_the_check_refuses_the_start(project, monkey
     assert not seen.other_matching("compose", "up")
 
 
-def test_a_legacy_stage_found_since_the_check_refuses_the_start(project, monkeypatch) -> None:
-    """The legacy-stage refusal alone: this test goes when the refusal does."""
-    checked = check_start(project, "myapp", component="test", compose_files=FILES)
-    monkeypatch.setattr("boxmunge.compose_guard.legacy_stage_refusal",
-                        lambda paths, name: "a stage made by boxmunge 0.10.1 is in place")
-    with docker_calls() as seen, pytest.raises(ComposeRefused, match="0.10.1 is in place"):
-        compose_up_checked(project, "myapp", component="test", compose_files=FILES,
-                           earlier=checked)
-    assert not seen.other_matching("compose", "up")
-
-
 def test_the_files_are_hashed_last_on_an_earlier_check(project, monkeypatch) -> None:
     """As in the full check: the containers are asked about first, so the
     comparison with what the check read is the last thing before `up`."""
