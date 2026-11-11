@@ -35,7 +35,7 @@ from boxmunge.commands.security_enforce import (
     headline_of,
     raise_enforcement_error,
 )
-from boxmunge.compose_images import describe_image
+from boxmunge.compose_images import image_phrase
 from boxmunge.cve.alerting import emit_scan_alerts
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
@@ -136,8 +136,8 @@ def _unscanned(
     failed=(), skipped=(), unidentified: dict[str, str] | None = None,
 ) -> list[str]:
     """One human line per image or service a scan did not cover."""
-    out = [f"{describe_image(ref)}: scan failed" for ref in failed]
-    out += [f"{describe_image(ref)}: skipped (scan budget exhausted)" for ref in skipped]
+    out = [f"{image_phrase(ref)}: scan failed" for ref in failed]
+    out += [f"{image_phrase(ref)}: skipped (scan budget exhausted)" for ref in skipped]
     out += [f"service {svc!r}: {why}" for svc, why in (unidentified or {}).items()]
     return out
 
@@ -227,7 +227,7 @@ def _scan_targets(
                 paths, project=project, detail={"image_ref": ref, "error": str(e)},
             )
             failed.append(ref)
-            warnings.append(f"{describe_image(ref)}: scan failed ({e})")
+            warnings.append(f"{image_phrase(ref)}: scan failed ({e})")
             continue
         results.append(result)
         if scanned is not None:

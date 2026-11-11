@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from boxmunge.compose_images import (
-    built_image_name, describe_image, image_problems, image_warnings,
+    built_image_name, describe_image, image_phrase, image_problems, image_warnings,
 )
 
 OWN = "boxmunge.invalid/myapp/web"
@@ -221,3 +221,11 @@ def test_describe_image_reads_a_built_image_as_the_projects_own(ref: str, text: 
 ])
 def test_describe_image_returns_anything_else_unchanged(ref: str) -> None:
     assert describe_image(ref) == ref
+
+
+def test_image_phrase_prefixes_a_registry_image_and_describes_a_built_one() -> None:
+    assert image_phrase("nginx:1.25") == "image nginx:1.25"
+    assert image_phrase(f"ghcr.io/org/app@sha256:{DIGEST}") == (
+        f"image ghcr.io/org/app@sha256:{DIGEST}")
+    assert image_phrase(f"{OWN}@sha256:{DIGEST}") == (
+        "myapp's web image, built on this box (digest ba6a88c50000)")

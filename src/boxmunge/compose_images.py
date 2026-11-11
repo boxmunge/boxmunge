@@ -103,6 +103,13 @@ def describe_image(ref: str) -> str:
     return f"{text} ({', '.join(notes)})" if notes else text
 
 
+def image_phrase(ref: str) -> str:
+    """`describe_image` for a built image, `image <ref>` for any other: for
+    a message whose subject is the image."""
+    text = describe_image(ref)
+    return text if text != ref else f"image {ref}"
+
+
 def _own_owners(project: str) -> frozenset[str]:
     return frozenset({project, project + _STAGING})
 

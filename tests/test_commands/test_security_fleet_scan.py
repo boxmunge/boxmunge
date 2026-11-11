@@ -88,7 +88,7 @@ def test_partial_image_failure_exits_1_and_alerts(tmp_path, monkeypatch, scanned
     assert "INCOMPLETE" in capsys.readouterr().out
     [(_, body, priority)] = _failure_alerts(pushover)
     assert priority == 1
-    assert "broken-worker:1: scan failed" in body
+    assert "image broken-worker:1: scan failed" in body
 
 
 def test_unidentifiable_service_is_a_partial_failure(tmp_path, monkeypatch, scanned):

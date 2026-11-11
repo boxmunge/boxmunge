@@ -12,7 +12,7 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from boxmunge.compose_images import describe_image
+from boxmunge.compose_images import image_phrase
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.paths import BoxPaths
 from boxmunge.userns.daemon_config import (
@@ -153,8 +153,8 @@ def volumes(inv: Inventory, r: Report, *, forward: bool) -> None:
 
 def _names(img: ImageEntry) -> str:
     """An image's tags (or, untagged, its digest references) as the
-    operator reads them."""
-    return ", ".join(describe_image(ref) for ref in (img.tags or img.refs))
+    operator reads them: `image <ref>`, or a built image's description."""
+    return ", ".join(image_phrase(ref) for ref in (img.tags or img.refs))
 
 
 def images(inv: Inventory, r: Report) -> None:
