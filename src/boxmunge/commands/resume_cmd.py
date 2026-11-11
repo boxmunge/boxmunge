@@ -185,7 +185,8 @@ def resume_locked(
     # Check compose.yml and the bind sources BEFORE any container action. A
     # hostile compose.yml introduced while the project was paused must not
     # survive even an image pull or the release of its restart policies
-    # (audit A-NEW-1); the start below checks again. Containers made before
+    # (audit A-NEW-1); the start below runs on this check only while every
+    # file it read is unchanged, and checks again otherwise. Containers made before
     # the own-file rules are recreated from the checked files, not refused:
     # resume is the pause's only exit, and a deploy (the other way to
     # replace them) is refused while the project is paused.
@@ -193,8 +194,8 @@ def resume_locked(
         stale = stale_containers(paths, project_name, component="resume",
                                  compose_files=compose_files)
         recreate = stale is not None
-        check_start(paths, project_name, component="resume", compose_files=compose_files,
-                    deploying=recreate)
+        checked = check_start(paths, project_name, component="resume",
+                              compose_files=compose_files, deploying=recreate)
     except ComposeRefused as e:
         # Exit code 3 reserved for compose hardening rejections (audit H-N2).
         print(f"ERROR: {e} {_deploy_hint(project_name, paths)}", file=sys.stderr)
@@ -248,7 +249,7 @@ def resume_locked(
     try:
         compose_up_checked(paths, project_name, component="resume",
                            compose_files=compose_files, deploying=recreate,
-                           force_recreate=recreate)
+                           force_recreate=recreate, earlier=checked)
     except DockerError as e:
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)
         log_error("resume", f"compose up failed: {e}", paths,

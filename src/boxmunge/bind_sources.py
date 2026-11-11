@@ -283,13 +283,14 @@ def check_sources(project_dir: Path, sources: set[str], record: dict[str, str]) 
 def check_control(
     project_dir: Path, read_files: Iterable[Path], record: dict[str, str | None], *,
     redo: str, control_root: Path | None = None,
-) -> None:
+) -> dict[str, str | None]:
     """Every file boxmunge reads hashes to what deploy recorded. A rewritten
     control file (a tampered manifest or compose), or one newly created or
     removed, is refused: a later root `up` must never run container-modified
     control files. ``redo`` is the command that records the files again
     (a deploy, or for staging a new stage). A file the record does not
-    track yet (one this boxmunge newly reads) says so rather than "changed"."""
+    track yet (one this boxmunge newly reads) says so rather than "changed".
+    Returns the hashes checked."""
     now = control_hashes(project_dir, read_files, control_root=control_root)
     for rel in sorted(set(now) | set(record)):
         if now.get(rel) == record.get(rel):
@@ -300,6 +301,7 @@ def check_control(
                 f"project was last deployed; {redo} to record it. Boxmunge will not "
                 f"start a release from files it did not validate.")
         raise _changed(rel, redo)
+    return now
 
 
 def _changed(rel: str, redo: str) -> BindSourceError:
@@ -330,12 +332,13 @@ def check_kept_control(project_dir: Path, read_files: Iterable[Path], path: Path
 
 
 def record(project_dir: Path, sources: set[str], control: dict[str, str | None],
-           path: Path) -> None:
+           path: Path) -> dict[str, str]:
     """Check every source, creating missing ones, record their kinds, and
     record ``control``: the sha256 of every file boxmunge reads, as
-    control_hashes (or check_kept_control) took them."""
+    control_hashes (or check_kept_control) took them. Returns the kinds."""
     kinds = {rel: source_kind(project_dir, rel, create=True) for rel in sorted(sources)}
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, json.dumps({
         "version": RECORD_VERSION, "sources": kinds, "control": control,
     }, indent=2) + "\n")
+    return kinds

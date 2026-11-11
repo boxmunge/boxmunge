@@ -99,3 +99,19 @@ def test_prepare_names_running_builds_before_it_untags(paths, monkeypatch) -> No
     assert '"images": ["boxmunge.invalid/app/web"]' in log
     assert '"component": "upgrade"' in log
 
+
+def test_prepare_looks_for_no_running_build_where_nothing_is_built(paths, monkeypatch) -> None:
+    """A project of pulled images has no build to name: its containers are
+    not listed for one. The old names of what it once built still go."""
+    project_dir = paths.project_dir("app")
+    project_dir.mkdir(parents=True)
+    (project_dir / "compose.yml").write_text(
+        yaml.safe_dump({"services": {"web": {"image": "nginx:1.27"}}}))
+    calls: list = []
+    monkeypatch.setattr("boxmunge.built_images.name_running_builds",
+                        lambda cp, built: calls.append(("name", cp)) or [])
+    monkeypatch.setattr("boxmunge.built_images.untag_old_built_names",
+                        lambda cp, built, others: calls.append(("untag", cp, dict(built),
+                                                                sorted(others))) or [])
+    prepare_compose_override(paths, MANIFEST)
+    assert calls == [("untag", "app", {}, ["web"]), ("untag", "app-staging", {}, ["web"])]
