@@ -88,40 +88,20 @@ drop_root
 
 # A stash create without a 'Stash digest:' line (a release before 0.11.6;
 # the default mock): the upgrade records the stash it made with the size and
-# sha256 of the file, or by name alone when it holds link members (a release
-# before 0.10.2 made it), which the new release's apply rewrites away.
-for kind in plain links; do
-    new_root a
-    echo "1.4.0" > "$BOXMUNGE_ROOT/config/version"
-    if [[ "$kind" == links ]]; then
-        mock_server a 'if [[ "$1 $2" == "stash create" ]]; then
-    n=boxmunge-stash-2026-06-01T120000.tar.gz
-    python3 -c "import io, tarfile, sys
-with tarfile.open(sys.argv[1], \"w:gz\") as t:
-    i = tarfile.TarInfo(\"projects/app/manifest.yml\"); i.type = tarfile.SYMTYPE; i.linkname = \"repo/manifest.yml\"; t.addfile(i)" "$BOXMUNGE_ROOT/stashes/$n"
-    echo "Stash created: $n"; exit 0
-fi
-[[ "$1" != --version ]] || echo "boxmunge 1.4.0"; exit 0'
-    else
-        mock_server a '[[ "$1" != --version ]] || echo "boxmunge 1.4.0"; exit 0'
-    fi
-    rm "$BOXMUNGE_ROOT/env-a/bin/python"
-    stub "$BOXMUNGE_ROOT/env-a/bin/python" '[[ "$1" != "-" ]] || cat >/dev/null; exit 0'
-    run_shim target 1.5.0
-    expect 0 "probation started" "an upgrade whose stash is $kind completes"
-    read -r v name size sha < "$BOXMUNGE_ROOT/upgrade-root/upgrade-stash"
-    stash="$BOXMUNGE_ROOT/stashes/$name"
-    if [[ "$kind" == plain ]]; then
-        want="$("$REAL_PYTHON3" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$stash")"
-        [[ "$v" == 1.5.0 && -f "$stash" && "$size" == "$(wc -c < "$stash" | tr -d ' ')" && "$sha" == "$want" ]] \
-            && pass "the stash is recorded with its size and sha256" || fail "record: $v $name $size $sha"
-    else
-        [[ "$v" == 1.5.0 && -f "$stash" && -z "${size:-}" && -z "${sha:-}" ]] \
-            && pass "a stash with link members is recorded by name alone" || fail "record: $v $name ${size:-} ${sha:-}"
-        [[ "$OUT" == *"link members"* ]] && pass "and the shim says why" || fail "out: $OUT"
-    fi
-    drop_root
-done
+# sha256 of the file.
+new_root a
+echo "1.4.0" > "$BOXMUNGE_ROOT/config/version"
+mock_server a '[[ "$1" != --version ]] || echo "boxmunge 1.4.0"; exit 0'
+rm "$BOXMUNGE_ROOT/env-a/bin/python"
+stub "$BOXMUNGE_ROOT/env-a/bin/python" '[[ "$1" != "-" ]] || cat >/dev/null; exit 0'
+run_shim target 1.5.0
+expect 0 "probation started" "an upgrade whose stash create prints no digest completes"
+read -r v name size sha < "$BOXMUNGE_ROOT/upgrade-root/upgrade-stash"
+stash="$BOXMUNGE_ROOT/stashes/$name"
+want="$("$REAL_PYTHON3" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$stash")"
+[[ "$v" == 1.5.0 && -f "$stash" && "$size" == "$(wc -c < "$stash" | tr -d ' ')" && "$sha" == "$want" ]] \
+    && pass "the stash is recorded with its size and sha256" || fail "record: $v $name $size $sha"
+drop_root
 
 # A stash create that prints the size and sha256 of what it wrote: the shim
 # records those, and refuses, before anything changes, a file at the name

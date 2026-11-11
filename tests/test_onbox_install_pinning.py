@@ -66,8 +66,8 @@ def test_requirements_used_on_box_ship_in_the_bundle(script: str) -> None:
 
 def test_shim_keeps_install_sh_out_of_the_venvs() -> None:
     """install.sh run by the shim must not install into env-active, which is
-    still the previous release (the rollback target) at that point; it
-    completes the standby instead (tests/test_venv_deps.py)."""
+    still the previous release (the rollback target) at that point, nor
+    into the standby the shim built (tests/test_venv_deps.py)."""
     shim = (REPO / "scripts" / "boxmunge-upgrade.d" / "system.sh").read_text()
     assert 'bash "$new_install_sh" --upgrade-shim' in shim
     install = (REPO / "install.sh").read_text()

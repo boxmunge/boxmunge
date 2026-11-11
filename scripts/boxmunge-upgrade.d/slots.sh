@@ -81,7 +81,8 @@ report_failure() {
     BM_VERSION="$version" BM_FROM_VERSION="$from_version" BM_STAGE="$stage" BM_DETAIL="$detail" "$(active_venv)/bin/python" -c "
 import inspect, os
 from boxmunge.report_failure import report_failure
-# The active venv is the release being left: one older than this shim has no detail parameter.
+# The active venv is the release being left: 0.11.0 has no detail parameter
+# (the probe goes when the upgrade floor reaches 0.11.1).
 extra = {'detail': os.environ['BM_DETAIL']} if 'detail' in inspect.signature(report_failure).parameters else {}
 report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.environ['BM_STAGE'], **extra)
 " || { log "WARNING: the upgrade failure report could not be sent"; } || :
@@ -130,24 +131,23 @@ send_notification() {
 # ones `stash create` prints ("Stash digest: <size> <sha256>", since 0.11.6),
 # of the bytes it wrote, and the file at the name must match them: hashing
 # the name alone would record whatever deploy renamed over it meanwhile. A
-# release before 0.11.6 prints no digest (it runs the stash of the upgrade to
-# 0.11.6); then the file at the name is what is recorded. A stash with link
-# members (made by a release before 0.10.2) is recorded by name alone: the
-# new release's apply rewrites it without them (D18), changing its hash. An
-# upgrade run by a shim before this one recorded nothing: its rollback takes
-# the newest-named stash, as that shim would, under the same checks.
+# release before 0.11.6 prints no digest (it runs the stash of the upgrade
+# away from it); then the file at the name is what is recorded. An upgrade a
+# shim before 0.11.5 started recorded nothing: its rollback takes the
+# newest-named stash, as that shim would, under the same checks. That goes
+# when the upgrade floor reaches 0.11.5.
 #
-# upgrade-stash: "<version> <name> [<size> <sha256>]"
+# upgrade-stash: "<version> <name> <size> <sha256>"
 # ---------------------------------------------------------------------------
 STASH_RECORD_FILE="$UPGRADE_ROOT_DIR/upgrade-stash"
 STASH_COPY_DIR="$UPGRADE_ROOT_DIR/rollback-stash"
 STASH_NAME_RE='^boxmunge-stash-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}\.tar\.gz$'
 
-# stash_facts <stash>: print "<size> <sha256>" of the stash just made, with
-# " links" after when it holds link members; on failure print why and return 1.
+# stash_facts <stash>: print "<size> <sha256>" of the stash just made; on
+# failure print why and return 1.
 stash_facts() {
     BM_STASH="$1" python3 - <<'PYREC'
-import hashlib, os, stat, sys, tarfile
+import hashlib, os, stat, sys
 src = os.environ["BM_STASH"]
 try:
     fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -162,13 +162,7 @@ with os.fdopen(fd, "rb") as f:
     digest = hashlib.sha256()
     while chunk := f.read(1 << 20):
         digest.update(chunk)
-    f.seek(0)
-    try:
-        with tarfile.open(fileobj=f, mode="r:gz") as tar:
-            links = any(m.issym() for m in tar)
-    except (tarfile.TarError, OSError, EOFError):
-        links = False  # nothing the apply's rewrite would touch
-print(f"{st.st_size} {digest.hexdigest()}" + (" links" if links else ""))
+print(f"{st.st_size} {digest.hexdigest()}")
 PYREC
 }
 
@@ -183,16 +177,11 @@ record_stash() {
     [[ -z "$printed" || "$printed" =~ ^[0-9]+\ [0-9a-f]{64}$ ]] \
         || { echo "stash create printed a digest line the shim cannot read (want one 'Stash digest: <size> <sha256>'): $2"; return 1; }
     facts="$(stash_facts "$BOXMUNGE_ROOT/stashes/$name")" || { echo "$facts"; return 1; }
-    if [[ -n "$printed" && "${facts% links}" != "$printed" ]]; then
-        echo "$BOXMUNGE_ROOT/stashes/$name is not what stash create just wrote: it printed size and sha256 '$printed', the file there has '${facts% links}' (stashes/ is deploy-writable: something renamed or wrote another file over the name). Nothing has changed. Find what wrote to stashes/, then retry: sudo $BOXMUNGE_ROOT/bin/boxmunge-upgrade target $1"
+    if [[ -n "$printed" && "$facts" != "$printed" ]]; then
+        echo "$BOXMUNGE_ROOT/stashes/$name is not what stash create just wrote: it printed size and sha256 '$printed', the file there has '$facts' (stashes/ is deploy-writable: something renamed or wrote another file over the name). Nothing has changed. Find what wrote to stashes/, then retry: sudo $BOXMUNGE_ROOT/bin/boxmunge-upgrade target $1"
         return 1
     fi
-    if [[ "$facts" == *" links" ]]; then
-        log "The stash $name has link members (an older release made it); the upgrade rewrites it without them, so it is recorded by name alone"
-        write_root_file "$STASH_RECORD_FILE" "$1 $name"
-    else
-        write_root_file "$STASH_RECORD_FILE" "$1 $name $facts"
-    fi
+    write_root_file "$STASH_RECORD_FILE" "$1 $name $facts"
 }
 
 # copy_rollback_stash <new_version>: copy the stash the rollback of
@@ -200,17 +189,17 @@ record_stash() {
 # failure print why and return 1.
 copy_rollback_stash() {
     local recorded="" name="" size="" sha="" r_version r_name r_size r_sha r_extra
-    local hash_re='^([0-9]+ [0-9a-f]{64})?$'
+    local hash_re='^[0-9]+ [0-9a-f]{64}$'
     refuse_symlink "$STASH_RECORD_FILE"
     refuse_symlink "$STASH_COPY_DIR"
     [[ ! -e "$STASH_RECORD_FILE" ]] || recorded="$(cat "$STASH_RECORD_FILE")"
     if [[ -n "$recorded" ]]; then
         read -r r_version r_name r_size r_sha r_extra <<< "$recorded"
-        if [[ ! "$r_name" =~ $STASH_NAME_RE || -n "${r_extra:-}" || ! "${r_size:+$r_size $r_sha}" =~ $hash_re ]]; then
+        if [[ ! "$r_name" =~ $STASH_NAME_RE || -n "${r_extra:-}" || ! "${r_size:-} ${r_sha:-}" =~ $hash_re ]]; then
             echo "$STASH_RECORD_FILE is malformed ('$(printable "$recorded")'); restore the stash this upgrade made by hand as supervisor: check that sudo boxmunge-server stash list names it first (stashes/ is deploy-writable), then run: sudo boxmunge-server stash restore --latest; sudo boxmunge-server upgrade --apply"
             return 1
         elif [[ "$r_version" == "$1" ]]; then
-            name="$r_name" size="${r_size:-}" sha="${r_sha:-}"
+            name="$r_name" size="$r_size" sha="$r_sha"
         else
             log "WARN: $STASH_RECORD_FILE ('$(printable "$recorded")') is not the stash of the upgrade to $1; taking the newest-named stash"
         fi
@@ -324,18 +313,6 @@ do_rollback() {
     complete_rollback "$new_version" "$from_version" "$stage" "$prev_slot" "$count" "$detail"
 }
 
-# legacy_caddy_log_note <version>: what the active (previous) release costs CrowdSec. A
-# release from before Caddy logged to stdout writes Caddy's access log to a
-# tmpfs inside the container that nothing reads (caddy/compose.yml), so
-# HTTP-layer detection is off until the next upgrade. Read from that
-# release's own root-owned code, never from the deploy-writable site files.
-legacy_caddy_log_note() {
-    if grep -qsF "output file /var/log/caddy/access.log" \
-            "$(active_venv)"/lib/python3*/site-packages/boxmunge/caddy.py; then
-        echo " HTTP-layer detection is off until the next upgrade: $1 writes Caddy's access log to a file CrowdSec does not read."
-    fi
-}
-
 # teardown_before_rollback: staging-teardown-all with the active (new)
 # release. It alerts per project itself and exits 0 even when a project
 # fails; a non-zero exit means it did not finish (killed by the timeout,
@@ -403,12 +380,6 @@ complete_rollback() {
         "re-apply of the previous release" "$rc" "$output"
 
     refresh_docs_for_slot "$prev_slot"
-    local note
-    note="$(legacy_caddy_log_note "$from_version")"
-    if [[ -n "$note" ]]; then
-        log "WARNING:$note"
-        bm_log warn upgrade "HTTP-layer detection off after rollback" "{\"version\": \"$from_version\"}"
-    fi
     # The box is back on the previous release. Drop the marker before any
     # bookkeeping, the interruption count included: if that fails (a corrupt
     # interrupted.json, say), the next fire must not restore and re-apply
@@ -426,11 +397,11 @@ complete_rollback() {
             outcome="interrupted $count times, now blocklisted"
         fi
         bm_log warn upgrade "interrupted upgrade rolled back" "{\"version\": \"$new_version\", \"interruptions\": $count}"
-        send_notification "boxmunge ROLLBACK" "Rolled back $new_version: the upgrade was interrupted ($outcome).$note"
+        send_notification "boxmunge ROLLBACK" "Rolled back $new_version: the upgrade was interrupted ($outcome)."
     else
         add_blocklist "$new_version" "$stage"
         report_failure "$new_version" "$from_version" "$stage" "$detail"
-        send_notification "boxmunge ROLLBACK" "Rolled back $new_version (stage: $stage).$note"
+        send_notification "boxmunge ROLLBACK" "Rolled back $new_version (stage: $stage)."
     fi
 
     log "Rollback complete: reverted to $from_version"

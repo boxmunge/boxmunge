@@ -8,8 +8,8 @@
 # Upgrade (SSH in as deploy user, elevate with sudo):
 #   sudo bash install.sh
 #
-# From the upgrade shim (system pieces and the standby venv's hash-pinned
-# dependencies; the shim installs the package and records the version itself):
+# From the upgrade shim (system pieces only: the shim builds the standby venv
+# and records the version itself):
 #   bash install.sh --upgrade-shim
 
 set -euo pipefail
@@ -18,8 +18,7 @@ BOXMUNGE_ROOT="/opt/boxmunge"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # During an upgrade env-active is still the PREVIOUS release's venv, the one a
-# rollback returns to, so a run by the shim leaves it alone. Shims up to 0.10.0
-# pass no --upgrade-shim; after the pre-flight, run-by-old-shim.sh spots them.
+# rollback returns to, so a run by the shim leaves it alone.
 FROM_UPGRADE_SHIM=0
 if [[ "${1:-}" == "--upgrade-shim" ]]; then
     FROM_UPGRADE_SHIM=1
@@ -55,7 +54,7 @@ if grep -q '^# >>> boxmunge-upgrade.d:' "${SCRIPT_DIR}/scripts/boxmunge-upgrade"
     echo "       Install from a release bundle (boxmunge-install.sh, or \`make bundle\`), not a source checkout." >&2
     exit 1
 fi
-[[ "${FROM_UPGRADE_SHIM}" -eq 1 ]] || FROM_UPGRADE_SHIM="$(BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/run-by-old-shim.sh")"
+BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/upgrade-floor.sh"
 command -v python3 >/dev/null && bash "${SCRIPT_DIR}/bootstrap/python-floor.sh"
 
 # Docker Compose 2.35.0 or newer (bootstrap/compose-version.sh): an upgrade
@@ -81,27 +80,6 @@ remove_dead_crowdsec_repo() {
     rm -f "${list}" /etc/apt/keyrings/crowdsec_crowdsec-archive-keyring.gpg
 }
 remove_dead_crowdsec_repo
-
-# ---------------------------------------------------------------------------
-# Broken unattended-upgrades origins.
-#
-# Earlier bootstraps put an Origins-Pattern match inside the legacy
-# Allowed-Origins list, which crashes unattended-upgrade on every run, so
-# those hosts never installed an OS security update. A file still carrying
-# that exact line is replaced with the bundled config; one an operator has
-# edited since is left alone (`health` reports the failing runs).
-# ---------------------------------------------------------------------------
-repair_unattended_origins() {
-    local conf=/etc/apt/apt.conf.d/50unattended-upgrades
-    [[ -f "${conf}" ]] || return 0
-    grep -q '^Unattended-Upgrade::Allowed-Origins {$' "${conf}" || return 0
-    # shellcheck disable=SC2016  # the file's own literal ${distro_codename}
-    grep -q '^    "origin=Debian,codename=${distro_codename}-security,label=Debian-Security";$' \
-        "${conf}" || return 0
-    echo "  Repairing ${conf}: unattended-upgrade has been crashing on its origins list"
-    install -m 0644 "${SCRIPT_DIR}/bootstrap/50unattended-upgrades-debian" "${conf}"
-}
-repair_unattended_origins
 
 # cosign/Trivy run before init-host.sh installs gnupg, which cloud images lack.
 ensure_install_prereqs() {
@@ -193,69 +171,6 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Migrate backup key from passphrase to age identity (0.1.1 -> 0.1.2)
-# ---------------------------------------------------------------------------
-KEY_FILE="${BOXMUNGE_ROOT}/config/backup.key"
-if [[ -f "${KEY_FILE}" ]] && ! grep -q "^AGE-SECRET-KEY-" "${KEY_FILE}"; then
-    echo ""
-    echo "========================================================"
-    echo "  Migrating backup key to age identity format"
-    echo "========================================================"
-    mv "${KEY_FILE}" "${KEY_FILE}.old-passphrase"
-    age-keygen -o "${KEY_FILE}" 2>/dev/null
-    chown root:deploy "${KEY_FILE}"
-    chmod 640 "${KEY_FILE}"
-    PUBKEY="$(age-keygen -y "${KEY_FILE}")"
-    echo "  New public key: ${PUBKEY}"
-    echo "  Old passphrase key saved as: ${KEY_FILE}.old-passphrase"
-    echo "  NOTE: Existing backups used the old passphrase."
-    echo "        New backups will use the age identity."
-fi
-
-# ---------------------------------------------------------------------------
-# Migrate v0.2.x single-venv layout to v0.3.0+ two-venv layout
-# ---------------------------------------------------------------------------
-if [[ -d "${BOXMUNGE_ROOT}/venv" && ! -d "${BOXMUNGE_ROOT}/env-a" ]]; then
-    echo ""
-    echo "========================================================"
-    echo "  Migrating from single-venv to two-venv layout"
-    echo "========================================================"
-    # The old venv contains nothing recoverable for us — every package is
-    # about to be reinstalled in the next step. Don't `mv`: the venv's
-    # shebangs are absolute paths to /opt/boxmunge/venv/bin/python3 and
-    # don't survive a rename. Wipe and recreate fresh.
-    rm -rf "${BOXMUNGE_ROOT}/venv"
-    mkdir -p "${BOXMUNGE_ROOT}/upgrade-state"
-    chown root:deploy "${BOXMUNGE_ROOT}/upgrade-state"
-    chmod 770 "${BOXMUNGE_ROOT}/upgrade-state"
-    echo "a" > "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
-    chown root:deploy "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
-    chmod 660 "${BOXMUNGE_ROOT}/upgrade-state/active-slot"
-    echo "{}" > "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
-    chown root:deploy "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
-    chmod 660 "${BOXMUNGE_ROOT}/upgrade-state/blocklist.json"
-    python3 -m venv "${BOXMUNGE_ROOT}/env-a"
-    ln -sfn "${BOXMUNGE_ROOT}/env-a" "${BOXMUNGE_ROOT}/env-active"
-    echo "  Layout migrated: old venv removed, env-a created, env-active symlink in place"
-fi
-
-# ---------------------------------------------------------------------------
-# Migrate project registry from config/ (root-only) to state/ (deploy-writable)
-# ---------------------------------------------------------------------------
-OLD_REGISTRY="${BOXMUNGE_ROOT}/config/projects.txt"
-NEW_REGISTRY="${BOXMUNGE_ROOT}/state/projects.txt"
-if [[ -f "${OLD_REGISTRY}" && ! -f "${NEW_REGISTRY}" ]]; then
-    echo ""
-    echo "========================================================"
-    echo "  Moving project registry to state/ (deploy-writable)"
-    echo "========================================================"
-    mv "${OLD_REGISTRY}" "${NEW_REGISTRY}"
-    chown deploy:deploy "${NEW_REGISTRY}"
-    chmod 644 "${NEW_REGISTRY}"
-    echo "  Registry moved: ${OLD_REGISTRY} -> ${NEW_REGISTRY}"
-fi
-
-# ---------------------------------------------------------------------------
 # Install boxmunge Python package into isolated venv
 # ---------------------------------------------------------------------------
 echo ""
@@ -284,14 +199,6 @@ if [[ -d "${BOXMUNGE_ROOT}/upgrade-state" ]]; then
     chown root:deploy "${BOXMUNGE_ROOT}/upgrade-state"
     chmod 770 "${BOXMUNGE_ROOT}/upgrade-state"
     BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/upgrade-state-perms.sh"
-fi
-
-# Ensure caddy/sites perms: 775 root:deploy so deploy can write generated
-# configs (group) AND the caddy container can traverse the dir (other +x).
-# Idempotent — fixes existing installs where sites was 770 or 755.
-if [[ -d "${BOXMUNGE_ROOT}/caddy/sites" ]]; then
-    chown root:deploy "${BOXMUNGE_ROOT}/caddy/sites"
-    chmod 775 "${BOXMUNGE_ROOT}/caddy/sites"
 fi
 
 # The Caddy site journal (boxmunge.caddy_journal) is written by deploy-run
@@ -326,17 +233,11 @@ note_incomplete() {
     echo "WARNING: $*" >&2
 }
 
-# Caddy logs access to stdout, not to the caddy/logs mount the compose file
-# below no longer has: fix site configs before Caddy is recreated on it.
-bash "${SCRIPT_DIR}/bootstrap/caddy-access-log.sh" sites
-
 # Refresh system Caddy compose so existing installs pick up new mounts
 # (e.g., the v0.4 maintenance bind-mount). Compose recreates Caddy only when
 # its definition changed; asking every time also finishes a recreate that an
 # earlier run copied the file for but did not get to.
-# A failed `up` (a transient pull of the pinned image, say) is noted, and
-# caddy/logs is kept: the Caddy that keeps running may still mount it.
-CADDY_KEPT_OLD=0
+# A failed `up` (a transient pull of the pinned image, say) is noted.
 refresh_caddy() {
     [[ -f "${SCRIPT_DIR}/caddy/compose.yml" ]] || return 0
     cp "${SCRIPT_DIR}/caddy/compose.yml" "${BOXMUNGE_ROOT}/caddy/compose.yml"
@@ -344,13 +245,11 @@ refresh_caddy() {
     chmod 640 "${BOXMUNGE_ROOT}/caddy/compose.yml"
     docker inspect boxmunge-caddy >/dev/null 2>&1 || return 0
     docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d && return 0
-    CADDY_KEPT_OLD=1
     note_incomplete "Caddy was not started from the new caddy/compose.yml (see above); the" \
         "previous container, if any, keeps running. Start it as supervisor once the cause is" \
         "fixed: sudo docker compose -f ${BOXMUNGE_ROOT}/caddy/compose.yml up -d"
 }
 refresh_caddy
-[[ "${CADDY_KEPT_OLD}" -eq 1 ]] || bash "${SCRIPT_DIR}/bootstrap/caddy-access-log.sh" retire
 
 # CrowdSec reads Caddy's stdout through Docker; verified after the restart.
 if command -v cscli >/dev/null 2>&1; then
@@ -393,29 +292,18 @@ refresh_system_container
 # Ensure stashes dir exists and is writable by deploy (group). Stash files
 # are created by deploy during upgrade flows; the dir itself is root-owned
 # so deploy cannot rename/delete the dir, only files inside.
-# Idempotent — fixes existing v0.3.x installs where stashes was root:root 700.
 mkdir -p "${BOXMUNGE_ROOT}/stashes"
 chown root:deploy "${BOXMUNGE_ROOT}/stashes"
 chmod 770 "${BOXMUNGE_ROOT}/stashes"
 
-# Ensure backup.key is readable by deploy (group). Manual `boxmunge backup`
-# from the deploy shell and pre-deploy snapshots from `prod-deploy` need to
-# read the age recipient out of this file. Idempotent — fixes hosts where
-# the v0.1.x → v0.1.2 migration left it as root:root 640.
-if [[ -f "${BOXMUNGE_ROOT}/config/backup.key" ]]; then
-    chown root:deploy "${BOXMUNGE_ROOT}/config/backup.key"
-    chmod 640 "${BOXMUNGE_ROOT}/config/backup.key"
-fi
 # Dependencies only from the bundle's hash-pinned requirements, MCP included
 # (bootstrap/venv-deps.sh); the package with no further resolution, built by the
 # hash-pinned backend in the venv; the venv's own pip as is (upgrading it is one
-# more unpinned download). From a shim, the standby it built is completed
-# instead: an older shim leaves out requirements files it does not know.
+# more unpinned download). The upgrade shim has built its standby venv the same
+# way already, from the same files.
 if [[ "${FROM_UPGRADE_SHIM}" -eq 0 ]]; then
-    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/venv-deps.sh" active
+    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/venv-deps.sh"
     "${BOXMUNGE_ROOT}/env-active/bin/pip" install --quiet --no-cache-dir --no-deps --no-build-isolation "${SCRIPT_DIR}"
-else
-    BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/venv-deps.sh" standby
 fi
 
 # pip install as root leaves root-owned build artifacts in the source directory.
@@ -448,13 +336,10 @@ source "${SCRIPT_DIR}/bootstrap/install-ssh.sh"
 # ---------------------------------------------------------------------------
 # Install the boxmunge-upgrade shim (orchestrates auto-updates)
 #
-# The bundle's shim is built self-contained (scripts/build-shim.py). A
-# pre-release build of this change installed its libraries separately into
-# bin/boxmunge-upgrade.d/; nothing reads that any more. Renamed into place, never
-# copied over the running shim (bootstrap/install-shim.sh).
+# The bundle's shim is built self-contained (scripts/build-shim.py). Renamed
+# into place, never copied over the running shim (bootstrap/install-shim.sh).
 # ---------------------------------------------------------------------------
 BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/install-shim.sh"
-rm -rf "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade.d"
 
 # Symlink into /usr/local/bin so boxmunge works in non-interactive SSH sessions
 ln -sf "${BOXMUNGE_ROOT}/bin/boxmunge" /usr/local/bin/boxmunge

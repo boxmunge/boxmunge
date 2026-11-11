@@ -77,10 +77,10 @@ def _install_head(tmp_path: Path, shim: Path) -> subprocess.CompletedProcess:
     (root / "scripts").mkdir(parents=True)
     (root / "install.sh").write_text(install.split(_FIRST_STEP)[0] + "\necho HEAD-COMPLETED\n")
     shutil.copy(shim, root / "scripts" / "boxmunge-upgrade")
-    # The head sources the cosign pins for its architecture check, asks
-    # whether a shim from 0.10.0 or earlier runs it, and checks the Python floor.
+    # The head sources the cosign pins for its architecture check, and checks
+    # the upgrade floor and the Python floor.
     (root / "bootstrap").mkdir()
-    for name in ("cosign.sh", "python-floor.sh", "run-by-old-shim.sh"):
+    for name in ("cosign.sh", "python-floor.sh", "upgrade-floor.sh"):
         shutil.copy(REPO / "bootstrap" / name, root / "bootstrap")
     fake = tmp_path / "fakebin"
     fake.mkdir()

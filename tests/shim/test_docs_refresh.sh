@@ -20,17 +20,13 @@ versioned_dirs() { compgen -G "$BOXMUNGE_ROOT/.docs.*" | grep -cv '\.link$' || t
 # --- install-docs ---------------------------------------------------------
 
 new_root a
-mkdir -p "$BOXMUNGE_ROOT/docs"
-echo "old" > "$BOXMUNGE_ROOT/docs/OPERATIONS.md"
-echo "gone" > "$BOXMUNGE_ROOT/docs/RETIRED.md"
+[[ ! -e "$BOXMUNGE_ROOT/docs" ]] || fail "new_root left a docs/: this test starts from a first install"
 src1="$(docs_src "OPERATIONS.md=v1 ops" "TRUST_MODEL.md=v1 trust")"
 run_shim install-docs "$src1"
-expect 0 "Installed docs" "install-docs replaces a plain docs directory"
-[[ -L "$BOXMUNGE_ROOT/docs" ]] && pass "docs/ is now a swappable symlink" || fail "docs/ is not a symlink"
+expect 0 "Installed docs" "a first install-docs succeeds"
+[[ -L "$BOXMUNGE_ROOT/docs" ]] && pass "docs/ is a swappable symlink" || fail "docs/ is not a symlink"
 [[ "$(cat "$BOXMUNGE_ROOT/docs/OPERATIONS.md")" == "v1 ops" ]] && pass "doc content installed" \
     || fail "doc content not installed"
-[[ ! -e "$BOXMUNGE_ROOT/docs/RETIRED.md" ]] && pass "doc missing from the release is removed" \
-    || fail "stale doc survived"
 [[ "$(file_mode "$BOXMUNGE_ROOT/docs/TRUST_MODEL.md")" == "644" ]] && pass "docs are 0644" \
     || fail "doc mode is $(file_mode "$BOXMUNGE_ROOT/docs/TRUST_MODEL.md")"
 

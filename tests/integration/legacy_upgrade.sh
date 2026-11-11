@@ -1,24 +1,19 @@
 #!/usr/bin/env bash
-# tests/integration/legacy_upgrade.sh <kind> <path> <project> — run as root in a
+# tests/integration/legacy_upgrade.sh <kind> <project> — run as root in a
 # throwaway container by test_legacy_upgrade.py, from an image holding
 # boxmunge 0.10.1 (`git archive v0.10.1`) in /venv-0101 and this tree's built
 # bundle in /venv-beta, with the host's /var/run/docker.sock mounted.
 #
 # boxmunge 0.10.1 deploys v1 of a busybox project and stages v2 the way it
-# does (<kind>: bundle | bundle-recreated | leftover | git). The beta's
-# `upgrade --dry-run` and `upgrade --apply` then run against it, and <path>
-# continues:
-#   rollback      the shim's rollback after a probation failure: 0.10.1's
-#                 `stash restore --latest` and `upgrade --apply`, then its own
-#                 `unstage` must work;
-#   failed-apply  the same after the beta's apply failed (Caddy refused);
-#   resolve       the beta's `legacy-stage`, then a normal deploy.
+# does (<kind>: bundle | bundle-recreated | leftover | git). The box then
+# reaches the beta through the bridge release (the upgrade floor), which
+# leaves such a stage as it is: the beta's `upgrade --dry-run` and `upgrade
+# --apply` run against it, then its `legacy-stage` and a normal deploy.
 # Facts are printed as KEY=value lines for the test to assert, then the logs.
 # The shared daemon runs no boxmunge Caddy, so a stand-in answers Caddy's
-# validate and reload, and refuses them while /tmp/caddy-refuses exists (no
-# environment variable reaches it: Docker runs with docker_env()).
+# validate and reload.
 set -uo pipefail
-KIND="$1" WAY="$2" P="$3" R=/opt/boxmunge
+KIND="$1" P="$2" R=/opt/boxmunge
 LOG=/tmp/legacy.log
 : > "$LOG"
 old() { /venv-0101/bin/boxmunge-server "$@"; }
@@ -43,7 +38,7 @@ trap cleanup EXIT
 # On the PATH Docker runs with (docker_run.DOCKER_ENV), ahead of /usr/bin.
 cat > /usr/local/bin/docker <<'EOF'
 #!/bin/sh
-if [ "$1 $2 $3" = "compose exec caddy" ]; then [ -e /tmp/caddy-refuses ] && exit 1; exit 0; fi
+if [ "$1 $2 $3" = "compose exec caddy" ]; then exit 0; fi
 exec /usr/bin/docker "$@"
 EOF
 chmod +x /usr/local/bin/docker
@@ -144,20 +139,15 @@ fact BEFORE_FILES "$(snap)"; fact BEFORE_IDS "$(ids)"
 fact CONTAINERS_BEFORE "$(for p in "$P" "$P-staging"; do
     docker ps -q --filter "label=com.docker.compose.project=$p"; done | wc -l)"
 
-run STASH old stash create   # the stash 0.10.1's shim makes before the swap
-latest() { find $R/stashes -name 'boxmunge-stash-*.tar.gz' | sort | tail -1; }
-tar -tvzf "$(latest)" | grep -q '^l' && fact STASH_LINKS_BEFORE yes
-cp "$(latest)" /tmp/unrewritten-stash.tar.gz
-
+# An upgrade starts from 0.11.0 or later: the box got here through the bridge
+# release, whose upgrade left the 0.10.1 stage as it was.
+echo 0.11.6 > $R/config/version
 new upgrade --dry-run > /tmp/dry 2>&1; fact DRY_RC $?
 cat /tmp/dry >> "$LOG"
 grep -q "will be left as is" /tmp/dry && fact DRY_LEFT yes
-[[ "$WAY" == failed-apply ]] && touch /tmp/caddy-refuses
 run APPLY new upgrade --apply
-rm -f /tmp/caddy-refuses
 fact AFTER_FILES "$(snap)"; fact AFTER_IDS "$(ids)"
 [[ "$KIND" != git ]] || { [[ -L $R/projects/$P/manifest.yml ]] && fact GIT_LINK yes; }
-tar -tvzf "$(latest)" | grep -q '^l' || fact STASH_LINKS none
 fact RECORD_KIND "$(python3 -c "import json,sys; print(json.load(open('$R/state/legacy-stages.json'))['$P']['kind'])" 2>/dev/null)"
 run DEPLOY_REFUSED new prod-deploy "$P"
 run PAUSE_REFUSED new pause "$P" --yes
@@ -166,50 +156,22 @@ for k in DEPLOY_REFUSED PAUSE_REFUSED; do
 done
 fact IDS_AFTER_REFUSALS "$(ids)"
 
-case "$WAY" in
-rollback|failed-apply)
-    # The control, from the state the real restore starts from: 0.10.1 cannot
-    # restore the stash its shim made, unrewritten. It writes members in
-    # order, so what it wrote before it stopped the real restore writes again.
-    if [[ "$KIND" == git ]]; then
-        control=$R/stashes/boxmunge-stash-2099-01-01T000000.tar.gz
-        cp /tmp/unrewritten-stash.tar.gz "$control"
-        run UNREWRITTEN_RESTORE old stash restore --latest
-        # 0.10.1's data_filter refuses the git manifest.yml link (D19 kept it).
-        grep -qF "refusing to extract member 'projects/$P/manifest.yml'" /tmp/out.UNREWRITTEN_RESTORE \
-            && grep -qF "is a link to an absolute path" /tmp/out.UNREWRITTEN_RESTORE \
-            && fact UNREWRITTEN_RESTORE_WHY link-member
-        rm -f "$control"
-    fi
-    run RESTORE old stash restore --latest
-    fact RESTORED_FILES "$(snap)"
-    run REAPPLY old upgrade --apply
-    fact PROD_VERSION_REAPPLIED "$(version "$P")"
-    if [[ "$KIND" != leftover ]]; then
-        run OLD_UNSTAGE old unstage "$P"
-        fact STAGING_LEFT "$(docker ps -aq --filter "label=com.docker.compose.project=$P-staging" | wc -l)"
-        fact PROD_VERSION_AFTER "$(version "$P")"
-    fi
-    ;;
-resolve)
-    case "$KIND" in
-        bundle-recreated)
-            run DISCARD_UNCONFIRMED new legacy-stage "$P" --discard
-            grep -q -- "--discard --confirm-recreated" /tmp/out.DISCARD_UNCONFIRMED \
-                && fact DISCARD_UNCONFIRMED_WHY confirm-recreated
-            run RESOLVE new legacy-stage "$P" --keep-staged ;;
-        *) run RESOLVE new legacy-stage "$P" --discard ;;
-    esac
-    run SHOW_AFTER new legacy-stage "$P"
-    grep -q "has no release staged by boxmunge 0.10.1" /tmp/out.SHOW_AFTER && fact SHOW_AFTER_WHY none
-    fact STAGING_LEFT "$(docker ps -aq --filter "label=com.docker.compose.project=$P-staging" | wc -l)"
-    fact PROD_VERSION_AFTER "$(version "$P")"
-    if [[ "$KIND" == bundle-recreated ]]; then
-        run ROLLBACK new rollback "$P" --yes
-        fact PROD_VERSION_ROLLED_BACK "$(version "$P")"
-    fi
-    if [[ "$KIND" == git ]]; then commit v3 declared; run DEPLOY_AFTER new prod-deploy "$P" --ref main
-    else bundle v3 11 declared; run DEPLOY_AFTER new prod-deploy "$P" --ref 2026-10-16T11; fi
-    fact PROD_VERSION_DEPLOYED "$(version "$P")" ;;
-*) echo "usage: legacy_upgrade.sh <kind> <rollback|failed-apply|resolve> <project>" >&2; exit 2 ;;
+case "$KIND" in
+    bundle-recreated)
+        run DISCARD_UNCONFIRMED new legacy-stage "$P" --discard
+        grep -q -- "--discard --confirm-recreated" /tmp/out.DISCARD_UNCONFIRMED \
+            && fact DISCARD_UNCONFIRMED_WHY confirm-recreated
+        run RESOLVE new legacy-stage "$P" --keep-staged ;;
+    *) run RESOLVE new legacy-stage "$P" --discard ;;
 esac
+run SHOW_AFTER new legacy-stage "$P"
+grep -q "has no release staged by boxmunge 0.10.1" /tmp/out.SHOW_AFTER && fact SHOW_AFTER_WHY none
+fact STAGING_LEFT "$(docker ps -aq --filter "label=com.docker.compose.project=$P-staging" | wc -l)"
+fact PROD_VERSION_AFTER "$(version "$P")"
+if [[ "$KIND" == bundle-recreated ]]; then
+    run ROLLBACK new rollback "$P" --yes
+    fact PROD_VERSION_ROLLED_BACK "$(version "$P")"
+fi
+if [[ "$KIND" == git ]]; then commit v3 declared; run DEPLOY_AFTER new prod-deploy "$P" --ref main
+else bundle v3 11 declared; run DEPLOY_AFTER new prod-deploy "$P" --ref 2026-10-16T11; fi
+fact PROD_VERSION_DEPLOYED "$(version "$P")"

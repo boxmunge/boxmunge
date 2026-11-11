@@ -9,8 +9,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-import stat
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator, TYPE_CHECKING
@@ -140,47 +139,34 @@ class UpgradeInProgress(Exception):
 
 @contextmanager
 def upgrade_lock(paths: BoxPaths) -> Iterator[None]:
-    """Hold the locks the upgrade shim takes, without waiting.
+    """Hold the lock the upgrade shim takes, without waiting.
 
-    Raises UpgradeInProgress if either is held. upgrade.lock is in root-only
-    upgrade-root/, so deploy cannot replace it to let two upgrades run. The
-    legacy lock in upgrade-state/ is what shims up to 0.10.1 and their venvs
-    take, and one of them is still running while it upgrades a box to this
-    release (acquire_lock in scripts/boxmunge-upgrade.d/state.sh says when
-    it can go). Both are opened with open_regular_nofollow, so a planted
-    link or FIFO is an UpgradeStateError naming it, instead of root opening
-    some other file or blocking on the FIFO.
+    Raises UpgradeInProgress if it is held. upgrade.lock is in root-only
+    upgrade-root/, so deploy cannot replace it to let two upgrades run, and
+    every shim an upgrade may start from (0.11.0 on) holds it. It is opened
+    with open_regular_nofollow, so a planted link or FIFO is an
+    UpgradeStateError naming it, instead of root opening some other file or
+    blocking on the FIFO.
     """
     if paths.upgrade_root.is_symlink():
         raise UpgradeStateError(f"{paths.upgrade_root} is a symlink; refusing to use it "
                                 "as root. Remove it and re-run.")
-    for directory, mode in ((paths.upgrade_root, 0o700), (paths.upgrade_state, 0o777)):
-        try:
-            directory.mkdir(mode=mode, parents=True, exist_ok=True)
-        except OSError as e:
-            raise UpgradeStateError.of(directory, e) from e
-    with ExitStack() as held:
-        for lock in (paths.upgrade_lock, paths.legacy_upgrade_lock):
-            held.enter_context(_flock(lock))
-        yield
-
-
-@contextmanager
-def _flock(path: Path) -> Iterator[None]:
+    try:
+        paths.upgrade_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    except OSError as e:
+        raise UpgradeStateError.of(paths.upgrade_root, e) from e
+    path = paths.upgrade_lock
     try:
         fd = open_regular_nofollow(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND)
     except OSError as e:
         raise UpgradeStateError.of(path, e) from e
     try:
-        # Deploy can replace the legacy lock with a file of its own and hold
-        # that, stalling every upgrade; root's own file it cannot make.
+        # Whoever owns the file can hold it, and stall every upgrade.
         owner = os.fstat(fd).st_uid
         if owner != os.geteuid():
             raise UpgradeStateError(f"{path} is owned by uid {owner}, not {os.geteuid()}, so "
                                     "another user may be holding it to stall upgrades; refusing "
                                     "to lock it. Remove it so it can be recreated.")
-        if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
-            os.fchmod(fd, 0o600)  # shims up to 0.10.1 made the legacy one 0644: deploy could lock it
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as e:

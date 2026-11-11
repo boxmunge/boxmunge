@@ -6,19 +6,13 @@ run on Debian 13's CrowdSec is tests/integration/test_crowdsec_caddy_trixie.py.
 from __future__ import annotations
 
 import configparser
-import json
-import os
 import re
-import shutil
-import stat
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 import yaml
 
-from boxmunge.caddy import ACCESS_LOG_FIELD_LIMITS, _access_log_lines, generate_caddy_config
+from boxmunge.caddy import ACCESS_LOG_FIELD_LIMITS, _access_log_lines
 from boxmunge.docker import _CADDY_CONTAINER
 
 REPO = Path(__file__).resolve().parents[1]
@@ -40,10 +34,11 @@ def test_caddy_mounts_no_log_directory() -> None:
         assert "/var/log" not in volume and "logs" not in volume.split(":")[0]
 
 
-def test_old_log_path_is_only_a_small_container_private_tmpfs() -> None:
-    """Room for the old configs' own rotation (roll_size 50MiB, roll_keep 5,
-    plus the file being written), so a rolled-back Caddy never fills it."""
-    assert _caddy_service()["tmpfs"] == ["/var/log/caddy:size=320m,mode=0700"]
+def test_caddy_has_no_writable_log_path() -> None:
+    """Every release an upgrade or rollback can reach logs to stdout."""
+    service = _caddy_service()
+    assert service["read_only"] is True
+    assert "tmpfs" not in service
 
 
 def test_caddy_logs_to_a_driver_the_docker_api_reads_back_rotated() -> None:
@@ -89,90 +84,12 @@ def test_init_host_installs_the_bundled_caddy_compose() -> None:
     assert "container_name: boxmunge-caddy" not in text
 
 
-def test_install_moves_sites_before_recreating_caddy_then_switches_crowdsec() -> None:
+def test_install_recreates_caddy_before_it_checks_crowdsec() -> None:
     text = (REPO / "install.sh").read_text()
-    sites = text.index('caddy-access-log.sh" sites')
     copy = text.index('cp "${SCRIPT_DIR}/caddy/compose.yml"')
     up = text.index('docker compose -f "${BOXMUNGE_ROOT}/caddy/compose.yml" up -d')
-    retire = text.index('caddy-access-log.sh" retire')
     crowdsec = text.index('bootstrap/crowdsec-acquis.sh"')
-    assert sites < copy < up < retire < crowdsec
-
-
-@pytest.mark.skipif(shutil.which("perl") is None, reason="needs perl")
-def test_legacy_removal_drops_exactly_the_block_crowdsec_sh_appended() -> None:
-    expr = re.search(r"-pe \\\n\s+'(.*)' \\\n", CROWDSEC_CADDY).group(1)
-    ours = ("\n---\nsource: file\nfilenames:\n  - /opt/boxmunge/caddy/logs/access.log\n"
-            "labels:\n  type: caddy\n")
-    debian = "source: journalctl\njournalctl_filter:\n - \"_SYSTEMD_UNIT=ssh.service\"\n"
-    out = subprocess.run(
-        ["perl", "-0777", "-pe", expr], input=debian + ours,
-        env={"LEGACY_LOG": "/opt/boxmunge/caddy/logs/access.log", "PATH": "/usr/bin:/bin"},
-        capture_output=True, text=True, check=True).stdout
-    assert out == debian
-
-
-# Each site block's access log as caddy.py generated it before this release.
-OLD_LOG = (
-    "    log {\n"
-    "        output file /var/log/caddy/access.log {\n"
-    "            roll_size 50MiB\n"
-    "            roll_keep 5\n"
-    "        }\n"
-    "        format json\n"
-    "    }\n"
-)
-MANIFEST = {
-    "project": "myapp", "hosts": ["myapp.example.com"],
-    "services": {"web": {"type": "frontend", "port": 3000, "routes": [{"path": "/"}]}},
-}
-
-
-def _rewrite_program() -> str:
-    script = (BOOTSTRAP / "caddy-access-log.sh").read_text()
-    return script.split("REWRITE=\"$(cat <<'PY'\n", 1)[1].split("\nPY\n", 1)[0]
-
-
-def _new_log() -> str:
-    return "\n".join(_access_log_lines()) + "\n"
-
-
-def test_sites_rewrite_knows_the_current_log_block() -> None:
-    namespace: dict = {}
-    program = _rewrite_program()
-    exec(program.split("\n\ndef rewrite", 1)[0], namespace)  # OLD and NEW only
-    assert namespace["NEW"] == _new_log()
-    assert namespace["OLD"] == OLD_LOG
-
-
-def test_sites_rewrite_moves_sites_and_journal_and_skips_what_it_must_not_open(tmp_path) -> None:
-    sites, journal = tmp_path / "sites", tmp_path / ".site-journal"
-    sites.mkdir()
-    journal.mkdir()
-    new = generate_caddy_config(MANIFEST)
-    old = new.replace(_new_log(), OLD_LOG)
-    assert old != new
-    (sites / "myapp.conf").write_text(old)
-    (sites / "myapp.conf").chmod(0o644)
-    victim = tmp_path / "victim"
-    victim.write_text(OLD_LOG)
-    (sites / "planted.conf").symlink_to(victim)
-    os.mkfifo(sites / "fifo.conf")
-    # What the first version's fixed temporary name left (a crash, or planted):
-    # a rerun must not trip over it.
-    (sites / "myapp.conf.boxmunge-rewrite").write_text("stale")
-    (journal / "myapp.conf.json").write_text(
-        json.dumps({"path": "x", "previous": old, "written": old}))
-    for _ in range(2):  # idempotent
-        subprocess.run([sys.executable, "-I", "-c", _rewrite_program(), str(sites), str(journal)],
-                       check=True, timeout=30)
-    assert (sites / "myapp.conf").read_text() == new
-    assert stat.S_IMODE((sites / "myapp.conf").stat().st_mode) == 0o644
-    assert json.loads((journal / "myapp.conf.json").read_text()) == {
-        "path": "x", "previous": new, "written": new}
-    assert victim.read_text() == OLD_LOG and (sites / "planted.conf").is_symlink()
-    assert sorted(p.name for p in sites.iterdir()) == [
-        "fifo.conf", "myapp.conf", "myapp.conf.boxmunge-rewrite", "planted.conf"]
+    assert copy < up < crowdsec
 
 
 def test_every_access_line_stays_far_below_crowdsecs_64k_line_limit() -> None:

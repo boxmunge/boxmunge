@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""A real 0.10.1 stage survives the beta's upgrade untouched, a rollback to
-0.10.1 then finds its own state, and the beta's legacy-stage resolves it
-(spec 'Test plan', 'Migration from 0.10.1').
+"""A real 0.10.1 stage survives the beta's upgrade untouched, and the beta's
+legacy-stage resolves it (spec 'Test plan', 'Migration from 0.10.1').
 
 Each case runs legacy_upgrade.sh as root in a throwaway container with the
 host's Docker socket: boxmunge 0.10.1 (`git archive v0.10.1`) and the beta
@@ -91,14 +90,14 @@ def image(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     _docker("image", "rm", "-f", tag)
 
 
-def _run(image: str, kind: str, way: str) -> dict[str, str]:
+def _run(image: str, kind: str) -> dict[str, str]:
     project = f"legacyt{uuid.uuid4().hex[:8]}"
     runner = f"bmtest-legacy-{uuid.uuid4().hex[:10]}"
     try:
         result = _docker("run", "--rm", "--name", runner,
                          "-v", "/var/run/docker.sock:/var/run/docker.sock",
                          "-v", f"{HERE}:/t:ro", image,
-                         "bash", "/t/legacy_upgrade.sh", kind, way, project, timeout=900)
+                         "bash", "/t/legacy_upgrade.sh", kind, project, timeout=900)
     finally:
         # A timeout kills only the docker client: the script's container runs
         # on. Stop it first, so it cannot start more containers after the sweep.
@@ -116,65 +115,33 @@ def _run(image: str, kind: str, way: str) -> dict[str, str]:
 
 # The 0.10.1 setup steps legacy_upgrade.sh runs for each kind: every one must
 # have run and passed.
-SETUP_STEPS = {"bundle": ("ADD", "DEPLOY_V1", "STAGE", "STASH"),
-               "bundle-recreated": ("ADD", "DEPLOY_V1", "STAGE", "PAUSE", "RECREATE", "STASH"),
-               "leftover": ("ADD", "DEPLOY_V1", "STAGE", "PROMOTE", "STASH"),
-               "git": ("REGISTER", "ADD", "DEPLOY_V1", "STAGE", "STASH")}
+SETUP_STEPS = {"bundle": ("ADD", "DEPLOY_V1", "STAGE"),
+               "bundle-recreated": ("ADD", "DEPLOY_V1", "STAGE", "PAUSE", "RECREATE"),
+               "leftover": ("ADD", "DEPLOY_V1", "STAGE", "PROMOTE"),
+               "git": ("REGISTER", "ADD", "DEPLOY_V1", "STAGE")}
 # What production runs once 0.10.1 has staged: the stage recreated it from
 # the staged files (bundle-recreated), or promoted them (leftover).
 RUNNING = {"bundle": "v1", "bundle-recreated": "v2", "leftover": "v2", "git": "v1"}
 RECORDED = {"bundle": "bundle", "bundle-recreated": "bundle", "leftover": "leftover", "git": "git"}
 
 
-def _left_as_is(kind: str, way: str, facts: dict[str, str]) -> None:
+def _left_as_is(kind: str, facts: dict[str, str]) -> None:
     log = facts["log"]
     for step in SETUP_STEPS[kind]:
         assert facts.get(f"{step}_RC") == "0", f"0.10.1 setup step {step} failed\n{log}"
     assert facts["PROD_VERSION_BEFORE"] == RUNNING[kind], log
     assert facts["CONTAINERS_BEFORE"] == ("1" if kind == "leftover" else "2"), log
     assert facts["DRY_RC"] == "0" and facts.get("DRY_LEFT") == "yes", log
-    assert facts["APPLY_RC"] == ("1" if way == "failed-apply" else "0"), log
+    assert facts["APPLY_RC"] == "0", log
     assert facts["AFTER_FILES"] == facts["BEFORE_FILES"], log
     assert facts["AFTER_IDS"] == facts["BEFORE_IDS"], log
     assert facts["RECORD_KIND"] == RECORDED[kind], log
-    assert facts.get("STASH_LINKS") == "none", log                    # D18 ran
     if kind == "git":
-        assert facts.get("STASH_LINKS_BEFORE") == "yes", log         # 0.10.1's stash had links
         assert facts.get("GIT_LINK") == "yes", log                   # D19: the link survived
     for refused in ("DEPLOY_REFUSED", "PAUSE_REFUSED"):
         assert facts[f"{refused}_RC"] == "1", log
         assert facts.get(f"{refused}_WHY") == "legacy-stage", log
     assert facts["IDS_AFTER_REFUSALS"] == facts["BEFORE_IDS"], log
-
-
-@pytest.mark.parametrize(("kind", "way"), [
-    ("bundle", "rollback"),
-    ("bundle-recreated", "rollback"),
-    ("leftover", "rollback"),
-    ("git", "rollback"),
-    ("git", "failed-apply"),
-    ("bundle", "failed-apply"),
-])
-def test_rollback_to_0101_finds_its_stage_as_it_was(image: str, kind: str, way: str) -> None:
-    facts = _run(image, kind, way)
-    log = facts["log"]
-    _left_as_is(kind, way, facts)
-    assert facts["RESTORE_RC"] == "0", log
-    assert facts["RESTORED_FILES"] == facts["BEFORE_FILES"], log
-    assert facts["REAPPLY_RC"] == "0", log
-    if kind != "leftover":
-        assert facts["OLD_UNSTAGE_RC"] == "0" and facts["STAGING_LEFT"] == "0", log
-    # 0.10.1's own behaviour, pinned so a change is noticed: its re-apply
-    # restarts production from the project dir, which holds the staged files,
-    # and its unstage does not put production's release back.
-    assert facts["PROD_VERSION_REAPPLIED"] == "v2", log
-    if kind != "leftover":
-        assert facts["PROD_VERSION_AFTER"] == "v2", log
-    if kind == "git":
-        # The control, run first from the same state: without the rewrite,
-        # 0.10.1 refuses its own stash, on the link member.
-        assert facts["UNREWRITTEN_RESTORE_RC"] == "1", log
-        assert facts.get("UNREWRITTEN_RESTORE_WHY") == "link-member", log
 
 
 # legacy-stage's choice per kind, and what production runs after it.
@@ -183,9 +150,9 @@ RESOLVED = {"bundle": "v1", "bundle-recreated": "v2", "leftover": "v2", "git": "
 
 @pytest.mark.parametrize("kind", ["bundle", "bundle-recreated", "leftover", "git"])
 def test_legacy_stage_resolves_a_0101_stage_after_the_upgrade(image: str, kind: str) -> None:
-    facts = _run(image, kind, "resolve")
+    facts = _run(image, kind)
     log = facts["log"]
-    _left_as_is(kind, "resolve", facts)
+    _left_as_is(kind, facts)
     if kind == "bundle-recreated":
         assert facts["DISCARD_UNCONFIRMED_RC"] == "1", log
         assert facts.get("DISCARD_UNCONFIRMED_WHY") == "confirm-recreated", log

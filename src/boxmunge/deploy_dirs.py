@@ -8,6 +8,8 @@ afterwards (a manual `security scan` died with EACCES in state/scans).
 `prepare_deploy_dirs` (run by the upgrade) creates what is missing and
 re-owns what root made; `unwritable_by_deploy` (doctor) reports what is
 still out of deploy's reach.
+The re-owning first shipped in 0.11.1, so it stays
+until the upgrade floor reaches that.
 
 Deliberately absent, because only root writes there: state/container-updates
 (boxmunge container-update, a root timer, is not in the deploy shell) and
