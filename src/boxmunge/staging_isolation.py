@@ -311,14 +311,19 @@ def _refuse_other_files(compose: Path) -> None:
 
 
 def candidate_model(paths: BoxPaths, project: str, tree: Path, manifest: dict[str, Any],
-                    scratch: Path) -> dict[str, Any]:
+                    scratch: Path, *, user_compose: dict[str, Any] | None = None,
+                    ) -> dict[str, Any]:
     """What production would run once ``tree`` is installed in the project
-    dir: its compose.yml and the overlay it would get, resolved there."""
+    dir: its compose.yml and the overlay it would get, resolved there.
+    ``user_compose`` is the tree's compose.yml as load_user_compose
+    resolves it, where the caller has just resolved it."""
     _refuse_other_files(tree / "compose.yml")
+    if user_compose is None:
+        user_compose = load_user_compose(tree / "compose.yml", project)
     overlay = scratch / "compose.boxmunge.candidate.yml"
     overlay.write_text(generate_compose_override(
         manifest, env_files=production_env_files(paths, project) or None,
-        user_compose=load_user_compose(tree / "compose.yml", project)))
+        user_compose=user_compose))
     compose = _without_read_files(tree / "compose.yml", scratch / "compose.candidate.yml")
     env = tree / ".env"
     project_dir = paths.project_dir(project)

@@ -83,7 +83,7 @@ def test_a_first_deploy_costs_what_a_redeploy_does(box) -> None:
 def test_stage_then_promote(deployed) -> None:
     with docker_calls() as seen:
         assert run_stage("myapp", deployed, ref=V2) == 0
-    _expect(seen, compose_config=19, docker_info=6, other=5)
+    _expect(seen, compose_config=17, docker_info=6, other=5)
     with docker_calls() as seen:
         assert run_promote("myapp", deployed) == 0
     _expect(seen, compose_config=10, docker_info=3, other=11)
