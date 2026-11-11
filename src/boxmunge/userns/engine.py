@@ -45,7 +45,8 @@ from boxmunge.userns.shift import Direction, scan_tree, shift_tree
 from boxmunge.userns.switch import (
     CADDYFILE_MODE, MigrationError, back_to_prior, caddyfile_mode, create_identity,
     daemon_json_owner,
-    ensure_prior, host_ids, prior_store, read_daemon_json, set_caddyfile_mode, to_remapped,
+    ensure_prior, host_ids, prior_store, read_daemon_json, require_remapped, set_caddyfile_mode,
+    to_remapped,
 )
 from boxmunge.userns.volumes import data_dir, move, recreate
 
@@ -208,9 +209,7 @@ def _ensure_remapped(paths: BoxPaths, j: Journal, daemon: DaemonControl) -> None
     """After the switch: the remapped daemon runs, exactly as journalled."""
     if not daemon_answers():
         daemon.start()
-    if uo.remap_offset(paths) != j.offset:
-        raise MigrationError(f"the daemon is not remapped at offset {j.offset} as the journal "
-                             f"says; see docker-userns in health")
+    require_remapped(paths, j.offset)
 
 
 def _refuse_rerun(j: Journal | None) -> Journal | None:

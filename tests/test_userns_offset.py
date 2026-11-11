@@ -177,3 +177,15 @@ def test_non_ascii_or_signed_digits_are_refused(tmp_path, line) -> None:
     (tmp_path / "subuid").write_text(line + "\n")
     with pytest.raises(RemapError, match="is not 'name:start:count'"):
         offset.read_subids(tmp_path / "subuid")
+
+
+@pytest.mark.parametrize("info, expected", [
+    ({"DriverStatus": [["Backing Filesystem", "extfs"],
+                       ["driver-type", "io.containerd.snapshotter.v1"]]},
+     "io.containerd.snapshotter.v1"),
+    ({"DriverStatus": [["Backing Filesystem", "extfs"]]}, ""),
+    ({"DriverStatus": None}, ""),
+    ({}, ""),
+])
+def test_the_driver_type_docker_info_reports(info, expected) -> None:
+    assert offset.driver_type(info) == expected

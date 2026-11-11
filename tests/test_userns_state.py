@@ -101,3 +101,30 @@ def test_what_each_state_is_told() -> None:
         "rolling back": "a userns rollback stopped at rb-saved; finish it: userns-rollback",
         "rolled back": "the userns migration was already rolled back",
     }
+
+
+def test_one_sentence_when_the_daemon_is_not_the_journalled_one(paths, monkeypatch) -> None:
+    """Migrate's resume, rollback and commit all ask the same check."""
+    from boxmunge.userns import switch as sw
+
+    class Daemon:
+        def start(self) -> None:
+            raise AssertionError("the daemon answers")
+
+    j = Journal(FORWARD, "applied", S, applied_at="2026-01-01T00:00:00+00:00")
+    monkeypatch.setattr(sw.uo, "remap_offset", lambda paths: 0)
+    monkeypatch.setattr(en, "daemon_answers", lambda: True)
+    monkeypatch.setattr(rb, "daemon_answers", lambda: True)
+    monkeypatch.setattr(rb, "_refuse_soak_edit", lambda j: None)
+    said = []
+    for run in (lambda: sw.require_remapped(paths, S),
+                lambda: en._ensure_remapped(paths, j, Daemon()),
+                lambda: rb._start(paths, j, Daemon(), paths.root / "img"),
+                lambda: cm._checked(paths, j, datetime(2026, 2, 1, tzinfo=timezone.utc))):
+        with pytest.raises(MigrationError) as e:
+            run()
+        said.append(str(e.value))
+    assert set(said) == {f"the daemon is not remapped at offset {S} as the journal says; "
+                         f"see docker-userns in health"}
+    monkeypatch.setattr(sw.uo, "remap_offset", lambda paths: S)
+    sw.require_remapped(paths, S)

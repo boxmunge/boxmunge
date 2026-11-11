@@ -32,8 +32,9 @@ from boxmunge.userns.inventory import CONTAINERD_STORE, Inventory
 from boxmunge.userns.journal import (
     COMMIT_STARTED, Journal, State, finish_hint, load_journal, save_journal, state,
 )
-from boxmunge.userns.preflight_checks import dir_size
-from boxmunge.userns.switch import MigrationError, remove_docker_tree
+from boxmunge.userns.switch import (
+    MigrationError, remove_docker_tree, require_remapped, store_size,
+)
 
 COMPONENT = "userns-commit"
 SOAK = timedelta(hours=48)
@@ -42,13 +43,6 @@ _LISTINGS = {"containers": ("containers", "ls", "-q"), "images": ("images", "ls"
              "leases": ("leases", "ls", "-q"), "content blobs": ("content", "ls", "-q")}
 _SNAPSHOTTER = "io.containerd.snapshotter.v1"
 _OLD_ROOT_DIRS = ("containers", "volumes", "image")
-
-
-def _old_store_size(prior: dict, old_root: Path) -> int:
-    """The old store as phase 0 measured it (switch.prior_store)."""
-    if prior["driver_type"] == CONTAINERD_STORE:
-        return dir_size(Path(prior["store_root"]))
-    return dir_size(old_root / "overlay2") + dir_size(old_root / "image")
 
 
 def _ctr(prior: dict, *args: str) -> str:
@@ -182,9 +176,7 @@ def _checked(paths: BoxPaths, j: Journal | None, now: datetime) -> Journal:
     applied = datetime.fromisoformat(str(j.applied_at))
     if now - applied < SOAK:
         raise MigrationError(f"soak until {(applied + SOAK).isoformat()} before committing")
-    if uo.remap_offset(paths) != j.offset:
-        raise MigrationError("the daemon is not remapped as the journal says; see "
-                             "docker-userns in health")
+    require_remapped(paths, j.offset)
     if j.prior_store["driver_type"] == CONTAINERD_STORE:
         _check_containerd(j.prior_store, uo.docker_info(), j.offset)
     left = _old_volumes_with_data(Path(Inventory.from_json(j.inventory).root))
@@ -220,7 +212,7 @@ def commit(paths: BoxPaths, *, now: datetime | None = None,
 
 def _check_freed(prior: dict, old_root: Path, before: int) -> None:
     """What was deleted as directories: the old store must have gone."""
-    freed = before - _old_store_size(prior, old_root)
+    freed = before - store_size(prior, old_root)
     if freed < 0.9 * prior["size"]:
         raise MigrationError(f"only {freed} bytes were freed under {prior['store_root']}, not "
                              f"the old store's {prior['size']} (less 10%); inspect what is "
@@ -231,7 +223,7 @@ def _commit(paths: BoxPaths, j: Journal, images_dir: Path) -> Journal:
     prior = j.prior_store
     old_root = Path(Inventory.from_json(j.inventory).root)
     if COMMIT_STARTED not in j.items:
-        j.items[COMMIT_STARTED] = str(_old_store_size(prior, old_root))
+        j.items[COMMIT_STARTED] = str(store_size(prior, old_root))
         save_journal(paths, j)
     before = int(j.items[COMMIT_STARTED])
     remove_tars(images_dir)

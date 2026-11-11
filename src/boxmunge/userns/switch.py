@@ -128,9 +128,27 @@ def create_identity(s: int) -> None:
                              f"{s}-{s + uo.RANGE - 1} in both /etc/subuid and /etc/subgid")
 
 
+def require_remapped(paths: BoxPaths, s: int) -> None:
+    """After the switch, every command acts only on the daemon the journal
+    describes: the remapped one, at the journalled offset."""
+    if uo.remap_offset(paths) != s:
+        raise MigrationError(f"the daemon is not remapped at offset {s} as the journal "
+                             f"says; see docker-userns in health")
+
+
+def store_size(prior: dict, root: Path) -> int:
+    """Bytes the old daemon's store holds under its root `root`: what phase
+    0 journals as the prior store's size, and what commit must free."""
+    if prior["driver_type"] == CONTAINERD_STORE:
+        return dir_size(Path(prior["store_root"]))
+    return dir_size(root / "overlay2") + dir_size(root / "image")
+
+
 def prior_store(inv: Inventory) -> dict:
     """The store the old daemon used, and its size, for commit and rollback."""
     root = Path(inv.root)
+    prior = {"driver": inv.driver, "driver_type": inv.driver_type,
+             "store_root": str(root / "overlay2")}
     if inv.driver_type == CONTAINERD_STORE:
         # As the daemon reports it (the preflight refused any other):
         # dockerd's own containerd keeps its root in the daemon's root (and a
@@ -144,12 +162,9 @@ def prior_store(inv: Inventory) -> dict:
         else:
             raise MigrationError(f"the daemon uses containerd at {address!r}, which the "
                                  f"migration does not support (see userns-migrate --check)")
-        return {"driver": inv.driver, "driver_type": inv.driver_type, "store_root": str(croot),
-                "containerd": {"address": address, "namespace": namespace},
-                "managed": managed, "size": dir_size(croot)}
-    return {"driver": inv.driver, "driver_type": inv.driver_type,
-            "store_root": str(root / "overlay2"),
-            "size": dir_size(root / "overlay2") + dir_size(root / "image")}
+        prior.update(store_root=str(croot),
+                     containerd={"address": address, "namespace": namespace}, managed=managed)
+    return {**prior, "size": store_size(prior, root)}
 
 
 _SYS_NET = Path("/sys/class/net")

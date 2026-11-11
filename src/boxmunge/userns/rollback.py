@@ -37,7 +37,7 @@ from boxmunge.userns.preflight import PreflightRefused, preflight
 from boxmunge.userns.shift import Direction
 from boxmunge.userns.switch import (
     MigrationError, back_to_prior, daemon_json_path, ensure_prior, read_daemon_json,
-    remove_docker_tree, set_caddyfile_mode,
+    remove_docker_tree, require_remapped, set_caddyfile_mode,
 )
 from boxmunge.userns.volumes import data_dir, move, recreate
 
@@ -66,8 +66,8 @@ def _abort(paths: BoxPaths, j: Journal, daemon: DaemonControl, timers: TimerCont
 
 def _verify_prior_store(j: Journal) -> None:
     info = uo.docker_info()
-    driver_type = dict(info.get("DriverStatus") or []).get("driver-type", "")
-    got = (info.get("Driver"), driver_type, "name=userns" in (info.get("SecurityOptions") or []))
+    got = (info.get("Driver"), uo.driver_type(info),
+           "name=userns" in (info.get("SecurityOptions") or []))
     want = (j.prior_store["driver"], j.prior_store["driver_type"], False)
     if got != want:
         raise MigrationError(f"the daemon came back as {got}, not the prior store {want}")
@@ -179,9 +179,7 @@ def _start(paths: BoxPaths, j: Journal, daemon: DaemonControl, images_dir: Path)
     _refuse_soak_edit(j)
     if not daemon_answers():
         daemon.start()
-    if uo.remap_offset(paths) != j.offset:
-        raise MigrationError(f"the daemon is not remapped at offset {j.offset} as the journal "
-                             f"says; see docker-userns in health")
+    require_remapped(paths, j.offset)
     inv = take_inventory(paths)
     if j.rollback_inventory:
         inv = inv.with_running_from(Inventory.from_json(j.rollback_inventory))

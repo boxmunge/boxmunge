@@ -30,7 +30,7 @@ from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import load_registered_projects
 from boxmunge.release import project_data_dirs
 from boxmunge.system_container import CONTAINER_NAME
-from boxmunge.userns.offset import docker_info
+from boxmunge.userns.offset import docker_info, driver_type
 
 PROXY_NETWORK = "boxmunge-proxy"
 CONTAINERD_STORE = "io.containerd.snapshotter.v1"
@@ -259,7 +259,6 @@ def take_containers(paths: BoxPaths) -> list[ContainerEntry]:
 
 def take_inventory(paths: BoxPaths) -> Inventory:
     info = docker_info()
-    driver_type = dict(info.get("DriverStatus") or []).get("driver-type", "")
     containers = take_containers(paths)
     names = _run(["docker", "volume", "ls", "-q"], capture=True).stdout.split()
     attached = {m.name for c in containers for m in c.mounts if m.type == "volume"}
@@ -288,7 +287,7 @@ def take_inventory(paths: BoxPaths) -> Inventory:
               for d in (_json(["docker", "image", "inspect", *image_ids]) if image_ids else [])]
     projects = sorted(load_registered_projects(paths))
     network, bridges = _networks()
-    return Inventory(driver=str(info.get("Driver")), driver_type=driver_type,
+    return Inventory(driver=str(info.get("Driver")), driver_type=driver_type(info),
                      root=str(info.get("DockerRootDir")),
                      server_version=str(info.get("ServerVersion")),
                      containers=containers, volumes=volumes, images=images, network=network,
