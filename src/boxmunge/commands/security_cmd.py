@@ -29,7 +29,6 @@ from boxmunge.commands.security_views import (
 )
 from boxmunge.cve.breaker import BreakerError, read_held
 from boxmunge.cve.policy import Disposition
-from boxmunge.cve.grace import GraceError, read_grace_state
 from boxmunge.cve.kev import kev_status
 from boxmunge.cve.scan_state import read_scan_state
 from boxmunge.cve.quarantine import (
@@ -248,8 +247,6 @@ def fleet_summary(paths: BoxPaths) -> dict:
             projects_with_supps += 1
             active_supps_count += facts.active_suppressions
 
-    grace_payload = _grace_payload(paths, now=datetime.now(timezone.utc))
-
     # Host-scope suppressions apply to every project on the box, so they live
     # in one file rather than per-project ones. Counting only the per-project
     # files above would report an active host suppression as 0 — hiding it
@@ -274,7 +271,6 @@ def fleet_summary(paths: BoxPaths) -> dict:
             for s in active_host
         ],
         "last_fleet_scan": max(last_scans) if last_scans else None,
-        "grace": grace_payload,
         "held_by_breaker": _held_payload(paths),
         "kev": kev_status(paths, today),
     }
@@ -299,32 +295,6 @@ def _held_payload(paths: BoxPaths) -> dict:
     except BreakerError as e:
         return {"error": [str(e)]}
     return {name: sorted(cves) for name, cves in sorted(held.items())}
-
-
-def _grace_payload(paths: BoxPaths, *, now: datetime) -> dict | None:
-    """Build the grace block for the fleet summary, or None if no file.
-
-    Corrupt grace state surfaces as a flag the operator can see in the
-    summary; we don't crash the read-side view over a bad file.
-    """
-    try:
-        state = read_grace_state(paths)
-    except GraceError as e:
-        return {
-            "active": False,
-            "installed_at": None,
-            "expires_at": None,
-            "heads_up_sent": False,
-            "error": str(e),
-        }
-    if state is None:
-        return None
-    return {
-        "active": state.is_active(now=now),
-        "installed_at": state.installed_at.isoformat(),
-        "expires_at": state.expires_at.isoformat(),
-        "heads_up_sent": state.heads_up_sent,
-    }
 
 
 # ---------- entry ----------
@@ -385,9 +355,6 @@ def cmd_security(args: list[str]) -> None:
                     "active_suppressions_count": 0,
                     "active_suppressions_projects": 0,
                     "last_fleet_scan": None,
-                    "grace": _grace_payload(
-                        paths, now=datetime.now(timezone.utc),
-                    ),
                     "kev": kev_status(paths, datetime.now(timezone.utc).date()),
                 }))
             else:

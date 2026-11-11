@@ -2300,9 +2300,11 @@ judged not exploitable.
 
 Scan cadence:
 
-- Daily between 03:00 and 03:30 via `boxmunge-cve-scan.timer`
-- Not yet at deploy or image-update time: run `security scan <project>`
-  after a deploy to check a new image at once
+- Daily between 03:00 and 03:30 via `boxmunge-cve-scan.timer`, after the
+  nightly container update (02:30 to 03:00), so the images it pulled are
+  scanned that night
+- Not yet at deploy time: run `security scan <project>` after a deploy to
+  check a new image at once
 - Ad-hoc:
 
   ```

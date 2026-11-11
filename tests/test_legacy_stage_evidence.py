@@ -375,7 +375,7 @@ def test_quarantine_held_for_a_legacy_project(paths, legacy) -> None:
     with patch.object(security_enforce, "quarantine_project") as quarantine, \
             patch("boxmunge.commands.security_enforce.notify") as alert:
         result = security_enforce.enforce(paths, "myapp", hosts=[], compose_files=[], policy={},
-                                          headline=_headline(), in_grace=False)
+                                          headline=_headline(), defer_new=False)
     quarantine.assert_not_called()
     assert result.held == "CVE-1" and not result.landed
     assert alert.call_args.kwargs["priority"] == 1 and "CVE-1" in alert.call_args.args[2]
@@ -395,7 +395,7 @@ def test_quarantine_reassertion_held_for_a_legacy_project(paths, legacy, complet
     with patch.object(security_enforce, "reassert_quarantine") as reassert, \
             patch("boxmunge.commands.security_enforce.notify") as alert:
         result = security_enforce.enforce(paths, "myapp", hosts=[], compose_files=[], policy={},
-                                          headline=None, in_grace=False)
+                                          headline=None, defer_new=False)
     reassert.assert_not_called()
     assert result.held == "CVE-9" and not result.landed and result.error is None
     assert alert.call_args.kwargs["priority"] == 1 and "CVE-9" in alert.call_args.args[2]
@@ -409,17 +409,17 @@ def test_reassertion_hold_of_a_record_without_a_cve_fails_loudly(paths, legacy) 
     with patch.object(security_enforce, "reassert_quarantine") as reassert, \
             patch("boxmunge.commands.security_enforce.notify"):
         result = security_enforce.enforce(paths, "myapp", hosts=[], compose_files=[], policy={},
-                                          headline=None, in_grace=False)
+                                          headline=None, defer_new=False)
     reassert.assert_not_called()
     assert result.held is None and "names no cve_id" in result.error
 
 
-def test_quarantine_not_held_during_grace(paths, legacy) -> None:
+def test_a_deferred_quarantine_is_not_held(paths, legacy) -> None:
     from boxmunge.commands import security_enforce
     with patch.object(security_enforce, "quarantine_project") as quarantine, \
             patch("boxmunge.commands.security_enforce.notify") as alert:
         result = security_enforce.enforce(paths, "myapp", hosts=[], compose_files=[], policy={},
-                                          headline=_headline(), in_grace=True)
+                                          headline=_headline(), defer_new=True)
     quarantine.assert_not_called()
     alert.assert_not_called()
     assert result.held is None

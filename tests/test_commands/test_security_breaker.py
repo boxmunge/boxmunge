@@ -166,7 +166,7 @@ def test_a_dangling_quarantine_record_is_an_error_not_a_skip(tmp_path) -> None:
     paths = make_box(tmp_path, projects=("demo",))
     _dangling_quarantine(paths, "demo")
     result = apply_new_quarantines(
-        paths, {"demo": SimpleNamespace(headline="CVE-1", decisions=())}, in_grace=False)
+        paths, {"demo": SimpleNamespace(headline="CVE-1", decisions=())})
     assert result.applied == [] and "quarantine" in result.errors["demo"].lower()
     assert "symlink" in result.errors["demo"]
 

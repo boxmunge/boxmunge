@@ -19,7 +19,7 @@ To rule out deadlock, a process only ever acquires them in this order
    migration, item 5).
 4. Short blocking locks, always innermost: ``state/.registry.lock``
    (``registry_lock``), ``state/.caddy.lock`` (inside ``caddy_reload``),
-   ``state/.cve-grace.lock``, and ``state/secrets-locks/*.lock`` (one per
+   and ``state/secrets-locks/*.lock`` (one per
    secrets file, around every write of it). None of them is held while
    acquiring any other lock, and none is held across slow work.
 5. The user-namespace migration (``boxmunge-server userns migrate|rollback``,

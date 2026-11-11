@@ -123,6 +123,12 @@ class KevCatalog:
     def is_stale(self, today: date) -> bool:
         return self.stale_reason(today) is not None
 
+    def fresh_ids(self, today: date) -> frozenset[str] | None:
+        """The listed CVE ids when the catalog is fresh on ``today``; None
+        when it is stale, and then nothing may be treated as exploited. A
+        scan judges freshness once with this, not once per finding."""
+        return None if self.is_stale(today) else self.cve_ids
+
     def is_known_exploited(
         self, cve_id: str, *, today: date | None = None,
     ) -> bool:
@@ -131,10 +137,8 @@ class KevCatalog:
         `today` defaults to UTC today; passing it explicitly keeps the check
         deterministic in tests and matches the policy engine's injected date.
         """
-        when = today or datetime.now(timezone.utc).date()
-        if self.is_stale(when):
-            return False
-        return cve_id in self.cve_ids
+        ids = self.fresh_ids(today or datetime.now(timezone.utc).date())
+        return ids is not None and cve_id in ids
 
 
 _EMPTY = KevCatalog(cve_ids=frozenset(), fetched_at=None, released_at=None, source=None)

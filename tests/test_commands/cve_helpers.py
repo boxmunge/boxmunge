@@ -8,7 +8,7 @@ compose stop/up) are stubbed by the individual tests.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import yaml
 
@@ -95,19 +95,13 @@ def write_project(
 
 
 def make_box(tmp_path, projects=("demo",), **project_kwargs) -> BoxPaths:
-    """A box with registered projects and the migration grace already over."""
+    """A box with registered projects."""
     paths = BoxPaths(root=tmp_path)
     for d in (paths.state, paths.deploy_state, paths.caddy_sites, paths.config):
         d.mkdir(parents=True, exist_ok=True)
     for name in projects:
         write_project(paths, name, **project_kwargs)
     (paths.state / "projects.txt").write_text("".join(f"{n}\n" for n in projects))
-    expired = datetime(2025, 1, 1, tzinfo=timezone.utc)
-    paths.cve_grace_state.write_text(json.dumps({
-        "installed_at": expired.isoformat(),
-        "expires_at": (expired + timedelta(hours=24)).isoformat(),
-        "heads_up_sent": True,
-    }))
     return paths
 
 

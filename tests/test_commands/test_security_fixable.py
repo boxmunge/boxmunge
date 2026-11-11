@@ -37,7 +37,7 @@ def test_fixable_kev_quarantines_and_alerts(box, posture):
     """Audit B-01: a fixable, KEV-listed Critical produced 0 alerts and
     never quarantined, while nothing rebuilt the image."""
     paths, pushover = box(posture, [finding(_XZ, fix="5.6.1-2")])
-    scan = scan_one_project(paths, "demo", in_grace=False, kev=_kev(_XZ))
+    scan = scan_one_project(paths, "demo", kev=_kev(_XZ))
     assert scan.decisions[0].findings[0].disposition is Disposition.QUARANTINE
     assert is_quarantined("demo", paths)
     [(title, body, priority)] = pushover.sent
@@ -49,7 +49,7 @@ def test_fixable_kev_under_relaxed_alerts_every_scan(box):
     paths, pushover = box("relaxed", [finding(_XZ, fix="5.6.1-2")])
     for _ in range(3):
         pushover.clear()
-        scan_one_project(paths, "demo", in_grace=False, kev=_kev(_XZ))
+        scan_one_project(paths, "demo", kev=_kev(_XZ))
         assert not is_quarantined("demo", paths)
         [(title, _, priority)] = pushover.sent
         assert priority == 1
@@ -58,14 +58,14 @@ def test_fixable_kev_under_relaxed_alerts_every_scan(box):
 
 def test_fixable_over_threshold_alerts_once(box):
     paths, pushover = box("balanced", [finding("CVE-2026-0001", fix="3.0.15-1")])
-    scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+    scan_one_project(paths, "demo", kev=_kev())
     [(title, body, priority)] = pushover.sent
     assert priority == 0
     assert "1 fixable CVE finding over the posture's gate" in title
     assert "CVE-2026-0001" in body
     assert not is_quarantined("demo", paths)
     pushover.clear()
-    scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+    scan_one_project(paths, "demo", kev=_kev())
     assert pushover.sent == []
 
 
@@ -75,9 +75,9 @@ def test_fixable_below_threshold_is_in_the_digest(box):
     from boxmunge.cve.scanner import Severity
 
     paths, pushover = box("balanced", [finding(sev=Severity.LOW, fix="1.1")])
-    scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+    scan_one_project(paths, "demo", kev=_kev())
     [(title, body, priority)] = pushover.sent
     assert priority == 0 and "1 new CVE finding" in title and "Fix available" in body
     pushover.clear()
-    scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+    scan_one_project(paths, "demo", kev=_kev())
     assert pushover.sent == []

@@ -56,7 +56,7 @@ def _scan_box(tmp_path, monkeypatch, db: dict, posture: str = "strict", found=LO
 
 
 def _scan(paths):
-    return scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+    return scan_one_project(paths, "demo", kev=_kev())
 
 
 def test_a_compose_only_writable_db_warns_and_does_not_quarantine(tmp_path, monkeypatch) -> None:

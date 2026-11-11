@@ -3,7 +3,7 @@
 
 Runs under the per-project lock. Inputs (manifest meta, image
 identification, suppressions) come from security_scan_inputs.py; fleet
-orchestration (grace heads-up, exit codes, lock-skip handling) lives in
+orchestration (exit codes, lock-skip handling) lives in
 security_actions.py.
 """
 from __future__ import annotations
@@ -36,7 +36,6 @@ from boxmunge.commands.security_enforce import (
     raise_enforcement_error,
 )
 from boxmunge.cve.alerting import emit_scan_alerts
-from boxmunge.cve.grace import GraceError, init_grace_if_missing
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
     FindingDisposition,
@@ -148,26 +147,25 @@ def _today() -> date:
 
 def scan_one_project(
     paths: BoxPaths, project: str, *,
-    in_grace: bool | None = None,
     audit_only: bool = False,
     kev: KevCatalog | None = None,
     defer_new: bool = False,
+    scanned: dict[str, ScanResult] | None = None,
 ) -> ProjectScan:
     """Scan a single project, persist state, take quarantine action.
 
     ``ProjectScan.headline`` is the first (decision, finding) pair that
     requires quarantine, or None if nothing quarantines.
 
-    ``in_grace=True`` suppresses new quarantines and transition alerts but
-    still writes scan_state; ``None`` (direct callers) lazily bootstraps
-    the grace state and derives it (audit F-2).
-
     ``audit_only=True`` (the resume re-scan, audit A-3) only evaluates: no
-    scan_state write, no alerts, no action, no grace bootstrap.
+    scan_state write, no alerts, no action.
 
     When ``defer_new`` is True, an existing quarantine is still re-asserted
     but a NEW quarantine is not taken here: the fleet scan decides it for
     the whole run, through the circuit breaker (security_enforce).
+
+    ``scanned`` shares Trivy results by exact image reference across the
+    projects of one fleet run, so an image two projects run is scanned once.
 
     Concurrency: holds the per-project lock for its full body.
 
@@ -175,36 +173,28 @@ def scan_one_project(
         LockError: when another operation holds the project lock.
         TrivyNotInstalledError: when the Trivy binary is missing.
         RuntimeError: on irrecoverable failures (manifest unreadable, all
-            images failed to scan, quarantine action raised, grace state
-            corrupt).
+            images failed to scan, quarantine action raised).
     """
-    if in_grace is None:
-        if audit_only:
-            in_grace = False
-        else:
-            try:
-                grace = init_grace_if_missing(
-                    paths, now=datetime.now(timezone.utc),
-                )
-            except GraceError as e:
-                raise RuntimeError(
-                    f"CVE migration grace state is corrupt: {e}"
-                ) from e
-            in_grace = grace.is_active(now=datetime.now(timezone.utc))
     # Direct callers use the cached catalog without a refresh (no network).
     if kev is None:
         kev = load_kev(paths)
     with project_lock(project, paths):
         return scan_one_project_locked(
-            paths, project, in_grace=in_grace, audit_only=audit_only, kev=kev,
-            defer_new=defer_new,
+            paths, project, audit_only=audit_only, kev=kev, defer_new=defer_new,
+            scanned=scanned,
         )
 
 
 def _scan_targets(
     paths: BoxPaths, project: str, targets: list[ScanTarget],
+    scanned: dict[str, ScanResult] | None = None,
 ) -> tuple[list[ScanResult], list[str], list[str], list[str]]:
     """Scan each target within the project budget.
+
+    A ref already in ``scanned`` (this fleet run's results) is not scanned
+    again; each new result is added. Only results are shared: an image that
+    failed, or that the budget skipped, is scanned by the next project that
+    runs it, under that project's own budget.
 
     Returns (results, failed image refs, budget-skipped image refs, warnings).
     """
@@ -213,44 +203,46 @@ def _scan_targets(
     skipped: list[str] = []
     warnings: list[str] = []
     project_start = time.monotonic()
-    for index, target in enumerate(targets):
+    for target in targets:
+        ref = target.image_ref
+        if scanned is not None and ref in scanned:
+            results.append(scanned[ref])
+            continue
         # The systemd unit timeout (60m) is the outer cap — without this
         # inner cap, one slow project could starve every project after it.
-        elapsed = time.monotonic() - project_start
-        remaining = _PROJECT_BUDGET_SECONDS - elapsed
-        if remaining <= 0:
-            skipped = [t.image_ref for t in targets[index:]]
-            log_warning(
-                "cve-scan",
-                f"project {project} exceeded scan budget after "
-                f"{elapsed:.0f}s — skipping remaining {len(skipped)} image(s)",
-                paths, project=project,
-                detail={
-                    "elapsed_s": round(elapsed, 1),
-                    "budget_s": _PROJECT_BUDGET_SECONDS,
-                    "skipped_images": skipped,
-                },
-            )
-            warnings.append(
-                f"project budget exceeded after {elapsed:.0f}s — "
-                f"skipped {len(skipped)} image(s)"
-            )
-            break
+        remaining = _PROJECT_BUDGET_SECONDS - (time.monotonic() - project_start)
+        if skipped or remaining <= 0:
+            skipped.append(ref)
+            continue
         # Cap the per-image timeout so one scan can't blow the budget alone.
         per_image_timeout = min(_DEFAULT_TIMEOUT, max(1, int(remaining)))
         try:
-            results.append(scan_image(target.image_ref, timeout=per_image_timeout))
+            result = scan_image(ref, timeout=per_image_timeout)
         except TrivyNotInstalledError:
             raise
         except ScannerError as e:
             log_warning(
-                "cve-scan",
-                f"scan failed for {project} image {target.image_ref}: {e}",
-                paths, project=project,
-                detail={"image_ref": target.image_ref, "error": str(e)},
+                "cve-scan", f"scan failed for {project} image {ref}: {e}",
+                paths, project=project, detail={"image_ref": ref, "error": str(e)},
             )
-            failed.append(target.image_ref)
-            warnings.append(f"image {target.image_ref}: scan failed ({e})")
+            failed.append(ref)
+            warnings.append(f"image {ref}: scan failed ({e})")
+            continue
+        results.append(result)
+        if scanned is not None:
+            scanned[ref] = result
+    if skipped:
+        elapsed = time.monotonic() - project_start
+        log_warning(
+            "cve-scan",
+            f"project {project} exceeded scan budget after "
+            f"{elapsed:.0f}s — skipping remaining {len(skipped)} image(s)",
+            paths, project=project,
+            detail={"elapsed_s": round(elapsed, 1), "budget_s": _PROJECT_BUDGET_SECONDS,
+                    "skipped_images": skipped},
+        )
+        warnings.append(
+            f"project budget exceeded after {elapsed:.0f}s — skipped {len(skipped)} image(s)")
     return results, failed, skipped, warnings
 
 
@@ -271,15 +263,14 @@ def _check_declared_runtimes(project: str, meta: ProjectMeta) -> None:
 
 def _evaluate(
     paths: BoxPaths, project: str, meta: ProjectMeta, profile: ProjectHardening,
-    supps: tuple[Suppression, ...], results: list[ScanResult], kev: KevCatalog,
+    supps: tuple[Suppression, ...], results: list[ScanResult],
+    kev_ids: frozenset[str] | None, today: date,
 ) -> list[ProjectDecision]:
-    """One decision per scanned image, under the project's policy."""
+    """One decision per scanned image, under the project's policy.
+    ``kev_ids`` is KevCatalog.fresh_ids: None (stale) lists nothing."""
     posture, dangerously, declared = meta.posture, meta.dangerously, meta.declared_runtimes
     decisions: list[ProjectDecision] = []
-    today = _today()
-
-    def kev_lookup(cid: str) -> bool:
-        return kev.is_known_exploited(cid, today=today)
+    kev_lookup = (kev_ids or frozenset()).__contains__
 
     # Collected across every image but logged at most once per project scan.
     dropped_lang_types: set[str] = set()
@@ -326,7 +317,9 @@ def audit_targets(
     (quarantine_gate)."""
     _check_declared_runtimes(project, meta)
     results, failed, skipped, warnings = _scan_targets(paths, project, targets)
-    decisions = _evaluate(paths, project, meta, profile, supps, results, kev)
+    today = _today()
+    decisions = _evaluate(paths, project, meta, profile, supps, results,
+                          kev.fresh_ids(today), today)
     return ProjectScan(
         project=project, posture=meta.posture.value, dangerously=meta.dangerously,
         decisions=tuple(decisions),
@@ -339,10 +332,10 @@ def audit_targets(
 
 def scan_one_project_locked(
     paths: BoxPaths, project: str, *,
-    in_grace: bool,
     kev: KevCatalog,
     audit_only: bool = False,
     defer_new: bool = False,
+    scanned: dict[str, ScanResult] | None = None,
 ) -> ProjectScan:
     """Inner scan body. Caller MUST hold the per-project lock."""
     meta = load_project_meta(paths, project)
@@ -370,7 +363,7 @@ def scan_one_project_locked(
         # Audit-only (resume re-scan, audit A-3) leaves the prior alone.
         record_error = None
         if not audit_only:
-            outcome = _enforce(paths, project, meta, None, in_grace=in_grace)
+            outcome = _enforce(paths, project, meta, None, defer_new=defer_new)
             record_error = _record(
                 scan_state_path, decisions=(),
                 unscanned=tuple(_unscanned(unidentified=unidentified)), **basis,
@@ -383,22 +376,25 @@ def scan_one_project_locked(
             **basis,
         )
 
-    results, failed, skipped, scan_warnings = _scan_targets(paths, project, targets)
+    results, failed, skipped, scan_warnings = _scan_targets(
+        paths, project, targets, scanned)
     warnings.extend(scan_warnings)
-    decisions = _evaluate(paths, project, meta, profile, supps, results, kev)
+    today = _today()
+    kev_ids = kev.fresh_ids(today)
+    decisions = _evaluate(paths, project, meta, profile, supps, results, kev_ids, today)
 
     headline = headline_of(decisions)
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow
     # itself and never act. Everyone else enforces: an existing quarantine
-    # is re-asserted on every scan (B-03) unless this scan cleared it, a new
-    # one fires outside grace.
+    # is re-asserted on every scan (B-03) unless this scan cleared it, and a
+    # new one fires here unless the fleet run decides it (defer_new).
     outcome = Enforcement()
     if not audit_only:
         cleared = clears_quarantine(
             meta.posture, decisions, complete=not (failed or skipped or unidentified),
-            kev_fresh=not kev.is_stale(_today()))
+            kev_fresh=kev_ids is not None)
         outcome = _enforce(
-            paths, project, meta, headline, in_grace=in_grace or defer_new,
+            paths, project, meta, headline, defer_new=defer_new,
             cleared=tuple(decisions) if cleared else None,
         )
 
@@ -417,11 +413,10 @@ def scan_one_project_locked(
             unscanned=tuple(_unscanned(failed, skipped, unidentified)), **basis,
         )
 
-    # Transition alerts are best-effort; during grace the operator gets the
-    # single fleet-level heads-up instead, and audit-only callers (resume)
-    # must not push alerts.
+    # Transition alerts are best-effort; audit-only callers (resume) must not
+    # push alerts.
     host_expired: tuple[Suppression, ...] = ()
-    if not in_grace and not audit_only:
+    if not audit_only:
         if outcome.landed:
             announce_quarantine(paths, project, decisions)
         host_expired = _emit_transition_alerts(
@@ -460,11 +455,11 @@ def _record(path, **kwargs) -> str | None:
 def _enforce(
     paths: BoxPaths, project: str, meta: ProjectMeta,
     headline: tuple[ProjectDecision, FindingDisposition] | None,
-    *, in_grace: bool, cleared: tuple[ProjectDecision, ...] | None = None,
+    *, defer_new: bool, cleared: tuple[ProjectDecision, ...] | None = None,
 ) -> Enforcement:
     return enforce(
         paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
-        policy=meta.policy(), headline=headline, in_grace=in_grace, cleared=cleared,
+        policy=meta.policy(), headline=headline, defer_new=defer_new, cleared=cleared,
     )
 
 

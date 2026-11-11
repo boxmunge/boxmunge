@@ -24,7 +24,6 @@ which the per-project titles below show after it:
 | `[boxmunge:<p>] Suppression expired` / `[<hostname>] Host suppression expired` | A previously-suppressed CVE is an active finding again. |
 | `[<hostname>] CVE scan incomplete` | Some images were not scanned. They are unprotected until a scan succeeds. |
 | `[<hostname>] Circuit breaker held <N> quarantines` | Many projects would have quarantined at once for the same CVE(s). They are still running. Escalate: applying (`security scan --apply-held`) or host-suppressing is an operator decision. |
-| `[<hostname>] CVE policy enforcement begins in <N>h` | One-time migration grace heads-up after upgrade. Affects the whole fleet. |
 | `[boxmunge:<p>] <N> fixable CVE findings over the posture's gate — rebuild to apply the fix` | Findings over the posture's gate have an upstream fix the image does not run yet (including a fix landing for an `AWAITING_FIX` finding). Not quarantined (unless on KEV). Hand off a rebuild and redeploy. |
 | `[boxmunge:<p>] <N> CVE findings with no fix yet — site stays up, nothing to do now` | `balanced`: serious, network-reachable findings with no fix, not known to be exploited. Nothing to do now; once per finding. The next alert is the fix landing (rebuild) or a KEV listing (it quarantines). Only `strict` or `paranoid` would take the site down for these: that is the operator's call. |
 | `[boxmunge:<p>] Quarantine lifted — back online (<CVE>)` | A `balanced` project's scan found nothing quarantine-level and nothing on KEV, and lifted the quarantine on its own; the body says why (gone, or no longer quarantining under balanced's KEV-only rule from 0.11.2). `smoke test FAILED` in the title (priority 1): check the project. |
@@ -347,7 +346,6 @@ What to flag:
 - Suppressions expiring within 7 days (`security <project>` shows `until`)
 - Projects in `at_risk_running` for more than 90 days without a suppression
 - Repeated scan failures in the ops log (Trivy DB issues, image not pullable)
-- Migration grace still active after the 24h window (something's stuck)
 
 If anything looks off and the path forward isn't obvious from this playbook:
 escalate. Better to under-act than to over-act on incomplete information.

@@ -5,6 +5,7 @@ from datetime import date, datetime, timezone
 from boxmunge.cve.kev import (
     KEV_MAX_AGE_DAYS, KEV_MAX_RELEASE_AGE_DAYS, KevCatalog, load_kev,
 )
+from boxmunge.cve import kev_refresh
 from boxmunge.cve.kev_refresh import refresh_from
 from boxmunge.paths import BoxPaths
 
@@ -151,21 +152,20 @@ class _FakeResp:
     def __exit__(self, *exc):
         return False
 
-    def read(self) -> bytes:
-        return self._body
+    def read1(self, limit: int = -1) -> bytes:
+        body, self._body = self._body, b""
+        return body
 
 
 def test_refresh_kev_non_dict_payload_does_not_raise(tmp_path, monkeypatch):
     # Valid JSON that is not an object (e.g. []) must not raise. Offline.
     paths = BoxPaths(root=tmp_path)
 
-    def fake_urlopen(req, timeout=None):
-        return _FakeResp(b"[]")
-
-    monkeypatch.setattr(
-        "boxmunge.cve.kev_refresh.urllib.request.urlopen", fake_urlopen,
-    )
+    asked: list[str] = []
+    monkeypatch.setattr(kev_refresh, "_open",
+                        lambda req: asked.append(req.full_url) or _FakeResp(b"[]"))
     refresh_from(paths, (MIRROR,))  # must not raise
+    assert asked == [MIRROR]  # answered by the fake, not the network
     # Nothing valid to write → cache absent → load is fail-safe empty.
     cat = load_kev(paths)
     assert cat.cve_ids == frozenset()

@@ -58,7 +58,8 @@ def _staging_configs_name_their_release(configs: list[dict], slot: Path,
 
 
 def test_every_staging_invocation_names_the_slot(paths, fake_containers) -> None:
-    prod_and_stage(paths, staged_files=SMOKED)
+    with patch("boxmunge.commands.check._smoke_one", _smoke):
+        prod_and_stage(paths, staged_files=SMOKED)
     fake_containers.run("myapp", "web", "sha256:1")
     fake_containers.run("myapp-staging", "web", "sha256:2")
     calls: list[tuple[list[str], str]] = []

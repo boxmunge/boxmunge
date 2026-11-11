@@ -34,7 +34,7 @@ from boxmunge.blocked_update import read_blocked_state
 from boxmunge.commands.security_scan_inputs import project_suppressions_path
 from boxmunge.container_update_targets import read_target_state
 from boxmunge.cve import (
-    breaker, grace, kev, kev_source_history, kev_withdrawals, quarantine, scan_state,
+    breaker, kev, kev_source_history, kev_withdrawals, quarantine, scan_state,
     suppressions,
 )
 from boxmunge.discovery_freshness import stale_discovery_warning
@@ -128,9 +128,6 @@ READERS = [
            breaker.read_held),
     Reader("breaker.alert_pending", breaker.breaker_path, {"held": {}, "alert_pending": True},
            breaker.alert_pending),
-    Reader("grace", grace.grace_state_path,
-           {"installed_at": ISO, "expires_at": ISO, "heads_up_sent": True},
-           grace.read_grace_state),
     # Specified: a cache it cannot read is an empty, stale catalog that
     # says why (scans report it), not a missing one.
     Reader("kev", lambda p: p.kev_catalog, {"cve_ids": ["CVE-1"], "fetched_at": ISO},

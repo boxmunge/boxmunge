@@ -65,7 +65,7 @@ def test_a_due_quarantine_is_not_taken(paths) -> None:
     with _undetectable("boxmunge.commands.security_enforce"), \
             patch("boxmunge.commands.security_enforce.quarantine_project") as take:
         outcome = enforce(paths, "myapp", hosts=[], compose_files=[], policy={},
-                          headline=object(), in_grace=False)
+                          headline=object(), defer_new=False)
     take.assert_not_called()
     assert outcome.error is not None and CANNOT_TELL in outcome.error
 
@@ -73,9 +73,9 @@ def test_a_due_quarantine_is_not_taken(paths) -> None:
 def test_nothing_due_is_not_an_error(paths) -> None:
     with _undetectable("boxmunge.commands.security_enforce"):
         assert enforce(paths, "myapp", hosts=[], compose_files=[], policy={},
-                       headline=None, in_grace=False).error is None
+                       headline=None, defer_new=False).error is None
         assert enforce(paths, "myapp", hosts=[], compose_files=[], policy={},
-                       headline=object(), in_grace=True).error is None
+                       headline=object(), defer_new=True).error is None
 
 
 def test_upgrade_leaves_the_project_as_is_and_alerts(paths) -> None:
@@ -119,7 +119,7 @@ def test_every_consumer_says_what_to_do(paths, capsys) -> None:
         assert RETRY in backup_source(paths, "myapp").skip
     with _undetectable("boxmunge.commands.security_enforce"):
         assert RETRY in enforce(paths, "myapp", hosts=[], compose_files=[], policy={},
-                                headline=object(), in_grace=False).error
+                                headline=object(), defer_new=False).error
     with _undetectable("boxmunge.commands.legacy_stage_cmd"):
         legacy_stage_locked(paths, "myapp", None, False)
     assert RETRY in capsys.readouterr().err
@@ -154,7 +154,7 @@ def test_a_quarantine_is_not_reasserted_when_it_cannot_tell(paths) -> None:
     with _undetectable("boxmunge.commands.security_enforce"), \
             patch("boxmunge.commands.security_enforce.reassert_quarantine") as reassert:
         outcome = enforce(paths, "myapp", hosts=[], compose_files=[], policy={},
-                          headline=None, in_grace=True)
+                          headline=None, defer_new=True)
     reassert.assert_not_called()
     assert outcome.error is not None and CANNOT_TELL in outcome.error
 
@@ -164,7 +164,7 @@ def test_an_unreadable_quarantine_record_does_not_escape_enforce(paths) -> None:
             patch("boxmunge.commands.security_enforce.is_quarantined",
                   side_effect=PermissionError(13, "record denied")):
         outcome = enforce(paths, "myapp", hosts=[], compose_files=[], policy={},
-                          headline=None, in_grace=False)
+                          headline=None, defer_new=False)
     assert outcome.error is not None and CANNOT_TELL in outcome.error
     assert "record denied" in outcome.error
 

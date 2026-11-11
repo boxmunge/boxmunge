@@ -315,8 +315,8 @@ Recurring operations run via systemd timers:
 | `boxmunge-health.timer` | Every 5 minutes | `check-all` |
 | `boxmunge-backup.timer` | Daily at 02:00 | `backup-all` |
 | `boxmunge-backup-sync.timer` | Daily at 03:00 | `backup-sync` |
-| `boxmunge-cve-scan.timer` | Daily at 03:00 (up to 30 min jitter) | `security scan` |
-| `boxmunge-container-update.timer` | Daily at 03:00 (up to 60 min jitter) | `container-update` |
+| `boxmunge-cve-scan.timer` | Daily at 03:00 (up to 30 min jitter), after any container update still running | `security scan` |
+| `boxmunge-container-update.timer` | Daily at 02:30 (up to 30 min jitter) | `container-update` |
 | `boxmunge-auto-update.timer` | Every 6 hours (up to 30 min jitter) | `auto-update` |
 
 All timers use `Persistent=true` so a missed run (e.g., server was rebooted) executes on next start rather than being silently skipped.
@@ -417,7 +417,7 @@ See `agent-help writable` and `PROJECT_CONVENTIONS.md` for the schema reference.
 
 Beyond per-container hardening, boxmunge runs a CVE policy engine that scans deployed images and quarantines projects whose findings meet their posture's quarantine gate (under the default `balanced`, only a CVE on CISA KEV); a `balanced` quarantine is lifted at the first scan that finds nothing quarantine-level and nothing on KEV.
 
-- **Where it sits** — runs via `boxmunge-cve-scan.timer` daily at 03:00 (up to 30 min jitter), on demand with `security scan [<project>]`, and in `security resume`, which re-scans before lifting a quarantine. An ordinary deploy, stage or promote does not scan; only a quarantined project's release is scanned before it starts (see "Deploy Flow"). Lives in `src/boxmunge/cve/` (scanner, policy, quarantine, suppressions, alerting, scan_state, grace, kev, relevance, breaker) plus the orchestrating `commands/security_*.py`.
+- **Where it sits** — runs via `boxmunge-cve-scan.timer` daily at 03:00 (up to 30 min jitter), on demand with `security scan [<project>]`, and in `security resume`, which re-scans before lifting a quarantine. An ordinary deploy, stage or promote does not scan; only a quarantined project's release is scanned before it starts (see "Deploy Flow"). Lives in `src/boxmunge/cve/` (scanner, policy, quarantine, suppressions, alerting, scan_state, kev, relevance, breaker) plus the orchestrating `commands/security_*.py`.
 - **Inputs** — Trivy's vulnerability DB (refreshed before each scan), the CISA KEV catalog (fetched from an ordered list of sources, CISA's feed and then its GitHub mirror by default, and cached in `state/kev/` with the source that answered), the project's `manifest.yml` (`security.posture`, `dangerously_disable_quarantine`, hardening fields), the project's `security/suppressions.yml` if present, and the host-scope `config/suppressions.yml`.
 - **Outputs** — per-project `state/scans/<project>.json` (the durable record), quarantine actions (maintenance Caddy fragment, then `compose stop`, with a critical Pushover alert) and their lifts (`commands/quarantine_lift.py`, shared with `security resume`), alerts for findings that do not quarantine, and structured `log_operation` entries under `cve-scan` / `cve-suppress` / `cve-quarantine` components. A circuit breaker holds new non-KEV quarantines when one scan would quarantine a large share of the fleet at once, alerting instead, until the operator runs `security scan --apply-held` (state in `state/cve-breaker.json`).
 - **Per-project scan budget** — each project gets a 600-second wall-clock budget across its image scans. Exceeding it skips remaining images (logged at WARNING) and resumes on the next tick.

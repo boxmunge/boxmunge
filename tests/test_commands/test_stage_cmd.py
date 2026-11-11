@@ -4,6 +4,7 @@ import tarfile
 from pathlib import Path
 from unittest.mock import patch
 
+from boxmunge.commands.smoke_result import SmokeResult
 from boxmunge.commands.stage_cmd import run_stage
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import add_project
@@ -128,6 +129,7 @@ class TestRunStage:
             f"Staging compose base must be 0o644; got {oct(os.stat(staging_base).st_mode & 0o777)}"
 
     @patch("boxmunge.docker.compose_logs_capture", return_value="")  # the smoke's hint
+    @patch("boxmunge.commands.check._smoke_one", new=lambda *a, **k: SmokeResult("ok", ""))
     @patch("boxmunge.staging_bringup.caddy_reload")
     @patch("boxmunge.compose_guard.compose_up")
     def test_copies_smoke_scripts(self, mock_up, mock_reload, mock_logs, paths):

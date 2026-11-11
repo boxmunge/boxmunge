@@ -108,7 +108,7 @@ def test_the_refresh_records_the_withdrawal(box) -> None:
 def test_a_clean_scan_holds_the_quarantine_and_alerts_once(box) -> None:
     paths, pushover = box
     for _ in range(3):
-        scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+        scan_one_project(paths, "demo", kev=_kev())
         assert is_quarantined("demo", paths)
         assert "compose_up" not in paths.docker.calls
     [(title, body, priority)] = _sent(pushover, HELD)
@@ -122,12 +122,12 @@ def test_an_undelivered_hold_alert_is_sent_again_next_scan(box, monkeypatch) -> 
     delivered, so a Pushover outage does not swallow the only alert."""
     paths, pushover = box
     monkeypatch.setattr("boxmunge.notify.send_notification", lambda *a, **k: False)
-    scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+    scan_one_project(paths, "demo", kev=_kev())
     assert is_quarantined("demo", paths)
     assert not _sent(pushover, HELD)
     monkeypatch.setattr("boxmunge.notify.send_notification", pushover._send)
     for _ in range(2):
-        scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+        scan_one_project(paths, "demo", kev=_kev())
     assert len(_sent(pushover, HELD)) == 1
 
 
@@ -137,9 +137,9 @@ def test_an_incomplete_scan_in_the_withdrawing_run_keeps_the_hold(box) -> None:
     paths, pushover = box
     paths.flaky = True
     with pytest.raises(RuntimeError):
-        scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+        scan_one_project(paths, "demo", kev=_kev())
     paths.flaky = False
-    scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+    scan_one_project(paths, "demo", kev=_kev())
     assert is_quarantined("demo", paths)
     assert _sent(pushover, HELD) and not _sent(pushover, LIFTED)
 
@@ -149,13 +149,13 @@ def test_a_project_absent_from_the_withdrawing_run_is_held(box, monkeypatch) -> 
     later, after another refresh that withdrew nothing."""
     paths, pushover = box
     _refresh(paths, monkeypatch, _ids(1400))
-    scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+    scan_one_project(paths, "demo", kev=_kev())
     assert is_quarantined("demo", paths) and _sent(pushover, HELD)
 
 
 def test_resume_accepts_the_withdrawal(box) -> None:
     paths, _ = box
-    scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+    scan_one_project(paths, "demo", kev=_kev())
     assert security_resume_locked(paths, "demo") == 0
     assert not is_quarantined("demo", paths)
     assert "compose_up" in paths.docker.calls
@@ -164,7 +164,7 @@ def test_resume_accepts_the_withdrawal(box) -> None:
 def test_images_without_the_cve_are_a_fix_and_lift(box) -> None:
     paths, pushover = box
     paths.found = []
-    scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+    scan_one_project(paths, "demo", kev=_kev())
     assert not is_quarantined("demo", paths)
     assert _sent(pushover, LIFTED) and not _sent(pushover, HELD)
 
@@ -178,7 +178,7 @@ def test_the_cve_listed_again_ends_the_withdrawal(box, monkeypatch) -> None:
 def test_an_unreadable_withdrawals_file_keeps_the_quarantine(box) -> None:
     paths, _ = box
     paths.kev_withdrawn.write_text("{")
-    scan_one_project(paths, "demo", in_grace=False, kev=_kev())
+    scan_one_project(paths, "demo", kev=_kev())
     assert is_quarantined("demo", paths)
 
 
@@ -285,7 +285,7 @@ def test_fixing_the_quarantines_cve_does_not_lift_past_another_withdrawn_one(
     _catalog(paths, _ids(1400) + [_CVE, _OTHER])
     _refresh(paths, monkeypatch, _ids(1400) + [_CVE])  # withdraws B only
     paths.found = [finding(_OTHER, pkg="zlib")]  # A fixed
-    scan_one_project(paths, "demo", in_grace=False, kev=_kev_listing(_CVE))
+    scan_one_project(paths, "demo", kev=_kev_listing(_CVE))
     assert is_quarantined("demo", paths)
     [(title, body, priority)] = _sent(pushover, HELD)
     assert _OTHER in title and priority == 1
@@ -295,7 +295,7 @@ def test_fixing_the_quarantines_cve_does_not_lift_past_another_withdrawn_one(
     assert security_resume_locked(paths, "demo") == 0
     assert load_withdrawals(paths)[_OTHER].accepted == frozenset({"demo"})
     seed_quarantine(paths)
-    scan_one_project(paths, "demo", in_grace=False, kev=_kev_listing(_CVE))
+    scan_one_project(paths, "demo", kev=_kev_listing(_CVE))
     assert not is_quarantined("demo", paths)
 
 

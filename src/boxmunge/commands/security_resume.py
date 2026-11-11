@@ -138,7 +138,7 @@ def security_resume_locked(paths: BoxPaths, project: str, *,
     kev = load_kev(paths)
     try:
         scan = scan_one_project_locked(
-            paths, project, in_grace=False, kev=kev, audit_only=True,
+            paths, project, kev=kev, audit_only=True,
         )
     except (TrivyNotInstalledError, RuntimeError, ManifestError) as e:
         _err(f"ERROR: {e}")
