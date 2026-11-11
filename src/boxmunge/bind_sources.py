@@ -25,7 +25,8 @@ import stat
 from pathlib import Path
 from typing import Any, Iterable
 
-from boxmunge.compose_mounts import host_path_forms, is_bind_entry, volume_source
+from boxmunge import compose_mounts
+from boxmunge.compose_mounts import bind_entries
 from boxmunge.compose_own_files import CONTROL_ENTRIES
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.fs_nofollow import open_regular_nofollow, read_text_nofollow
@@ -61,31 +62,21 @@ class BindSourceError(Exception):
 def model_sources(model: dict[str, Any], project_dir: Path) -> set[str]:
     """Project-relative path of every host path a compose model mounts:
     service bind mounts and the files of top-level secrets and configs."""
-    sources: set[str] = set()
-    for svc in (model.get("services") or {}).values():
-        if not isinstance(svc, dict) or not isinstance(svc.get("volumes"), list):
-            continue
-        for entry in svc["volumes"]:
-            src = volume_source(entry)
-            if src is not None and is_bind_entry(entry):
-                sources.add(project_rel(host_path_forms(src, project_dir)[0], project_dir))
-    for section in ("secrets", "configs"):
-        entries = model.get(section)
-        for decl in (entries.values() if isinstance(entries, dict) else ()):
-            path = decl.get("file") if isinstance(decl, dict) else None
-            if isinstance(path, str):
-                sources.add(project_rel(host_path_forms(path, project_dir)[0], project_dir))
-    return sources
+    return {project_rel(bind.path, project_dir) for bind in bind_entries(model, project_dir)}
 
 
 def project_rel(source: str, project_dir: Path) -> str:
     """`source` relative to the project directory, without resolving any
     symlink below it. Raises BindSourceError for a path outside it."""
-    norm = os.path.normpath(source)
-    for root in {os.path.normpath(project_dir), os.path.realpath(project_dir)}:
-        if norm == root or norm.startswith(root + "/"):
-            return os.path.relpath(norm, root)
-    raise BindSourceError(f"bind source {source} is outside the project directory {project_dir}")
+    rel = None
+    # A relative source under an absolute project dir is outside it: it is
+    # not read from the working directory, nor from the project dir.
+    if os.path.isabs(source) or not os.path.isabs(project_dir):
+        rel = compose_mounts.project_rel(os.path.abspath(source), project_dir, literal=True)
+    if rel is None:
+        raise BindSourceError(
+            f"bind source {source} is outside the project directory {project_dir}")
+    return rel
 
 
 def _kind(st: os.stat_result, shown: str) -> str:

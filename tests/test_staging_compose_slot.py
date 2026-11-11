@@ -266,8 +266,8 @@ def test_project_relative_is_deterministic_and_literal_on_request(tmp_path) -> N
     project = tmp_path / "myapp"
     (project / "data").mkdir(parents=True)
     (project / "link").symlink_to(project / "data")
-    code = ("import sys; from pathlib import Path; from boxmunge.bind_mounts import "
-            "project_relative as r; p = Path(sys.argv[1]); "
+    code = ("import sys; from pathlib import Path; from boxmunge.compose_mounts import "
+            "project_rel as r; p = Path(sys.argv[1]); "
             "print(r(str(p / 'link/x'), p), r(str(p / 'link/x'), p, literal=True))")
     seen = {subprocess.run([sys.executable, "-c", code, str(project)], check=True, text=True,
                            capture_output=True, env={**os.environ, "PYTHONHASHSEED": str(seed)}
