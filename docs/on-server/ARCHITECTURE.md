@@ -413,8 +413,10 @@ See `agent-help writable` and `PROJECT_CONVENTIONS.md` for the schema reference.
   upgrade's dry run, and the apply before it touches a project, refuse while any project holds one or awaits
   a deploy after a discard, naming each project and the command the release the box still runs accepts; the
   dry run's refusal is the one dry-run failure that alerts (priority 1), since the 0.11 shims send nothing (see
-  OPERATIONS.md, "Upgrading with a release staged by 0.10.1 or earlier"). The check is skipped on a box
-  that already runs 0.11.7 or later.
+  OPERATIONS.md, "Upgrading with a release staged by 0.10.1 or earlier"). An `install.sh` run by hand
+  refuses the same way before it changes anything (`bootstrap/unresolved-stage.sh` runs the same detector
+  from the bundle's `src/` on the host's `python3`, standard library only, since the package is not yet
+  installed). The check is skipped on a box that already runs 0.11.7 or later.
 
 ## CVE Policy Module
 

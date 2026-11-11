@@ -59,11 +59,16 @@ command -v python3 >/dev/null && bash "${SCRIPT_DIR}/bootstrap/python-floor.sh"
 
 # An existing box is checked before anything is changed: Docker Compose 2.35.0
 # or newer (bootstrap/compose-version.sh; a fresh install checks after the
-# bootstrap), and no Caddy config that writes a log under /var/log/caddy, which
-# Caddy's container no longer has (bootstrap/caddy-log-path.sh).
+# bootstrap), no Caddy config that writes a log under /var/log/caddy, which
+# Caddy's container no longer has (bootstrap/caddy-log-path.sh), and, for an
+# install run by hand, no project still holding a release that boxmunge 0.10.1
+# or earlier staged (bootstrap/unresolved-stage.sh; an upgrade is refused for
+# it in the shim's pre-flight).
 if [[ -f "${BOXMUNGE_ROOT}/config/boxmunge.yml" ]]; then
     bash "${SCRIPT_DIR}/bootstrap/compose-version.sh"
     BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/caddy-log-path.sh"
+    FROM_UPGRADE_SHIM="${FROM_UPGRADE_SHIM}" BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" \
+        bash "${SCRIPT_DIR}/bootstrap/unresolved-stage.sh"
 fi
 
 # ---------------------------------------------------------------------------

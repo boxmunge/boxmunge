@@ -5,9 +5,10 @@ over or beside production's files. Read-only.
 
 Releases 0.11.0 to 0.11.6 resolve such a stage with their `legacy-stage`
 command. This release has none, and its upgrade restarts every project, so
-the upgrade names what the release the box still runs accepts. Delete this
-module, and the names reserved for it in BOXMUNGE_ENTRIES and
-CONTROL_ENTRIES, once the upgrade floor is 0.11.7.
+the upgrade names what the release the box still runs accepts. install.sh
+run by hand asks the same through unresolved_stage_install. Delete both
+modules, bootstrap/unresolved-stage.sh, and the names reserved for this in
+BOXMUNGE_ENTRIES and CONTROL_ENTRIES, once the upgrade floor is 0.11.7.
 """
 from __future__ import annotations
 
@@ -110,9 +111,11 @@ def _problem(paths: BoxPaths, project: str, record: dict) -> str | None:
             f"not finished; run `boxmunge-server legacy-stage {project} --{choice}`")
 
 
-def refusal(paths: BoxPaths, projects: list[str], installed: str) -> str | None:
+def refusal(paths: BoxPaths, projects: list[str], installed: str, *,
+            retry: str = "retry the upgrade") -> str | None:
     """Why a box running the release `installed` must not be upgraded, or None: each project
-    whose stage is unresolved or awaits a deploy, with the command that release accepts."""
+    whose stage is unresolved or awaits a deploy, with the command that release accepts.
+    `retry` is what to do once they are resolved (install.sh run by hand is no upgrade)."""
     semver = parse_version_string(installed)[0]
     running = version_tuple(semver) or (0,)
     if running >= FIRST_WITHOUT:
@@ -124,7 +127,7 @@ def refusal(paths: BoxPaths, projects: list[str], installed: str) -> str | None:
         return (f"Cannot tell which projects hold a release that boxmunge 0.10.1 or earlier "
                 f"staged over production's files ({type(e).__name__}: {e}). Repair what that "
                 f"names (legacy-stage's record of them is {paths.state / 'legacy-stages.json'}, "
-                f"a JSON object holding one object per project), then retry the upgrade.")
+                f"a JSON object holding one object per project), then {retry}.")
     if not held:
         return None
     if running >= RESOLVES:
@@ -146,4 +149,4 @@ def refusal(paths: BoxPaths, projects: list[str], installed: str) -> str | None:
         f"it is not resolved. An upgrade restarts every project, and this release neither starts "
         f"a project from staged files nor has the legacy-stage command that resolves them. {where}",
         *(f"  - {project}: {problem}" for project, problem in held.items()),
-        "Then retry the upgrade."])
+        f"Then {retry}."])

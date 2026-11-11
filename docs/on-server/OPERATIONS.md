@@ -2252,6 +2252,11 @@ sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist <version>
 
 then run the upgrade again.
 
+`install.sh` run by hand on such a box (`sudo bash install.sh` from an extracted bundle, with no
+upgrade shim) is refused the same way, before it changes anything: it prints the same lines,
+ending `Then run the install again.`, exits 1, and sends no alert and blocklists nothing. If it
+cannot run the check, it stops with an error that says so, and installs nothing.
+
 If the upgrade cannot tell (it cannot read `state/legacy-stages.json`, `legacy-stage`'s record;
 a project's entry there records a choice that is not `discard` or `keep-staged`; or it cannot
 examine a project directory, for example because `.releases` or `state/staging` is a file), it
