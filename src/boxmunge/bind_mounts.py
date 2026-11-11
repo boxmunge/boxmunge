@@ -14,7 +14,7 @@ from typing import Any
 
 import yaml
 
-from boxmunge.compose_mounts import volume_source
+from boxmunge.compose_mounts import project_rel, service_bind_entries
 from boxmunge.fs_nofollow import read_text_nofollow
 
 
@@ -22,46 +22,16 @@ class BindMountError(ValueError):
     """A compose file cannot be read well enough to classify its bind mounts."""
 
 
-def _is_read_only(entry: Any) -> bool:
-    if isinstance(entry, dict):
-        return entry.get("read_only") is True
-    parts = entry.split(":")
-    return len(parts) >= 3 and "ro" in parts[2].split(",")
-
-
-def project_relative(source: str, project_dir: Path, *, literal: bool = False) -> str | None:
-    """A bind source's path inside the project dir ("." for the dir itself),
-    or None when it lies outside it. Spelled forms are tried before resolved
-    ones, so the answer does not depend on set order. ``literal`` never
-    follows the source's own links: for a path the caller joined from a
-    relative input, whose links are production's, not the release's."""
-    if source.startswith("~"):
-        return None
-    found: str | None = None
-    # Compare both spelled and resolved paths: /opt may be a symlink.
-    for base in dict.fromkeys((os.path.normpath(project_dir), os.path.realpath(project_dir))):
-        candidates = [os.path.normpath(os.path.join(base, source))]
-        if os.path.isabs(source) and not literal:
-            candidates.append(os.path.realpath(source))
-        for path in dict.fromkeys(candidates):
-            rel = os.path.relpath(path, base)
-            if rel == ".." or rel.startswith(".." + os.sep):
-                continue
-            if rel != ".":
-                return rel
-            found = rel
-    return found
-
-
 def _top_dir(source: str, project_dir: Path) -> str | None:
     """The project's top-level entry a bind source points into, if any."""
-    rel = project_relative(source, project_dir)
+    rel = project_rel(source, project_dir)
     if rel is None or rel == ".":
         return None
     return rel.split(os.sep, 1)[0]
 
 
-def _entries(compose_path: Path, nofollow: bool = False) -> list[Any]:
+def _services(compose_path: Path, nofollow: bool = False) -> dict[str, Any]:
+    """The file's services, each one's volumes a list of strings and mappings."""
     try:
         text = read_text_nofollow(compose_path) if nofollow else compose_path.read_text()
         doc = yaml.safe_load(text)
@@ -72,7 +42,6 @@ def _entries(compose_path: Path, nofollow: bool = False) -> list[Any]:
     services = doc.get("services") or {}
     if not isinstance(services, dict):
         raise BindMountError(f"{compose_path}: 'services' is not a mapping")
-    entries: list[Any] = []
     for name, svc in services.items():
         if not isinstance(svc, dict):
             raise BindMountError(f"{compose_path}: service '{name}' is not a mapping")
@@ -83,8 +52,7 @@ def _entries(compose_path: Path, nofollow: bool = False) -> list[Any]:
             if not isinstance(entry, (str, dict)):
                 raise BindMountError(
                     f"{compose_path}: '{name}.volumes' has an unexpected entry {entry!r}")
-            entries.append(entry)
-    return entries
+    return services
 
 
 def bind_mounted_dirs(compose_path: Path, project_dir: Path, *,
@@ -100,14 +68,9 @@ def bind_mounted_dirs(compose_path: Path, project_dir: Path, *,
     if not (os.path.lexists(compose_path) if nofollow else compose_path.exists()):
         return {}
     dirs: dict[str, bool] = {}
-    for entry in _entries(compose_path, nofollow):
-        source = volume_source(entry)
-        if source is None:
-            continue
-        if isinstance(entry, str) and not source.startswith((".", "/", "~")):
-            continue  # short syntax "name:/dst" is a named volume
-        top = _top_dir(source, project_dir)
-        if top is None:
-            continue
-        dirs[top] = dirs.get(top, False) or not _is_read_only(entry)
+    for name, svc in _services(compose_path, nofollow).items():
+        for bind in service_bind_entries(name, svc, project_dir):
+            top = _top_dir(bind.source, project_dir)
+            if top is not None:
+                dirs[top] = dirs.get(top, False) or bind.read_write
     return dirs
