@@ -77,12 +77,13 @@ def shift_journalled(j: Journal, tree: Path, direction: Direction, save: Save,
     owner to give them back) are journalled under `left:<key>`, for the
     rollback's result and alert (steps.left_alone)."""
     resumed = key in j.setid
-    setid = {**j.setid.get(seed or "", {}), **scan_tree(tree, j.offset, direction).setid,
-             **j.setid.get(key, {})}
+    # One scan: its list is journalled first, whatever it refuses, as it always was.
+    scan = scan_tree(tree, j.offset, direction, resumed=resumed)
+    setid = {**j.setid.get(seed or "", {}), **scan.setid, **j.setid.get(key, {})}
     if not resumed or setid != j.setid[key]:
         j.setid[key] = setid  # also the mark that this tree's shift has begun
         save()
-    left = shift_tree(tree, j.offset, direction, setid, resumed=resumed).left_alone
+    left = shift_tree(tree, j.offset, direction, setid, resumed=resumed, scan=scan).left_alone
     if left:
         j.items[f"left:{key}"] = (
             f"{len(left)} {'entry' if len(left) == 1 else 'entries'} with ids outside both "
