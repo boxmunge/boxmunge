@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from boxmunge.commands.deploy_checks import persistent, service_mounts
+from boxmunge.compose_mounts import path_within
 from boxmunge.data_helper import chown_under, run_helper, volume
 from boxmunge.staging_placeholders import copy_label
 
@@ -36,9 +37,7 @@ def _writers(dest: Store, services: dict[str, dict]) -> set[str]:
                 found.add(name)
             elif dest.kind == "bind" and m.kind == "bind":
                 a, b = os.path.normpath(str(m.source)), os.path.normpath(dest.ref)
-                # rstrip: "/" holds every path, and "/" + "/" matches none.
-                if (a == b or a.startswith(b.rstrip("/") + "/")
-                        or b.startswith(a.rstrip("/") + "/")):
+                if path_within(a, b) or path_within(b, a):
                     found.add(name)
     return found
 

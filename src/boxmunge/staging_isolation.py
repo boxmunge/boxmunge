@@ -26,10 +26,9 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from boxmunge.bind_mounts import project_relative
 from boxmunge.compose import generate_compose_override, load_user_compose, production_env_files
 from boxmunge.compose_build import is_local_ref
-from boxmunge.compose_mounts import is_bind_entry, volume_source
+from boxmunge.compose_mounts import BindEntry, bind_entries, path_within, project_rel
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.docker import staging_compose_project
 from boxmunge.staged_release import ComposeTarget, has_slot, staging_target
@@ -62,15 +61,8 @@ def _replicas(svc: dict[str, Any]) -> int:
     return max(1, count) if isinstance(count, int) else 1
 
 
-def _bind_target(entry: Any) -> str:
-    if isinstance(entry, dict):
-        return str(entry.get("target"))
-    return entry.split(":")[1] if entry.count(":") else entry
-
-
-def _host_paths(source: str, project_dir: Path) -> set[str]:
-    path = os.path.normpath(os.path.join(project_dir, os.path.expanduser(source)))
-    return {path, os.path.realpath(path)}
+def _file_use(bind: BindEntry) -> str:
+    return f"{bind.section[:-1]} {bind.name}"
 
 
 def identities(model: dict[str, Any], project: str, project_dir: Path) -> Identities:
@@ -97,20 +89,11 @@ def identities(model: dict[str, Any], project: str, project_dir: Path) -> Identi
             if decl.get("external"):
                 net_name = decl.get("name") or net
                 ids.aliases.update(f"{net_name}/{a}" for a in _mapping(cfg).get("aliases") or [])
-        for entry in svc.get("volumes") or []:
-            if is_bind_entry(entry):
-                for path in _host_paths(volume_source(entry), project_dir):
-                    ids.binds[path] = f"{name}:{_bind_target(entry)}"
-    for section in ("configs", "secrets"):
-        for key, decl in _mapping(model.get(section)).items():
-            if isinstance(_mapping(decl).get("file"), str):
-                for path in _host_paths(decl["file"], project_dir):
-                    ids.binds[path] = f"{section[:-1]} {key}"
+    for bind in bind_entries(model, project_dir):
+        use = f"{bind.name}:{bind.target}" if bind.section == "services" else _file_use(bind)
+        for path in (bind.path, os.path.realpath(bind.path)):
+            ids.binds[path] = use
     return ids
-
-
-def _nested(a: str, b: str) -> bool:
-    return a == b or a.startswith(b.rstrip("/") + "/") or b.startswith(a.rstrip("/") + "/")
 
 
 def overlaps(prod: Identities, staging: Identities) -> list[str]:
@@ -129,7 +112,8 @@ def overlaps(prod: Identities, staging: Identities) -> list[str]:
     seen: set[tuple[str, str]] = set()
     for p_path, p_use in sorted(prod.binds.items()):
         for s_path, s_use in sorted(staging.binds.items()):
-            if _nested(p_path, s_path) and (p_use, s_use) not in seen:
+            if (path_within(p_path, s_path) or path_within(s_path, p_path)) \
+                    and (p_use, s_use) not in seen:
                 seen.add((p_use, s_use))
                 found.append(f"bind mount {s_path} (production {p_use} mounts "
                              f"{p_path}; staging {s_use})")
@@ -142,13 +126,6 @@ def whole_project_mounts(ids: Identities, project_dir: Path, environment: str) -
             f"staging and production cannot each have a copy of. Mount the "
             f"subdirectories the service needs instead."
             for path, use in sorted(ids.binds.items()) if path in whole]
-
-
-def _read_only(entry: Any) -> bool:
-    if isinstance(entry, dict):
-        return entry.get("read_only") is True
-    parts = entry.split(":")
-    return len(parts) > 2 and "ro" in parts[2].split(",")
 
 
 def _build_inputs(build: Any) -> Iterator[tuple[str, str]]:
@@ -180,8 +157,8 @@ def _build_problems(name: str, build: Any, project_dir: Path, roots: set[str]) -
     for what, ref in _build_inputs(build):
         path = os.path.normpath(ref)
         forms = dict.fromkeys((path, os.path.realpath(path)))
-        if any(project_relative(form, project_dir, literal=True) is not None
-               and not any(form == r or form.startswith(r + os.sep) for r in roots)
+        if any(project_rel(form, project_dir, literal=True) is not None
+               and not any(path_within(form, r) for r in roots)
                for form in forms):
             problems.append(f"staging service {name} build {what} reads {path}, which is "
                             f"production's; build from the staged release (a path "
@@ -189,29 +166,16 @@ def _build_problems(name: str, build: Any, project_dir: Path, roots: set[str]) -
     return problems
 
 
-def _mounted(model: dict[str, Any]) -> Iterator[tuple[str, bool, str]]:
-    """(source, read-only, what) of each host path a staging model mounts."""
-    for name, svc in _mapping(model.get("services")).items():
-        for entry in (svc.get("volumes") or []) if isinstance(svc, dict) else []:
-            if is_bind_entry(entry):
-                yield volume_source(entry), _read_only(entry), f"service {name}"
-    for section in ("configs", "secrets"):
-        for key, decl in _mapping(model.get(section)).items():
-            if isinstance(_mapping(decl).get("file"), str):
-                yield decl["file"], True, f"{section[:-1]} {key}"
-
-
-def _copy_top(src: str, project_dir: Path, release: Path) -> str | None:
+def _copy_top(path: str, project_dir: Path) -> str | None:
     """The top-level ``-staging`` entry a staging source lies in, if any."""
-    path = os.path.normpath(os.path.join(release, os.path.expanduser(src)))
-    rel = project_relative(path, project_dir)
+    rel = project_rel(path, project_dir)
     top = rel.split(os.sep, 1)[0] if rel not in (None, ".") else None
     return top if top is not None and top.endswith("-staging") else None
 
 
 def staging_copy_tops(model: dict[str, Any], project_dir: Path, release: Path) -> set[str]:
     """The top-level ``-staging`` entries a staging model mounts."""
-    tops = (_copy_top(src, project_dir, release) for src, _ro, _what in _mounted(model))
+    tops = (_copy_top(bind.path, project_dir) for bind in bind_entries(model, release))
     return {t for t in tops if t is not None}
 
 
@@ -223,14 +187,15 @@ def separation_problems(model: dict[str, Any], project_dir: Path, release: Path,
     and builds only from the slot's release."""
     roots = {os.path.normpath(release), os.path.realpath(release)}
 
-    def check(src: str, ro: bool, what: str) -> list[str]:
-        path = os.path.normpath(os.path.join(release, os.path.expanduser(src)))
-        if any(path == r or path.startswith(r + os.sep) for r in roots):
-            return [] if ro else [f"staging {what} mounts the staged release ({path}) "
-                                  f"read-write; mount release code read-only"]
-        if project_relative(path, project_dir) is None:
+    def check(bind: BindEntry) -> list[str]:
+        path = bind.path
+        what = f"service {bind.name}" if bind.section == "services" else _file_use(bind)
+        if any(path_within(path, r) for r in roots):
+            return [f"staging {what} mounts the staged release ({path}) read-write; "
+                    f"mount release code read-only"] if bind.read_write else []
+        if project_rel(path, project_dir) is None:
             return []
-        top = _copy_top(src, project_dir, release)
+        top = _copy_top(path, project_dir)
         if top is None:
             return [f"staging {what} mounts {path}, which is production's"]
         if top in foreign:
@@ -242,8 +207,8 @@ def separation_problems(model: dict[str, Any], project_dir: Path, release: Path,
         return []
 
     problems: list[str] = []
-    for src, ro, what in _mounted(model):
-        problems += check(src, ro, what)
+    for bind in bind_entries(model, release):
+        problems += check(bind)
     for name, svc in _mapping(model.get("services")).items():
         if isinstance(svc, dict):
             problems += _build_problems(name, svc.get("build"), project_dir, roots)
