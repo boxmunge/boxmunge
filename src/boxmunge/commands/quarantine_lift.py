@@ -100,8 +100,7 @@ def restore_from_quarantine(paths: BoxPaths, project: str, *, component: str) ->
 
 def _start(paths: BoxPaths, project: str, manifest: dict, component: str) -> None:
     try:
-        prepare_caddy_config(paths, manifest)
-        site_content = paths.project_caddy_site(project).read_text()
+        site_content = prepare_caddy_config(paths, manifest)
     except (OSError, ValueError) as e:
         raise QuarantineError(f"Failed to render Caddy: {e}") from e
     lift_quarantine(project, paths, project_caddy_site_content=site_content,
