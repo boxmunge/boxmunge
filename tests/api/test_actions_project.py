@@ -52,16 +52,14 @@ def test_paused_quarantined_staged_and_pre_registered(fixture_paths) -> None:
     assert newapp["deploy"] == {"current_ref": None, "deployed_at": None, "history": []}
 
 
-def test_an_open_install_and_a_0_10_1_stage(fixture_paths) -> None:
+def test_an_open_install(fixture_paths) -> None:
     shop = _call(fixture_paths, "project.get", {"project": "shop"})
     assert shop["install"]["source"] == "bundle" and shop["install"]["phase"] == "installed"
     assert shop["install"]["ref"].startswith("shop-") and shop["install"]["id"]
-    assert shop["legacy_stage"] is None
     blog = _call(fixture_paths, "project.get", {"project": "blog"})
-    assert blog["legacy_stage"] == {"kind": "bundle", "evidence": "untouched"}
     assert blog["install"] is None
     wiki = _call(fixture_paths, "project.get", {"project": "wiki"})
-    assert wiki["install"] is None and wiki["legacy_stage"] is None
+    assert wiki["install"] is None
 
 
 def test_monitor_stopped_project(fixture_paths) -> None:
@@ -156,18 +154,3 @@ def test_a_registered_project_with_no_directory_yet_is_registered(fixture_paths)
     assert fresh["lifecycle"] == "registered"
     assert fresh["deploy"] == {"current_ref": None, "deployed_at": None, "history": []}
     assert fresh["paused"] is None and fresh["quarantine"] is None
-
-
-def test_a_stage_made_before_0_10_1(fixture_paths) -> None:
-    """A 0.9 or 0.10.0 stage: staging files and state, no .releases/ at all."""
-    from boxmunge.legacy_stage import legacy_staging_state
-    from boxmunge.project_registry import add_project
-    add_project("oldapp", fixture_paths)
-    pdir = fixture_paths.project_dir("oldapp")
-    pdir.mkdir(parents=True)
-    (pdir / "compose.boxmunge-staging.yml").write_text("services: {}\n")
-    state = legacy_staging_state(fixture_paths, "oldapp")
-    state.parent.mkdir(parents=True, exist_ok=True)
-    state.write_text('{"active": true}')
-    oldapp = _call(fixture_paths, "project.get", {"project": "oldapp"})
-    assert oldapp["legacy_stage"] == {"kind": "pre0101", "evidence": None}

@@ -55,7 +55,6 @@ from boxmunge.docker import COMPOSE_PROJECT_LABEL
 from boxmunge.docker_containers import container_mounts, project_containers
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.fileutil import LockError, project_lock
-from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation
 from boxmunge.manifest import ManifestError, load_manifest
@@ -154,9 +153,6 @@ def adopt_locked(paths: BoxPaths, project: str, service: str, path: str, name: s
     """The adopt core. Caller holds the project lock. Raises DataError,
     DockerError or ComposeRefused (a DockerError) naming what failed."""
     _refuse_if_migrating(paths, project)
-    refusal = legacy_stage_refusal(paths, project)
-    if refusal is not None:
-        raise DataError(refusal)
     if not _VOLUME_NAME.fullmatch(name):
         raise DataError(f"volume name {name!r} must be lower-case letters, digits, '_', "
                         f"'.' or '-', starting with a letter or digit, at most 63 characters")
@@ -285,9 +281,6 @@ def chown_locked(paths: BoxPaths, project: str, service: str, ids: tuple[int, in
     RunAsError, ManifestError, ReleaseStateError, StateError or
     ComposeError."""
     _refuse_if_migrating(paths, project)
-    refusal = legacy_stage_refusal(paths, project)
-    if refusal is not None:
-        raise DataError(refusal)
     model, services = resolved_services(production_target(paths, project))
     if service not in services:
         raise DataError(f"{project} has no service {service}")

@@ -188,9 +188,7 @@ def test_a_staged_release_is_refused(paths, quiet) -> None:
 
 def test_an_open_install_transaction_is_refused(paths, quiet, monkeypatch) -> None:
     monkeypatch.setattr(pf, "open_install_reason", lambda paths, p: f"{p}: install open")
-    monkeypatch.setattr(pf, "legacy_stage_refusal", lambda paths, p: f"{p}: old-layout stage")
-    text = _run(paths, _inv(quiet)).text()
-    assert "REFUSED: shop: install open" in text and "REFUSED: shop: old-layout stage" in text
+    assert "REFUSED: shop: install open" in _run(paths, _inv(quiet)).text()
 
 
 @pytest.mark.parametrize("record", ["project_paused_state", "project_quarantine_state"])

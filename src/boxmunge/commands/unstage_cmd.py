@@ -18,7 +18,6 @@ from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import DockerError, caddy_config_lock, caddy_reload, compose_down
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.log import log_error, log_operation
-from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.lifecycle import migration_refusal
 from boxmunge.production_stopped import start_again, unreadable_slot_discarded
 from boxmunge.release_txn import load_txn, options_text
@@ -151,8 +150,6 @@ def unstage_locked(project: str, paths: BoxPaths, dry_run: bool = False) -> int:
     refusal = migration_refusal(f"Unstaging '{project}'", paths)
     if refusal:
         print(f"ERROR: {refusal}", file=sys.stderr)
-        return 1
-    if refuse_if_legacy_stage(paths, project):
         return 1
     if not staging_exists(project, paths) and not slot_debris(paths, project):
         print(f"ERROR: No staging found for '{project}'.", file=sys.stderr)

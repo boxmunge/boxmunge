@@ -2,7 +2,7 @@
 """upgrade-state/ is root:deploy 0770, so deploy can plant a link or a FIFO
 at any name in it. Every root open there (upgrade.lock, probation.json,
 blocklist.json) refuses both without blocking, naming the file and saying
-to remove it, and legacy-stage's probation guard stays fail-closed."""
+to remove it."""
 from __future__ import annotations
 
 import os
@@ -11,8 +11,6 @@ from pathlib import Path
 import pytest
 
 from boxmunge.commands.auto_update_cmd import run_auto_update
-from boxmunge.commands.legacy_stage_cmd import run_legacy_stage
-from boxmunge.legacy_stage_ops import platform_rollback_possible
 from boxmunge.upgrade_state import (
     UpgradeStateError, add_to_blocklist, is_blocklisted, read_probation, upgrade_lock,
     write_probation,
@@ -83,21 +81,6 @@ def test_writing_probation_replaces_a_planted_file_without_opening_it(
     assert read_probation(paths)["version"] == "1.2.3"
     if kind == "link":
         assert planted.read_text() == "{}"
-
-
-@pytest.mark.parametrize("kind", KINDS)
-def test_the_legacy_stage_probation_guard_fails_closed(paths, tmp_path, kind) -> None:
-    planted = _plant(paths.probation, kind, tmp_path)
-    why = _within(lambda: platform_rollback_possible(paths), planted)
-    assert isinstance(why, str) and "cannot tell whether a platform rollback is possible" in why
-    assert f"fix or remove {paths.probation}" in why
-
-
-def test_legacy_stage_reports_a_planted_lock(paths, tmp_path, capsys) -> None:
-    fifo = _plant(paths.upgrade_lock, "fifo", tmp_path)
-    assert _within(lambda: run_legacy_stage(paths, "myapp", "discard", False), fifo) == 1
-    err = capsys.readouterr().err
-    assert f"ERROR: {paths.upgrade_lock}" in err and "Remove it" in err
 
 
 def test_auto_update_reports_a_planted_lock(paths, tmp_path, capsys, monkeypatch) -> None:

@@ -8,7 +8,18 @@ from unittest.mock import patch
 
 from boxmunge.commands import check, check_all
 from boxmunge.commands.smoke_result import SmokeResult
-from tests.test_legacy_stage_undetermined import _deployed
+
+
+def _deployed(paths) -> None:
+    from boxmunge.commands.deploy import run_deploy
+    from boxmunge.project_registry import add_project
+    from tests.bundle_helpers import place_bundle
+    from tests.stage_helpers import V1
+    from tests.txn_helpers import docker_off
+    add_project("myapp", paths)
+    place_bundle(paths, timestamp=V1)
+    with docker_off():
+        assert run_deploy("myapp", paths, ref=V1) == 0
 
 
 def _with_smoke(paths) -> None:
