@@ -1,6 +1,7 @@
 """Tests for the boxmunge log command — filtering and output."""
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,6 +51,35 @@ class TestParseLogFile:
 
     def test_missing_file(self, tmp_path: Path) -> None:
         assert parse_log_file(tmp_path / "nope.log").entries == []
+
+    def test_required_keys_make_an_object_without_them_torn(self, tmp_path: Path) -> None:
+        """`log` shows any JSON object; the API's oplog.query needs these keys."""
+        log_file = tmp_path / "boxmunge.log"
+        log_file.write_text('{"ts": "t", "msg": "ok"}\n{"msg": "x"}\n')
+        read = parse_log_file(log_file, frozenset({"ts", "level"}))
+        assert read.entries == []
+        assert read.torn[0].startswith(f"{log_file}:1: a log entry without level (repair")
+        assert read.torn[1].startswith(f"{log_file}:2: a log entry without level, ts (repair")
+
+    def test_bytes_that_are_not_utf8_make_their_line_torn(self, tmp_path: Path) -> None:
+        log_file = tmp_path / "boxmunge.log"
+        log_file.write_bytes(b'{"msg": "ok"}\n{"msg": "\xff"}\n{"msg": "caf\xc3\xa9"}\n')
+        read = parse_log_file(log_file)
+        assert [e["msg"] for e in read.entries] == ["ok", "caf\u00e9"]
+        assert [t.split(": ")[0] for t in read.torn] == [f"{log_file}:2"]
+
+    @pytest.mark.parametrize("kind", ["symlink", "hardlink", "dangling"])
+    def test_a_link_is_refused_not_read_through(self, tmp_path: Path, kind: str) -> None:
+        """logs/ is deploy-writable, and root runs `log` and `health` too."""
+        real = tmp_path / "elsewhere"
+        _write_log_entries(real, SAMPLE_ENTRIES)
+        log_file = tmp_path / "boxmunge.log"
+        if kind == "hardlink":
+            os.link(real, log_file)
+        else:
+            log_file.symlink_to(real if kind == "symlink" else tmp_path / "gone")
+        with pytest.raises(OSError, match=f"{log_file} is .*not a plain regular file"):
+            parse_log_file(log_file)
 
 
 class TestFilterLogEntries:
