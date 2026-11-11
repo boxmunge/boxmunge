@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from boxmunge import docker_containers
-from boxmunge.container_update_tags import restore_tags
+from boxmunge.container_update_tags import restore_and_report
 from boxmunge.container_update_targets import UpdateTarget, persist_result
 from boxmunge.compose_guard import ComposeRefused, compose_up_checked, compose_up_platform
 from boxmunge.deployed_inventory import (
@@ -467,10 +467,7 @@ def _abort(
     """Record a failed run that pulled but recreated nothing. The tags the
     pull moved go back first, or the next restart of any kind would run the
     new images; one that cannot go back is part of the failure."""
-    stuck = restore_tags(paths, target.name, services, running)
-    if stuck:
-        result["tags_not_restored"] = sorted(stuck)
-        reason += "; tag_restore_failed: " + "; ".join(stuck[ref] for ref in sorted(stuck))
+    reason = restore_and_report(paths, target.name, result, reason, services, running)
     return _fail(paths, target, result, reason, before=display_images(running), message=message)
 
 

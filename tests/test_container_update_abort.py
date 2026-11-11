@@ -8,11 +8,13 @@ import pytest
 
 from boxmunge import container_update as cu
 from boxmunge import container_update_tags, user_drift
+from boxmunge.commands.container_update_cmd import _dry_run_target, update_project
 from boxmunge.compose_guard import ComposeRefused
 from boxmunge.container_update_targets import UpdateTarget
 from boxmunge.deployed_inventory import DeployedService
 from boxmunge.docker import DockerError
 from boxmunge.docker_containers import ImageFacts, LocalImage, ProjectContainer
+from boxmunge.pause import mark_pause_complete, write_paused_state
 from boxmunge.run_as import RunAsError, ServiceUser, write_users
 from tests.deploy_helpers import mark_deployed
 from tests.test_container_update import _NEW, _OLD, FakeDocker, _write_project
@@ -56,6 +58,14 @@ def _raiser(error):
     return raises
 
 
+def _docker_tag_fails_for_db(monkeypatch, docker):
+    def tag(source, ref):
+        if ref == "postgres:17":
+            raise DockerError("no space left on device")
+        docker._tag(source, ref)
+    monkeypatch.setattr(container_update_tags, "tag_image", tag)
+
+
 def _backup_fails(paths, monkeypatch, docker):
     monkeypatch.setattr(cu, "backup_locked", lambda *a, **kw: 1)
 
@@ -69,6 +79,7 @@ def _pull_fails_partway(paths, monkeypatch, docker):
         docker.tags["postgres:17"] = _NEW
         raise DockerError("nginx:1.25: manifest unknown")
     monkeypatch.setattr(cu, "compose_pull", pull)
+    monkeypatch.setattr("boxmunge.docker.compose_pull", pull)  # the dry run's
 
 
 def _inspect_fails_after_pull(paths, monkeypatch, docker):
@@ -124,12 +135,7 @@ def test_abort_after_pull_puts_the_tags_back(
 def test_a_tag_that_cannot_be_put_back_is_reported(paths, monkeypatch, fake_containers) -> None:
     docker, target = _project(paths, monkeypatch, fake_containers)
     _backup_fails(paths, monkeypatch, docker)
-
-    def tag(source, ref):
-        if ref == "postgres:17":
-            raise DockerError("no space left on device")
-        docker._tag(source, ref)
-    monkeypatch.setattr(container_update_tags, "tag_image", tag)
+    _docker_tag_fails_for_db(monkeypatch, docker)
     logged = []
     monkeypatch.setattr(container_update_tags, "log_error",
                         lambda component, message, *a, **kw: logged.append(message))
@@ -205,3 +211,74 @@ def test_a_digest_reference_is_never_retagged(paths, monkeypatch) -> None:
                         _raiser(AssertionError("nothing to inspect")))
 
     assert container_update_tags.restore_tags(paths, "shop", {"db": db}, {"db": db_c}) == {}
+
+
+# --- The dry run pulls too (and the nightly pre-fetch of a paused project is one) ---
+
+def test_dry_run_reports_the_change_and_puts_the_tags_back(
+        paths, monkeypatch, fake_containers) -> None:
+    docker, target = _project(paths, monkeypatch, fake_containers)
+
+    result = _dry_run_target(paths, target)
+
+    assert result["status"] == "would_change" and sorted(result["current_digests"]) == ["db", "web"]
+    assert result["tags_not_restored"] == []
+    assert docker.tags == {"nginx:1.25": _OLD, "postgres:17": _OLD}
+    assert _restart(docker) == _ALL_OLD
+
+
+def test_failed_dry_run_puts_the_tags_back(paths, monkeypatch, fake_containers) -> None:
+    docker, target = _project(paths, monkeypatch, fake_containers)
+    _pull_fails_partway(paths, monkeypatch, docker)
+
+    result = _dry_run_target(paths, target)
+
+    assert result["status"] == "failed" and result["reason"].startswith("pull_failed: ")
+    assert result["tags_not_restored"] == [] and _restart(docker) == _ALL_OLD
+
+
+def test_dry_run_with_a_tag_it_cannot_put_back_fails(paths, monkeypatch, fake_containers) -> None:
+    docker, target = _project(paths, monkeypatch, fake_containers)
+    _docker_tag_fails_for_db(monkeypatch, docker)
+
+    result = _dry_run_target(paths, target)
+
+    assert result["status"] == "failed" and result["tags_not_restored"] == ["postgres:17"]
+    assert result["reason"].startswith("tag_restore_failed: postgres:17")
+    assert f"docker tag {_OLD} postgres:17" in result["reason"]
+
+
+def _paused(paths, monkeypatch, fake_containers):
+    """The project, paused: its containers are stopped, on the old images."""
+    docker, target = _project(paths, monkeypatch, fake_containers)
+    fake_containers.remove(docker.project)
+    for svc in _SERVICES:
+        fake_containers.run(docker.project, svc, _OLD, running=False, exit_code=0)
+    write_paused_state(docker.project, paths)
+    mark_pause_complete(docker.project, paths)
+    return docker, target
+
+
+def test_prefetch_of_a_paused_project_leaves_its_tags_for_the_resume(
+        paths, monkeypatch, fake_containers) -> None:
+    """The nightly run pre-fetches a paused project's images and reports
+    them as pending. A resume that does not pull recreates from local tags:
+    it must start the images the project was paused on."""
+    docker, target = _paused(paths, monkeypatch, fake_containers)
+
+    result = update_project(paths, target, dry_run=False)
+
+    assert result["status"] == "paused" and result["pending_services"] == ["db", "web"]
+    assert docker.ups == 0 and docker.tags == {"nginx:1.25": _OLD, "postgres:17": _OLD}
+    assert _restart(docker) == _ALL_OLD
+
+
+def test_prefetch_that_cannot_put_a_tag_back_is_a_failure_not_a_skip(
+        paths, monkeypatch, fake_containers) -> None:
+    docker, target = _paused(paths, monkeypatch, fake_containers)
+    _docker_tag_fails_for_db(monkeypatch, docker)
+
+    result = update_project(paths, target, dry_run=False)
+
+    assert result["status"] == "failed" and result["tags_not_restored"] == ["postgres:17"]
+    assert f"docker tag {_OLD} postgres:17" in result["reason"]

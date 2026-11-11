@@ -16,7 +16,7 @@ is the supply-chain work planned for 0.12.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from boxmunge import docker_containers
 from boxmunge.deployed_inventory import DeployedService
@@ -36,8 +36,8 @@ def restore_tags(
     service's containers run.
 
     Returns {reference: why it is not back, and the fix} for each one that
-    could not be restored, each logged as an error: the caller reports them
-    as part of the failed update.
+    could not be restored, each logged as an error: restore_and_report makes
+    them part of the run's result.
     """
     ran: dict[str, set[str]] = defaultdict(set)
     for name, svc in services.items():
@@ -54,6 +54,23 @@ def restore_tags(
             log_error("container-update", f"Tag restore failed for {project}: {stuck[ref]}",
                       paths, project=project)
     return stuck
+
+
+def restore_and_report(
+    paths: "BoxPaths", project: str, result: dict[str, Any], reason: str,
+    services: dict[str, DeployedService], running: dict[str, ProjectContainer],
+) -> str:
+    """restore_tags, for the result of a run that pulled and recreated
+    nothing. The references that stay are listed in
+    result["tags_not_restored"] and appended to `reason` ("" for a run that
+    had not failed) as `tag_restore_failed`. Returns the reason: the run has
+    failed whenever that list is not empty."""
+    stuck = restore_tags(paths, project, services, running)
+    result["tags_not_restored"] = sorted(stuck)
+    if not stuck:
+        return reason
+    failed = "tag_restore_failed: " + "; ".join(stuck[ref] for ref in sorted(stuck))
+    return f"{reason}; {failed}" if reason else failed
 
 
 def _restore(ref: str, ids: set[str]) -> str | None:
