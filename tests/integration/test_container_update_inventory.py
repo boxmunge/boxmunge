@@ -51,17 +51,17 @@ def _pull_moves(monkeypatch, tag: str, new_source: str) -> None:
     monkeypatch.setattr(cu, "compose_pull", pull)
 
 
-def _target(name, project_dir, strategy="leave_broken"):
+def _target(name, project_dir, strategy="leave_broken", backup=None):
     """The target, with the project as a deploy leaves it: a manifest and
     the record of its bind sources, which the recreate is checked against."""
     (project_dir / "manifest.yml").write_text(yaml.safe_dump({
         "schema_version": 2, "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ", "project": name,
         "source": "bundle", "hosts": [f"{name}.example.com"],
-        "services": {"web": {"internal": True}},
+        "services": {"web": {"internal": True}}, **({"backup": backup} if backup else {}),
     }))
     mark_deployed(BoxPaths(root=project_dir.parents[1]), name)
     return UpdateTarget(name=name, project_dir=project_dir, compose_files=["compose.yml"],
-                        strategy=strategy, has_backup=False)
+                        strategy=strategy, has_backup=bool(backup))
 
 
 def test_interpolated_image_is_updated(project, monkeypatch):
@@ -204,3 +204,34 @@ def test_genuine_one_shot_stays_healthy_across_an_update(project, monkeypatch):
 
     assert result["status"] == "succeeded", result
     assert container_image_ids(name, "migrate") == {new_id}
+
+
+def test_failed_preupdate_backup_puts_the_tag_back(project, monkeypatch, capfd):
+    """Audit F01: the pull moves the tag, then the pre-update backup fails
+    (its dump command exits non-zero in the real container). The update is
+    aborted, and a recreate from local tags afterwards, as any restart or
+    resume does, still runs the image the project ran before."""
+    paths, name, project_dir, tags = project
+    tag, newer = f"{name}-web:1", f"{name}-web-new:1"
+    tags += [tag, newer]
+    old_id = build_image(tag, f"{name}-old")
+    new_id = build_image(newer, f"{name}-new")
+    (project_dir / "compose.yml").write_text(
+        f"services:\n  web:\n    image: {tag}\n    command: [sleep, '3600']\n    network_mode: none\n")
+    compose(project_dir, name, "up", "-d")
+    _pull_moves(monkeypatch, tag, newer)
+    # Present so the backup gets as far as its dump; never read, as the dump fails.
+    paths.backup_key.parent.mkdir(parents=True, exist_ok=True)
+    paths.backup_key.write_text("unused\n")
+    backup = {"type": "custom", "service": "web", "dump_command": "exit 3",
+              "restore_command": "cat > /dev/null"}
+
+    result = update_project(paths, _target(name, project_dir, backup=backup), dry_run=False)
+
+    assert result["status"] == "failed" and result["reason"] == "backup_failed", result
+    assert "dump" in capfd.readouterr().err.lower()
+    assert result["tags_not_restored"] == []
+    assert new_id != old_id and image_id(tag) == old_id
+    assert container_image_ids(name, "web") == {old_id}
+    compose(project_dir, name, "up", "-d", "--force-recreate", "--pull", "never")
+    assert container_image_ids(name, "web") == {old_id}
