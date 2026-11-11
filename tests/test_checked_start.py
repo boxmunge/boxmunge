@@ -2,6 +2,7 @@
 """A start runs on what its check resolved, and only a check can say so."""
 from __future__ import annotations
 
+import dataclasses
 import re
 from pathlib import Path
 
@@ -50,22 +51,49 @@ def test_a_recording_check_returns_what_it_recorded(project) -> None:
 
 def test_nothing_but_a_check_can_build_one(project) -> None:
     checked = check_start(project, "myapp", component="test", compose_files=FILES)
-    fields = {name: getattr(checked, name) for name in CheckedStart.__dataclass_fields__}
+    fields = {f.name: getattr(checked, f.name) for f in dataclasses.fields(checked)}
     with pytest.raises(TypeError, match="compose_guard.check_start"):
-        CheckedStart(**{**fields, "by": object()})
+        CheckedStart(**fields, by=object())
+    # ... nor a changed copy of one: the token is not the copy's to pass on.
+    with pytest.raises((TypeError, ValueError), match="'by'"):
+        dataclasses.replace(checked, model={})
+    assert not hasattr(checked, "by")
 
 
 def test_only_compose_guard_issues_one() -> None:
-    """`issue` is the one way past the constructor: no other module of
-    boxmunge may call it, or reach for the token it holds."""
+    """`issue` is the one way past the constructor: no module of boxmunge
+    but compose_guard may call it, and none may construct a CheckedStart,
+    reach for the token `issue` holds, or set a member of one."""
     src = Path(boxmunge.__file__).parent
-    reaching = re.compile(r"\bissue\(|_BY_A_CHECK|\bCheckedStart\(")
-    found = sorted(str(path.relative_to(src)) for path in src.rglob("*.py")
-                   if path.name != "checked_start.py" and "checked_start" in path.read_text()
-                   and reaching.search(path.read_text()))
-    assert found == ["compose_guard.py"]
+    building = re.compile(r"\bCheckedStart\(|_BY_A_CHECK|checked_start\.issue\(|__setattr__")
+    issuing = re.compile(r"\bissue\(|import [^\n]*\bissue\b")
+    found = {}
+    for path in sorted(src.rglob("*.py")):
+        text = path.read_text()
+        if path.name == "checked_start.py":
+            continue
+        hits = set(building.findall(text))
+        if "checked_start" in text:
+            hits |= set(issuing.findall(text))
+        if hits:
+            found[str(path.relative_to(src))] = sorted(hits)
+    assert found == {"compose_guard.py": ["checked_start.issue(", "issue("]}
     assert len(re.findall(r"checked_start\.issue\(", (src / "compose_guard.py").read_text())) == 2
+    # In its own module `issue` alone constructs one, and nothing copies one.
+    own = (src / "checked_start.py").read_text()
+    assert len(re.findall(r"\bCheckedStart\(", own)) == 1
+    assert not re.search(r"\breplace\(|__setattr__|import copy", own)
     assert checked_start.issue.__doc__
+
+
+def test_what_a_check_read_cannot_be_rewritten(project) -> None:
+    checked = check_start(project, "myapp", component="test", compose_files=FILES)
+    with pytest.raises(TypeError):
+        checked.control["compose.yml"] = "0" * 64
+    with pytest.raises(TypeError):
+        checked.kinds["data"] = "file"
+    with pytest.raises(TypeError):
+        checked.places[str(project.project_dir("myapp") / "compose.yml")] = "/etc/passwd"
 
 
 # -- a start on the check its operation already ran ---------------------------
@@ -148,3 +176,106 @@ def test_an_earlier_check_stands_in_only_for_the_start_it_checked(project) -> No
     with pytest.raises(TypeError, match="CheckedStart"):
         compose_up_checked(project, "myapp", component="test", compose_files=FILES,
                            earlier=True)
+
+
+# -- what the earlier check stands on is what the full check refuses ----------
+
+def _redeployed(paths, files: dict[str, str]):
+    project_dir = paths.project_dir("myapp")
+    for name, content in files.items():
+        (project_dir / name).parent.mkdir(parents=True, exist_ok=True)
+        (project_dir / name).write_text(content)
+    mark_deployed(paths, "myapp")
+    return project_dir
+
+
+def _refusal(paths, **kwargs) -> str:
+    with docker_calls() as seen, pytest.raises(ComposeRefused) as refused:
+        compose_up_checked(paths, "myapp", component="test", compose_files=FILES, **kwargs)
+    assert not seen.other_matching("compose", "up")
+    return str(refused.value)
+
+
+def _linked_out(project_dir: Path, name: str, outside: Path) -> None:
+    """Move `name` (a file or a directory) out of the project and leave a
+    link to it: the same bytes, read from somewhere else."""
+    (project_dir / name).rename(outside)
+    (project_dir / name).symlink_to(outside)
+
+
+@pytest.mark.parametrize("files, moved, refusal", [
+    ({"compose.yml": "services:\n  web:\n    image: nginx\n    env_file: secrets.env\n",
+      "secrets.env": "A=1\n"}, "secrets.env", "env_file 'secrets.env' resolves to"),
+    ({"compose.yml": "services:\n  web:\n    image: nginx\n    env_file: conf/app.env\n",
+      "conf/app.env": "A=1\n"}, "conf", "env_file 'conf/app.env' resolves to"),
+    ({"compose.yml": "include: [sub/inc.yml]\nservices:\n  web:\n    image: nginx\n",
+      "sub/inc.yml": "services:\n  db:\n    image: postgres\n"}, "sub",
+     "include 'sub/inc.yml' resolves to"),
+])
+def test_a_read_file_linked_out_of_the_project_since_the_check_is_refused(
+        project, tmp_path, files, moved, refusal) -> None:
+    """secrets.env is not hashed (`secrets set` rewrites it), and a hash
+    opens a file through whatever its parent directories have become: the
+    same bytes behind a link out of the project are not the file the check
+    read. The start is refused in the full check's own words."""
+    project_dir = _redeployed(project, files)
+    checked = check_start(project, "myapp", component="test", compose_files=FILES)
+    _linked_out(project_dir, moved, tmp_path / "elsewhere")
+    in_full = _refusal(project)
+    assert refusal in in_full and "outside the project directory" in in_full
+    assert _refusal(project, earlier=checked) == in_full
+
+
+def test_a_read_file_linked_elsewhere_in_the_project_is_checked_in_full(project) -> None:
+    """A link that stays inside the project is the full check's to judge."""
+    project_dir = _redeployed(project, {
+        "compose.yml": "services:\n  web:\n    image: nginx\n    env_file: conf/app.env\n",
+        "conf/app.env": "A=1\n"})
+    checked = check_start(project, "myapp", component="test", compose_files=FILES)
+    (project_dir / "conf").rename(project_dir / "kept")
+    (project_dir / "conf").symlink_to("kept")
+    assert _start(project, checked).compose_config
+
+
+OVERLAID = ["compose.yml", "compose.boxmunge.yml"]
+
+
+def _overlaid_check(paths):
+    _redeployed(paths, {"compose.boxmunge.yml": "services:\n  web: {}\n"})
+    return check_start(paths, "myapp", component="test", compose_files=OVERLAID)
+
+
+def test_an_overlay_gone_stale_since_the_check_refuses_the_start(project, monkeypatch) -> None:
+    checked = _overlaid_check(project)
+    monkeypatch.setattr("boxmunge.compose_guard.stale_overlay_problem",
+                        lambda paths, name: "the users record changed")
+    with docker_calls() as seen, pytest.raises(ComposeRefused, match="users record changed"):
+        compose_up_checked(project, "myapp", component="test", compose_files=OVERLAID,
+                           earlier=checked)
+    assert not seen.other_matching("compose", "up")
+
+
+def test_a_legacy_stage_found_since_the_check_refuses_the_start(project, monkeypatch) -> None:
+    """The legacy-stage refusal alone: this test goes when the refusal does."""
+    checked = check_start(project, "myapp", component="test", compose_files=FILES)
+    monkeypatch.setattr("boxmunge.compose_guard.legacy_stage_refusal",
+                        lambda paths, name: "a stage made by boxmunge 0.10.1 is in place")
+    with docker_calls() as seen, pytest.raises(ComposeRefused, match="0.10.1 is in place"):
+        compose_up_checked(project, "myapp", component="test", compose_files=FILES,
+                           earlier=checked)
+    assert not seen.other_matching("compose", "up")
+
+
+def test_the_files_are_hashed_last_on_an_earlier_check(project, monkeypatch) -> None:
+    """As in the full check: the containers are asked about first, so the
+    comparison with what the check read is the last thing before `up`."""
+    from boxmunge import bind_sources, docker_containers
+    checked = check_start(project, "myapp", component="test", compose_files=FILES)
+    order = []
+    hashes, held = bind_sources.control_hashes, docker_containers.container_bind_sources
+    monkeypatch.setattr(bind_sources, "control_hashes",
+                        lambda *a, **kw: (order.append("hashes"), hashes(*a, **kw))[1])
+    monkeypatch.setattr(docker_containers, "container_bind_sources",
+                        lambda name: (order.append("containers"), held(name))[1])
+    _start(project, checked)
+    assert order == ["containers", "hashes"]

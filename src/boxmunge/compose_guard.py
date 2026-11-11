@@ -174,7 +174,7 @@ def _check_staging(paths: BoxPaths, project_name: str, *, component: str,
             ReleaseStateError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
     return checked_start.issue(project_name, target.files, model, sources, kinds, read_files,
-                               control, control_root=release)
+                               control, walked=(), control_root=release)
 
 
 def check_start(
@@ -239,25 +239,29 @@ def check_start(
     _refuse_if_install_open(paths, project_name, component, txn)
     _refuse_if_legacy_stage(paths, project_name, component)
     _refuse_stale_overlay(paths, project_name, component, compose_files, deploying, txn)
-    if earlier is not None and checked_start.unchanged(
-            earlier, project_name, project_dir, compose_files):
-        stale = None if deploying else stale_containers(
-            paths, project_name, component=component, compose_files=compose_files)
-        if stale is not None:
-            raise _refused(paths, project_name, component, stale + _REDEPLOY)
-        return earlier
+    if earlier is not None:
+        # The containers first, against the files the check walked: what it
+        # read is compared last, as in the full check, which also words the
+        # refusal of anything changed.
+        earlier = checked_start.of_start(earlier, project_name, compose_files)
+        held = [] if deploying else _container_problems(
+            project_name, project_dir, list(earlier.walked))
+        if checked_start.unchanged(earlier, project_name, project_dir, compose_files):
+            if held:
+                raise _refused(paths, project_name, component, held[0] + _REDEPLOY)
+            return earlier
     try:
         validate_release_tree(project_dir, project_name, paths, component,
                               lenient_values=True)
-        _, read_files = compose_references.walk_references(
+        _, walked = compose_references.walk_references(
             project_dir / compose_files[0], (project_dir,))
         if not deploying:
-            problems = _container_problems(project_name, project_dir, read_files)
+            problems = _container_problems(project_name, project_dir, walked)
             if problems:
                 raise BindSourceError(problems[0] + _REDEPLOY)
         model = compose_resolve.resolve_deployed_config(
             project_dir, compose_files, project_name, all_profiles=True)
-        read_files = [*read_files, *compose_resolve.model_env_files(model, project_dir)]
+        read_files = [*walked, *compose_resolve.model_env_files(model, project_dir)]
         sources = bind_sources.model_sources(model, project_dir)
         if record:
             control = (bind_sources.check_kept_control(
@@ -274,7 +278,7 @@ def check_start(
     except (IntakeError, compose_resolve.ComposeResolveError, BindSourceError, OSError) as e:
         raise _refused(paths, project_name, component, str(e)) from e
     return checked_start.issue(project_name, compose_files, model, sources, kinds, read_files,
-                               control)
+                               control, walked=walked)
 
 
 def check_kept_files(paths: BoxPaths, project_name: str, *, component: str) -> None:
