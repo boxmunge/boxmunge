@@ -28,7 +28,7 @@ from boxmunge.userns.daemon_ctl import DaemonControl, TimerControl, daemon_answe
 from boxmunge.userns.durable import NotDurable, barrier
 from boxmunge.userns.engine import Save, project_locks, shift_journalled
 from boxmunge.userns.images import IMAGES_DIR, load_all, remove_tars, save_all
-from boxmunge.userns.inventory import Inventory, outermost, take_inventory
+from boxmunge.userns.inventory import Inventory, outermost, take_containers, take_inventory
 from boxmunge.userns.marker import clear_marker, migration_in_progress, set_marker
 from boxmunge.userns.steps import report_back
 from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
@@ -159,7 +159,7 @@ def _leftovers(paths: BoxPaths, j: Journal, save: Save) -> None:
     """Old-root containers of projects deleted during the soak were started
     by their restart policies; remove them (and their soak-only volumes)."""
     projects = set(load_registered_projects(paths))
-    for c in take_inventory(paths).containers:
+    for c in take_containers(paths):
         if c.compose_project in projects | _PLATFORM:
             continue
         _run(["docker", "rm", "-f", c.id], capture=True)
