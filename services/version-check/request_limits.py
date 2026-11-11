@@ -167,29 +167,120 @@ class RequestLimiter:
         return FULL if self._networks.full_for(network) else None
 
 
-def report_failed_flush(buffer: str, size: int, commit_failed: bool, error: BaseException,
-                        lost: int = 0) -> None:
-    """Say on stderr what became of a batch whose flush failed.
+class FlushBuffer:
+    """What CheckCounter and PrefixLog share: a buffer in memory, written to
+    SQLite in one transaction when due (every `flush_interval` seconds, or
+    when `max_pending` entries are buffered), and what becomes of a batch
+    whose write fails.
 
-    Before COMMIT nothing was written, so the batch is requeued (`lost` of it
-    did not fit the buffer's bound and was dropped). A failed COMMIT may or
-    may not have been applied, so the batch is dropped: requeueing it could
-    count it twice, and these are statistics.
+    - Failure before anything was written (connect, begin, insert, or a
+      COMMIT that failed and rolled back): the batch is requeued, merged with
+      arrivals, within `max_pending` entries.
+    - COMMIT failed and the transaction is no longer open, or ROLLBACK failed:
+      the batch may or may not have been written, so it is dropped; a retry
+      could double-count, and these are statistics.
+    - Until the next flush succeeds, a full buffer does not trigger another
+      attempt before `flush_interval` has passed since the last one, and a
+      new entry that would grow it past `max_pending` is dropped and counted;
+      the next attempt reports that count.
+    Every requeue and drop is logged on stderr, and the error is raised.
+
+    Subclasses set `name` and `_pending`, and define `_empty`, `_size`,
+    `_write` (inside the transaction, before COMMIT), `_merge` and, if they
+    need it, `_committed`.
     """
-    if commit_failed:
-        what = (f"COMMIT failed, outcome unknown: dropped a batch of {size} "
-                f"(not requeued, a retry could double-count)")
-    else:
-        what = f"flush failed before commit: requeued a batch of {size}"
-        if lost:
-            what += f", of which {lost} did not fit the buffer bound and were dropped"
-    print(f"ERROR {buffer}: {what}: {error!r}", file=sys.stderr, flush=True)
+
+    name = ""
+
+    def __init__(self, db_path: Path, flush_interval: float, max_pending: int,
+                 clock: Callable[[], float]) -> None:
+        self.db_path, self.flush_interval, self.max_pending = db_path, flush_interval, max_pending
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._last_flush = clock()
+        self._failed = False  # the last flush attempt failed
+        self._overflow = 0  # entries refused since then, the buffer being full
+        atexit.register(self.flush)
+
+    def _admit(self, key) -> bool:
+        """Under the lock: may `key` be added? Counts it if not."""
+        if self._failed and key not in self._pending and len(self._pending) >= self.max_pending:
+            self._overflow += 1
+            return False
+        return True
+
+    def _due(self) -> bool:
+        """Under the lock: should the caller flush now?"""
+        waiting = self._failed and len(self._pending) >= self.max_pending
+        full = len(self._pending) >= self.max_pending and not waiting
+        return full or self._clock() - self._last_flush >= self.flush_interval
+
+    def flush(self) -> None:
+        with self._lock:
+            batch, self._pending = self._pending, self._empty()
+            self._last_flush = self._clock()
+            refused, self._overflow = self._overflow, 0
+        if refused:
+            print(f"ERROR {self.name}: the buffer stayed full after a failed flush: dropped "
+                  f"{refused} new entr{'y' if refused == 1 else 'ies'}", file=sys.stderr, flush=True)
+        if not batch:
+            return
+        unknown, stage = None, "write"
+        try:
+            conn = db.connect(self.db_path, isolation_level=None)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                result = self._write(conn, batch)
+                stage = "commit"
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except BaseException:
+                        unknown = "COMMIT failed and so did ROLLBACK" if stage == "commit" else None
+                        raise
+                elif stage == "commit":
+                    unknown = "COMMIT failed with its transaction already closed"
+                raise
+            finally:
+                conn.close()
+        except BaseException as error:
+            self._failed_flush(batch, error, stage, unknown)
+            raise
+        with self._lock:
+            self._failed = False
+        self._committed(result)
+
+    def _failed_flush(self, batch, error: BaseException, stage: str, unknown: str | None) -> None:
+        size = self._size(batch)
+        if unknown:
+            with self._lock:
+                self._failed = True
+            what = f"{unknown}, outcome unknown: dropped a batch of {size} (not requeued, a retry could double-count)"
+        else:
+            lost = self._requeue(batch)
+            what = ("COMMIT failed and rolled back, nothing written: " if stage == "commit"
+                    else "flush failed before commit: ") + f"requeued a batch of {size}"
+            if lost:
+                what += f", of which {lost} did not fit the buffer bound and were dropped"
+        print(f"ERROR {self.name}: {what}: {error!r}", file=sys.stderr, flush=True)
+
+    def _requeue(self, batch) -> int:
+        """Merge a batch that was not written back into the buffer, within
+        max_pending entries: returns how many did not fit and were dropped."""
+        with self._lock:
+            self._failed = True
+            return self._merge(batch)
+
+    def _committed(self, result) -> None:
+        """After COMMIT, with what _write returned."""
 
 
 OVERFLOW_VERSION = "unlisted"
 
 
-class CheckCounter:
+class CheckCounter(FlushBuffer):
     """Daily per-version check counts, buffered in memory.
 
     record() never touches the database unless the buffer is due: every
@@ -203,80 +294,61 @@ class CheckCounter:
     as does the "unlisted" overflow row itself.
     """
 
+    name = "check-counter"
+
     def __init__(self, db_path: Path, flush_interval: float, max_pending: int,
                  max_versions_per_day: int = 200,
                  always_count: frozenset[str] = frozenset(),
                  clock: Callable[[], float] = time.monotonic,
                  today: Callable[[], date] = utc_today) -> None:
-        self.db_path = db_path
+        self._today = today
         self.max_versions_per_day, self.always_count = max_versions_per_day, always_count
-        self.flush_interval, self.max_pending = flush_interval, max_pending
-        self._clock, self._today = clock, today
-        self._lock = threading.Lock()
         self._pending: Counter[tuple[str, str]] = Counter()
-        self._last_flush = clock()
-        atexit.register(self.flush)
+        super().__init__(db_path, flush_interval, max_pending, clock)
 
     def record(self, version: str) -> None:
+        key = (self._today().isoformat(), version)
         with self._lock:
-            self._pending[(self._today().isoformat(), version)] += 1
-            due = (len(self._pending) >= self.max_pending
-                   or self._clock() - self._last_flush >= self.flush_interval)
+            if self._admit(key):
+                self._pending[key] += 1
+            due = self._due()
         if due:
             self.flush()
 
-    def flush(self) -> None:
-        with self._lock:
-            pending, self._pending = self._pending, Counter()
-            self._last_flush = self._clock()
-        if not pending:
-            return
-        committing = False
-        try:
-            conn = db.connect(self.db_path, isolation_level=None)
-            try:
-                # One write transaction across the select and the insert, so
-                # another worker's flush cannot add versions between them.
-                conn.execute("BEGIN IMMEDIATE")
-                known: dict[str, set[str]] = {}
-                merged: Counter[tuple[str, str]] = Counter()
-                for (d, v), n in sorted(pending.items()):
-                    if d not in known:
-                        known[d] = {r[0] for r in conn.execute(
-                            "SELECT version FROM version_checks WHERE date = ?", (d,))}
-                    if (v not in known[d] and v not in self.always_count
-                            and len(known[d]) >= self.max_versions_per_day):
-                        v = OVERFLOW_VERSION
-                    known[d].add(v)
-                    merged[(d, v)] += n
-                conn.executemany(
-                    """INSERT INTO version_checks (date, version, count)
-                       VALUES (?, ?, ?)
-                       ON CONFLICT (date, version) DO UPDATE SET count = count + excluded.count""",
-                    [(d, v, n) for (d, v), n in merged.items()],
-                )
-                committing = True
-                conn.execute("COMMIT")
-            except BaseException:
-                if conn.in_transaction:
-                    conn.execute("ROLLBACK")
-                raise
-            finally:
-                conn.close()
-        except BaseException as error:
-            lost = 0 if committing else self._requeue(pending)
-            report_failed_flush("check-counter", sum(pending.values()), committing, error, lost)
-            raise
+    @staticmethod
+    def _empty() -> Counter:
+        return Counter()
 
-    def _requeue(self, batch: Counter[tuple[str, str]]) -> int:
-        """Merge a batch that was not written back into the buffer, which
-        stays within max_pending distinct keys: returns how many counts did
-        not fit and were dropped."""
+    @staticmethod
+    def _size(batch: Counter) -> int:
+        return sum(batch.values())
+
+    def _write(self, conn, pending: Counter) -> None:
+        # One write transaction across the select and the insert, so
+        # another worker's flush cannot add versions between them.
+        known: dict[str, set[str]] = {}
+        merged: Counter[tuple[str, str]] = Counter()
+        for (d, v), n in sorted(pending.items()):
+            if d not in known:
+                known[d] = {r[0] for r in conn.execute(
+                    "SELECT version FROM version_checks WHERE date = ?", (d,))}
+            if (v not in known[d] and v not in self.always_count
+                    and len(known[d]) >= self.max_versions_per_day):
+                v = OVERFLOW_VERSION
+            known[d].add(v)
+            merged[(d, v)] += n
+        conn.executemany(
+            """INSERT INTO version_checks (date, version, count)
+               VALUES (?, ?, ?)
+               ON CONFLICT (date, version) DO UPDATE SET count = count + excluded.count""",
+            [(d, v, n) for (d, v), n in merged.items()],
+        )
+
+    def _merge(self, batch: Counter) -> int:
         lost = 0
-        with self._lock:
-            for key, n in batch.items():
-                if key in self._pending or len(self._pending) < self.max_pending:
-                    self._pending[key] += n
-                else:
-                    lost += n
+        for key, n in batch.items():
+            if key in self._pending or len(self._pending) < self.max_pending:
+                self._pending[key] += n
+            else:
+                lost += n
         return lost
