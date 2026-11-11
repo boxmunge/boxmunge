@@ -1741,19 +1741,17 @@ saves an image once. An image with such an id (one deployed since the last `--ch
 stops the migration during the save, after its report said `ready` and before any backup or
 downtime. The error names every such image; the other images' tars are kept and the journal is at
 `started`. Replace the image, redeploy and run `userns-migrate` again, or abandon the migration with
-`userns-rollback`. Until one of the two finishes, the box is mid-migration like any other stopped
-run: the projects keep running and deploys are not blocked, but the `docker-userns` health check
-reports an error and platform upgrades are deferred. Downtime starts after the free-space check: it
-disables the boxmunge timers (a reboot does not start them) and stops every container, switches the
-daemon (the stopped daemon's bridge interfaces are deleted, as a reboot would; Docker makes them
-again), loads the images, moves each volume into the remapped root, shifts the owners of volume and
-bind data by S, makes `caddy/Caddyfile` 0644, and brings each project back behind the maintenance
-page until its smoke tests pass. A project that does not come back stays on the maintenance page;
-the others carry on. Then the timers are enabled again and CrowdSec is restarted and checked to tail
-the new Caddy. If the remapped daemon does not start, the original `daemon.json` is put back and the
-box restarts on its untouched old root, timers included; fix the cause (an edit to `daemon.json` is
-kept, as long as it names no `userns-remap`) and run it again; the next attempt makes the
-pre-migration backups afresh.
+`userns-rollback`. Downtime starts after the free-space check: it disables the
+boxmunge timers (a reboot does not start them) and stops every container, switches the daemon (the
+stopped daemon's bridge interfaces are deleted, as a reboot would; Docker makes them again), loads
+the images, moves each volume into the remapped root, shifts the owners of volume and bind data by
+S, makes `caddy/Caddyfile` 0644, and brings each project back behind the maintenance page until its
+smoke tests pass. A project that does not come back stays on the maintenance page; the others carry
+on. Then the timers are enabled again and CrowdSec is restarted and checked to tail the new Caddy.
+If the remapped daemon does not start, the original `daemon.json` is put back and the box restarts
+on its untouched old root, timers included; fix the cause (an edit to `daemon.json` is kept, as long
+as it names no `userns-remap`) and run it again; the next attempt makes the pre-migration backups
+afresh.
 
 From the moment the downtime starts until the box runs again, `/opt/boxmunge/userns-migrating`
 exists, and every command that could change a project (deploy, stage, unstage, promote, rollback,
