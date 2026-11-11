@@ -30,6 +30,7 @@ from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.pause import is_paused
 from boxmunge.paths import BoxPaths
+from boxmunge.state import StateError
 
 
 @dataclass(frozen=True)
@@ -101,7 +102,7 @@ def restore_from_quarantine(paths: BoxPaths, project: str, *, component: str) ->
 def _start(paths: BoxPaths, project: str, manifest: dict, component: str) -> None:
     try:
         site_content = prepare_caddy_config(paths, manifest)
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, StateError) as e:
         raise QuarantineError(f"Failed to render Caddy: {e}") from e
     lift_quarantine(project, paths, project_caddy_site_content=site_content,
                     compose_files=compose_files_for(paths, project), component=component)
