@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from boxmunge import built_images, compose_resolve, docker_containers
-from boxmunge.compose_images import built_image_name
+from boxmunge.compose_images import built_image_name, describe_image
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import discard_dir
 from boxmunge.fs_nofollow import read_text_nofollow
@@ -62,8 +62,9 @@ def restore_build_names(paths: BoxPaths, project_name: str, compose_project: str
     named = built_images.name_running_builds(compose_project, built) if built else []
     if named:
         log_operation(component, f"named the images {compose_project}'s containers run: "
-                      f"{', '.join(named)} (their old names had been taken off them)",
-                      paths, project=project_name)
+                      f"{', '.join(describe_image(n) for n in named)} (their old names had "
+                      f"been taken off them)", paths, project=project_name,
+                      detail={"images": named})
 
 
 def up_failed(error: DockerError, images: dict[str, str], redo: str) -> ComposeUpFailed:

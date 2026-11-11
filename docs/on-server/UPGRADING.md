@@ -314,8 +314,9 @@ deploy> log --tail 60
   `a release staged by a boxmunge release before 0.10.1 (pre0101)`. There, `--discard` stops
   staging and starts nothing. Production keeps running its release, but every start of the
   project is refused until you upload production's bundle and `prod-deploy myapp`.
-- **`named the images myapp's containers run: boxmunge.invalid/myapp/web`.** Informational:
-  0.11 renames the images it builds.
+- **`named the images myapp's containers run: myapp's web image, built on this box`.**
+  Informational: 0.11 renames the images it builds (to `boxmunge.invalid/myapp/web`; the
+  entry's detail lists the names).
 
 ### Probation
 

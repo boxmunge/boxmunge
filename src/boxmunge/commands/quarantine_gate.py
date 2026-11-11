@@ -42,7 +42,7 @@ from boxmunge.commands.security_scan_inputs import (
     ProjectHardening, ProjectMeta, ProjectScanError, ScanTarget, hardening_profile,
     load_all_suppressions, project_meta,
 )
-from boxmunge.compose_images import built_image_name
+from boxmunge.compose_images import built_image_name, describe_image
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.lift_rule import ACCEPT_FLAG, KevLiftCheck, check_kev_for_lift
@@ -206,7 +206,7 @@ def _finding_lines(scan: ProjectScan, services: dict[str, list[str]],
             lines.setdefault(key, (
                 f"{f.finding.cve_id} ({f.effective_severity.value}{kev}) in "
                 f"{f.finding.package} {f.finding.installed_version}, service {service} "
-                f"(image {decision.image_ref}): {_fix_advice(f)}"))
+                f"({describe_image(decision.image_ref)}): {_fix_advice(f)}"))
     return list(lines.values())
 
 
@@ -219,8 +219,8 @@ def _upcoming_lines(scan: ProjectScan, services: dict[str, list[str]]) -> list[s
             if f.hardening_would_quarantine:
                 lines.setdefault((f.finding.cve_id, f.finding.package, decision.image_ref), (
                     f"{f.finding.cve_id} ({f.effective_severity.value}) in {f.finding.package} "
-                    f"{f.finding.installed_version}, service {service} (image "
-                    f"{decision.image_ref})"))
+                    f"{f.finding.installed_version}, service {service} "
+                    f"({describe_image(decision.image_ref)})"))
     return list(lines.values())
 
 

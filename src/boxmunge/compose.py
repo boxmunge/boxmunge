@@ -8,7 +8,7 @@ import yaml
 
 from boxmunge import built_images, compose_resolve
 from boxmunge.bind_sources import OVERLAY, refresh_control_hash
-from boxmunge.compose_images import built_image_name
+from boxmunge.compose_images import built_image_name, describe_image
 from boxmunge.compose_mounts import SMOKE_SOURCE
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.log import log_operation
@@ -373,7 +373,8 @@ def prepare_compose_override(
     named = built_images.name_running_builds(project_name, build_services)
     if named:
         log_operation(component, f"named the images {project_name}'s containers run: "
-                      f"{', '.join(named)}", paths, project=project_name)
+                      f"{', '.join(describe_image(n) for n in named)}", paths,
+                      project=project_name, detail={"images": named})
     for compose_project in (project_name, f"{project_name}-staging"):
         built_images.untag_old_built_names(
             compose_project, build_services, set(services) - set(build_services))

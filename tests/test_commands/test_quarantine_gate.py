@@ -99,7 +99,7 @@ def test_quarantine_level_finding_refuses_naming_cve_package_and_image(box) -> N
     with pytest.raises(gate.QuarantineRefused) as e:
         box.clear(STRICT)
     text = str(e.value)
-    assert "CVE-2026-1234 (Critical) in openssl 1, service db (image postgres@sha256:" in text
+    assert "CVE-2026-1234 (Critical) in openssl 1, service db (postgres@sha256:" in text
     assert "no fixed version is published yet" in text
     assert "quarantine stays in place" in text and "nothing was started" in text
 

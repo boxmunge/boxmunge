@@ -287,7 +287,11 @@ own containers, so boxmunge names every image it builds:
 `boxmunge.invalid/<project>-staging/<service>`). The `.invalid` domain can
 never be a registry or a Docker Hub name, and project names cannot contain
 `/`, so no build can replace another project's image, a public image, or the
-platform's. An `image:` you set on a service that also has `build:` is
+platform's. The `.invalid` in the name is deliberate, not a misconfiguration:
+it is the reserved domain that never resolves, so the image can never be
+pulled by mistake. Alerts and command output describe such an image as
+`<project>'s <service> image, built on this box` and give the raw reference
+on its own line; the operational log keeps the reference. An `image:` you set on a service that also has `build:` is
 ignored, with a warning naming the image boxmunge uses instead. A service
 without `build:` may run this project's own built image by that name, for
 example a worker sharing the web service's image; `container-update` and

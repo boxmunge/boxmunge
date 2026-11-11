@@ -139,6 +139,19 @@ def test_format_quarantine_alert_shape() -> None:
     assert "boxmunge security resume demo" in alert.body
 
 
+def test_quarantine_alert_describes_a_built_image_and_keeps_its_reference() -> None:
+    """A built image's `boxmunge.invalid/...` name reads as a misconfiguration,
+    so the finding names it as the project's own image; the raw reference
+    follows on its own line, not inline."""
+    ref = "boxmunge.invalid/demo/frontend@sha256:" + "ba6a88c5" + "0" * 56
+    fd = _disp("CVE-2026-1111", base=Severity.CRITICAL, package="libxslt", kev=True)
+    alert = format_quarantine_alert("demo", [Hit(fd, ref)])
+    assert ("- CVE-2026-1111 (Critical, CISA KEV) in libxslt — demo's frontend image, "
+            "built on this box (digest ba6a88c50000)\n"
+            f"  image: {ref}\n") in alert.body
+    assert alert.body.count(ref) == 1
+
+
 def test_format_quarantine_alert_kev_title() -> None:
     fd = _disp("CVE-2026-1111", kev=True)
     alert = format_quarantine_alert("demo", [Hit(fd, "myapp:1.0")])
