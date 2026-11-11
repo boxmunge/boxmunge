@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Callable
 
 import db
-from request_limits import utc_today
+from request_limits import report_failed_flush, utc_today
 
 RETENTION_DAYS = 90
 UNLISTED = "unlisted"
@@ -148,42 +148,59 @@ class PrefixLog:
         if not pending:
             return
         dropped = 0
-        conn = db.connect(self.db_path, isolation_level=None)
+        committing = False
         try:
-            # One write transaction, so another worker's flush cannot add
-            # rows between the count and the insert.
-            conn.execute("BEGIN IMMEDIATE")
-            known: dict[str, dict[str, set[str]]] = {}
-            rows = []
-            # Oldest version first (numeric order, unlisted last), so a cap
-            # never drops the oldest version a network reported.
-            for day, prefix, version in sorted(
-                    pending, key=lambda s: (s[0], s[1], _version_order(s[2]))):
-                if day not in known:
-                    known[day] = {}
-                    for p, v in conn.execute(
-                            "SELECT prefix, version FROM prefix_checks WHERE date = ?", (day,)):
-                        known[day].setdefault(p, set()).add(v)
-                versions = known[day].get(prefix)
-                if versions is None and len(known[day]) >= self.max_prefixes_per_day:
-                    dropped += 1
-                    continue
-                versions = known[day].setdefault(prefix, set())
-                if version not in versions and len(versions) >= self.max_versions_per_prefix:
-                    dropped += 1
-                    continue
-                versions.add(version)
-                rows.append((day, prefix, version))
-            conn.executemany("INSERT OR IGNORE INTO prefix_checks (date, prefix, version) "
-                             "VALUES (?, ?, ?)", rows)
-            conn.execute("COMMIT")
-        except BaseException:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
+            conn = db.connect(self.db_path, isolation_level=None)
+            try:
+                # One write transaction, so another worker's flush cannot add
+                # rows between the count and the insert.
+                conn.execute("BEGIN IMMEDIATE")
+                known: dict[str, dict[str, set[str]]] = {}
+                rows = []
+                # Oldest version first (numeric order, unlisted last), so a cap
+                # never drops the oldest version a network reported.
+                for day, prefix, version in sorted(
+                        pending, key=lambda s: (s[0], s[1], _version_order(s[2]))):
+                    if day not in known:
+                        known[day] = {}
+                        for p, v in conn.execute(
+                                "SELECT prefix, version FROM prefix_checks WHERE date = ?", (day,)):
+                            known[day].setdefault(p, set()).add(v)
+                    versions = known[day].get(prefix)
+                    if versions is None and len(known[day]) >= self.max_prefixes_per_day:
+                        dropped += 1
+                        continue
+                    versions = known[day].setdefault(prefix, set())
+                    if version not in versions and len(versions) >= self.max_versions_per_prefix:
+                        dropped += 1
+                        continue
+                    versions.add(version)
+                    rows.append((day, prefix, version))
+                conn.executemany("INSERT OR IGNORE INTO prefix_checks (date, prefix, version) "
+                                 "VALUES (?, ?, ?)", rows)
+                committing = True
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+            finally:
+                conn.close()
+        except BaseException as error:
+            lost = 0 if committing else self._requeue(pending)
+            report_failed_flush("prefix-log", len(pending), committing, error, lost)
             raise
-        finally:
-            conn.close()
         if dropped:
             print(f"prefix-log: dropped {dropped} sighting(s) beyond the daily caps "
                   f"({self.max_prefixes_per_day} prefixes, {self.max_versions_per_prefix} "
                   f"versions per prefix)", file=sys.stderr, flush=True)
+
+    def _requeue(self, batch: set[tuple[str, str, str]]) -> int:
+        """Merge a batch that was not written back into the buffer, which
+        stays within max_pending sightings: returns how many did not fit and
+        were dropped."""
+        with self._lock:
+            room = max(self.max_pending - len(self._pending), 0)
+            fresh = sorted(batch - self._pending)
+            self._pending.update(fresh[:room])
+        return len(fresh) - room if len(fresh) > room else 0

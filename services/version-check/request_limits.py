@@ -15,6 +15,7 @@ worker's last flush are lost if it is killed without a clean exit.
 
 import atexit
 import ipaddress
+import sys
 import threading
 import time
 from collections import Counter
@@ -166,6 +167,25 @@ class RequestLimiter:
         return FULL if self._networks.full_for(network) else None
 
 
+def report_failed_flush(buffer: str, size: int, commit_failed: bool, error: BaseException,
+                        lost: int = 0) -> None:
+    """Say on stderr what became of a batch whose flush failed.
+
+    Before COMMIT nothing was written, so the batch is requeued (`lost` of it
+    did not fit the buffer's bound and was dropped). A failed COMMIT may or
+    may not have been applied, so the batch is dropped: requeueing it could
+    count it twice, and these are statistics.
+    """
+    if commit_failed:
+        what = (f"COMMIT failed, outcome unknown: dropped a batch of {size} "
+                f"(not requeued, a retry could double-count)")
+    else:
+        what = f"flush failed before commit: requeued a batch of {size}"
+        if lost:
+            what += f", of which {lost} did not fit the buffer bound and were dropped"
+    print(f"ERROR {buffer}: {what}: {error!r}", file=sys.stderr, flush=True)
+
+
 OVERFLOW_VERSION = "unlisted"
 
 
@@ -211,32 +231,52 @@ class CheckCounter:
             self._last_flush = self._clock()
         if not pending:
             return
-        conn = db.connect(self.db_path, isolation_level=None)
+        committing = False
         try:
-            # One write transaction across the select and the insert, so
-            # another worker's flush cannot add versions between them.
-            conn.execute("BEGIN IMMEDIATE")
-            known: dict[str, set[str]] = {}
-            merged: Counter[tuple[str, str]] = Counter()
-            for (d, v), n in sorted(pending.items()):
-                if d not in known:
-                    known[d] = {r[0] for r in conn.execute(
-                        "SELECT version FROM version_checks WHERE date = ?", (d,))}
-                if (v not in known[d] and v not in self.always_count
-                        and len(known[d]) >= self.max_versions_per_day):
-                    v = OVERFLOW_VERSION
-                known[d].add(v)
-                merged[(d, v)] += n
-            conn.executemany(
-                """INSERT INTO version_checks (date, version, count)
-                   VALUES (?, ?, ?)
-                   ON CONFLICT (date, version) DO UPDATE SET count = count + excluded.count""",
-                [(d, v, n) for (d, v), n in merged.items()],
-            )
-            conn.execute("COMMIT")
-        except BaseException:
-            if conn.in_transaction:
-                conn.execute("ROLLBACK")
+            conn = db.connect(self.db_path, isolation_level=None)
+            try:
+                # One write transaction across the select and the insert, so
+                # another worker's flush cannot add versions between them.
+                conn.execute("BEGIN IMMEDIATE")
+                known: dict[str, set[str]] = {}
+                merged: Counter[tuple[str, str]] = Counter()
+                for (d, v), n in sorted(pending.items()):
+                    if d not in known:
+                        known[d] = {r[0] for r in conn.execute(
+                            "SELECT version FROM version_checks WHERE date = ?", (d,))}
+                    if (v not in known[d] and v not in self.always_count
+                            and len(known[d]) >= self.max_versions_per_day):
+                        v = OVERFLOW_VERSION
+                    known[d].add(v)
+                    merged[(d, v)] += n
+                conn.executemany(
+                    """INSERT INTO version_checks (date, version, count)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT (date, version) DO UPDATE SET count = count + excluded.count""",
+                    [(d, v, n) for (d, v), n in merged.items()],
+                )
+                committing = True
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+            finally:
+                conn.close()
+        except BaseException as error:
+            lost = 0 if committing else self._requeue(pending)
+            report_failed_flush("check-counter", sum(pending.values()), committing, error, lost)
             raise
-        finally:
-            conn.close()
+
+    def _requeue(self, batch: Counter[tuple[str, str]]) -> int:
+        """Merge a batch that was not written back into the buffer, which
+        stays within max_pending distinct keys: returns how many counts did
+        not fit and were dropped."""
+        lost = 0
+        with self._lock:
+            for key, n in batch.items():
+                if key in self._pending or len(self._pending) < self.max_pending:
+                    self._pending[key] += n
+                else:
+                    lost += n
+        return lost
