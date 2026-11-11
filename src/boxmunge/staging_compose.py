@@ -26,11 +26,10 @@ from typing import Any
 
 import yaml
 
-from boxmunge.bind_mounts import project_relative
 from boxmunge.bundle import BOXMUNGE_ENTRIES
 from boxmunge.compose import ComposeError
 from boxmunge.compose_build import is_local_ref
-from boxmunge.compose_mounts import is_bind_entry, volume_source
+from boxmunge.compose_mounts import is_bind_entry, project_rel, volume_source
 from boxmunge.staged_release import STAGING_BASE, STAGING_OVERLAY
 
 STAGING_FILES = [STAGING_BASE, STAGING_OVERLAY]
@@ -40,7 +39,7 @@ def staging_source(source: str, project_dir: Path, box_state: set[str], *, bind:
     """Where staging reads what production reads from ``source``. A bind
     (or config/secret file, which Compose mounts) gets staging's copy; an
     env file, read by Compose and never mounted, is the file itself."""
-    rel = project_relative(source, project_dir)
+    rel = project_rel(source, project_dir)
     if rel is None:
         outside = source if os.path.isabs(source) or source.startswith("~") \
             else os.path.normpath(os.path.join(project_dir, source))
@@ -92,8 +91,7 @@ def _release_code(path: str, base: str, project_dir: Path, box_state: set[str],
     except a git slot's own clone (staged_box_state leaves repo/ out)."""
     if path.startswith("~"):
         return None
-    rel = project_relative(os.path.join(base, path), project_dir,
-                           literal=not os.path.isabs(path))
+    rel = project_rel(os.path.join(base, path), project_dir, literal=not os.path.isabs(path))
     if rel is None:
         return None
     top = rel.partition(os.sep)[0]

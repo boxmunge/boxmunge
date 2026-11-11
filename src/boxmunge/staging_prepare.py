@@ -15,9 +15,10 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from boxmunge.bind_mounts import project_relative
 from boxmunge.compose import generate_staging_compose_override, load_user_compose
-from boxmunge.compose_mounts import has_env_substitution
+from boxmunge.compose_mounts import (
+    file_entries, has_env_substitution, path_within, project_rel,
+)
 from boxmunge.compose_validate import validate_user_compose
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.release import staged_box_state
@@ -106,7 +107,7 @@ def require_read_files(base: Path, release: Path, project: str, project_dir: Pat
             if not isinstance(ref, str) or not ref or has_env_substitution(ref):
                 continue
             path = os.path.normpath(os.path.join(release, os.path.expanduser(ref)))
-            if project_relative(path, project_dir) is not None and not os.path.exists(path):
+            if project_rel(path, project_dir) is not None and not os.path.exists(path):
                 missing.append(f"service {name} {key} {path}")
     if missing:
         raise StagingDataError(
@@ -141,25 +142,19 @@ def _refuse_shared(paths: BoxPaths, project: str, staging: dict[str, Any], relea
     check_isolation(paths, project, staging, productions)
 
 
-def _within(path: str, roots: set[str]) -> bool:
-    return any(path == r or path.startswith(r.rstrip("/") + "/") for r in roots)
-
-
 def require_staging_files(staging_model: dict[str, Any], project_dir: Path,
                           copied: set[str]) -> None:
     """Refuse a config or secret file staging reads from its own data copy
     when the file is neither there nor about to be copied there: Compose
     would refuse to create staging's containers."""
     missing = []
-    for section in ("configs", "secrets"):
-        for key, decl in (staging_model.get(section) or {}).items():
-            path = decl.get("file") if isinstance(decl, dict) else None
-            rel = project_relative(path, project_dir) if isinstance(path, str) else None
-            if not rel or not rel.split(os.sep, 1)[0].endswith("-staging"):
-                continue
-            full = os.path.normpath(project_dir / rel)
-            if not os.path.lexists(full) and not _within(full, copied):
-                missing.append(f"{section[:-1]} {key} reads {full}")
+    for bind in file_entries(staging_model, project_dir):
+        rel = project_rel(bind.source, project_dir)
+        if not rel or not rel.split(os.sep, 1)[0].endswith("-staging"):
+            continue
+        full = os.path.normpath(project_dir / rel)
+        if not os.path.lexists(full) and not any(path_within(full, c) for c in copied):
+            missing.append(f"{bind.section[:-1]} {bind.name} reads {full}")
     if missing:
         raise StagingDataError(
             "staging reads its own copy of data, never production's, and these "

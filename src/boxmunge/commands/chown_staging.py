@@ -16,12 +16,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from boxmunge.bind_mounts import project_relative
 from boxmunge.bind_sources import source_kind
 from boxmunge.bundle import STAGING_SUFFIX
 from boxmunge.commands.deploy_checks import (
     persistent, service_mounts, store_id, writable_by_a_container,
 )
+from boxmunge.compose_mounts import project_rel
 from boxmunge.data_helper import COMPOSE_VOLUME_LABEL, chown_under, run_helper, volume, volume_labels
 from boxmunge.docker import COMPOSE_PROJECT_LABEL, staging_compose_project
 from boxmunge.docker_containers import project_containers
@@ -51,7 +51,7 @@ def _bind_copy(project_dir: Path, source: str, is_copy) -> str | None:
     project dir, as Compose reads it), relative to the project dir; None
     when staging keeps no copy of it (outside the project dir, or not
     staging's entry)."""
-    rel = project_relative(source, project_dir)
+    rel = project_rel(source, project_dir)
     if rel is None or rel == ".":
         return None
     top, _, rest = rel.partition("/")

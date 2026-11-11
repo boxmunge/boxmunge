@@ -29,9 +29,8 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from boxmunge.bind_mounts import project_relative
 from boxmunge.bundle import BOX_OWNED_ENTRIES
-from boxmunge.compose_mounts import is_bind_entry, volume_source
+from boxmunge.compose_mounts import bind_entries, project_rel
 from boxmunge.data_dirs import ReleaseStateError, holds_data
 from boxmunge.data_helper import empty_dir
 from boxmunge.docker import staging_compose_project
@@ -52,15 +51,7 @@ def _production_sources(project_dir: Path) -> list[str]:
     doc: Any = yaml.safe_load(path.read_text()) if path.exists() else None
     if not isinstance(doc, dict):
         return []
-    sources: list[str | None] = []
-    for svc in (doc.get("services") or {}).values():
-        for entry in (svc.get("volumes") or []) if isinstance(svc, dict) else []:
-            if is_bind_entry(entry):
-                sources.append(volume_source(entry))
-    for section in ("configs", "secrets"):
-        for decl in (doc.get(section) or {}).values():
-            sources.append(decl.get("file") if isinstance(decl, dict) else None)
-    rels = (project_relative(s, project_dir) for s in sources if isinstance(s, str))
+    rels = (project_rel(bind.source, project_dir) for bind in bind_entries(doc, project_dir))
     return sorted({r for r in rels if r and r != "."})
 
 
