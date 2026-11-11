@@ -162,6 +162,11 @@ def untag_old_built_names(
     runs then keeps a name, the platform's, and the next start runs it."""
     check_compose_project_name(compose_project)
     labelled = _image_names(compose_project_filter(compose_project))
+    # Nothing labelled as this project's build and no build service whose
+    # container could run an unlabelled one: nothing to own, so no container
+    # is listed. Most projects build nothing, and pay this at every start.
+    if not labelled and not build_services:
+        return []
     containers = _container_images(compose_project, set(build_services), image_services)
     if not labelled and not containers.own_ids:
         return []

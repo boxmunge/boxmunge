@@ -71,13 +71,13 @@ def test_a_production_start(deployed) -> None:
 def test_a_bundle_deploy(deployed) -> None:
     with docker_calls() as seen:
         assert run_deploy("myapp", deployed, ref=V2) == 0
-    _expect(seen, compose_config=7, docker_info=3, other=14)
+    _expect(seen, compose_config=7, docker_info=3, other=8)
 
 
 def test_a_first_deploy_costs_what_a_redeploy_does(box) -> None:
     with docker_calls() as seen:
         assert run_deploy("myapp", box, ref=V1) == 0
-    _expect(seen, compose_config=7, docker_info=3, other=14)
+    _expect(seen, compose_config=7, docker_info=3, other=8)
 
 
 def test_stage_then_promote(deployed) -> None:
@@ -86,7 +86,7 @@ def test_stage_then_promote(deployed) -> None:
     _expect(seen, compose_config=19, docker_info=6, other=5)
     with docker_calls() as seen:
         assert run_promote("myapp", deployed) == 0
-    _expect(seen, compose_config=10, docker_info=3, other=17)
+    _expect(seen, compose_config=10, docker_info=3, other=11)
 
 
 def test_resume(deployed) -> None:
@@ -94,7 +94,7 @@ def test_resume(deployed) -> None:
         assert run_pause("myapp", deployed, yes=True, no_snapshot=True) == 0
     with docker_calls() as seen:
         assert run_resume("myapp", deployed, yes=True, skip_security_checks=True) == 0
-    _expect(seen, compose_config=5, docker_info=2, other=17)
+    _expect(seen, compose_config=5, docker_info=2, other=11)
 
 
 def test_restore(box, monkeypatch) -> None:
