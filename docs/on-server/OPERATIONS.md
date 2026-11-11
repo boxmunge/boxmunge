@@ -1667,7 +1667,7 @@ Everything else warns:
   `project-containers` or `config-drift` with the cause and the fix, and the rest of the report
   still runs;
 - a probe that does not answer in time (`docker info`, `docker inspect`, `ufw status`, `sshd -T`,
-  `docker compose ps`) warns, naming the command: a busy host is not a broken platform. So does
+  `docker ps`) warns, naming the command: a busy host is not a broken platform. So does
   `ufw status` failing (often a held xtables lock), since it says nothing about the firewall;
 - any other exception from a check (bad data it did not expect, say) warns with the exception and
   is logged (`log --component health`) instead of crashing the report.

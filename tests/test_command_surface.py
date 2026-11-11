@@ -187,12 +187,12 @@ def test_check_all_typo_never_runs_the_mutator(
 def test_check_all_read_only_reaches_read_only_mode(
     paths: BoxPaths, monkeypatch,
 ) -> None:
-    from boxmunge.commands import check as check_mod
+    from boxmunge.commands import check_all
 
     monkeypatch.setattr(BoxPaths.__init__, "__defaults__", (paths.root,))
     seen: list[bool] = []
     monkeypatch.setattr(
-        check_mod, "run_check_all",
+        check_all, "run_check_all",
         lambda paths, *, read_only: seen.append(read_only) or 0,
     )
     assert _main(["check-all", "--read-only"], monkeypatch) == 0

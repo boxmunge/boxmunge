@@ -210,7 +210,7 @@ def test_a_rerun_sends_the_alert_a_crash_before_step_8_lost(paths, stage09) -> N
 
 
 def test_check_all_names_the_deploy_after_discard(paths, stage09, capsys) -> None:
-    from boxmunge.commands.check import _check_one
+    from boxmunge.commands.check_all import _check_one
     with patch("boxmunge.legacy_stage_ops.finish_apply"):
         assert legacy_run(paths, "discard") == 0
     assert _check_one(P, paths, True) == 1

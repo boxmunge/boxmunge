@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from boxmunge.commands.check import _check_one
+from boxmunge.commands.check_all import _check_one
 from boxmunge.commands.pause_cmd import pause_locked
 from boxmunge.commands.recover_cmd import recover_locked, run_recover
 from boxmunge.docker_run import DockerError
@@ -188,7 +188,7 @@ def test_tick_leaves_an_open_install_alone(paths, fake_containers, capsys) -> No
     open_txn(paths, "myapp", source="bundle", ref="myapp-x", replaced_ref=f"myapp-{V1}",
              staged_id=None, snapshot="")
     with patch("boxmunge.commands.check.check_with_reason") as check, \
-            patch("boxmunge.commands.check.update_health_state") as health, \
+            patch("boxmunge.commands.check_all.update_health_state") as health, \
             patch("boxmunge.commands.health_state.compose_down") as down:
         assert _check_one("myapp", paths, read_only=False) == 1
     check.assert_not_called()

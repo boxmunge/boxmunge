@@ -18,7 +18,7 @@ import pytest
 
 from boxmunge import fileutil
 from boxmunge.commands import (
-    backup_cmd, check, deploy, promote_cmd, restore, rollback, stage_cmd, upgrade_steps,
+    backup_cmd, check, check_all, deploy, promote_cmd, restore, rollback, stage_cmd, upgrade_steps,
 )
 from boxmunge.commands.quarantine_gate import QuarantineRefused
 from boxmunge.pause import write_paused_state
@@ -170,8 +170,8 @@ def test_health_tick_never_checks_once_blocked(paths, marker) -> None:
     """A smoke run against a just-paused project would escalate and stop it."""
     _deployed(paths)
     run_check = MagicMock()
-    with patch.object(check, "check_with_reason", run_check), _marker_at_lock(check, marker):
-        assert check._check_project(NAME, paths, read_only=False) == 0
+    with patch.object(check, "check_with_reason", run_check), _marker_at_lock(check_all, marker):
+        assert check_all._check_project(NAME, paths, read_only=False) == 0
     run_check.assert_not_called()
 
 

@@ -12,7 +12,8 @@ from boxmunge.commands.inbox_cmd import cmd_inbox
 from boxmunge.commands.console import cmd_console
 from boxmunge.commands.backup_cmd import cmd_backup, cmd_backup_all, cmd_backup_sync
 from boxmunge.commands.caddy_status import cmd_caddy_status
-from boxmunge.commands.check import cmd_check, cmd_check_all
+from boxmunge.commands.check import cmd_check
+from boxmunge.commands.check_all import cmd_check_all
 from boxmunge.commands.deploy import cmd_deploy
 from boxmunge.commands.doctor import cmd_doctor
 from boxmunge.commands.help import cmd_help, cmd_agent_help, cmd_init_host
