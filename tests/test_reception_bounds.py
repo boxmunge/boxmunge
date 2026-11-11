@@ -172,3 +172,19 @@ def test_the_manifest_reception_reads_is_the_one_extraction_installs(tmp_path) -
     assert peek_manifest_from_bundle(upload) == {"project": "later"}
     tree = extract_bundle(upload, tmp_path / "out")
     assert (tree / "manifest.yml").read_bytes() == b"project: later\n"
+
+
+def _manifest_link(tar: tarfile.TarFile) -> None:
+    _file(tar, "demo/other.yml", b"project: other\n")
+    info = tarfile.TarInfo("demo/manifest.yml")
+    info.type = tarfile.SYMTYPE
+    info.linkname = "other.yml"
+    tar.addfile(info)
+
+
+def test_a_manifest_replaced_by_a_later_link_is_not_the_manifest(tmp_path, paths) -> None:
+    """Extraction leaves the later entry on disk, a link here, so the
+    regular file before it is not what a deploy would read."""
+    upload = _upload(tmp_path, _manifest_link)
+    _refused(upload, paths, "No manifest.yml found")
+    assert bundle.inspect_bundle(upload).manifest is None

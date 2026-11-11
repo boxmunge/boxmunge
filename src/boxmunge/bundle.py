@@ -304,15 +304,17 @@ def _inspect(tar: tarfile.TarFile) -> Inspection:
     the limits as it arrives (_limited_members) and the manifest is read,
     capped, as it is passed, so nothing seeks back (which, in a gzip stream,
     decompresses from the start again). Then the entries are checked as a
-    whole (_check_members). A name can appear twice in an archive; the
-    manifest kept is the last, the one extraction leaves on disk."""
+    whole (_check_members). A name can appear twice in an archive, and the
+    last entry is the one extraction leaves on disk: the manifest kept is
+    the last, and none if a later entry of that name is not a regular file
+    (a link, a directory), since no earlier file is then what a deploy reads."""
     members: list[tarfile.TarInfo] = []
     manifest: bytes | None = None
     for m in _limited_members(tar):
         members.append(m)
         parts = _member_parts(m.name)
-        if m.isfile() and len(parts) == 2 and parts[1] == MANIFEST_NAME:
-            manifest = _read_manifest(tar, m)
+        if len(parts) == 2 and parts[1] == MANIFEST_NAME:
+            manifest = _read_manifest(tar, m) if m.isfile() else None
     return Inspection(_check_members(members), members, manifest)
 
 
