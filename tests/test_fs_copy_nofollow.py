@@ -1,11 +1,13 @@
 """copy_entry_nofollow: root copies into a slot never through a link."""
 from __future__ import annotations
 
+import errno
 import os
 
 import pytest
 
 from boxmunge.fs_nofollow import copy_entry_nofollow
+from boxmunge.git_slot import copy_project_entries
 
 
 @pytest.fixture
@@ -64,3 +66,82 @@ def test_setuid_and_setgid_bits_are_never_copied(dirs) -> None:
     assert (src / "tool").stat().st_mode & 0o7777 == 0o4755    # the source as it was
     assert (dest / "tool").stat().st_mode & 0o7777 == 0o755
     assert (dest / "shared").stat().st_mode & 0o7777 == 0o1775
+
+
+# F09: os.write may write less than it was given. The real syscall is used
+# throughout; only how much of each call reaches it is cut short.
+
+PAYLOAD = b"0123456789abcdef" * 4
+
+
+def _short_writes(monkeypatch, sizes: list[int | BaseException]) -> list[int]:
+    """Each os.write in fs_nofollow takes the next of `sizes`: write at most
+    that many bytes, or raise it. Past the list, writes are whole. Returns
+    the byte counts asked for, as they happen."""
+    asked: list[int] = []
+    real = os.write
+    plan = list(sizes)
+
+    def write(fd: int, data) -> int:
+        asked.append(len(data))
+        step = plan.pop(0) if plan else len(data)
+        if isinstance(step, BaseException):
+            raise step
+        return real(fd, bytes(data[:step])) if step else 0
+
+    monkeypatch.setattr("boxmunge.fs_nofollow.os.write", write)
+    return asked
+
+
+def test_a_short_write_is_continued_until_the_file_is_whole(dirs, monkeypatch) -> None:
+    src, dest, sfd, dfd = dirs
+    (src / "asset").write_bytes(PAYLOAD)
+    (src / "asset").chmod(0o640)
+    asked = _short_writes(monkeypatch, [3, 1])
+    copy_entry_nofollow(sfd, "asset", dfd)
+    assert (dest / "asset").read_bytes() == PAYLOAD
+    assert (dest / "asset").stat().st_mode & 0o777 == 0o640
+    assert asked == [len(PAYLOAD), len(PAYLOAD) - 3, len(PAYLOAD) - 4]
+
+
+def test_a_short_write_then_an_error_fails_the_copy(dirs, monkeypatch) -> None:
+    """A full disk shows as a short write, then ENOSPC on the rest: the
+    copy must raise, not return with a truncated file."""
+    src, dest, sfd, dfd = dirs
+    (src / "asset").write_bytes(PAYLOAD)
+    _short_writes(monkeypatch, [3, OSError(errno.ENOSPC, "No space left on device")])
+    with pytest.raises(OSError) as refused:
+        copy_entry_nofollow(sfd, "asset", dfd)
+    assert refused.value.errno == errno.ENOSPC
+
+
+def _project_and_slot(tmp_path):
+    project, release = tmp_path / "project", tmp_path / "slot"
+    (project / "boxmunge-scripts").mkdir(parents=True)
+    (project / "boxmunge-scripts" / "smoke.sh").write_bytes(PAYLOAD)
+    release.mkdir()
+    return project, release
+
+
+def test_a_stage_gets_the_whole_script_after_a_short_write(tmp_path, monkeypatch) -> None:
+    """What the copy is for: a git stage's auxiliary files (git_slot)."""
+    project, release = _project_and_slot(tmp_path)
+    _short_writes(monkeypatch, [3])
+    copy_project_entries(project, release)
+    assert (release / "boxmunge-scripts" / "smoke.sh").read_bytes() == PAYLOAD
+
+
+def test_a_stage_fails_rather_than_carry_a_truncated_script(tmp_path, monkeypatch) -> None:
+    project, release = _project_and_slot(tmp_path)
+    _short_writes(monkeypatch, [3, OSError(errno.ENOSPC, "No space left on device")])
+    with pytest.raises(OSError) as refused:
+        copy_project_entries(project, release)
+    assert refused.value.errno == errno.ENOSPC
+
+
+def test_a_write_that_makes_no_progress_is_an_error(dirs, monkeypatch) -> None:
+    src, _dest, sfd, dfd = dirs
+    (src / "asset").write_bytes(PAYLOAD)
+    _short_writes(monkeypatch, [3, 0])
+    with pytest.raises(OSError, match="wrote nothing"):
+        copy_entry_nofollow(sfd, "asset", dfd)

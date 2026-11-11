@@ -378,9 +378,24 @@ def _copy_file(src_dir: int, name: str, dest_dir: int, mode: int) -> None:
                        0o600, dir_fd=dest_dir)
         try:
             while chunk := os.read(src, 1 << 20):
-                os.write(dest, chunk)
+                _write_all(dest, chunk, name)
             os.fchmod(dest, mode)
         finally:
             os.close(dest)
     finally:
         os.close(src)
+
+
+def _write_all(fd: int, data: bytes, name: str) -> None:
+    """Write all of ``data``. os.write may take less than it is given (a
+    nearly full disk, a quota, a signal) and still succeed, so the rest is
+    written until none is left: the error behind a short write surfaces on
+    the next call instead of a truncated copy passing for a whole one. A
+    write that takes nothing is an error, not a reason to spin."""
+    left = memoryview(data)
+    while left:
+        written = os.write(fd, left)
+        if written <= 0:
+            raise OSError(errno.EIO, f"copying {name} wrote nothing with {len(left)} "
+                          "bytes left; refusing to leave it truncated")
+        left = left[written:]
