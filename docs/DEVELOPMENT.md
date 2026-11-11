@@ -255,7 +255,8 @@ in the shim; re-owning root-made directories in `deploy_dirs.py`), 0.11.5 (a rol
 recorded stash), 0.11.6 (adopting a probation with no root record) and 0.11.7 (the shim's
 legacy lock; `bootstrap/caddy-log-path.sh`, which refuses a box whose Caddy configs write a log
 under `/var/log/caddy`; `unresolved_stage.py`, which refuses a box that still holds a stage
-0.10.1 or earlier made).
+0.10.1 or earlier made, with `unresolved_stage_install.py` and `bootstrap/unresolved-stage.sh`,
+which ask it for an `install.sh` run by hand).
 
 To raise the floor, announce it in the release notes of the release that becomes the bridge,
 then in the next release change the constants in both files, move the hop test's shims across,
