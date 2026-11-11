@@ -10,9 +10,12 @@ import sys
 import pytest
 import yaml
 
-from boxmunge.tui import project_detail
-from boxmunge.tui.app import BoxmungeApp
-from boxmunge.tui.project_detail import ProjectDetailScreen
+# The integration shards install no TUI extra; the console is not under test there.
+pytest.importorskip("textual")
+
+from boxmunge.tui import project_detail  # noqa: E402
+from boxmunge.tui.app import BoxmungeApp  # noqa: E402
+from boxmunge.tui.project_detail import ProjectDetailScreen  # noqa: E402
 
 # The overview asks Docker for health; here Docker answers nothing.
 pytestmark = pytest.mark.usefixtures("docker_down")
