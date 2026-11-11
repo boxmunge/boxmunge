@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from boxmunge import compose_references, compose_resolve
+from boxmunge import compose_references, compose_resolve, docker
 from boxmunge.compose_validate import ComposeSecurityError, validate_user_compose
 from boxmunge.paths import BoxPaths
 
@@ -128,8 +128,12 @@ def box(tmp_path: Path) -> BoxPaths:
 def test_compose_really_reads_the_other_project(
     box: BoxPaths, files: dict, leaked: str, _match: str,
 ) -> None:
-    """The premise: real Compose reads the victim project for every shape."""
-    model = compose_resolve.resolve_compose_config(_write(box.project_dir("evil"), files), "evil")
+    """The premise: real Compose reads the victim project for every shape.
+    Compose itself is asked, with the call the resolve makes: the resolve
+    raises what boxmunge's own walk of the files refuses, as these are."""
+    compose = _write(box.project_dir("evil"), files)
+    model = json.loads(docker.compose_config(
+        compose.parent, [compose.name], project_name="evil", all_profiles=True))
     assert leaked in json.dumps(model), model
 
 
