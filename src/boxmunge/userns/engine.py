@@ -37,13 +37,16 @@ from boxmunge.userns.durable import NotDurable, barrier
 from boxmunge.userns.images import IMAGES_DIR, load_all, save_all
 from boxmunge.userns.inventory import PROXY_NETWORK, Inventory, take_inventory
 from boxmunge.userns.marker import clear_marker, set_marker
-from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
+from boxmunge.userns.journal import (
+    FORWARD, Journal, State, finish_hint, load_journal, save_journal, state,
+)
 from boxmunge.userns.preflight import PreflightRefused, preflight
 from boxmunge.userns.shift import Direction, scan_tree, shift_tree
 from boxmunge.userns.switch import (
     CADDYFILE_MODE, MigrationError, back_to_prior, caddyfile_mode, create_identity,
     daemon_json_owner,
-    ensure_prior, host_ids, prior_store, read_daemon_json, set_caddyfile_mode, to_remapped,
+    ensure_prior, host_ids, prior_store, read_daemon_json, require_remapped, set_caddyfile_mode,
+    to_remapped,
 )
 from boxmunge.userns.volumes import data_dir, move, recreate
 
@@ -77,12 +80,13 @@ def shift_journalled(j: Journal, tree: Path, direction: Direction, save: Save,
     owner to give them back) are journalled under `left:<key>`, for the
     rollback's result and alert (steps.left_alone)."""
     resumed = key in j.setid
-    setid = {**j.setid.get(seed or "", {}), **scan_tree(tree, j.offset, direction).setid,
-             **j.setid.get(key, {})}
+    # One scan: its list is journalled first, whatever it refuses, as it always was.
+    scan = scan_tree(tree, j.offset, direction, resumed=resumed)
+    setid = {**j.setid.get(seed or "", {}), **scan.setid, **j.setid.get(key, {})}
     if not resumed or setid != j.setid[key]:
         j.setid[key] = setid  # also the mark that this tree's shift has begun
         save()
-    left = shift_tree(tree, j.offset, direction, setid, resumed=resumed).left_alone
+    left = shift_tree(tree, j.offset, direction, setid, resumed=resumed, scan=scan).left_alone
     if left:
         j.items[f"left:{key}"] = (
             f"{len(left)} {'entry' if len(left) == 1 else 'entries'} with ids outside both "
@@ -204,21 +208,16 @@ def _ensure_remapped(paths: BoxPaths, j: Journal, daemon: DaemonControl) -> None
     """After the switch: the remapped daemon runs, exactly as journalled."""
     if not daemon_answers():
         daemon.start()
-    if uo.remap_offset(paths) != j.offset:
-        raise MigrationError(f"the daemon is not remapped at offset {j.offset} as the journal "
-                             f"says; see docker-userns in health")
+    require_remapped(paths, j.offset)
 
 
 def _refuse_rerun(j: Journal | None) -> Journal | None:
-    if j is not None and j.direction == FORWARD and j.phase in ("applied", "committed"):
-        raise MigrationError(f"the migration is already {j.phase}; "
-                             + ("nothing to do" if j.phase == "committed"
-                                else "soak, then userns-commit, or userns-rollback"))
-    if j is not None and j.direction == ROLLBACK and j.phase != "rolled-back":
-        raise MigrationError(f"a rollback stopped at {j.phase}; finish it with userns-rollback")
-    if j is not None and j.direction == ROLLBACK:
-        return None  # a rolled-back box starts over from phase 0
-    return j
+    """The journal to resume, or None to start from phase 0 (a rolled-back
+    box starts over)."""
+    now = state(j)
+    if now not in (State.NONE, State.MIGRATING, State.ROLLED_BACK):
+        raise MigrationError(finish_hint(j))
+    return j if now is State.MIGRATING else None
 
 
 def migrate(paths: BoxPaths, *, daemon: DaemonControl, timers: TimerControl,

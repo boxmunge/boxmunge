@@ -13,6 +13,7 @@ fresh install, born committed (bootstrap/userns.sh).
 """
 from __future__ import annotations
 
+import enum
 import json
 import os
 import stat
@@ -30,6 +31,9 @@ ROLLBACK_PHASES = ("rb-started", "rb-saved", "rb-quiesced", "rb-restored", "rb-s
                    "rb-rebuilt", "rolled-back")
 _PHASES = {FORWARD: FORWARD_PHASES, ROLLBACK: ROLLBACK_PHASES}
 RANGE = 65536
+# An item userns-commit journals before its first deletion: from then on the
+# old root is partly gone, and there is no rollback.
+COMMIT_STARTED = "commit-before"
 
 
 class JournalError(Exception):
@@ -58,6 +62,50 @@ class Journal:
     def reached(self, phase: str) -> bool:
         order = _PHASES[self.direction]
         return order.index(self.phase) >= order.index(phase)
+
+
+class State(enum.Enum):
+    """Where a migration stands, as far as which command may run next."""
+    NONE = "none"                  # no journal: the box never migrated
+    MIGRATING = "migrating"        # forward, stopped before `applied`
+    APPLIED = "applied"            # soaking: commit or roll back
+    COMMITTING = "committing"      # a commit began deleting the old root
+    COMMITTED = "committed"
+    ROLLING_BACK = "rolling back"  # rollback, stopped before `rolled-back`
+    ROLLED_BACK = "rolled back"    # as good as no journal: migrate starts over
+
+
+def state(j: Journal | None) -> State:
+    if j is None:
+        return State.NONE
+    if j.direction == ROLLBACK:
+        return State.ROLLED_BACK if j.phase == "rolled-back" else State.ROLLING_BACK
+    if j.phase == "applied":
+        return State.COMMITTING if COMMIT_STARTED in j.items else State.APPLIED
+    return State.COMMITTED if j.phase == "committed" else State.MIGRATING
+
+
+_HINTS = {
+    State.NONE: "there is no userns migration",
+    State.MIGRATING: "a userns migration stopped at {phase}; resume it: {shim}userns-migrate, "
+                     "or undo it: {shim}userns-rollback",
+    State.APPLIED: "the userns migration is already applied (offset {offset}); soak, then "
+                   "{shim}userns-commit, or undo it: {shim}userns-rollback",
+    State.COMMITTING: "a userns-commit stopped part-way, after it began deleting the old root; "
+                      "finish it: {shim}userns-commit",
+    State.COMMITTED: "the userns migration is already committed (offset {offset})",
+    State.ROLLING_BACK: "a userns rollback stopped at {phase}; finish it: {shim}userns-rollback",
+    State.ROLLED_BACK: "the userns migration was already rolled back",
+}
+
+
+def finish_hint(j: Journal | None, shim: str = "") -> str:
+    """The journal's state in words, for a verdict or a command's refusal.
+    It names only commands that state accepts (tests/test_userns_state.py
+    holds it to each command's own check). `shim`: what an operator types
+    before a command, for a reader who is not already running one."""
+    return _HINTS[state(j)].format(shim=shim, phase=j.phase if j else "",
+                                   offset=j.offset if j else 0)
 
 
 _TYPES: dict[str, tuple[type, ...]] = {

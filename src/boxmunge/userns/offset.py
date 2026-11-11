@@ -218,6 +218,12 @@ def _daemon_remapped(info: dict[str, Any]) -> bool:
     return "name=userns" in (info.get("SecurityOptions") or [])
 
 
+def driver_type(info: dict[str, Any]) -> str:
+    """The storage driver's type in `docker info`: the containerd store's
+    snapshotter type, "" for a graph driver."""
+    return dict(info.get("DriverStatus") or []).get("driver-type", "")
+
+
 def boxmunge_claims_remap(paths: BoxPaths) -> bool:
     """Does a readable boxmunge source say this box is remapped: the
     boxmunge.yml record, or daemon.json naming boxmunge's identity?
