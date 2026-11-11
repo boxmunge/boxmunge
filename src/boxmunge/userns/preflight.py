@@ -17,11 +17,11 @@ from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.compose_version import compose_version_problem
 from boxmunge.config import ConfigError, load_config
-from boxmunge.cve.quarantine import is_quarantined, quarantine_action_complete
+from boxmunge.cve.quarantine import QuarantineError, is_quarantined, quarantine_action_complete
 from boxmunge.legacy_stage import legacy_stage_refusal
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.pause import is_paused, pause_incomplete
+from boxmunge.pause import pause_incomplete, read_paused_state
 from boxmunge.release_txn import open_install_reason
 from boxmunge.run_as import unmappable_users
 from boxmunge.staged_release import has_slot, slot_debris
@@ -63,10 +63,15 @@ def _project_state(paths: BoxPaths, p: str, r: Report) -> None:
     if has_slot(paths, p) or slot_debris(paths, p):
         r.refusals.append(f"{p}: a release is staged (or a stage left debris); promote or "
                           f"unstage it first: the migration carries production only")
-    if is_quarantined(p, paths) and not quarantine_action_complete(p, paths):
-        r.refusals.append(f"{p}: a quarantine is half-applied; finish it before migrating")
-    if pause_incomplete(p, paths):
-        r.refusals.append(f"{p}: a pause is half-applied; finish it with pause or resume")
+    try:
+        if is_quarantined(p, paths) and not quarantine_action_complete(p, paths):
+            r.refusals.append(f"{p}: a quarantine is half-applied; finish it before migrating")
+        if pause_incomplete(p, paths):
+            r.refusals.append(f"{p}: a pause is half-applied; finish it with pause or resume")
+    except (QuarantineError, StateError) as e:
+        # Anything at a record's name is read: one that cannot be is neither
+        # "not paused" (which would skip its backup) nor a crash.
+        r.refusals.append(f"{p}: {e}")
 
 
 def _lifecycle(paths: BoxPaths, inv: Inventory, r: Report, *, forward: bool) -> None:
@@ -165,7 +170,11 @@ def _notes(paths: BoxPaths, inv: Inventory, r: Report) -> None:
             status = f"unknown ({e})"
         if status not in (None, "ok", "healthy"):
             r.notes.append(f"{p} is currently {status}")
-        if is_paused(p, paths):
+        try:
+            paused = read_paused_state(p, paths) is not None
+        except StateError:
+            paused = False   # refused, naming the record (_project_state)
+        if paused:
             r.notes.append(f"{p} is paused: it gets no pre-migration backup (its containers are "
                            f"stopped); its data is carried like any other")
     _records(paths, inv, r)

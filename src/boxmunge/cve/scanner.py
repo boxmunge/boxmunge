@@ -40,7 +40,7 @@ def _extra(detail: dict[str, Any] | None = None) -> dict[str, Any]:
 
 
 class Severity(Enum):
-    """CVE severity classes. Ordering used for deterministic sort."""
+    """CVE severity classes, ordered by ``rank`` (SEVERITY_ORDER)."""
 
     LOW = "Low"
     MEDIUM = "Medium"
@@ -61,6 +61,19 @@ class Severity(Enum):
         if not raw:
             return cls.UNKNOWN
         return _TRIVY_SEVERITY_MAP.get(raw.upper(), cls.UNKNOWN)
+
+    @property
+    def rank(self) -> int:
+        """0 (UNKNOWN) to 4 (CRITICAL): the order findings sort and gates
+        compare in, and Trivy's VendorSeverity scale."""
+        return SEVERITY_ORDER.index(self)
+
+
+# Least to most severe. UNKNOWN is lowest, so unclassified findings never
+# crowd out real ones and never pass a threshold.
+SEVERITY_ORDER: tuple[Severity, ...] = (
+    Severity.UNKNOWN, Severity.LOW, Severity.MEDIUM, Severity.HIGH, Severity.CRITICAL,
+)
 
 
 class AttackVector(Enum):
@@ -156,16 +169,6 @@ _DISTRO_SOURCES: tuple[str, ...] = (
 # in alphabetical order for determinism.
 _CVSS_SOURCE_PRIORITY: tuple[str, ...] = ("nvd", "redhat", "ghsa")
 
-
-# Sort priority: higher number = sorts earlier in descending sort.
-# UNKNOWN sorts last so unclassified findings don't crowd out real ones.
-_SEVERITY_RANK: dict[Severity, int] = {
-    Severity.CRITICAL: 4,
-    Severity.HIGH: 3,
-    Severity.MEDIUM: 2,
-    Severity.LOW: 1,
-    Severity.UNKNOWN: 0,
-}
 
 # Internal map keyed by upper-case Trivy severity. Use
 # Severity.from_trivy_string() rather than indexing this directly so
@@ -360,7 +363,7 @@ def _parse_findings(payload: dict[str, Any]) -> tuple[Finding, ...]:
                 pkg_type=pkg_type,
             ))
 
-    findings.sort(key=lambda f: (-_SEVERITY_RANK[f.severity], f.cve_id))
+    findings.sort(key=lambda f: (-f.severity.rank, f.cve_id))
     return tuple(findings)
 
 
@@ -385,16 +388,6 @@ def _parse_lang_types(payload: dict[str, Any]) -> frozenset[str]:
     )
 
 
-# Trivy VendorSeverity encodes severity as an int 0-4.
-_VENDOR_SEVERITY_RANK_TO_ENUM: dict[int, Severity] = {
-    0: Severity.UNKNOWN,
-    1: Severity.LOW,
-    2: Severity.MEDIUM,
-    3: Severity.HIGH,
-    4: Severity.CRITICAL,
-}
-
-
 def _parse_vendor_severities(raw: Any) -> dict[str, Severity]:
     """Map Trivy's VendorSeverity {source: int} to {source: Severity}.
 
@@ -407,9 +400,9 @@ def _parse_vendor_severities(raw: Any) -> dict[str, Severity]:
     for source, level in raw.items():
         if not isinstance(source, str):
             continue
-        sev = _VENDOR_SEVERITY_RANK_TO_ENUM.get(level)
-        if sev is not None:
-            out[source] = sev
+        # Trivy VendorSeverity encodes severity as its rank, an int 0-4.
+        if level in range(len(SEVERITY_ORDER)):
+            out[source] = SEVERITY_ORDER[int(level)]
     return out
 
 

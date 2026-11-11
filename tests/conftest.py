@@ -316,13 +316,15 @@ def _compose_config_without_docker(request, monkeypatch, fake_containers):
                     if isinstance(svc, dict) and isinstance(svc.get("env_file"), str):
                         svc["env_file"] = os.path.normpath(inc.parent / svc["env_file"])
                 services.update(inc_doc.get("services") or {})
-        if not all_profiles and isinstance(services, dict):
+        active = doc
+        if isinstance(services, dict):
             # Like Compose, leave out services behind a profile.
-            doc["services"] = {n: s for n, s in services.items()
-                               if not (isinstance(s, dict) and s.get("profiles"))}
-        if not all_profiles and isinstance(doc, dict):
-            fake_containers.models[project_name] = doc
-        return json.dumps(doc)
+            active = {**doc, "services": {n: s for n, s in services.items()
+                                          if not (isinstance(s, dict) and s.get("profiles"))}}
+        if isinstance(doc, dict):
+            # The fake runs what `up` starts, whichever model was asked for.
+            fake_containers.models[project_name] = active
+        return json.dumps(doc if all_profiles else active)
 
     monkeypatch.setattr(docker, "compose_config", _literal_config)
 

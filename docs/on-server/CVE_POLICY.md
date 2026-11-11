@@ -969,10 +969,12 @@ of the two the last scan checked.
 ## Scan cadence
 
 - **Daily** at 03:00 system time via systemd timer `boxmunge-cve-scan.timer`,
-  with up to 30 minutes of randomized delay (03:00 to 03:30).
-- **Not yet at deploy or image-update time.** `prod-deploy`, `stage`,
-  `promote` and `container-update` do not scan, and no deploy is rejected
-  for CVEs: a new image runs unscanned until the next daily scan. Run
+  with up to 30 minutes of randomized delay (03:00 to 03:30). The nightly
+  container update runs first (02:30 to 03:00), and a scan due while it is
+  still running waits for it, so the images it pulled are scanned that night.
+- **Not yet at deploy time.** `prod-deploy`, `stage` and `promote` do not
+  scan, and no deploy is rejected for CVEs: a new image runs unscanned
+  until the next daily scan. Run
   `boxmunge security scan <project>` after a deploy to check it at once.
   The exception is a quarantined project: `prod-deploy`, `promote` and
   `stage` scan its release before starting it (see "Recovering a
@@ -1005,9 +1007,7 @@ The `QUARANTINED` alert belongs to the quarantine **action**, not to a
 change in a finding's disposition: it is sent once, when the maintenance
 page and the stop have both landed (a new quarantine, or an earlier
 partial one completing). A project that stays quarantined is not
-re-alerted, and the first enforcing scan after the migration grace window
-alerts even though its dispositions were already `QUARANTINE` while in
-grace.
+re-alerted.
 
 ### Per-project scan budget (v0.7.0)
 
@@ -1103,26 +1103,6 @@ run trips it. An unreadable `state/cve-breaker.json` fails loudly: no new
 quarantine is applied that run, the scan exits 1 and the scan-failure
 alert names the file.
 
-## Migration grace
-
-A one-time 24-hour grace window applies after upgrade to v0.6.0 (or after
-a fresh install on v0.6.0+). It runs once across the lifetime of the
-install — you cannot dodge enforcement by repeatedly upgrading.
-
-- The first scan after upgrade creates a grace marker. For the next 24
-  hours, no project gets quarantined.
-- A single fleet-level heads-up alert summarizes which projects *would*
-  quarantine when grace expires, with pointers to suppress / change
-  posture / accept enforcement.
-- Per-project transition alerts (new findings, suppression expiry, etc.)
-  are silenced during grace — the heads-up is the one alert in this
-  window.
-- After 24 hours, full enforcement begins on the next scan, and every
-  project quarantined then gets its own `QUARANTINED` alert.
-
-The grace state is visible in `boxmunge security --json` under the
-top-level `grace` field.
-
 ## Alerts you'll see (Pushover)
 
 Titles only (each starts with `[<hostname>]`, the box's name) — bodies
@@ -1157,10 +1137,9 @@ Alerting is best-effort. The durable record is the on-disk scan state
 under `state/scans/<project>.json`. If Pushover isn't configured, or
 the API call fails, the scan still runs, the quarantine still happens,
 and the state file is still written — you just won't get a push. Every
-alert that was not delivered is logged (component `cve-alert`). The two
-alerts that record "sent" state — the grace heads-up and a circuit-breaker
-hold — record it only once Pushover accepted them, so an undelivered one
-is retried by the next scan.
+alert that was not delivered is logged (component `cve-alert`). A
+circuit-breaker hold records its alert as sent only once Pushover accepted
+it, so an undelivered one is retried by the next scan.
 
 ## CLI reference
 
@@ -1181,7 +1160,8 @@ boxmunge prod-deploy <project> --accept-stale-kev     Deploy a fix with no usabl
 
 The fleet view shows posture distribution, currently quarantined projects,
 projects in `at_risk_running` (dangerously-disable-quarantine with active
-findings), active suppression counts, and the migration grace state.
+findings), active suppression counts, quarantines held by the circuit
+breaker, and whether the KEV catalog is fresh.
 
 The per-project view shows posture, quarantine state (with the triggering
 CVE if applicable), the latest scan disposition per finding, and the

@@ -4,9 +4,8 @@
 Deciding (security_scan_core) is kept apart from acting (here). The
 QUARANTINED alert is tied to the action, not to a change in a finding's
 disposition (audit B-17): it fires when a quarantine actually lands, so
-the first enforcing scan after the migration grace window — whose
-dispositions were already QUARANTINE while in grace — still tells the
-operator the site went dark.
+a quarantine the fleet run applies after deferring it, or one that
+converges on a later scan, still tells the operator the site went dark.
 
 A quarantine of a `balanced` project lifts on its own when a scan covered
 every image the project starts, against a fresh KEV catalog, and found no
@@ -70,7 +69,7 @@ def enforce(
     paths: BoxPaths, project: str, *,
     hosts: list[str], compose_files: list[str], policy: dict[str, Any],
     headline: tuple[ProjectDecision, FindingDisposition] | None,
-    in_grace: bool,
+    defer_new: bool,
     cleared: Sequence[ProjectDecision] | None = None,
 ) -> Enforcement:
     """Take, re-assert or lift the quarantine action for ``project``.
@@ -80,8 +79,8 @@ def enforce(
     ``_lift_blocker`` says it must not be, or a KEV refresh withdrew its
     CVE and the images still contain it (kev_withdrawal). Otherwise an
     existing record is re-asserted, so a partially failed action converges
-    (audit B-03). During grace no NEW quarantine fires; the heads-up alert
-    summarises what would. For a project with a 0.10.1 stage both are held
+    (audit B-03). With ``defer_new`` no NEW quarantine fires here: the fleet
+    run weighs it through the circuit breaker. For a project with a 0.10.1 stage both are held
     (Enforcement.held); when it cannot be told whether one is on disk, a due
     action is not taken and is reported as the error.
     """
@@ -90,7 +89,7 @@ def enforce(
         try:
             legacy = legacy_stage(paths, project) is not None
         except OSError as e:
-            return _undetermined(paths, project, e, due=headline is not None and not in_grace)
+            return _undetermined(paths, project, e, due=headline is not None and not defer_new)
         if is_quarantined(project, paths):
             if legacy:
                 # Re-asserting stops the containers again: production's.
@@ -109,7 +108,7 @@ def enforce(
             if blocker is not None:
                 log_warning("cve-scan", f"{project}: {blocker}", paths, project=project)
             return Enforcement(landed=not was_complete, kept=blocker)
-        if headline is not None and not in_grace:
+        if headline is not None and not defer_new:
             if legacy:
                 return _hold(paths, project, headline[1].finding.cve_id, reasserting=False)
             quarantine_project(
@@ -195,7 +194,7 @@ def _hold(paths: BoxPaths, project: str, cve: str, *, reasserting: bool) -> Enfo
     stay refused until probation ends."""
     action = ("its quarantine for {cve} would be re-asserted" if reasserting
               else "it would be quarantined for {cve}").format(cve=cve)
-    message = (f"{project}: {action}, but it has a release staged by boxmunge 0.10.1: "
+    message = (f"{project}: {action}, but it has a release staged by boxmunge 0.10.1 or earlier: "
                f"a quarantine would stop production, and security resume and "
                f"legacy-stage stay refused until probation ends. Resolve it with "
                f"`boxmunge-server legacy-stage {project}`.")

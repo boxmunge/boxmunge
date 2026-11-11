@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from boxmunge import docker_containers
+from boxmunge.caddy_journal import MAX_SITE_BYTES
 from boxmunge.commands.deploy_images import candidate_name
 from boxmunge.commands.kev_acceptance import accept_at_gate, gate_exits
 from boxmunge.commands.kev_withdrawal import gate_hold
@@ -52,6 +53,7 @@ from boxmunge.cve.quarantine import (
     QuarantineError, checked_quarantine_record, is_quarantined, lift_quarantine,
     read_quarantine_state, reassert_quarantine,
 )
+from boxmunge.fs_nofollow import read_text_nofollow
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
@@ -462,11 +464,13 @@ def lift_after_deploy(paths: BoxPaths, project: str, ref: str, clearance: Cleara
     try:
         policies = _release_policies(paths, project,
                                      _verify_running(paths, clearance, component))
-        site = paths.project_caddy_site(project).read_text()
+        site = read_text_nofollow(paths.project_caddy_site(project),
+                                  limit=MAX_SITE_BYTES)
         lift_quarantine(project, paths, project_caddy_site_content=site,
                         compose_files=["compose.yml", "compose.boxmunge.yml"],
                         restore=policies, txn=txn, component=component, after_start=recheck)
-    except (QuarantineError, DockerError, ComposeResolveError, OSError) as e:
+    except (QuarantineError, DockerError, ComposeResolveError, OSError,
+            UnicodeDecodeError) as e:
         print(f"ERROR: {ref} is deployed, but lifting the quarantine ({clearance.cve_id}) "
               f"failed: {e}. The quarantine stays in place and the next scan re-asserts it; "
               f"run `boxmunge security resume {project}` once the cause is fixed.",

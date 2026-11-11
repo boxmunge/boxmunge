@@ -17,7 +17,6 @@ committed, rollback is no longer offered.
 from __future__ import annotations
 
 import os
-import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -32,7 +31,7 @@ from boxmunge.userns.images import IMAGES_DIR, remove_tars
 from boxmunge.userns.inventory import CONTAINERD_STORE, Inventory
 from boxmunge.userns.journal import FORWARD, Journal, load_journal, save_journal
 from boxmunge.userns.preflight_checks import dir_size
-from boxmunge.userns.switch import MigrationError
+from boxmunge.userns.switch import MigrationError, remove_docker_tree
 
 COMPONENT = "userns-commit"
 SOAK = timedelta(hours=48)
@@ -125,7 +124,7 @@ def _drop_managed_root(old_root: Path, s: int, store_root: Path) -> None:
                              f"{old_root}/{s}.{s}; {store_root} may still be in use, so it "
                              f"is left as it is")
     if store_root.is_dir() and not store_root.is_symlink():
-        shutil.rmtree(store_root)
+        remove_docker_tree(store_root)
 
 
 def _old_volumes_with_data(old_root: Path) -> list[str]:
@@ -234,13 +233,13 @@ def _commit(paths: BoxPaths, j: Journal, images_dir: Path) -> Journal:
     remove_tars(images_dir)
     for sub in _OLD_ROOT_DIRS:
         if (old_root / sub).is_dir() and not (old_root / sub).is_symlink():
-            shutil.rmtree(old_root / sub)
+            remove_docker_tree(old_root / sub)
     if prior["driver_type"] == CONTAINERD_STORE and prior["managed"]:
         _drop_managed_root(old_root, j.offset, Path(prior["store_root"]))
     elif prior["driver_type"] == CONTAINERD_STORE:
         _clean_containerd(prior)
     elif Path(prior["store_root"]).is_dir():
-        shutil.rmtree(prior["store_root"])
+        remove_docker_tree(Path(prior["store_root"]))
     if not (prior["driver_type"] == CONTAINERD_STORE and not prior["managed"]):
         _check_freed(prior, old_root, before)
     barrier(paths, j, images_dir)  # the deletions, before the journal says committed

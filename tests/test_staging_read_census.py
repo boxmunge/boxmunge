@@ -152,7 +152,7 @@ def _scan_and_quarantine(box, seen, monkeypatch):
     kev = KevCatalog(frozenset({CRIT.cve_id}), datetime.now(timezone.utc), datetime.now(timezone.utc), 'test')
     with staging_docker_off(), patch("boxmunge.cve.quarantine.caddy_reload"):
         security_scan_core.scan_one_project_locked(
-            box.paths, "myapp", in_grace=False, kev=kev)
+            box.paths, "myapp", kev=kev)
     assert is_quarantined("myapp", box.paths)
     assert "stop" in seen.docker
 

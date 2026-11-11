@@ -4,12 +4,10 @@
 Resume lives in security_resume.py and suppress/unsuppress in
 security_suppress.py. The per-project scan mechanics live in
 security_scan_core.py — keep this file focused on fleet orchestration
-(grace heads-up, exit codes, lock-skip handling).
+(exit codes, lock-skip handling).
 """
 from __future__ import annotations
 
-import fcntl
-import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -19,7 +17,6 @@ from boxmunge.commands.security_fleet_enforce import apply_held, apply_new_quara
 from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project
 from boxmunge.cve.breaker import BreakerError
 from boxmunge.cve.alerting import (
-    format_grace_heads_up_alert,
     format_host_suppression_expired_alert,
     format_scan_failure_alert,
     format_scan_unrecorded_alert,
@@ -28,19 +25,13 @@ from boxmunge.cve.alerting import (
 from boxmunge.commands.security_kev import refresh_kev_and_alert
 from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.scan_state import last_scanned_at
-from boxmunge.cve.grace import (
-    GraceError,
-    init_grace_if_missing,
-    mark_heads_up_sent,
-    read_grace_state,
-)
 from boxmunge.cve.policy import Disposition, ProjectDecision
-from boxmunge.cve.quarantine import is_quarantined
-from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
+from boxmunge.cve.quarantine import QuarantineError, is_quarantined
+from boxmunge.cve.scanner import ScanResult, TrivyNotInstalledError, refresh_db
 from boxmunge import docker_containers
 from boxmunge.docker_run import DockerError
-from boxmunge.fileutil import LockError, open_shared_lockfile
-from boxmunge.log import log_warning
+from boxmunge.fileutil import LockError
+from boxmunge.log import log_operation, log_warning
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError
@@ -53,63 +44,32 @@ from boxmunge.project_registry import (
 # ---------- helpers ----------
 
 
-def _maybe_fire_grace_heads_up(
-    paths: BoxPaths,
-    *,
-    decisions_by_project: dict[str, ProjectDecision],
-    posture_by_project: dict[str, str],
-    dangerously_by_project: dict[str, bool],
-) -> None:
-    """Fire the one-time grace heads-up alert under a fleet-wide flock.
+# The v0.6.0 migration grace window's marker and its lock. Every box's
+# window closed in May 2026 and nothing reads them any more; the scan
+# removes what an older release left behind.
+_RETIRED_GRACE_FILES = ("cve-grace.json", ".cve-grace.lock")
 
-    Audit E-1: read-decide-write of grace.heads_up_sent must be atomic
-    across concurrent fleet scans (cron + manual). Without the lock, two
-    scans both pass the ``not heads_up_sent`` check and Pushover is spammed
-    twice. The lock file lives at ``state/.cve-grace.lock`` (matches the
-    ``.caddy.lock`` / ``.registry.lock`` pattern, shared between root and
-    deploy uids).
 
-    Failures of send/persist are logged but never raised — alerting must
-    not block the scan.
-    """
-    lock_path = paths.state / ".cve-grace.lock"
-    fd = open_shared_lockfile(lock_path)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        # Re-read inside the lock: another process may have raced us
-        # between the outer check and lock acquisition.
+def _retire_grace_marker(paths: BoxPaths) -> None:
+    """Remove the retired grace marker and lock; say so once, when they go.
+
+    A file that cannot be removed is warned about, not raised: it is inert,
+    and the scan it would block is the box's CVE enforcement."""
+    removed = []
+    for name in _RETIRED_GRACE_FILES:
+        path = paths.state / name
         try:
-            current = read_grace_state(paths)
-        except GraceError as e:
-            log_warning(
-                "cve-scan",
-                f"grace state unreadable while firing heads-up: {e}",
-                paths,
-            )
-            return
-        if current is None or current.heads_up_sent:
-            return
-        alert = format_grace_heads_up_alert(
-            expires_at=current.expires_at,
-            decisions_by_project=decisions_by_project,
-            posture_by_project=posture_by_project,
-            dangerously_by_project=dangerously_by_project,
-        )
-        # Record the heads-up as sent only once it was delivered, so an
-        # undelivered one is retried by the next scan in the window.
-        if send_alerts((alert,), paths) != 1:
-            return
-        try:
-            mark_heads_up_sent(paths, current)
+            path.unlink()
+        except FileNotFoundError:
+            continue
         except OSError as e:
-            log_warning(
-                "cve-scan",
-                f"failed to persist heads_up_sent flag: {e}",
-                paths,
-            )
-    finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+            log_warning("cve-scan", f"could not remove the retired {path}: {e}; "
+                        f"remove it by hand: sudo rm {path}", paths)
+            continue
+        removed.append(name)
+    if removed:
+        log_operation("cve-scan", f"removed the retired migration grace files: "
+                      f"{', '.join(removed)}", paths)
 
 
 def _summarise_decisions(decisions: list[ProjectDecision]) -> str:
@@ -235,18 +195,17 @@ def _orphaned(missing: list[str]) -> dict[str, list[str]]:
 
 
 def _scan_each(
-    paths: BoxPaths, targets: list[str], *, in_grace: bool, kev: KevCatalog,
+    paths: BoxPaths, targets: list[str], *, kev: KevCatalog,
 ) -> FleetRun:
     """Scan every target; one project's failure never stops the others.
 
     Raises TrivyNotInstalledError — no project can be scanned without it.
     """
     run = FleetRun()
+    scanned: dict[str, ScanResult] = {}  # Trivy results by exact image ref
     for name in targets:
         try:
-            scan = scan_one_project(
-                paths, name, in_grace=in_grace, kev=kev, defer_new=True,
-            )
+            scan = scan_one_project(paths, name, kev=kev, defer_new=True, scanned=scanned)
         except LockError:
             # Audit A-2: another operation holds the project lock. Skip and
             # warn; the next cron tick will re-attempt.
@@ -259,10 +218,10 @@ def _scan_each(
             print(f"{name}: SKIPPED — held by another operation; will be "
                   f"picked up on next scan")
             continue
-        except (RuntimeError, ManifestError, OSError, StateError) as e:
+        except (RuntimeError, ManifestError, OSError, StateError, QuarantineError) as e:
             # Audit B-12: a malformed per-project file (a manifest, a corrupt
-            # health or deploy state) is reported for that project and the
-            # fleet scan carries on with the rest.
+            # health, deploy, pause or quarantine record) is reported for
+            # that project and the fleet scan carries on with the rest.
             print(f"{name}: ERROR — {e}")
             log_warning(
                 "cve-scan", f"scan failed for {name}: {e}",
@@ -292,10 +251,10 @@ def _scan_each(
     return run
 
 
-def _enforce_fleet(paths: BoxPaths, run: FleetRun, *, in_grace: bool) -> None:
+def _enforce_fleet(paths: BoxPaths, run: FleetRun) -> None:
     """Phase 2: new quarantines for the whole run, via the circuit breaker."""
     try:
-        phase2 = apply_new_quarantines(paths, run.scans, in_grace=in_grace)
+        phase2 = apply_new_quarantines(paths, run.scans)
     except BreakerError as e:
         print(f"ERROR: {e} — no new quarantine was applied this run", file=sys.stderr)
         run.problems["(circuit breaker)"] = [f"{e}; no new quarantine was applied"]
@@ -410,23 +369,11 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
     now = datetime.now(timezone.utc)
     kev = refresh_kev_and_alert(paths, now)
 
-    # Migration grace window — bootstrap lazily on first scan after upgrade.
-    # Corrupt grace state aborts the scan rather than silently proceeding
-    # with full enforcement: the operator might believe they are in grace.
-    try:
-        grace = init_grace_if_missing(paths, now=now)
-    except GraceError as e:
-        print(
-            f"ERROR: CVE migration grace state is corrupt: {e}\n"
-            f"  Inspect {paths.cve_grace_state} and resolve before scanning.",
-            file=sys.stderr,
-        )
-        return 1
-    in_grace = grace.is_active(now=now)
+    _retire_grace_marker(paths)
 
     start = time.monotonic()
     try:
-        run = _scan_each(paths, targets, in_grace=in_grace, kev=kev)
+        run = _scan_each(paths, targets, kev=kev)
     except TrivyNotInstalledError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
@@ -435,27 +382,11 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
         print(f"{name}: ERROR — {reasons[0]}")
         log_warning("cve-scan", f"{name}: {reasons[0]}", paths, project=name)
         run.problems[name] = reasons
-    _enforce_fleet(paths, run, in_grace=in_grace)
-
-    # The one-time heads-up needs the whole fleet: fleet scans only.
-    if not args and in_grace and not grace.heads_up_sent and run.scans:
-        _maybe_fire_grace_heads_up(
-            paths,
-            decisions_by_project={
-                n: s.decisions[0] for n, s in run.scans.items() if s.decisions
-            },
-            posture_by_project={n: s.posture for n, s in run.scans.items()},
-            dangerously_by_project={n: s.dangerously for n, s in run.scans.items()},
-        )
+    _enforce_fleet(paths, run)
     _alert_fleet(paths, run)
 
     elapsed = time.monotonic() - start
     print(f"Scanned {len(targets)} projects in {elapsed:.1f}s.")
     if run.skipped_locked:
         print(f"Skipped (locked): {', '.join(run.skipped_locked)}")
-    if in_grace:
-        print(
-            f"Migration grace ACTIVE — full enforcement begins "
-            f"{grace.expires_at.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC",
-        )
     return _exit_code(paths, run)

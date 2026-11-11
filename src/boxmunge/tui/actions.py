@@ -11,6 +11,18 @@ from boxmunge.paths import BoxPaths
 
 _SHOWN_LINES = 8
 
+# What each action does, shown in the confirmation modal before it runs.
+PROMPTS: dict[str, str] = {
+    "deploy": "Deploy {project}: install the newest uploaded bundle and restart "
+              "the project on it.",
+    "redeploy": "Redeploy {project}: re-run the installed release, recreating "
+                "its containers.",
+    "backup": "Back up {project}: take a data snapshot now.",
+    "rollback": "Roll back {project}: replace the running release with the "
+                "previous one and, if it has one, restore the data snapshot "
+                "paired with it, discarding data written since.",
+}
+
 
 @dataclass(frozen=True)
 class Outcome:

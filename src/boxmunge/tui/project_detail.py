@@ -10,6 +10,7 @@ from textual.widgets import (
     TabbedContent, TabPane,
 )
 
+from boxmunge.caddy import read_override
 from boxmunge.docker import compose_command
 from boxmunge.docker_run import docker_env
 from boxmunge.manifest import load_manifest, ManifestError
@@ -170,19 +171,19 @@ class ProjectDetailScreen(Screen):
         else:
             self.query_one("#manifest-view", Static).update("manifest.yml not found")
 
-        caddy_path = self.paths.project_caddy_site(self.project_name)
-        override = self.paths.project_caddy_override(self.project_name)
-        if override.exists():
-            caddy_content = override.read_text()
-            label = "[bold]caddy.override.conf[/] (custom override active)\n\n"
-        elif caddy_path.exists():
-            caddy_content = caddy_path.read_text()
-            label = "[bold]Generated Caddy config[/]\n\n"
-        else:
-            caddy_content = ""
-            label = "No Caddy config generated yet"
+        self.query_one("#caddy-view", Static).update(self._caddy_text())
 
-        self.query_one("#caddy-view", Static).update(label + caddy_content)
+    def _caddy_text(self) -> str:
+        try:
+            override = read_override(self.paths.project_caddy_override(self.project_name))
+        except OSError as e:
+            return f"[bold]caddy.override.conf[/] (refused)\n\n{e}"
+        if override is not None:
+            return f"[bold]caddy.override.conf[/] (custom override active)\n\n{override}"
+        caddy_path = self.paths.project_caddy_site(self.project_name)
+        if caddy_path.exists():
+            return f"[bold]Generated Caddy config[/]\n\n{caddy_path.read_text()}"
+        return "No Caddy config generated yet"
 
     async def _tail_logs(self, service: str | None = None) -> None:
         """Start tailing docker compose logs in the background."""

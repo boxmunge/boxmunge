@@ -367,14 +367,6 @@ def validate_user_compose(
             f"the top-level name: line."
         )
 
-    if "models" in doc:
-        # Checked on the literal file: `config` drops unused top-level models.
-        raise ComposeSecurityError(
-            "compose.yml declares top-level models:, which Docker Model Runner "
-            "runs outside the project's containers. Remove it and run the model "
-            "server as an ordinary service from an image."
-        )
-
     if not isinstance(doc.get("services") or {}, dict):
         raise ComposeSecurityError(
             f"could not parse compose.yml: 'services' must be a mapping, "

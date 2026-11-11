@@ -114,3 +114,17 @@ def test_precheck_refuses_staging_mounting_productions_release_code(paths, tmp_p
     tree, manifest = _release(workspace, volumes=[f"{conf}:/etc/app:ro"])
     with pytest.raises(StagingIsolationError, match=f"mounts {conf}, which is production's"):
         precheck_candidate(paths, P, manifest, tree, workspace)
+
+
+def test_precheck_refuses_a_wildcard_host_before_anything_changes(paths) -> None:
+    """S-13: staging serves staging.<host>, and `staging.*.example.com` can
+    hold no certificate, so Caddy refused it at the stage's last step, after
+    production had been stopped to copy its data. Refused up front."""
+    from boxmunge.staging_isolation import StagingIsolationError
+    from boxmunge.staging_prepare import precheck_candidate
+    workspace = paths.project_releases(P) / "incoming"
+    tree, manifest = _release(workspace)
+    manifest["hosts"] = ["myapp.example.com", "*.example.com"]
+    with pytest.raises(StagingIsolationError, match=r"\*\.example\.com.*prod-deploy myapp --ref"):
+        precheck_candidate(paths, P, manifest, tree, workspace)
+    assert not (workspace / "staging-check").exists()

@@ -350,6 +350,7 @@ def _checks(paths: BoxPaths) -> list[tuple[str, Callable[[], HealthCheck]]]:
         ("container-updates", _in("container_updates", "check_container_updates", paths)),
         ("platform-updates", _in("platform_updates", "check_platform_updates", paths)),
         ("upgrade-probation", _in("upgrade_probation", "check_upgrade_probation", paths)),
+        ("upgrade-slot", _in("upgrade_slot", "check_upgrade_slot", paths)),
         ("docker-userns", _in("userns", "check_docker_userns", paths)),
         ("sshd-hardening", _in("sshd", "check_sshd_hardening")),
         ("sshd-deploy-env", _in("sshd", "check_sshd_deploy_env")),

@@ -99,6 +99,7 @@ def _run(paths: BoxPaths, sub: str) -> None:
     from boxmunge.userns.daemon_ctl import SystemdDaemon, SystemdTimers
     from boxmunge.userns.engine import migrate
     from boxmunge.userns.rollback import rollback
+    from boxmunge.userns.steps import left_alone
     if sub == "migrate":
         j = migrate(paths, daemon=SystemdDaemon(), timers=SystemdTimers())
         failed = sorted(k for k, v in j.items.items()
@@ -111,6 +112,8 @@ def _run(paths: BoxPaths, sub: str) -> None:
                         if k.startswith(("rb-project:", "abort:")) and v.startswith("failed"))
         print("Rolled back to the prior store." + (f" Not healthy, on the maintenance page: "
                                                    f"{failed}" if failed else ""))
+        for line in left_alone(j):
+            print(line)
     else:
         commit(paths)
         print("Committed: the old root is deleted; rollback is no longer offered.")

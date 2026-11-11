@@ -121,11 +121,25 @@ on_probation() {
     rm "$BOXMUNGE_ROOT/env-b/bin/python"
     printf '#!/usr/bin/env bash\nexit 0\n' > "$BOXMUNGE_ROOT/env-b/bin/python"
     chmod +x "$BOXMUNGE_ROOT/env-b/bin/python"
-    write_probation "1.5.0" "b" "$SOON"
-    mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+    write_probation "1.5.0" "b" "$SOON"  # also makes upgrade-root/
     [[ -z "${2:-}" ]] || echo "$2" > "$BOXMUNGE_ROOT/upgrade-root/health-baseline"
 }
 rolled_back() { [[ "$(readlink "$BOXMUNGE_ROOT/env-active")" == "$BOXMUNGE_ROOT/env-b" ]]; }
+
+# Linux caps one environment variable at 128 KiB: a report bigger than that
+# must still be judged (it reaches Python on stdin), not kill the shim.
+BIGBIN="$(mktemp -d)"
+printf '%s\n' '#!/usr/bin/env bash' \
+    'python3 -c '"'"'import json; print(json.dumps({"healthy": True, "exit_code": 0, "checks": [{"name": "docker", "status": "ok", "detail": "x" * 140000}]}))'"'" \
+    > "$BIGBIN/big-report"
+chmod +x "$BIGBIN/big-report"
+PATH="$BIGBIN:$PATH" on_probation "big-report"
+PATH="$BIGBIN:$PATH" run_shim check-probation
+expect 0 "" "a 140 KB health report is judged"
+[[ "$OUT" != *"rgument list too long"* && -f "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] \
+    && pass "a large report keeps the probation going" || fail "out: $OUT"
+drop_root
+rm -rf "$BIGBIN"
 
 on_probation "health-report 2 ufw" "a report ufw"
 run_shim check-probation

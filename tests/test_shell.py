@@ -105,6 +105,11 @@ class TestAllowedCommands:
                      "add-project"]:
             assert cmd not in ALLOWED_COMMANDS, f"{cmd} should not be allowed"
 
+    def test_auto_update_is_root_only(self) -> None:
+        """It takes upgrade.lock in root-only upgrade-root/, so from the deploy
+        shell it could only ever fail (after writing state as deploy)."""
+        assert "auto-update" not in ALLOWED_COMMANDS
+
     def test_shell_commands_not_allowed(self) -> None:
         for cmd in ["bash", "sh", "ls", "cat", "cd", "vi", "rm",
                      "python", "python3", "curl", "wget", "docker"]:
@@ -133,6 +138,8 @@ class TestAllowedCommands:
             "legacy-stage",      # Operator-only (root): resolves a stage left by 0.10.1.
             "staging-teardown-all",  # Root-only: run by the upgrade shim before a rollback.
             "userns",            # Root-only: the userns migration, through the upgrade shim.
+            "auto-update",       # Root-only: its lock is in root-only upgrade-root/ (`upgrade`
+                                 # is the deploy shell's way to update).
         }
 
         for cmd in COMMANDS:

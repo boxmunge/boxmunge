@@ -139,3 +139,35 @@ def test_discovery_reports_a_planted_blocklist_as_an_error_action(
     out = json.loads(capsys.readouterr().out)
     assert out["action"] == "error"
     assert str(paths.blocklist) in out["message"] and "Remove it" in out["message"]
+
+
+@pytest.mark.parametrize("which", ["upgrade_lock", "legacy_upgrade_lock"])
+def test_upgrade_lock_refuses_a_lock_file_of_another_user(paths, monkeypatch, which) -> None:
+    """Deploy can unlink root's legacy lock and hold a flock on its own file
+    at the name: every taker would then wait on deploy, silently. A lock file
+    the taker does not own is refused, naming it."""
+    lock = getattr(paths, which)
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.touch()
+    foreign = os.stat(lock)
+    real_fstat = os.fstat
+
+    def fstat(fd):  # the planted file, as another user's
+        st = real_fstat(fd)
+        if (st.st_dev, st.st_ino) != (foreign.st_dev, foreign.st_ino):
+            return st
+        return os.stat_result((st.st_mode, st.st_ino, st.st_dev, st.st_nlink, st.st_uid + 1,
+                               *st[5:10]))
+    monkeypatch.setattr(os, "fstat", fstat)
+    with pytest.raises(UpgradeStateError, match=f"{lock} is owned by uid {foreign.st_uid + 1}.*Remove it"):
+        _lock(paths)
+
+
+def test_upgrade_lock_makes_a_0644_legacy_lock_0600(paths) -> None:
+    """Shims up to 0.10.1 created the legacy lock 0644: deploy could open it
+    read-only and hold a flock on it. Taking the locks closes it to others."""
+    paths.legacy_upgrade_lock.parent.mkdir(parents=True, exist_ok=True)
+    paths.legacy_upgrade_lock.touch()
+    os.chmod(paths.legacy_upgrade_lock, 0o644)
+    _lock(paths)
+    assert os.stat(paths.legacy_upgrade_lock).st_mode & 0o777 == 0o600

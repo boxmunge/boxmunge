@@ -14,7 +14,8 @@ from pathlib import Path
 from boxmunge.backup import BackupKind
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
-from boxmunge.pause import is_paused
+from boxmunge.state import StateError
+from boxmunge.pause import read_paused_state
 from boxmunge.userns.inventory import Inventory
 from boxmunge.userns.journal import Journal
 from boxmunge.userns.preflight_checks import Report, disk
@@ -31,7 +32,13 @@ def _backups(paths: BoxPaths, inv: Inventory) -> None:
     for p in inv.projects:
         if not paths.project_manifest(p).exists():
             continue
-        if is_paused(p, paths):
+        try:
+            # Read, not looked for: a record that cannot be read must not
+            # pass for "paused" and skip this backup.
+            paused = read_paused_state(p, paths) is not None
+        except StateError as e:
+            raise MigrationError(f"{e}; nothing was stopped") from e
+        if paused:
             print(f"  {p} is paused: no pre-migration backup (its containers are stopped); "
                   f"its data is carried like any other")
             continue
@@ -100,12 +107,28 @@ def _final(paths: BoxPaths, j: Journal, results: dict[str, str]) -> None:
            component=COMPONENT, priority=1)
 
 
+def left_alone(j: Journal) -> list[str]:
+    """A warning per tree whose inverse shift left entries alone: ids in
+    neither range have no owner to go back to, so they keep theirs, and a
+    service may not be able to use them on the old daemon. The rollback
+    still completes (the box must come back up, and no rerun could do
+    better); the operator chowns those entries by hand."""
+    return [f"WARNING: {k.removeprefix('left:').removeprefix('rb:')}: {v}. Give them the owner the "
+            f"service expects (chown, as root)" for k, v in sorted(j.items.items())
+            if k.startswith("left:")]
+
+
 def report_back(paths: BoxPaths, j: Journal, prefix: str, title: str, component: str) -> None:
     """The alert once a rollback or an abort has the box running on its old
-    daemon: each project's result, and whether CrowdSec tails Caddy."""
+    daemon: each project's result, entries left with unmapped owners, and
+    whether CrowdSec tails Caddy."""
     lines = [f"{k.split(':', 1)[1]}: {v}" for k, v in sorted(j.items.items())
              if k.startswith(f"{prefix}:")]
     failed = [line for line in lines if ": failed" in line]
+    left = left_alone(j)
+    lines += left
+    if left:
+        title += f"; files in {len(left)} tree(s) keep owners outside both id ranges"
     crowdsec = crowdsec_tails_caddy()
     if crowdsec:
         print(f"ERROR: {crowdsec}", file=sys.stderr)

@@ -13,21 +13,23 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from boxmunge.caddy import generate_caddy_config, prepare_caddy_config
+from boxmunge.caddy import generate_caddy_config, override_refusal, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.upgrade_offline import (
-    PutBackError, offline_dry_run_line, regenerate_offline, render_overlay,
+    PutBackError, UnreadableRecord, in_memory_line, offline_dry_run_line, offline_exit,
+    regenerate_offline, render_overlay, unreadable_record,
 )
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
 from boxmunge.user_entries import USER_ENTRIES, split_user_entries
 from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
-from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.release_txn import InstallTxn, load_txn, stale_reason, start_refusal
 from boxmunge.docker import DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
-from boxmunge.legacy_stage import LegacyStage, cannot_tell_left_as_is, legacy_stage
+from boxmunge.legacy_stage import (
+    LegacyStage, awaiting_deploy_refusal, cannot_tell_left_as_is, legacy_stage, staged_by,
+)
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import (
@@ -35,8 +37,8 @@ from boxmunge.manifest import (
 )
 from boxmunge.git_layout import relink_advice, repo_ownership_advice, unlinked_files
 from boxmunge.migration import migrate_manifest, MigrationError
-from boxmunge.pause import is_paused, render_maintenance_caddy_config
-from boxmunge.redeploy_hint import deploy_from_pause
+from boxmunge.pause import render_maintenance_caddy_config
+from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.fleet import report_project_failure
 from boxmunge.paths import BoxPaths, InvalidProjectName, validate_project_name
 from boxmunge.security_overlay import services_with_off_profile
@@ -75,11 +77,13 @@ def require_manifest(project_dir: Path) -> Path:
     return path
 
 
-def exclusion(paths: BoxPaths, name: str) -> LegacyStage | InstallTxn | ReleaseStateError | OSError | None:
+def exclusion(paths: BoxPaths, name: str) -> (
+        LegacyStage | InstallTxn | ReleaseStateError | OSError | UnreadableRecord | None):
     """Why the upgrade leaves `name` exactly as it is, or None: a stage left by
     0.10.1, an OSError when it cannot be told whether one is on disk, an
-    open install, or an install record this release cannot read. Read-only;
-    the one decision behind the dry run and the apply."""
+    open install, an install record this release cannot read, or a pause or
+    quarantine record it cannot read. Read-only; the one decision behind the
+    dry run and the apply."""
     try:
         stage = legacy_stage(paths, name)
     except OSError as e:
@@ -87,9 +91,10 @@ def exclusion(paths: BoxPaths, name: str) -> LegacyStage | InstallTxn | ReleaseS
     if stage is not None:
         return stage
     try:
-        return load_txn(paths, name)
+        txn = load_txn(paths, name)
     except ReleaseStateError as e:
         return e
+    return txn if txn is not None else unreadable_record(paths, name)
 
 
 def _unreadable_release_files(paths: BoxPaths, name: str, txn: InstallTxn) -> tuple[str | None, str | None]:
@@ -259,6 +264,13 @@ def _regenerate_project(
     if block:
         _regenerate_offline(paths, name, manifest, block.reason.value, regen)
         return
+    refusal = override_refusal(paths, name)  # the project's fault, not the upgrade's
+    if refusal is not None:
+        regen.refused[name] = refusal
+        log_error("upgrade", f"{refusal} {name}'s configs and running containers are "
+                  f"left as they were and it is not restarted; fix the override, "
+                  f"then {redeploy_command(paths, name)}.", paths, project=name)
+        return
     try:
         prepare_caddy_config(paths, manifest)
         prepare_compose_override(paths, manifest, component="upgrade")
@@ -285,34 +297,13 @@ def _regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any], re
                                f"previous ones could not be put back: {e}") from e
     if refusal is not None:
         regen.refused[name] = refusal
-        log_error("upgrade", f"{name} ({reason}): {refusal}. Fix the cause, then "
-                  f"{_offline_exit(paths, name)}.", paths, project=name)
+        log_error("upgrade", f"{name} ({reason}): {refusal}. To bring it back, "
+                  f"{offline_exit(paths, name)}.", paths, project=name)
         return
     log_operation("upgrade", f"{name} is {reason}: it keeps its maintenance page and is not "
                   f"restarted; its overlay was regenerated and recorded for when it comes "
                   f"back", paths, project=name)
     regen.processed.append(name)
-
-
-def _offline_exit(paths: BoxPaths, name: str) -> str:
-    """The command that brings a paused or quarantined project back. A
-    deploy is refused while it is paused, so where only a deploy fixes the
-    refusal (a changed control file), resume hands the pause to it."""
-    if not is_quarantined(name, paths):
-        return f"run `boxmunge resume {name}`, or {deploy_from_pause(paths, name)}"
-    if is_paused(name, paths):
-        return f"run `boxmunge security resume {name}`, then `boxmunge resume {name}`"
-    return f"run `boxmunge security resume {name}`, or deploy a fixed release"
-
-
-def _in_memory_line(name: str, written: object) -> str:
-    if written is None:
-        return (f"{name}: repository manifest.yml has no schema_version; the "
-                f"upgrade will alert to set it to {CURRENT_SCHEMA_VERSION} in the "
-                f"repository")
-    return (f"{name}: repository manifest.yml uses schema v{written}; migrated in "
-            f"memory to v{CURRENT_SCHEMA_VERSION} (the upgrade will alert to update "
-            f"it in the repository)")
 
 
 def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
@@ -323,8 +314,8 @@ def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
     if why is None:
         return None
     if isinstance(why, LegacyStage):
-        return (f"{name}: a release staged by boxmunge 0.10.1 ({why.kind}) will be left "
-                f"as is; after the upgrade, resolve it with boxmunge-server legacy-stage "
+        return (f"{name}: a release staged by {staged_by(why.kind)} ({why.kind}) will be "
+                f"left as is; after the upgrade, resolve it with boxmunge-server legacy-stage "
                 f"{name}")
     if isinstance(why, InstallTxn):
         line = f"{name}: an install ({why.ref}, {why.phase}) is open; the project will be left as is"
@@ -332,6 +323,8 @@ def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
         return line if unreadable is None else f"{line} ({unreadable})"
     if isinstance(why, OSError):
         return f"{name}: the project will be left as is: {cannot_tell_left_as_is(name, why)}"
+    if isinstance(why, UnreadableRecord):
+        return f"{name}: the project will be left as is: {why.text}"
     return f"{name}: {why}; the project will be left as is"
 
 
@@ -361,6 +354,11 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
         if left is not None:
             report.append(left)
             continue
+        awaiting = awaiting_deploy_refusal(paths, name)
+        if awaiting is not None:   # the apply's check_kept_files refuses it the same way
+            report.append(f"{name}: would be refused and left on its current configs and "
+                          f"containers, not restarted: {awaiting}")
+            continue
         manifest = load_manifest_as_written(require_manifest(project_dir))
         migrated = _migrated(project_dir, manifest)
         unlinked = unlinked_files(project_dir, manifest)
@@ -369,7 +367,7 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
         if migrated is not None:
             written = manifest.get("schema_version")
             if _links_into_repository(project_dir):
-                report.append(_in_memory_line(name, written))
+                report.append(in_memory_line(name, written))
             else:
                 report.append(f"{name}: migration OK (schema v{written or 1} "
                               f"-> v{CURRENT_SCHEMA_VERSION})")
@@ -386,6 +384,11 @@ def check_upgrade(paths: BoxPaths) -> list[str]:
             continue
         if block:
             report.append(offline_dry_run_line(paths, name, manifest, block.reason.value))
+            continue
+        refusal = override_refusal(paths, name)
+        if refusal is not None:
+            report.append(f"{name}: would be left on its current configs and containers, "
+                          f"not restarted: {refusal}")
             continue
         if not paths.project_caddy_override(name).exists():
             generate_caddy_config(manifest)

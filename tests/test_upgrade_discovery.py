@@ -1,5 +1,6 @@
 """Tests for upgrade discovery — release-class selection via endpoint and GitHub."""
 import http.client
+import io
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -9,6 +10,7 @@ from urllib.error import HTTPError, URLError
 import pytest
 
 from boxmunge.paths import BoxPaths
+from boxmunge import upgrade_discovery as ud
 from boxmunge.upgrade_discovery import discover_update
 from boxmunge.version import write_installed_version
 
@@ -25,10 +27,18 @@ def _setup(tmp_path, version="0.3.0"):
     return paths
 
 
+class _Body:
+    """A response body, read as discovery reads one (read1, under a cap)."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = io.BytesIO(data)
+
+    def read1(self, n: int = -1) -> bytes:
+        return self._data.read1(n)
+
+
 def _response(payload):
-    m = MagicMock()
-    m.read.return_value = json.dumps(payload).encode()
-    return m
+    return _Body(json.dumps(payload).encode())
 
 
 def _offer(version, cls):
@@ -201,9 +211,7 @@ class TestEndpointContract:
 
     @patch("urllib.request.OpenerDirector.open")
     def test_non_json_answer_is_rejected(self, mock_open, tmp_path):
-        page = MagicMock()
-        page.read.return_value = b"<html>not json</html>"
-        mock_open.side_effect = [page, _github([])]
+        mock_open.side_effect = [_Body(b"<html>not json</html>"), _github([])]
         self._refused(mock_open, tmp_path, "security", "not JSON")
 
 
@@ -231,7 +239,7 @@ class TestBrokenAnswers:
     @patch("urllib.request.OpenerDirector.open")
     def test_a_read_that_breaks_off_is_an_error(self, mock_open, tmp_path):
         resp = MagicMock()
-        resp.read.side_effect = ConnectionResetError("reset by peer")
+        resp.read1.side_effect = ConnectionResetError("reset by peer")
         mock_open.side_effect = [resp, _github([])]
         result = discover_update(_setup(tmp_path), mode="security")
         assert result["action"] == "error"
@@ -267,6 +275,28 @@ class TestBrokenAnswers:
         assert result["action"] == "error"
         assert "redirected to http://127.0.0.1:9/v1/check" in result["message"]
         github.assert_not_called()
+
+
+class TestOversizedAnswers:
+    """Discovery runs as root under upgrade.lock: an answer far larger than
+    the contract allows is refused, not read whole into memory."""
+
+    @patch("urllib.request.OpenerDirector.open")
+    def test_an_oversized_endpoint_answer_is_an_error(self, mock_open, tmp_path):
+        mock_open.side_effect = [_Body(b" " * (ud.ENDPOINT_MAX_BYTES + 1)), _github([])]
+        result = discover_update(_setup(tmp_path), mode="security")
+        assert result["action"] == "error"
+        assert mock_open.call_count == 1
+        assert f"larger than {ud.ENDPOINT_MAX_BYTES} bytes" in result["message"]
+
+    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
+    def test_an_oversized_github_answer_is_an_error(self, mock_open, mock_urlopen, tmp_path):
+        mock_open.side_effect = URLError("down")
+        mock_urlopen.return_value = _Body(b" " * (ud.GITHUB_MAX_BYTES + 1))
+        result = discover_update(_setup(tmp_path), mode="security")
+        assert result["action"] == "error"
+        assert f"larger than {ud.GITHUB_MAX_BYTES} bytes" in result["message"]
 
 
 class TestHeld:
@@ -442,9 +472,7 @@ class TestBothSourcesFail:
 
     @patch("urllib.request.OpenerDirector.open")
     def test_malformed_json_from_both_returns_error(self, mock_open, tmp_path):
-        m = MagicMock()
-        m.read.return_value = b"not json"
-        mock_open.return_value = m
+        mock_open.side_effect = lambda *a, **kw: _Body(b"not json")
         assert discover_update(_setup(tmp_path), mode="latest")["action"] == "error"
 
     @patch("urllib.request.OpenerDirector.open")

@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
 from boxmunge.userns import commit as cm
+from boxmunge.userns import switch as sw
 from boxmunge.userns.inventory import Inventory
 from boxmunge.userns.journal import FORWARD, Journal, load_journal, save_journal
 
@@ -51,6 +53,13 @@ def _c8d(store, address=SYSTEM, **kw) -> dict:
     return {"driver_type": cm.CONTAINERD_STORE, "store_root": str(store),
             "managed": address == MANAGED, "containerd": {"address": address,
                                                           "namespace": "moby"}, **kw}
+
+
+@pytest.fixture(autouse=True)
+def no_mounts(monkeypatch):
+    """No mount below any tree the commit deletes (a test host has no
+    /proc/self/mountinfo to read, or its own mounts)."""
+    monkeypatch.setattr(sw, "mount_points_under", lambda root: [])
 
 
 @pytest.fixture
@@ -346,3 +355,18 @@ def test_a_containerd_the_migration_does_not_know_has_no_prior_store(tmp_path) -
                     containerd_address="/srv/c.sock", containerd_namespace="moby")
     with pytest.raises(cm.MigrationError, match="containerd at '/srv/c.sock'"):
         prior_store(inv)
+
+
+def test_a_mount_below_the_old_store_stops_the_commit(paths, tmp_path, monkeypatch,
+                                                      remapped) -> None:
+    """rmtree crosses filesystems: a leaked overlay `merged` (or `shm`) mount
+    below the old store would be deleted through, not just unmounted."""
+    store = tmp_path / "overlay2"
+    (store / "layer" / "merged").mkdir(parents=True)
+    _journal(paths, tmp_path, {"driver_type": "", "store_root": str(store), "size": 0})
+    leaked = str(store / "layer" / "merged")
+    monkeypatch.setattr(sw, "mount_points_under",
+                        lambda root: [leaked] if Path(root) == store else [])
+    with pytest.raises(cm.MigrationError, match=f"{leaked}.*umount"):
+        cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
+    assert (store / "layer" / "merged").is_dir()

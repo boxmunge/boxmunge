@@ -15,7 +15,10 @@ import logging
 import os
 import pwd
 import stat
+from collections.abc import Sequence
 from pathlib import Path
+
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 def running_as_root() -> bool:
@@ -77,7 +80,8 @@ def fchown_deploy(fd: int, what: str) -> None:
         _warn_chown(what, e)
 
 
-def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
+def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600, *,
+                          dir_fd: int | None = None) -> int:
     """os.open that refuses a symlink, a non-regular file or an extra hard link.
 
     For root opening a name in a directory the deploy user can write: a
@@ -88,14 +92,15 @@ def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
     ordinary blocking descriptor.
     """
     try:
-        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, mode)
+        fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, mode,
+                     dir_fd=dir_fd)
     except OSError as e:
         # ENXIO: a write-only open of a FIFO (or socket) nobody reads.
-        what = {errno.ELOOP: "a symlink", errno.ENXIO: "a FIFO or socket"}.get(e.errno)
-        if what is None:
-            raise
-        raise OSError(e.errno, f"{path} is {what}, not a plain regular file; refusing "
-                      "to use it. Remove it so it can be recreated.") from e
+        for code, what in ((errno.ELOOP, "a symlink"), (errno.ENXIO, "a FIFO or socket")):
+            if e.errno == code:
+                raise OSError(code, f"{path} is {what}, not a plain regular file; "
+                              "refusing to use it. Remove it so it can be recreated.") from e
+        raise
     st = os.fstat(fd)
     if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
         os.close(fd)
@@ -105,6 +110,40 @@ def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
         )
     fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
     return fd
+
+
+def open_dir_beneath(root: Path, parts: Sequence[str]) -> int:
+    """A descriptor of the directory ``root/parts...``, reached one
+    component at a time with O_NOFOLLOW: no component below ``root`` may be
+    a link, so one swapped in at any depth is refused (ELOOP or ENOTDIR),
+    not followed. Raises OSError."""
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for part in parts:
+            if part in ("", ".", "..") or "/" in part:
+                raise OSError(errno.EINVAL, f"{root}: {'/'.join(parts)} is not a plain "
+                              f"relative path")
+            child = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = child
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def open_resolved_nofollow(path: Path, flags: int) -> int:
+    """open_regular_nofollow for a symlink-free absolute path (a realpath),
+    walked from / so that no component, at any depth, is followed if it has
+    been swapped for a link since the path was resolved. Raises OSError."""
+    parts = Path(path).parts
+    if not parts or parts[0] != "/":
+        raise OSError(errno.EINVAL, f"{path} is not an absolute path")
+    parent = open_dir_beneath(Path("/"), parts[1:-1])
+    try:
+        return open_regular_nofollow(Path(parts[-1]), flags, dir_fd=parent)
+    finally:
+        os.close(parent)
 
 
 # Far above any state record, compose file or catalog boxmunge writes or
@@ -133,6 +172,19 @@ def read_text_nofollow(path: Path, *, limit: int = READ_LIMIT_BYTES) -> str:
     return read_bytes_nofollow(path, limit=limit).decode("utf-8")
 
 
+def read_text_nofollow_or_none(path: Path, *, limit: int = READ_LIMIT_BYTES) -> str | None:
+    """read_text_nofollow, or None when nothing is at the name: the one
+    existence rule for root's readers of deploy-writable records. Anything
+    there, a link whose target is gone included, is read or refused, never
+    taken for "no record" (Path.exists() follows the link, so it would be).
+    Absence is the no-follow open's own ENOENT, so there is no window
+    between a check and the read."""
+    try:
+        return read_text_nofollow(path, limit=limit)
+    except FileNotFoundError:
+        return None
+
+
 def chmod_nofollow(path: Path, mode: int | None = None, add: int = 0) -> None:
     """chmod that refuses a symlink rather than following it.
 
@@ -141,8 +193,9 @@ def chmod_nofollow(path: Path, mode: int | None = None, add: int = 0) -> None:
     permission, so a 0000 file of the caller's own still works) and chmod'd
     through its /proc/self/fd entry. Elsewhere lchmod does the same job.
     """
-    if hasattr(os, "O_PATH"):
-        fd = os.open(path, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC)
+    o_path: int | None = getattr(os, "O_PATH", None)  # Linux only
+    if o_path is not None:
+        fd = os.open(path, o_path | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             st = os.fstat(fd)
             if stat.S_ISLNK(st.st_mode):
@@ -281,9 +334,6 @@ def _chown_entry(name: str, dirfd: int, where: str, owner: tuple[int, int],
             os.fchown(fd, *owner)
     finally:
         os.close(fd)
-
-
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 def copy_entry_nofollow(src_dir: int, name: str, dest_dir: int) -> None:

@@ -7,7 +7,7 @@ dozens of findings at once, and a storm of pushes trains operators to
 ignore the channel that carries quarantine alerts.
 
 Pure functions: take in-memory values, return ``Alert`` instances. No I/O,
-no logging. Fleet-level formatters (grace heads-up, KEV, scan failure)
+no logging. Fleet-level formatters (KEV, scan failure)
 live in ``_alerting_fleet``; consumers import from ``boxmunge.cve.alerting``.
 """
 
@@ -18,7 +18,6 @@ from collections.abc import Sequence
 from boxmunge.cve._alerting_types import Alert, Hit
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.policy_types import BALANCED_KEV_ONLY_SINCE
-from boxmunge.cve.scanner import Severity
 from boxmunge.cve.suppressions import Suppression
 
 # Lines listed in an aggregated alert body before "... and N more".
@@ -26,13 +25,9 @@ _MAX_LISTED = 10
 # Findings named in the informational digest.
 _DIGEST_TOP = 5
 
-_RANK = {Severity.CRITICAL: 4, Severity.HIGH: 3, Severity.MEDIUM: 2,
-         Severity.LOW: 1, Severity.UNKNOWN: 0}
-
-
 def _ordered(hits: Sequence[Hit]) -> list[Hit]:
     """Most severe first, then by CVE id, for stable titles and bodies."""
-    return sorted(hits, key=lambda h: (-_RANK[h.disposition.effective_severity],
+    return sorted(hits, key=lambda h: (-h.disposition.effective_severity.rank,
                                        h.disposition.finding.cve_id,
                                        h.disposition.finding.package))
 

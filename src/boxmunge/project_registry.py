@@ -8,6 +8,7 @@ a project name on read, never trusted.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -148,7 +149,7 @@ def unfinished_removals(names: frozenset[str] | set[str], paths: BoxPaths) -> li
     removed. A name never deployed has none, and is just awaiting its first
     deploy."""
     return [name for name in missing_among(names, paths)
-            if any(f.exists() for f in (paths.project_deploy_state(name),
+            if any(os.path.lexists(f) for f in (paths.project_deploy_state(name),
                                         paths.project_scan_state(name),
                                         paths.project_health_state(name)))]
 

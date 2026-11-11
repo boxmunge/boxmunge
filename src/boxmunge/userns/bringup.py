@@ -28,10 +28,12 @@ from boxmunge.data_helper import HELPER_IMAGE
 from boxmunge.docker import caddy_reload
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.fileutil import atomic_write_text
+from boxmunge.cve.quarantine import QuarantineError
 from boxmunge.lifecycle import lifecycle_block
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.paths import BoxPaths
 from boxmunge.pause import render_maintenance_caddy_config
+from boxmunge.state import StateError
 from boxmunge.system_container import CONTAINER_NAME, SystemContainerError, connect
 from boxmunge.userns.inventory import Inventory
 from boxmunge.userns.journal import Journal
@@ -98,6 +100,23 @@ def _held(paths: BoxPaths, project: str) -> str | None:
     return "stopped by the health monitor" if is_monitor_stopped(project, paths) else None
 
 
+def _held_all(paths: BoxPaths, projects: list[str]) -> tuple[dict[str, str], dict[str, str]]:
+    """(project -> why it is left down, project -> why that cannot be told).
+    A pause, quarantine or health record that cannot be read is that
+    project's failure, never a raise that strands the rest of the bring-up."""
+    held: dict[str, str] = {}
+    unreadable: dict[str, str] = {}
+    for p in projects:
+        try:
+            why = _held(paths, p)
+        except (QuarantineError, StateError) as e:
+            unreadable[p] = f"cannot tell whether it is meant to be down: {e}"
+            continue
+        if why:
+            held[p] = why
+    return held, unreadable
+
+
 def _failed_before(journal: Journal, project: str) -> bool:
     """An earlier bring-up of this journal left the project failed: it may run
     yet still sit behind the maintenance page (its smoke tests failed), so
@@ -162,13 +181,14 @@ def bring_up(paths: BoxPaths, inv: Inventory, journal: Journal, save: Callable[[
     no-op for what runs, and its smoke tests decide).
     """
     projects = [p for p in inv.projects if paths.project_manifest(p).exists()]
-    held = {p: why for p in projects if (why := _held(paths, p))}
+    held, unreadable = _held_all(paths, projects)
     todo = {p: _services_to_start(inv, p, only_stopped and not _failed_before(journal, p))
-            for p in projects if p not in held}
+            for p in projects if p not in held and p not in unreadable}
     untouched = {p for p, services in todo.items()
                  if only_stopped and not services and _running_services(inv, p)}
-    refused = _changed_since_deploy(paths, [p for p in projects if p not in untouched],
-                                    journal, prefix, component)
+    checked = [p for p in projects if p not in untouched and p not in unreadable]
+    refused = {**_changed_since_deploy(paths, checked, journal, prefix, component),
+               **unreadable}
     _platform(paths, [p for p in todo if p not in untouched | set(refused)], journal, prefix)
     for p in projects:
         key = f"{prefix}:{p}"

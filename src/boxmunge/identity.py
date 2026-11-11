@@ -22,9 +22,13 @@ def check_project_identity(project_name: str, manifest_id: str, paths: BoxPaths)
     # Check reverse: is this ULID already used by a different project?
     if paths.deploy_state.exists():
         for state_file in paths.deploy_state.iterdir():
-            if state_file.suffix != ".json":
-                continue
             other_name = state_file.stem
+            # Only deploy records, `<project>.json`, hold a project_id; a
+            # project name has no dot, its pause, quarantine, users and binds
+            # records do, and one of those that cannot be read must not fail
+            # another project's check.
+            if state_file.suffix != ".json" or "." in other_name:
+                continue
             if other_name == project_name:
                 continue
             other_state = read_state(state_file)

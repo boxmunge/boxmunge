@@ -1,9 +1,11 @@
 """Generate Caddy site configuration from a project manifest."""
 
+import os
 from pathlib import Path
 from typing import Any
 
-from boxmunge.caddy_journal import write_site
+from boxmunge.caddy_journal import MAX_SITE_BYTES, write_site
+from boxmunge.fs_nofollow import open_resolved_nofollow
 from boxmunge.docker import caddy_config_lock
 from boxmunge.log import log_operation
 from boxmunge.manifest import get_all_routes
@@ -103,13 +105,61 @@ def site_config(paths: BoxPaths, project: str,
     generated from ``manifest``; ``override`` is the file used, or None.
     prepare_caddy_config writes this, and diff previews it."""
     override = paths.project_caddy_override(project)
-    if override.exists():
-        return override.read_text(), override
+    text = read_override(override)
+    if text is not None:
+        return text, override
     return generate_caddy_config(manifest), None
 
 
-def prepare_caddy_config(paths: BoxPaths, manifest: dict[str, Any]) -> None:
-    """Generate or copy Caddy site config for a project.
+def read_override(override: Path) -> str | None:
+    """The text of a project's caddy.override.conf, or None if there is
+    none. The project directory is deploy-writable and root reads this under
+    sudo deploy/promote/rollback/resume and the upgrade, so it must resolve
+    inside the project (a link into repo/, say, is fine; one out of the
+    project is refused), is opened along its resolved path without
+    following a link swapped in at any depth or blocking on a FIFO, and is
+    capped at the size of a site file. Raises OSError naming the fix."""
+    def unusable(what: str) -> OSError:
+        return OSError(f"{override} {what}. Make it a regular file in the project "
+                       f"holding the site block, or remove it to use the generated "
+                       f"site config.")
+    if not os.path.lexists(override):
+        return None
+    project = Path(os.path.realpath(override.parent))
+    target = Path(os.path.realpath(override))
+    if not target.is_relative_to(project):
+        raise unusable(f"is a link to {target}, outside the project, which boxmunge "
+                       f"does not follow")
+    try:
+        fd = open_resolved_nofollow(target, os.O_RDONLY)
+    except FileNotFoundError as e:
+        raise unusable(f"is a link to {target}, which does not exist") from e
+    except OSError as e:
+        raise unusable("is not a regular file, or a link on its way was swapped") from e
+    with os.fdopen(fd, "rb") as f:
+        data = f.read(MAX_SITE_BYTES + 1)
+    if len(data) > MAX_SITE_BYTES:
+        raise unusable(f"is larger than {MAX_SITE_BYTES} bytes")
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise unusable("is not UTF-8 text") from e
+
+
+def override_refusal(paths: BoxPaths, project: str) -> str | None:
+    """Why ``project``'s caddy.override.conf cannot be used, or None."""
+    try:
+        read_override(paths.project_caddy_override(project))
+    except OSError as e:
+        return str(e)
+    return None
+
+
+def prepare_caddy_config(paths: BoxPaths, manifest: dict[str, Any]) -> str:
+    """Generate or copy Caddy site config for a project, and return the
+    text written. A caller that needs the text takes it from here: deploy
+    can replace a name in caddy/sites, so reading the file back as root
+    reads whatever deploy put there.
 
     Writes either the generated site block or, if a host operator has
     placed a project-specific override file, a copy of that override.
@@ -132,6 +182,7 @@ def prepare_caddy_config(paths: BoxPaths, manifest: dict[str, Any]) -> None:
         )
     with caddy_config_lock(paths.state):
         write_site(paths.caddy, site_conf, content)
+    return content
 
 
 def generate_staging_caddy_config(

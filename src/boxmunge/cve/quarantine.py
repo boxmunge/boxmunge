@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,7 +41,7 @@ from boxmunge import restart_hold
 from boxmunge.compose_guard import compose_up_checked
 from boxmunge.docker import DockerError, caddy_reload, compose_stop
 from boxmunge.fileutil import atomic_write_text
-from boxmunge.fs_nofollow import mkdir_p_deploy, read_text_nofollow
+from boxmunge.fs_nofollow import mkdir_p_deploy, read_text_nofollow_or_none
 from boxmunge.pause import (
     hand_over_restart_policies, is_paused, render_maintenance_caddy_config,
 )
@@ -90,8 +91,9 @@ def checked_quarantine_record(state: dict[str, Any] | None, path: Path) -> dict[
 
 
 def is_quarantined(project_name: str, paths: BoxPaths) -> bool:
-    """True if the project has been CVE-quarantined."""
-    return paths.project_quarantine_state(project_name).exists()
+    """True if the project has been CVE-quarantined: anything is at its
+    record's name, a link included (reading the record then refuses it)."""
+    return os.path.lexists(paths.project_quarantine_state(project_name))
 
 
 def read_quarantine_state(
@@ -99,11 +101,12 @@ def read_quarantine_state(
 ) -> dict[str, Any] | None:
     """Return the quarantine state dict, or None if not quarantined."""
     path = paths.project_quarantine_state(project_name)
-    if not path.exists():
-        return None
     try:
-        state = json.loads(read_text_nofollow(path))
-    except (OSError, json.JSONDecodeError) as e:
+        raw = read_text_nofollow_or_none(path)
+        if raw is None:
+            return None
+        state = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as e:
         raise QuarantineError(f"Cannot read quarantine state {path}: {e}") from e
     if not isinstance(state, dict):
         raise QuarantineError(f"Quarantine state {path} is not a JSON object")

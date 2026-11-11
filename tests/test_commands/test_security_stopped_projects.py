@@ -53,7 +53,7 @@ def box(tmp_path, monkeypatch, fake_containers):
 
 
 def _scan(paths):
-    return scan_one_project(paths, "demo", in_grace=True, kev=_KEV)
+    return scan_one_project(paths, "demo", kev=_KEV, defer_new=True)
 
 
 def test_running_project_is_scanned_by_its_containers(box, fake_containers):

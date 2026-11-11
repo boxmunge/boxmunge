@@ -6,6 +6,7 @@ import pytest
 from boxmunge.compose import ComposeError
 from boxmunge.system_container import SystemContainerError
 from boxmunge.userns import rollback as rb
+from boxmunge.userns import switch as sw
 from boxmunge.userns.inventory import Inventory, VolumeEntry
 from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
 from boxmunge.userns.preflight import Report
@@ -35,6 +36,12 @@ class _Daemon:
 def flushes(monkeypatch):
     """The durability barrier, stood in for (it flushes real filesystems)."""
     monkeypatch.setattr(rb, "barrier", lambda paths, j, images_dir: None)
+
+
+@pytest.fixture(autouse=True)
+def no_mounts(monkeypatch):
+    """No mount below the remapped root (a test host has no mountinfo)."""
+    monkeypatch.setattr(sw, "mount_points_under", lambda root: [])
 
 
 @pytest.fixture
@@ -331,3 +338,44 @@ def test_the_box_running_again_is_reported(paths, monkeypatch) -> None:
     steps.report_back(paths, j, "rb-project", "userns migration rolled back", "userns-rollback")
     assert sent == [("userns migration rolled back; 1 project(s) did not come back",
                      "a: up\nb: failed: smoke")]
+
+
+def test_files_left_with_unmapped_owners_are_in_the_rollback_alert(paths, monkeypatch) -> None:
+    from boxmunge.userns import steps
+    sent = []
+    monkeypatch.setattr(steps, "notify", lambda p, title, body, **kw: sent.append((title, body)))
+    monkeypatch.setattr(steps, "crowdsec_tails_caddy", lambda: None)
+    j = Journal(ROLLBACK, "rolled-back", S, items={
+        "rb-project:a": "up", "left:rb:/srv/a": "2 entries with ids outside both ranges ...",
+        "left:/srv/b": "1 entry ..."})
+    steps.report_back(paths, j, "rb-project", "userns migration rolled back", "userns-rollback")
+    title, body = sent[0]
+    assert title == ("userns migration rolled back; files in 2 tree(s) keep owners "
+                     "outside both id ranges")
+    assert "WARNING: /srv/b: 1 entry ..." in body  # a forward shift's key, too
+    assert "a: up" in body
+    assert "WARNING: /srv/a: 2 entries with ids outside both ranges ..." in body
+    assert "chown" in body
+
+
+def test_the_rollback_command_prints_what_was_left_alone(paths, monkeypatch, capsys) -> None:
+    from boxmunge.commands import userns_cmd
+    from boxmunge.userns import rollback as rbm
+    j = Journal(ROLLBACK, "rolled-back", S, items={"left:rb:/srv/a": "1 entry ..."})
+    monkeypatch.setattr(rbm, "rollback", lambda paths, **kw: j)
+    userns_cmd._run(paths, "rollback")
+    out = capsys.readouterr().out
+    assert "Rolled back to the prior store." in out
+    assert "WARNING: /srv/a: 1 entry ..." in out
+
+
+def test_a_mount_below_the_remapped_root_is_not_deleted_through(paths, remapped,
+                                                                 monkeypatch) -> None:
+    events, new_root = remapped
+    (new_root / "overlay2" / "l" / "merged").mkdir(parents=True)
+    leaked = str(new_root / "overlay2" / "l" / "merged")
+    monkeypatch.setattr(sw, "mount_points_under", lambda root: [leaked])
+    with pytest.raises(rb.MigrationError, match=f"{leaked}.*umount"):
+        rb.rollback(paths, daemon=_Daemon(events), timers=FakeTimers())
+    assert (new_root / "overlay2" / "l" / "merged").is_dir()
+    assert "umount" in load_journal(paths).failed

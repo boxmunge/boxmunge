@@ -29,7 +29,7 @@ from boxmunge.compose_guard import compose_up_checked
 from boxmunge.docker import caddy_reload, DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
-from boxmunge.lifecycle import BlockReason, is_blocked
+from boxmunge.lifecycle import BlockReason, is_blocked, paused_refusal
 from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
@@ -51,19 +51,20 @@ class CopyStop(Enum):
 def _held_by_lift(project_name: str, paths: BoxPaths) -> bool:
     """Paused / quarantined projects are routed to their dedicated recovery
     paths rather than restarted here (which would bypass those checks).
-    Prints why when held."""
-    if is_paused(project_name, paths):
-        print(
-            f"ERROR: Project '{project_name}' is paused, not monitor-stopped. "
-            f"Use: boxmunge resume {project_name}",
-            file=sys.stderr,
-        )
-        return True
+    Prints why when held, naming a way out the project's state accepts:
+    `resume` only for a project that is just paused."""
     block = is_blocked(project_name, paths)
-    if block and block.reason in (BlockReason.QUARANTINED, BlockReason.MIGRATING):
-        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
-        return True
-    return False
+    if block is None:
+        return False
+    if block.reason is BlockReason.PAUSED:
+        why = (f"Project '{project_name}' is paused, not monitor-stopped. "
+               f"Use: boxmunge resume {project_name}")
+    elif is_paused(project_name, paths):
+        why = paused_refusal(project_name, block)   # and quarantined, or migrating
+    else:
+        why = block.refuse_message
+    print(f"ERROR: {why}", file=sys.stderr)
+    return True
 
 
 def _monitor_stopped_health(project_name: str, paths: BoxPaths, *,

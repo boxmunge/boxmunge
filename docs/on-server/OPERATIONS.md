@@ -1340,6 +1340,8 @@ hosts:
 
 Plain hostnames don't need the flag. See `SECURITY.md` for the routing-isolation trade-off.
 
+A project with a wildcard host cannot be staged: staging serves `staging.<host>`, and no certificate can be issued for `staging.*.example.com`. `stage` refuses it before anything changes; deploy the release with `prod-deploy <project> --ref <bundle or git ref>`.
+
 ---
 
 ### Container crash-loops with "Read-only file system" (v0.9+)
@@ -1636,6 +1638,7 @@ unless `health` also ran past its budget before the upgrade.
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
 | `platform-updates` | a security or break-fix release cannot be installed automatically, or the version-check service has given no usable answer for 48 hours | see [Upgrading the Platform](#upgrading-the-platform) |
 | `upgrade-probation` | a platform upgrade's probation expired more than 30 minutes ago and the health timer has not promoted it, or `probation.json` cannot be read | the supervisor user runs `sudo /opt/boxmunge/bin/boxmunge-upgrade check-probation` to see why; `sudo rm /opt/boxmunge/upgrade-state/probation.json` accepts the release, as does `backup <project>` from the deploy shell when it can read the file |
+| `upgrade-slot` | `upgrade-state/active-slot` does not agree with root's `env-active` symlink outside an interrupted swap, so every upgrade and `check-probation` refuses to run (the refusal is also in `log --level error`) | unless an upgrade is running, the supervisor user puts back the slot `env-active` names, as the warning shows: `echo a \| sudo tee /opt/boxmunge/upgrade-state/active-slot` |
 | `docker-userns` | Docker does not remap user namespaces yet, remaps them with another identity, or a source cannot be read on a box boxmunge has not remapped (warning; deploys go on); or the record or `daemon.json` claims boxmunge's remap and a source disagrees, or a remapped box's `caddy/Caddyfile` is not a world-readable regular file (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
 | `security-profiles` | a service runs with `profile: off` | review the reason in its manifest |
 | `service-users` | a deployed project's services have no recorded user yet (its next deploy decides them, and refuses an undeclared root registry image) | `doctor` lists the lines to add; see [Service Users After an Upgrade](#service-users-after-an-upgrade) |
@@ -1876,6 +1879,9 @@ self-test
 ```
 
 ## Upgrading the Platform
+
+A box still on 0.9 or 0.10 cannot get here by `upgrade` alone: follow
+[UPGRADING.md](UPGRADING.md), "Upgrading from 0.9 or 0.10".
 
 Apply platform updates:
 
@@ -2294,9 +2300,11 @@ judged not exploitable.
 
 Scan cadence:
 
-- Daily between 03:00 and 03:30 via `boxmunge-cve-scan.timer`
-- Not yet at deploy or image-update time: run `security scan <project>`
-  after a deploy to check a new image at once
+- Daily between 03:00 and 03:30 via `boxmunge-cve-scan.timer`, after the
+  nightly container update (02:30 to 03:00), so the images it pulled are
+  scanned that night
+- Not yet at deploy time: run `security scan <project>` after a deploy to
+  check a new image at once
 - Ad-hoc:
 
   ```

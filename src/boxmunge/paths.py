@@ -139,9 +139,6 @@ class BoxPaths:
         self.cosign_pub = self.config / "cosign.pub"
         self.container_update_state = self.state / "container-updates"
         self.container_update_lock = self.container_update_state / ".lock"
-        # CVE migration grace marker (singleton, fleet-wide).
-        # Created lazily on first scan after upgrade; never re-init.
-        self.cve_grace_state = self.state / "cve-grace.json"
         # CISA KEV catalog cache (singleton, fleet-wide). Refreshed best-effort
         # before each scan; consumed by the CVE policy engine as the
         # active-exploitation signal.

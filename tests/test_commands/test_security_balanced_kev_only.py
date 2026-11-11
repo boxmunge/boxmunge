@@ -59,7 +59,7 @@ def box(tmp_path, monkeypatch):
 
 
 def _scan(paths, kev: KevCatalog | None = None):
-    return scan_one_project(paths, "demo", in_grace=False, kev=kev or _kev())
+    return scan_one_project(paths, "demo", kev=kev or _kev())
 
 
 def _titles(pushover, words: str) -> list[str]:

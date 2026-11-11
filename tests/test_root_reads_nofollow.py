@@ -76,7 +76,7 @@ def test_a_regular_file_is_opened_blocking(tmp_path) -> None:
 def test_a_fifo_state_file_counts_as_a_stage_without_blocking(paths) -> None:
     paths.project_dir(P).mkdir(parents=True)
     fifo = _fifo(legacy_staging_state(paths, P))
-    assert _within(lambda: legacy_stage(paths, P), fifo) == LegacyStage("leftover")
+    assert _within(lambda: legacy_stage(paths, P), fifo) == LegacyStage("pre0101")
 
 
 def test_a_linked_state_file_is_not_read_through(paths, tmp_path) -> None:
@@ -87,7 +87,7 @@ def test_a_linked_state_file_is_not_read_through(paths, tmp_path) -> None:
     state = legacy_staging_state(paths, P)
     state.parent.mkdir(parents=True, exist_ok=True)
     state.symlink_to(target)
-    assert legacy_stage(paths, P) == LegacyStage("leftover")
+    assert legacy_stage(paths, P) == LegacyStage("pre0101")
 
 
 @pytest.mark.parametrize("make", ["fifo", "link"])

@@ -109,10 +109,14 @@ def load_deployed_inventory(
     """
     what = f"compose project {project_name!r}"
     try:
-        active = _services(resolve_deployed_config(
-            project_dir, compose_files, project_name), what)
         every = _services(resolve_deployed_config(
             project_dir, compose_files, project_name, all_profiles=True), what)
+        # With no profiled service, `up` starts every service, and Compose
+        # need not be asked again. Otherwise it must be: COMPOSE_PROFILES (in
+        # the project's .env or the environment) activates profiles the
+        # model does not show.
+        active = every if not any(svc.get("profiles") for svc in every.values()) else (
+            _services(resolve_deployed_config(project_dir, compose_files, project_name), what))
         containers = docker_containers.project_containers(project_name)
     except (ComposeResolveError, DockerError) as e:
         raise InventoryError(f"{what}: {e}") from e

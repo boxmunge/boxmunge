@@ -56,14 +56,22 @@ def test_docker_failure_is_an_inventory_error(tmp_path, monkeypatch):
         load_deployed_inventory(project, ["compose.yml"], "demo")
 
 
-def test_both_profile_views_are_resolved_from_every_deployed_file(tmp_path, monkeypatch):
+@pytest.mark.parametrize("services, views", [
+    # No service behind a profile: the all-profiles model is what `up` starts.
+    ('{"web": {"image": "a"}}', [True]),
+    # A profiled service: COMPOSE_PROFILES may activate it, so Compose says.
+    ('{"web": {"image": "a"}, "dev": {"image": "b", "profiles": ["dev"]}}', [True, False]),
+])
+def test_profile_views_are_resolved_from_every_deployed_file(
+    tmp_path, monkeypatch, services, views,
+):
     calls = []
 
     def config(project_dir, compose_files=None, *, project_name, all_profiles=False):
         calls.append((compose_files, project_name, all_profiles))
-        return '{"services": {}}'
+        return f'{{"services": {services}}}'
 
     monkeypatch.setattr(docker, "compose_config", config)
     load_deployed_inventory(tmp_path, ["compose.yml", "compose.boxmunge.yml"], "demo")
-    assert calls == [(["compose.yml", "compose.boxmunge.yml"], "demo", False),
-                     (["compose.yml", "compose.boxmunge.yml"], "demo", True)]
+    assert calls == [(["compose.yml", "compose.boxmunge.yml"], "demo", every)
+                     for every in views]

@@ -755,6 +755,25 @@ def test_suppress_current_no_quarantine_findings_rejected(
     assert "no current quarantine-level findings" in err
 
 
+@pytest.mark.parametrize("scope", [["--project", "demo"], ["--host"]])
+def test_suppress_current_refuses_an_unreadable_scan_state_naming_it(
+    tmp_path, capsys, scope,
+) -> None:
+    """A corrupted severity is an unreadable scan state, reported with the
+    file and field and a command that rewrites it, never a traceback."""
+    from boxmunge.commands.security_suppress import cmd_security_suppress
+    paths = _suppress_paths(tmp_path)
+    _write_quarantine_scan_state(paths, "demo", [("CVE-2026-0001", "Severe")])
+    rc = cmd_security_suppress(
+        ["--current", *scope, "--until", _SOON, "--reason", "x"], paths)
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert str(paths.project_scan_state("demo")) in err
+    assert "'effective_severity'" in err
+    assert "security scan demo" in err
+    assert "Traceback" not in err
+
+
 def test_suppress_current_without_scan_state_rejected(
     tmp_path, capsys,
 ) -> None:
@@ -1286,13 +1305,8 @@ def test_suppress_validation_failure_emits_log_error(
 # ---------- scan ----------
 
 
-def _scan_paths(tmp_path, *, in_grace: bool = False):
+def _scan_paths(tmp_path):
     """Build a paths fixture with a single 'demo' project ready to scan.
-
-    By default tests run with the migration grace already expired (so the
-    long-standing quarantine/alert behaviour matches the pre-grace tests).
-    Pass ``in_grace=True`` to write an active grace marker for the
-    grace-specific tests.
 
     The posture is strict: these tests quarantine on plain (non-KEV)
     findings, which balanced only alerts on.
@@ -1319,26 +1333,7 @@ def _scan_paths(tmp_path, *, in_grace: bool = False):
     }))
     mark_deployed(paths, "demo")
     (paths.state / "projects.txt").write_text("demo\n")
-    _seed_grace(paths, in_grace=in_grace)
     return paths
-
-
-def _seed_grace(paths, *, in_grace: bool, heads_up_sent: bool = False) -> None:
-    """Pre-create a grace marker. ``in_grace=False`` writes an already-expired
-    marker so tests exercise the normal enforcement path."""
-    from datetime import datetime, timedelta, timezone
-    paths.state.mkdir(parents=True, exist_ok=True)
-    if in_grace:
-        installed = datetime.now(timezone.utc)
-        expires = installed + timedelta(hours=24)
-    else:
-        installed = datetime(2025, 1, 1, tzinfo=timezone.utc)
-        expires = datetime(2025, 1, 2, tzinfo=timezone.utc)
-    paths.cve_grace_state.write_text(json.dumps({
-        "installed_at": installed.isoformat(),
-        "expires_at": expires.isoformat(),
-        "heads_up_sent": heads_up_sent,
-    }))
 
 
 def test_scan_no_projects_registered(monkeypatch, tmp_path, capsys) -> None:
@@ -2167,12 +2162,12 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
     )
 
 
-# ---------- migration grace ----------
+# ---------- a quarantining scan ----------
 
 
-def _grace_quarantine_scan(monkeypatch, paths) -> None:
-    """Wire up scan-related stubs for grace tests: returns a Critical finding
-    that would normally trigger quarantine."""
+def _quarantine_scan(monkeypatch, paths) -> None:
+    """Wire up scan-related stubs: returns a Critical finding that
+    quarantines a strict project."""
     from datetime import datetime, timezone
     from boxmunge.cve.scanner import (
         AttackVector, Finding, ScanResult, Severity, VulnStatus,
@@ -2203,144 +2198,13 @@ def _grace_quarantine_scan(monkeypatch, paths) -> None:
     )
 
 
-def test_scan_all_initializes_grace_on_first_run(monkeypatch, tmp_path) -> None:
-    """Fresh paths, no grace file → grace file created post-scan."""
-    from boxmunge.commands.security_actions import cmd_security_scan
-    paths = _make_paths(tmp_path)
-    proj = paths.projects / "demo"
-    proj.mkdir(parents=True)
-    manifest = {
-        "schema_version": 2,
-        "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ",
-        "source": "bundle",
-        "project": "demo",
-        "hosts": ["demo.example.com"],
-        "services": {
-            "web": {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh"},
-        },
-    }
-    (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
-    (proj / "compose.yml").write_text(yaml.safe_dump({
-        "services": {"web": {"image": "myapp:1.0"}},
-    }))
-    (paths.state / "projects.txt").write_text("demo\n")
-    # No grace file exists.
-    assert not paths.cve_grace_state.exists()
-    _grace_quarantine_scan(monkeypatch, paths)
-    monkeypatch.setattr(
-        "boxmunge.commands.security_enforce.quarantine_project",
-        lambda *a, **k: None,
-    )
-    rc = cmd_security_scan([], paths)
-    assert rc == 0
-    assert paths.cve_grace_state.exists()
-    payload = json.loads(paths.cve_grace_state.read_text())
-    assert "installed_at" in payload
-    assert "expires_at" in payload
-
-
-def test_scan_all_during_grace_does_not_quarantine(
+def test_first_fleet_scan_quarantines_and_alerts(
     monkeypatch, tmp_path,
 ) -> None:
-    """A would-quarantine finding inside the grace window must NOT call
-    quarantine_project."""
+    """The first scan on a box enforces in full: no migration window."""
     from boxmunge.commands.security_actions import cmd_security_scan
-    paths = _scan_paths(tmp_path, in_grace=True)
-    _grace_quarantine_scan(monkeypatch, paths)
-    called = {}
-    def fake_quarantine(*a, **k):
-        called["q"] = True
-    monkeypatch.setattr(
-        "boxmunge.commands.security_enforce.quarantine_project",
-        fake_quarantine,
-    )
-    rc = cmd_security_scan([], paths)
-    assert rc == 0
-    assert "q" not in called
-
-
-def test_scan_all_during_grace_fires_heads_up_once(
-    monkeypatch, tmp_path,
-) -> None:
-    """Heads-up alert fires exactly once when grace is active and unsent."""
-    from boxmunge.commands.security_actions import cmd_security_scan
-    paths = _scan_paths(tmp_path, in_grace=True)
-    _grace_quarantine_scan(monkeypatch, paths)
-    monkeypatch.setattr(
-        "boxmunge.commands.security_enforce.quarantine_project",
-        lambda *a, **k: None,
-    )
-    sends: list = []
-    def fake_send(alerts, p):
-        sends.append(alerts)
-        return len(alerts)
-    monkeypatch.setattr(
-        "boxmunge.commands.security_actions.send_alerts", fake_send,
-    )
-    rc = cmd_security_scan([], paths)
-    assert rc == 0
-    assert len(sends) == 1
-    assert sends[0][0].kind == "grace_heads_up"
-    # Marker now has heads_up_sent: True.
-    payload = json.loads(paths.cve_grace_state.read_text())
-    assert payload["heads_up_sent"] is True
-
-
-def test_scan_all_during_grace_does_not_fire_heads_up_again(
-    monkeypatch, tmp_path,
-) -> None:
-    """If grace.heads_up_sent is already True, no heads-up call."""
-    from boxmunge.commands.security_actions import cmd_security_scan
-    paths = _scan_paths(tmp_path, in_grace=True)
-    # Re-seed with heads_up_sent=True.
-    _seed_grace(paths, in_grace=True, heads_up_sent=True)
-    _grace_quarantine_scan(monkeypatch, paths)
-    monkeypatch.setattr(
-        "boxmunge.commands.security_enforce.quarantine_project",
-        lambda *a, **k: None,
-    )
-    sends: list = []
-    monkeypatch.setattr(
-        "boxmunge.commands.security_actions.send_alerts",
-        lambda alerts, p: sends.append(alerts) or len(alerts),
-    )
-    rc = cmd_security_scan([], paths)
-    assert rc == 0
-    assert sends == []
-
-
-def test_scan_all_during_grace_skips_normal_transition_alerts(
-    monkeypatch, tmp_path,
-) -> None:
-    """emit_scan_alerts is NOT called inside the grace window."""
-    from boxmunge.commands.security_actions import cmd_security_scan
-    paths = _scan_paths(tmp_path, in_grace=True)
-    _grace_quarantine_scan(monkeypatch, paths)
-    monkeypatch.setattr(
-        "boxmunge.commands.security_enforce.quarantine_project",
-        lambda *a, **k: None,
-    )
-    captured: list = []
-    monkeypatch.setattr(
-        "boxmunge.commands.security_scan_core.emit_scan_alerts",
-        lambda **kw: captured.append(kw) or (),
-    )
-    monkeypatch.setattr(
-        "boxmunge.commands.security_actions.send_alerts",
-        lambda alerts, p: 0,
-    )
-    rc = cmd_security_scan([], paths)
-    assert rc == 0
-    assert captured == []
-
-
-def test_scan_all_after_grace_quarantines_normally(
-    monkeypatch, tmp_path,
-) -> None:
-    """When grace has expired, full enforcement and per-project alerts fire."""
-    from boxmunge.commands.security_actions import cmd_security_scan
-    paths = _scan_paths(tmp_path, in_grace=False)
-    _grace_quarantine_scan(monkeypatch, paths)
+    paths = _scan_paths(tmp_path)
+    _quarantine_scan(monkeypatch, paths)
     quarantine_called: list = []
     monkeypatch.setattr(
         "boxmunge.commands.security_enforce.quarantine_project",
@@ -2357,80 +2221,34 @@ def test_scan_all_after_grace_quarantines_normally(
     assert len(emit_called) == 1
 
 
-def test_scan_per_project_during_grace_does_not_quarantine(
-    monkeypatch, tmp_path,
-) -> None:
-    """Per-project scan during grace skips quarantine AND skips heads-up."""
+def test_scan_removes_a_retired_grace_marker_once(monkeypatch, tmp_path) -> None:
+    """The v0.6.0 grace marker is inert: the scan ignores it, even when it
+    is unreadable or claims an open window, and removes it with its lock,
+    logging that once at info level."""
+    import logging
     from boxmunge.commands.security_actions import cmd_security_scan
-    paths = _scan_paths(tmp_path, in_grace=True)
-    _grace_quarantine_scan(monkeypatch, paths)
-    quarantine_called: list = []
-    monkeypatch.setattr(
-        "boxmunge.commands.security_enforce.quarantine_project",
-        lambda *a, **k: quarantine_called.append(True),
-    )
-    sends: list = []
-    monkeypatch.setattr(
-        "boxmunge.commands.security_actions.send_alerts",
-        lambda alerts, p: sends.append(alerts) or len(alerts),
-    )
-    rc = cmd_security_scan(["demo"], paths)
-    assert rc == 0
-    assert quarantine_called == []
-    # Per-project flow doesn't fire heads-up.
-    assert sends == []
+    paths = _scan_paths(tmp_path)
+    paths.logs.mkdir(parents=True, exist_ok=True)
+    marker, lock = paths.state / "cve-grace.json", paths.state / ".cve-grace.lock"
+    marker.write_text('{"installed_at": "2099-01-01T00:00:00+00:00", garbage')
+    lock.write_text("")
+    _quarantine_scan(monkeypatch, paths)
+    quarantined: list = []
+    monkeypatch.setattr("boxmunge.commands.security_enforce.quarantine_project",
+                        lambda *a, **k: quarantined.append(a))
+    records, detach = _capture_log_records()
+    try:
+        assert cmd_security_scan([], paths) == 0
+        cmd_security_scan([], paths)
+    finally:
+        detach()
+    assert not marker.exists() and not lock.exists()
+    assert quarantined  # enforcement ran in full
+    grace_logs = [r for r in records if "grace" in r.getMessage()]
+    assert [r.levelno for r in grace_logs] == [logging.INFO]
 
 
-def test_scan_corrupt_grace_aborts(monkeypatch, tmp_path, capsys) -> None:
-    """Corrupt grace state aborts the scan loud rather than proceeding."""
-    from boxmunge.commands.security_actions import cmd_security_scan
-    paths = _scan_paths(tmp_path, in_grace=False)
-    paths.cve_grace_state.write_text("garbage {")
-    monkeypatch.setattr(
-        "boxmunge.commands.security_actions.refresh_db", lambda: None,
-    )
-    rc = cmd_security_scan([], paths)
-    err = capsys.readouterr().err
-    assert rc == 1
-    assert "grace state is corrupt" in err
-
-
-def test_security_summary_shows_grace_active_when_in_window(
-    monkeypatch, tmp_path,
-) -> None:
-    """Fleet text summary surfaces ACTIVE grace and heads_up_sent flag."""
-    paths = _make_paths(tmp_path)
-    (paths.state / "projects.txt").write_text("")
-    _seed_grace(paths, in_grace=True, heads_up_sent=True)
-    monkeypatch.setattr(
-        "boxmunge.commands.security_cmd._paths", lambda: paths,
-    )
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        cmd_security(["--json"])
-    payload = json.loads(buf.getvalue())
-    assert payload["grace"] is not None
-    assert payload["grace"]["active"] is True
-    assert payload["grace"]["heads_up_sent"] is True
-
-
-def test_security_summary_omits_grace_when_no_file(
-    monkeypatch, tmp_path,
-) -> None:
-    """No grace file → grace key is null in JSON, line absent in text."""
-    paths = _make_paths(tmp_path)
-    (paths.state / "projects.txt").write_text("")
-    monkeypatch.setattr(
-        "boxmunge.commands.security_cmd._paths", lambda: paths,
-    )
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        cmd_security(["--json"])
-    payload = json.loads(buf.getvalue())
-    assert payload["grace"] is None
-
-
-# ---------- Wave 2: A-2 lock skip / E-1 heads-up flock / E-2 ordering / F-8 exit code ----------
+# ---------- Wave 2: A-2 lock skip / E-2 ordering / F-8 exit code ----------
 
 
 def _wire_clean_scan(monkeypatch, paths) -> None:
@@ -2581,65 +2399,13 @@ def test_resume_lift_section_holds_project_lock(monkeypatch, tmp_path) -> None:
     )
 
 
-def test_grace_heads_up_only_fires_once_under_concurrent_callers(
-    monkeypatch, tmp_path,
-) -> None:
-    """Audit E-1: the grace heads-up alert must not double-fire when two
-    fleet scans race. Direct test of the helper's flock + re-read semantics."""
-    from boxmunge.commands.security_actions import _maybe_fire_grace_heads_up
-    paths = _scan_paths(tmp_path, in_grace=True)
-    sends: list = []
-    monkeypatch.setattr(
-        "boxmunge.commands.security_actions.send_alerts",
-        lambda alerts, p: sends.append(alerts) or len(alerts),
-    )
-    # Make formatting cheap and deterministic.
-    monkeypatch.setattr(
-        "boxmunge.commands.security_actions.format_grace_heads_up_alert",
-        lambda **kw: "ALERT",
-    )
-    # Provide a non-empty decisions_by_project so the outer guard would
-    # have fired the heads-up.
-    from datetime import datetime, timezone
-    from boxmunge.cve.policy import ProjectDecision
-    decisions = {"demo": ProjectDecision(
-        project_name="demo",
-        image_ref="myapp:1.0",
-        scanned_at=datetime(2026, 5, 6, tzinfo=timezone.utc),
-        findings=(),
-        quarantine_required=False,
-        at_risk_running=False,
-    )}
-    posture = {"demo": "balanced"}
-    dangerously = {"demo": False}
-    # First call should fire and persist heads_up_sent=True.
-    _maybe_fire_grace_heads_up(
-        paths,
-        decisions_by_project=decisions,
-        posture_by_project=posture,
-        dangerously_by_project=dangerously,
-    )
-    # Second call simulates a concurrent fleet scan that passed its outer
-    # check before the first call persisted. Inside the lock it must
-    # re-read and bail.
-    _maybe_fire_grace_heads_up(
-        paths,
-        decisions_by_project=decisions,
-        posture_by_project=posture,
-        dangerously_by_project=dangerously,
-    )
-    assert len(sends) == 1, (
-        f"heads-up fired {len(sends)} times (expected 1)"
-    )
-
-
 def test_scan_exit_code_2_when_project_quarantined(
     monkeypatch, tmp_path, capsys,
 ) -> None:
     """Audit F-8: scan returns exit code 2 when ≥1 project is quarantined."""
     from boxmunge.commands.security_actions import cmd_security_scan
     paths = _scan_paths(tmp_path)
-    _grace_quarantine_scan(monkeypatch, paths)
+    _quarantine_scan(monkeypatch, paths)
     # Stub quarantine_project to write the state file (mimics the real action).
     def fake_quarantine(project_name, paths_, **kwargs):
         qf = paths_.project_quarantine_state(project_name)
@@ -2867,15 +2633,11 @@ def test_resume_audit_only_still_detects_blocking_findings(
     assert "Re-scanning demo before lift" in out
 
 
-# ---------- F-2: scan_one_project lazy grace bootstrap ----------
+# ---------- scan_one_project direct callers ----------
 
 
 def _scan_one_project_paths(tmp_path):
-    """Build a paths fixture with 'demo' project but NO grace marker.
-
-    Differs from _scan_paths in that grace state is NOT pre-created — used
-    by F-2 tests that exercise the lazy bootstrap inside scan_one_project.
-    """
+    """Build a paths fixture with a balanced 'demo' project."""
     paths = _make_paths(tmp_path)
     proj = paths.projects / "demo"
     proj.mkdir(parents=True)
@@ -2903,48 +2665,6 @@ def _scan_one_project_paths(tmp_path):
     return paths
 
 
-def test_scan_one_project_direct_caller_bootstraps_grace(
-    monkeypatch, tmp_path,
-) -> None:
-    """Audit F-2: scan_one_project called fresh (no fleet entry-point,
-    no prior grace state) lazily creates the grace marker."""
-    from boxmunge.commands.security_scan_core import scan_one_project
-
-    paths = _scan_one_project_paths(tmp_path)
-    _grace_quarantine_scan(monkeypatch, paths)
-    monkeypatch.setattr(
-        "boxmunge.commands.security_enforce.quarantine_project",
-        lambda *a, **k: None,
-    )
-    assert not paths.cve_grace_state.exists()
-    scan_one_project(paths, "demo")
-    assert paths.cve_grace_state.exists()
-    payload = json.loads(paths.cve_grace_state.read_text())
-    assert "installed_at" in payload
-    assert "expires_at" in payload
-    assert payload["heads_up_sent"] is False
-
-
-def test_scan_one_project_audit_only_skips_bootstrap(
-    monkeypatch, tmp_path,
-) -> None:
-    """Audit F-2 + Wave 2: audit_only=True must NOT lazy-bootstrap grace.
-    The resume pre-flight observes findings and is not a scan entry-point."""
-    from boxmunge.commands.security_scan_core import scan_one_project
-
-    paths = _scan_one_project_paths(tmp_path)
-    _grace_quarantine_scan(monkeypatch, paths)
-    # quarantine_project must not be called in audit_only mode either; stub
-    # defensively so a regression would surface as wrong-state, not raise.
-    monkeypatch.setattr(
-        "boxmunge.commands.security_enforce.quarantine_project",
-        lambda *a, **k: None,
-    )
-    assert not paths.cve_grace_state.exists()
-    scan_one_project(paths, "demo", audit_only=True)
-    assert not paths.cve_grace_state.exists()
-
-
 def test_host_suppression_applies_during_scan_disposition(
     monkeypatch, tmp_path,
 ) -> None:
@@ -2954,8 +2674,7 @@ def test_host_suppression_applies_during_scan_disposition(
     from boxmunge.commands.security_scan_core import scan_one_project
 
     paths = _scan_one_project_paths(tmp_path)
-    _seed_grace(paths, in_grace=False)  # past grace so quarantine fires
-    _grace_quarantine_scan(monkeypatch, paths)  # returns Critical CVE-2026-9999
+    _quarantine_scan(monkeypatch, paths)  # returns Critical CVE-2026-9999
     # Without a suppression this scan WOULD quarantine the project. Track
     # whether quarantine_project is called — it must NOT be once the host
     # suppression covers the CVE.
@@ -2990,26 +2709,6 @@ def test_host_suppression_applies_during_scan_disposition(
     assert f9999["disposition"] == "suppressed"
 
 
-def test_scan_one_project_does_not_double_init_grace(
-    monkeypatch, tmp_path,
-) -> None:
-    """Audit F-2: when the fleet entry-point already wrote grace state,
-    a subsequent direct call must use the existing record (no overwrite)."""
-    from boxmunge.commands.security_scan_core import scan_one_project
-
-    paths = _scan_one_project_paths(tmp_path)
-    _seed_grace(paths, in_grace=True)
-    pre = paths.cve_grace_state.read_text()
-    _grace_quarantine_scan(monkeypatch, paths)
-    monkeypatch.setattr(
-        "boxmunge.commands.security_enforce.quarantine_project",
-        lambda *a, **k: None,
-    )
-    scan_one_project(paths, "demo")
-    post = paths.cve_grace_state.read_text()
-    assert post == pre, "grace state must not be re-initialised"
-
-
 # ---------- Task 6: KEV integration ----------
 
 
@@ -3030,7 +2729,6 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
     )
 
     paths = _scan_one_project_paths(tmp_path)
-    _seed_grace(paths, in_grace=False)  # past grace so quarantine fires
 
 
     # A finding that would be INFORMATIONAL without the KEV signal:
@@ -3080,7 +2778,7 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
         lambda: date(2026, 7, 1),
     )
 
-    headline = scan_one_project(paths, "demo", in_grace=False, kev=kev).headline
+    headline = scan_one_project(paths, "demo", kev=kev).headline
 
     assert headline is not None, (
         "KEV-listed CVE should quarantine even when otherwise informational"
@@ -3225,23 +2923,3 @@ def test_fleet_summary_excludes_expired_host_suppressions(
     payload = json.loads(buf.getvalue())
     assert payload["active_suppressions_host"] == 0
     assert payload["active_suppressions_count"] == 0
-
-
-def test_undelivered_grace_heads_up_is_not_marked_sent(monkeypatch, tmp_path) -> None:
-    """The heads-up is recorded as sent only once Pushover accepted it, so
-    an undelivered one is retried by the next scan in the window."""
-    from boxmunge.commands.security_actions import cmd_security_scan
-    from boxmunge.cve.grace import read_grace_state
-    paths = _scan_paths(tmp_path, in_grace=True)
-    _grace_quarantine_scan(monkeypatch, paths)
-    monkeypatch.setattr(
-        "boxmunge.commands.security_actions.send_alerts", lambda alerts, p: 0,
-    )
-    cmd_security_scan([], paths)
-    assert read_grace_state(paths).heads_up_sent is False
-    monkeypatch.setattr(
-        "boxmunge.commands.security_actions.send_alerts", lambda alerts, p: len(alerts),
-    )
-    cmd_security_scan([], paths)
-    assert read_grace_state(paths).heads_up_sent is True
-

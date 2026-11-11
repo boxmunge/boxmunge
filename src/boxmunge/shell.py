@@ -63,10 +63,9 @@ ALLOWED_COMMANDS: set[str] = {
     "health",
     # Self-test
     "self-test",
-    # Upgrade
+    # Upgrade (auto-update is root's: its timer runs it, and it locks
+    # upgrade-root/upgrade.lock, which deploy cannot open)
     "upgrade",
-    # Auto-update
-    "auto-update",
     # MCP server
     "mcp-serve",
 }

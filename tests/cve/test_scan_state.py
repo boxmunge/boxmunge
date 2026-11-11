@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for scan_state persistence of the VulnStatus `status` field."""
 
-import json
 from datetime import datetime, timezone
 
 import pytest
@@ -79,31 +78,49 @@ def test_scan_state_roundtrips_status(tmp_path):
     assert restored[0].findings[0].finding.status is VulnStatus.WILL_NOT_FIX
 
 
-def test_scan_state_legacy_file_without_status_defaults_unknown(tmp_path):
-    """A legacy scan_state.json without a 'status' key deserializes to UNKNOWN."""
-    from boxmunge.cve.scan_state import decisions_from_scan_state, read_scan_state
-
-    legacy = {
-        "scanned_at": "2026-06-01T00:00:00+00:00",
-        "decisions": [{
-            "image_ref": "img@sha256:abc",
-            "findings": [{
-                "cve_id": "CVE-9", "base_severity": "High",
-                "effective_severity": "High", "hardening_penalty": 0,
-                "disposition": "informational", "explanation": "x",
-                "fix_available": False, "fixed_version": None,
-                "package": "p", "primary_url": None, "title": "t",
-                "installed_version": "1", "attack_vector": None,
-                # NOTE: no "status" key — simulates legacy file
-            }],
-        }],
+def _stored(**overrides):
+    finding = {
+        "cve_id": "CVE-9", "base_severity": "High",
+        "effective_severity": "High", "hardening_penalty": 0,
+        "disposition": "informational", "explanation": "x",
+        "fix_available": False, "fixed_version": None,
+        "package": "p", "primary_url": None, "title": "t",
+        "installed_version": "1", "attack_vector": None,
+        "status": "affected", "pkg_class": "os-pkgs", "pkg_type": "debian",
     }
-    path = tmp_path / "legacy.json"
-    path.write_text(json.dumps(legacy))
-    state = read_scan_state(path)
-    assert state is not None
-    restored = decisions_from_scan_state(state, project_name="p")
-    assert restored[0].findings[0].finding.status is VulnStatus.UNKNOWN
+    finding.update(overrides)
+    for key in [k for k, v in overrides.items() if v is _MISSING]:
+        del finding[key]
+    return {"scanned_at": "2026-06-01T00:00:00+00:00",
+            "decisions": [{"image_ref": "img@sha256:abc", "findings": [finding]}]}
+
+
+_MISSING = object()
+
+
+@pytest.mark.parametrize("attack_vector", [None, _MISSING])
+def test_a_stored_finding_with_no_attack_vector_reads_back_as_none(attack_vector):
+    """Trivy gives no CVSS vector for some findings: null (or absent) is
+    "AV unknown", not an unreadable file."""
+    from boxmunge.cve.scan_state import decisions_from_scan_state
+    [decision] = decisions_from_scan_state(
+        _stored(attack_vector=attack_vector), project_name="p")
+    assert decision.findings[0].finding.attack_vector is None
+
+
+@pytest.mark.parametrize("field, value", [
+    ("base_severity", "Severe"), ("effective_severity", _MISSING),
+    ("status", _MISSING), ("status", "maybe"),
+    ("pkg_class", _MISSING), ("pkg_class", "os"),
+    ("attack_vector", "SATELLITE"), ("disposition", "quarantined-ish"),
+])
+def test_an_unrecognised_stored_value_is_refused_naming_its_field(field, value):
+    """A corrupted or hand-edited field is an unreadable file, not "unknown":
+    reading it as unknown would silently skew the transition alerts."""
+    from boxmunge.cve.scan_state import decisions_from_scan_state
+    from boxmunge.state import StateError
+    with pytest.raises(StateError, match=field):
+        decisions_from_scan_state(_stored(**{field: value}), project_name="p")
 
 
 def test_scan_state_roundtrips_pkg_class(tmp_path):
@@ -122,40 +139,6 @@ def test_scan_state_roundtrips_pkg_class(tmp_path):
     restored = decisions_from_scan_state(state, project_name="p")
     assert restored[0].findings[0].finding.pkg_class is PkgClass.OS
     assert restored[0].findings[0].finding.pkg_type == "debian"
-
-
-def test_scan_state_legacy_file_without_pkg_class_defaults_unknown(tmp_path):
-    """A legacy scan_state.json without 'pkg_class' deserializes to UNKNOWN.
-
-    Regression guard: such a finding must NOT read back as an OS package,
-    which would make it eligible for a relevance de-escalation it was never
-    evaluated for.
-    """
-    from boxmunge.cve.scan_state import decisions_from_scan_state, read_scan_state
-
-    legacy = {
-        "scanned_at": "2026-06-01T00:00:00+00:00",
-        "decisions": [{
-            "image_ref": "img@sha256:abc",
-            "findings": [{
-                "cve_id": "CVE-9", "base_severity": "High",
-                "effective_severity": "High", "hardening_penalty": 0,
-                "disposition": "informational", "explanation": "x",
-                "fix_available": False, "fixed_version": None,
-                "package": "p", "primary_url": None, "title": "t",
-                "installed_version": "1", "attack_vector": None,
-                "status": "unknown",
-                # NOTE: no "pkg_class"/"pkg_type" keys — simulates legacy file
-            }],
-        }],
-    }
-    path = tmp_path / "legacy.json"
-    path.write_text(json.dumps(legacy))
-    state = read_scan_state(path)
-    assert state is not None
-    restored = decisions_from_scan_state(state, project_name="p")
-    assert restored[0].findings[0].finding.pkg_class is PkgClass.UNKNOWN
-    assert restored[0].findings[0].finding.pkg_type is None
 
 
 @pytest.mark.parametrize("content", ["{not json", "[]"])
