@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from boxmunge.compose_images import describe_image
 from boxmunge.cve._alerting_types import Alert, Hit
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.policy_types import BALANCED_KEV_ONLY_SINCE
@@ -39,15 +40,21 @@ def _sev(fd: FindingDisposition) -> str:
     return eff
 
 
-def _line(hit: Hit) -> str:
+def _lines(hit: Hit) -> list[str]:
+    """The finding, naming its image as an operator reads it; a built
+    image's raw reference follows on its own line, where it can be copied."""
     fd = hit.disposition
     kev = ", CISA KEV" if fd.kev_listed else ""
-    return (f"- {fd.finding.cve_id} ({_sev(fd)}{kev}) in "
-            f"{fd.finding.package or '?'} — {hit.image_ref}")
+    image = describe_image(hit.image_ref)
+    lines = [f"- {fd.finding.cve_id} ({_sev(fd)}{kev}) in "
+             f"{fd.finding.package or '?'} — {image}"]
+    if image != hit.image_ref:
+        lines.append(f"  image: {hit.image_ref}")
+    return lines
 
 
 def _listing(hits: Sequence[Hit], limit: int = _MAX_LISTED) -> list[str]:
-    lines = [_line(h) for h in hits[:limit]]
+    lines = [line for h in hits[:limit] for line in _lines(h)]
     if len(hits) > limit:
         lines.append(f"... and {len(hits) - limit} more")
     return lines
@@ -224,7 +231,7 @@ def format_new_findings_alert(project: str, hits: Sequence[Hit]) -> Alert:
              f"{n} new finding{'s' if n != 1 else ''} below the quarantine gate. "
              f"Top {min(n, _DIGEST_TOP)}:"]
     for hit in hits[:_DIGEST_TOP]:
-        lines.append(_line(hit))
+        lines += _lines(hit)
         lines.append(f"    {hit.disposition.explanation}")
     lines += ["", f"All findings: boxmunge security {project}"]
     return Alert(kind="informational", title=title, body="\n".join(lines), priority=0)

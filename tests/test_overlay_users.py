@@ -95,6 +95,7 @@ def test_prepare_names_running_builds_before_it_untags(paths, monkeypatch) -> No
     # Production's builds only: staging's start names staging's (compose_guard).
     assert calls == [("name", "app", ["web"]), ("untag", "app"), ("untag", "app-staging")]
     log = paths.log_file.read_text()
-    assert "named the images app's containers run: boxmunge.invalid/app/web" in log
+    assert "named the images app's containers run: app's web image, built on this box" in log
+    assert '"images": ["boxmunge.invalid/app/web"]' in log
     assert '"component": "upgrade"' in log
 
