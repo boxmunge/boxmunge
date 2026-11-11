@@ -36,7 +36,9 @@ def _writers(dest: Store, services: dict[str, dict]) -> set[str]:
                 found.add(name)
             elif dest.kind == "bind" and m.kind == "bind":
                 a, b = os.path.normpath(str(m.source)), os.path.normpath(dest.ref)
-                if a == b or a.startswith(b + "/") or b.startswith(a + "/"):
+                # rstrip: "/" holds every path, and "/" + "/" matches none.
+                if (a == b or a.startswith(b.rstrip("/") + "/")
+                        or b.startswith(a.rstrip("/") + "/")):
                     found.add(name)
     return found
 

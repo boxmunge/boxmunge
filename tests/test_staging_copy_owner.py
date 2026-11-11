@@ -59,3 +59,14 @@ def test_a_volume_copy_goes_to_its_writer(paths, monkeypatch) -> None:
                     {"db": {"volumes": [{"type": "volume", "source": "db", "target": "/d"}]}},
                     {"db": ServiceUser(None, "image", "999:999")})
     assert calls == [("type=volume,src=shop-staging_db,dst=/x", "chown -R -h 999:999 /x")]
+
+
+def test_a_service_that_binds_the_host_root_writes_every_bind_store(tmp_path) -> None:
+    """`/` holds every path. Validation refuses such a bind today, but who
+    counts as a writer must not depend on that: with a second writer the
+    copy is given to nobody."""
+    dest = Store("bind", "./data", str(tmp_path / "data-staging"))
+    services = {"app": {"volumes": ["/:/host"]},
+                "web": {"volumes": [f"{tmp_path}/elsewhere:/e"]},
+                "ro": {"volumes": ["/:/host:ro"]}}
+    assert sco._writers(dest, services) == {"app"}
