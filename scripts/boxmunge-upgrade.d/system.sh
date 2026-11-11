@@ -45,11 +45,16 @@ cmd_install_sudoers() {
 slot_docs() { echo "$BOXMUNGE_ROOT/env-$1/boxmunge-docs"; }
 
 # install_docs <dir>: returns non-zero (and changes nothing) if <dir> has no
-# *.md files.
+# *.md files, or if docs/ is anything but the link (a rename cannot replace a
+# directory with a link, and what is in one is not boxmunge's to delete).
 install_docs() {
     local src="$1" docs="$BOXMUNGE_ROOT/docs" stage link previous
     if ! compgen -G "$src/*.md" >/dev/null; then
         log "ERROR: no *.md docs in $src; $docs left unchanged"
+        return 1
+    fi
+    if [[ -e "$docs" && ! -L "$docs" ]]; then
+        log "ERROR: $docs is not the link boxmunge keeps there, so the docs were not installed and it is left unchanged. Move it aside (sudo mv $docs $docs.old), then run the install or upgrade again"
         return 1
     fi
     stage="$(mktemp -d "$BOXMUNGE_ROOT/.docs.XXXXXX")"
@@ -60,7 +65,11 @@ install_docs() {
     link="$stage.link"
     ln -s "$(basename "$stage")" "$link"
     previous="$(readlink "$docs" 2>/dev/null || true)"
-    replace_file "$link" "$docs"
+    if ! replace_file "$link" "$docs"; then
+        rm -rf "$stage" "$link"
+        log "ERROR: could not replace $docs (see above); it is left unchanged"
+        return 1
+    fi
     if [[ "$previous" =~ ^\.docs\.[A-Za-z0-9]+$ ]]; then rm -rf "${BOXMUNGE_ROOT:?}/$previous"; fi
     log "Installed docs from $src"
 }
@@ -88,7 +97,7 @@ refresh_docs_for_slot() {
     local src
     src="$(slot_docs "$1")"
     if [[ ! -d "$src" ]] || ! install_docs "$src"; then
-        log "ERROR: docs not refreshed for slot $1 ($src missing or empty); agent-help may be stale"
+        log "ERROR: docs not refreshed for slot $1 from $src (missing, empty, or refused above); agent-help may be stale"
         bm_log error upgrade "docs refresh failed" "{\"slot\": \"$1\"}"
     fi
 }

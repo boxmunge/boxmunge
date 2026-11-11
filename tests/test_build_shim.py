@@ -67,7 +67,7 @@ def test_bundle_ships_the_built_shim(needle: str) -> None:
 # The head of install.sh up to the first step that changes the system: the
 # guard must sit in it. Only that head is ever run here, so a broken guard
 # cannot let the rest of install.sh loose on the test machine.
-_FIRST_STEP = "\n# Docker Compose 2.35.0 or newer (bootstrap/compose-version.sh)"
+_FIRST_STEP = "\n# An existing box is checked before anything is changed:"
 
 
 def _install_head(tmp_path: Path, shim: Path) -> subprocess.CompletedProcess:

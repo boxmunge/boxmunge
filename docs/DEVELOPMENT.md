@@ -253,7 +253,8 @@ Code that exists only for a source below the floor is deleted. Code kept for a s
 says, where it lives, which floor retires it. Today that is 0.11.1 (the `report_failure` probe
 in the shim; re-owning root-made directories in `deploy_dirs.py`), 0.11.5 (a rollback with no
 recorded stash), 0.11.6 (adopting a probation with no root record) and 0.11.7 (the shim's
-legacy lock).
+legacy lock; `bootstrap/caddy-log-path.sh`, which refuses a box whose Caddy configs write a log
+under `/var/log/caddy`).
 
 To raise the floor, announce it in the release notes of the release that becomes the bridge,
 then in the next release change the constants in both files, move the hop test's shims across,

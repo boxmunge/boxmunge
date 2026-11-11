@@ -51,6 +51,24 @@ expect 1 "no *.md docs" "install-docs refuses a source without docs"
 rm -rf "$src1" "$src2" "$empty"
 drop_root
 
+# docs/ as a plain directory (an install of a release before 0.11.7 that never
+# finished left one): refused, the directory as it was, nothing staged.
+new_root a
+mkdir "$BOXMUNGE_ROOT/docs"
+echo "kept" > "$BOXMUNGE_ROOT/docs/OLD.md"
+src1="$(docs_src "OPERATIONS.md=v1 ops")"
+run_shim install-docs "$src1"
+expect 1 "$BOXMUNGE_ROOT/docs is not the link boxmunge keeps there" "install-docs refuses a plain docs directory"
+[[ "$OUT" == *"sudo mv $BOXMUNGE_ROOT/docs $BOXMUNGE_ROOT/docs.old"* ]] && pass "the refusal says how to move it aside" \
+    || fail "no remedy: $OUT"
+[[ "$OUT" != *"Installed docs"* && "$OUT" != *Traceback* ]] && pass "no success line and no traceback" || fail "out: $OUT"
+[[ -d "$BOXMUNGE_ROOT/docs" && ! -L "$BOXMUNGE_ROOT/docs" && "$(cat "$BOXMUNGE_ROOT/docs/OLD.md")" == "kept" ]] \
+    && pass "the plain directory is left as it was" || fail "the plain directory changed"
+[[ -z "$(compgen -G "$BOXMUNGE_ROOT/.docs.*" || true)" ]] && pass "no staged docs or link left behind" \
+    || fail "left behind: $(compgen -G "$BOXMUNGE_ROOT/.docs.*")"
+rm -rf "$src1"
+drop_root
+
 # --- probation rollback restores the previous release's docs ---------------
 
 new_root a  # active a = new release on probation; b = previous release

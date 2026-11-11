@@ -658,6 +658,19 @@ mounted at `/var/log/caddy`. A `caddy.override.conf` or a hand-placed file in `c
 writes a log file there stops Caddy from loading its config. Use the log block boxmunge generates
 (stdout) instead.
 
+Releases 0.11.0 to 0.11.6 mounted a tmpfs there, so such a file worked on them. An install or
+upgrade to 0.11.7 or later looks for `/var/log/caddy` in `caddy/sites/*.conf`, in the site files
+waiting in `caddy/.site-journal/` and in every `projects/*/caddy.override.conf`, before it changes
+anything. If one names it, the install stops and lists the files, and the box stays on its
+release with its sites up. In each file, remove the log block or make it `output stdout`. An
+upgrade that stopped this way blocklisted the release it was installing, so clear that and
+upgrade again:
+
+```
+sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist <version>
+sudo /opt/boxmunge/bin/boxmunge-upgrade target <version>
+```
+
 ---
 
 ## Backups

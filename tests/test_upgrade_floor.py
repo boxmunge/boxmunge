@@ -71,12 +71,66 @@ def test_a_missing_version_record_is_refused_not_guessed(tmp_path: Path) -> None
     assert "boxmunge-server --version" in message
 
 
-@pytest.mark.parametrize("recorded", ["", "unknown", "0.11", "v0.11.2", "0.11.x"])
-def test_an_unreadable_version_record_is_refused(tmp_path: Path, recorded: str) -> None:
-    paths = _box(tmp_path, recorded)
-    with pytest.raises(BelowUpgradeFloor, match="boxmunge-server --version") as refusal:
+def test_a_missing_record_says_which_part_of_the_version_output_to_write(tmp_path: Path) -> None:
+    """`--version` prints `boxmunge 0.11.6+abc1234`; written whole, that is refused again."""
+    paths = _box(tmp_path, None)
+    with pytest.raises(BelowUpgradeFloor) as refusal:
         require_upgrade_floor(paths, NEW)
-    assert str(paths.version_file) in str(refusal.value)
+    assert "as X.Y.Z alone" in str(refusal.value)
+    assert "(for `boxmunge 0.11.6+abc1234`, write 0.11.6)" in str(refusal.value)
+    paths.version_file.write_text("boxmunge 0.11.6+abc1234\n")
+    with pytest.raises(BelowUpgradeFloor, match="does not record"):
+        require_upgrade_floor(paths, NEW)
+    paths.version_file.write_text("0.11.6\n")
+    require_upgrade_floor(paths, NEW)
+
+
+# What config/version holds, byte for byte, and the verdict of both checks:
+# "pass", "below" the floor, or "unreadable". One line (the newline optional),
+# a version as the shim's SEMVER_RE reads it, an optional +build; compared on
+# X.Y.Z alone.
+RECORDS = [
+    (b"0.11.0\n", "pass"), (b"0.11.0", "pass"), (b"0.11.6+abc1234\n", "pass"),
+    (b"0.12.0\n", "pass"), (b"1.0.0\n", "pass"), (b"0.100.0\n", "pass"), (b"0.11.10\n", "pass"),
+    (b"0.12.0-rc.1\n", "pass"), (b"0.11.0-rc.1\n", "pass"), (b"0.11.0-rc.1+abc1234", "pass"),
+    (b"00.011.00\n", "pass"), (b"0.011.0\n", "pass"),
+    (b"99999999999999999999999999.0.0\n", "pass"), (b"0.99999999999999999999999999.0\n", "pass"),
+    (b"0.10.99\n", "below"), (b"0.10.1+abc\n", "below"), (b"0.9.16\n", "below"),
+    (b"0.10.1-rc.1+abc\n", "below"), (b"0.010.9\n", "below"), (b"0.9.2+0.11.0\n", "below"),
+    (b"0.0.99999999999999999999999999\n", "below"),
+    (b"", "unreadable"), (b"\n", "unreadable"), (b"unknown\n", "unreadable"),
+    (b"v0.11.0\n", "unreadable"), (b"0.11\n", "unreadable"), (b"0.11.0.1\n", "unreadable"),
+    (b"0.11.x\n", "unreadable"), (b"boxmunge 0.11.6+abc1234\n", "unreadable"),
+    (b"0.11.0\njunk\n", "unreadable"), (b"0.11.0\n\n", "unreadable"), (b"\n0.11.0\n", "unreadable"),
+    (b" 0.11.0\n", "unreadable"), (b"0.11.0 \n", "unreadable"), (b"0.11.0\r\n", "unreadable"),
+    (b"0.11.0\t\n", "unreadable"), (b"0.11.0+\n", "unreadable"), (b"+0.11.0\n", "unreadable"),
+    (b"0.11.0-\n", "unreadable"), (b"0.11.0-rc..1\n", "unreadable"), (b"0.11.0+a+b\n", "unreadable"),
+    (b"0.11.0\x00\n", "unreadable"), (b"0.11.0\n\x00", "unreadable"), (b"\x000.11.0\n", "unreadable"),
+    (b"0.11.\xc3\xa9\n", "unreadable"), (b"0.\xd9\xa1\xd9\xa1.0\n", "unreadable"), (b"0.11.0\xff\n", "unreadable"),
+]
+SAID = {"below": "cannot be installed over", "unreadable": "does not record the release this box runs"}
+
+
+@pytest.mark.parametrize(("record", "verdict"), RECORDS, ids=[repr(r)[2:-1] for r, _ in RECORDS])
+def test_the_package_and_install_sh_read_the_version_record_alike(
+        tmp_path: Path, record: bytes, verdict: str) -> None:
+    paths = _box(tmp_path, None)
+    paths.version_file.write_bytes(record)
+
+    try:
+        require_upgrade_floor(paths, NEW)
+        package = "pass"
+    except BelowUpgradeFloor as refusal:
+        package = next(name for name, text in SAID.items() if text in str(refusal))
+    result = subprocess.run(["bash", str(INSTALL_FLOOR)], capture_output=True, text=True,
+                            check=False, env={**os.environ, "BOXMUNGE_ROOT": str(paths.root)})
+    if result.returncode == 0:
+        install_sh = "pass"
+    else:
+        assert result.returncode == 1, result.stderr
+        install_sh = next(name for name, text in SAID.items() if text in result.stderr)
+
+    assert (package, install_sh) == (verdict, verdict)
 
 
 class TestDryRun:
@@ -169,12 +223,15 @@ class TestInstallSh:
         assert f"sudo {tmp_path}/bin/boxmunge-upgrade target {BRIDGE_RELEASE}" in result.stderr
         assert "+abc1234" not in result.stderr
 
-    @pytest.mark.parametrize("recorded", ["", "unknown", "0.11", "v0.11.2"])
-    def test_an_unreadable_record_is_refused(self, tmp_path: Path, recorded: str) -> None:
-        result = self._run(self._recorded(tmp_path, recorded))
+    def test_an_unreadable_record_says_which_part_of_the_version_output_to_write(
+            self, tmp_path: Path) -> None:
+        result = self._run(self._recorded(tmp_path, "boxmunge 0.11.6+abc1234"))
         assert result.returncode == 1
         assert f"{tmp_path}/config/version does not record" in result.stderr
-        assert "boxmunge-server --version" in result.stderr
+        assert "(it holds 'boxmunge 0.11.6+abc1234?')" in result.stderr
+        assert f"{tmp_path}/env-active/bin/boxmunge-server --version" in result.stderr
+        assert "(for `boxmunge 0.11.6+abc1234`, write 0.11.6)" in result.stderr
+        assert "Nothing was changed" in result.stderr
 
     def test_an_interrupted_first_install_is_let_through(self, tmp_path: Path) -> None:
         """No release ever finished installing there: a re-run completes it."""

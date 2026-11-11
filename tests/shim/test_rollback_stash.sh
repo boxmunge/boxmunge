@@ -87,6 +87,33 @@ run_shim check-probation
 expect 2 "stashes/$RECORDED cannot be opened" "a missing recorded stash is refused"
 drop_root
 
+# The record a released shim's own record_stash writes (0.11.5 is the first
+# that records one, 0.11.6 the bridge release) is the one this shim's rollback
+# restores, not the newer-named stash planted beside it.
+for released in v0.11.5 v0.11.6; do
+    box none
+    echo "deploy's stash" > "$BOXMUNGE_ROOT/stashes/$PLANTED"
+    written="$(
+        UPGRADE_ROOT_DIR="$BOXMUNGE_ROOT/upgrade-root"
+        # shellcheck disable=SC2034  # read by the released record_stash
+        STASH_RECORD_FILE="$UPGRADE_ROOT_DIR/upgrade-stash"
+        # shellcheck disable=SC2329  # both are called by the released functions
+        log() { echo "log: $*"; }
+        # shellcheck disable=SC2329
+        die_logged() { echo "die: $*"; exit 1; }
+        # The functions cut from the released shim (eval: bash 3.2 cannot source a pipe).
+        eval "$(sed -n '/^STASH_NAME_RE=/p;/^refuse_symlink() {/,/^}/p;/^replace_file() {/,/^}/p;/^write_root_file() {/,/^}/p;/^stash_facts() {/,/^}/p;/^record_stash() {/,/^}/p' \
+            "$REPO_DIR/tests/integration/old_shims/boxmunge-upgrade-$released")"
+        record_stash 1.5.0 "Stash created: $RECORDED" 2>&1
+    )" && [[ "$(cat "$BOXMUNGE_ROOT/upgrade-root/upgrade-stash")" == "1.5.0 $RECORDED $(record_of "$BOXMUNGE_ROOT/stashes/$RECORDED")" ]] \
+        && pass "the $released shim records the stash with its size and sha256" || fail "the $released record_stash: $written"
+    run_shim check-probation
+    expect 1 "Rollback complete" "a record of the $released shim: the rollback completes"
+    restored "$RECORDED" "the upgrade's stash" && [[ "$OUT" != *"no stash recorded"* ]] \
+        && pass "a record of the $released shim: the recorded stash is restored" || fail "$(calls); out: $OUT"
+    drop_root
+done
+
 # No record (a shim before 0.11.5 ran the upgrade): the newest-named stash, checked.
 box none
 run_shim check-probation
