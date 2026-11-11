@@ -81,8 +81,12 @@ def backup_source(paths: BoxPaths, project: str) -> BackupSource:
 def _legacy(paths: BoxPaths, project: str, stage: LegacyStage) -> BackupSource:
     """The manifest matching the containers a 0.10.1 stage left running."""
     pdir = paths.project_dir(project)
-    if stage.kind == "leftover":
-        # A promote whose unstage failed: production runs the promoted release.
+    if stage.kind in ("leftover", "pre0101"):
+        # leftover: a promote whose unstage failed: production runs the
+        # promoted release. pre0101: the project dir holds the staged
+        # release's files and no copy of production's is on the box; the
+        # release that made the stage backed up from these files too, and a
+        # backup service the staged release renamed fails the dump noisily.
         return BackupSource(load_manifest(pdir / "manifest.yml"))
     try:
         ev = evidence(paths, project, stage)

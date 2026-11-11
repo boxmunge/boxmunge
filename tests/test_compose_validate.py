@@ -618,7 +618,9 @@ services:
 
 
 # ---------------------------------------------------------------------------
-# A-NEW-4 — Variable substitution in volume sources is rejected up front.
+# A-NEW-4 — A volume source that still holds a '$' in the model is refused.
+# The unit fixture's `config` does not interpolate; real Compose resolves a
+# ${VAR} that .env sets first, and the resulting path is checked as any other.
 # ---------------------------------------------------------------------------
 
 class TestRejectsVolumeEnvSubstitution:
@@ -630,7 +632,7 @@ services:
     volumes:
       - ${SOCK_PATH}:/var/run/docker.sock
 """)
-        with pytest.raises(ComposeSecurityError, match="substitution"):
+        with pytest.raises(ComposeSecurityError, match=r"'\$' in its volumes: source"):
             validate_user_compose(compose, paths, project_name="myapp")
 
     def test_bare_dollar_substitution_rejected(self, tmp_path: Path, paths) -> None:
@@ -641,7 +643,7 @@ services:
     volumes:
       - $HOME/foo:/etc
 """)
-        with pytest.raises(ComposeSecurityError, match="substitution"):
+        with pytest.raises(ComposeSecurityError, match=r"'\$' in its volumes: source"):
             validate_user_compose(compose, paths, project_name="myapp")
 
     def test_brace_substitution_in_long_syntax_rejected(self, tmp_path: Path, paths) -> None:
@@ -654,7 +656,7 @@ services:
         source: ${PROC_PATH}
         target: /host_proc
 """)
-        with pytest.raises(ComposeSecurityError, match="substitution"):
+        with pytest.raises(ComposeSecurityError, match=r"'\$' in its volumes: source"):
             validate_user_compose(compose, paths, project_name="myapp")
 
     # Audit F-5: embedded `$` (not just leading) must trigger rejection.
@@ -666,7 +668,7 @@ services:
     volumes:
       - /foo$BAR:/dst
 """)
-        with pytest.raises(ComposeSecurityError, match="substitution"):
+        with pytest.raises(ComposeSecurityError, match=r"'\$' in its volumes: source"):
             validate_user_compose(compose, paths, project_name="myapp")
 
     def test_embedded_brace_substitution_rejected(self, tmp_path: Path, paths) -> None:
@@ -677,7 +679,7 @@ services:
     volumes:
       - /foo${BAR}/x:/dst
 """)
-        with pytest.raises(ComposeSecurityError, match="substitution"):
+        with pytest.raises(ComposeSecurityError, match=r"'\$' in its volumes: source"):
             validate_user_compose(compose, paths, project_name="myapp")
 
     def test_trailing_brace_substitution_rejected(self, tmp_path: Path, paths) -> None:
@@ -688,7 +690,7 @@ services:
     volumes:
       - /abc/${BAR}:/dst
 """)
-        with pytest.raises(ComposeSecurityError, match="substitution"):
+        with pytest.raises(ComposeSecurityError, match=r"'\$' in its volumes: source"):
             validate_user_compose(compose, paths, project_name="myapp")
 
     def test_literal_path_no_dollars_accepted(self, tmp_path: Path, paths) -> None:

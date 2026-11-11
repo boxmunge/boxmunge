@@ -92,29 +92,28 @@ expect_deferred "target (probation expired, not yet promoted)"
     || fail "expired refusal lacks the promotion note: $OUT"
 drop_root
 
-# A forged far-future expiry cannot defer upgrades for good: the first run
-# that reads it records, root-only, an expiry at most a fresh probation's
-# length away, and the probation ends then.
+# A forged far-future expiry cannot defer upgrades for good: the probation
+# ends when root recorded it would, a fresh probation's length after it began.
 on_probation "2999-01-01T00:00:00+00:00"
 run_shim target 1.5.0
-expect_deferred "target (expiry beyond the cap)"
-[[ "$OUT" == *"beyond a 6h probation; it ends at"* && "$OUT" != *"2999"* ]] \
-    && pass "a beyond-cap expiry is capped, with a warning" || fail "beyond-cap expiry: $OUT"
+expect_deferred "target (expiry beyond the record)"
+[[ "$OUT" == *"later than the probation root recorded; it ends at"* && "$OUT" != *"2999"* ]] \
+    && pass "a lengthened expiry is ignored, with a warning" || fail "lengthened expiry: $OUT"
 run_shim check-probation
-expect 0 "" "check-probation carries on with a capped probation"
-[[ -f "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] && pass "a capped probation is not promoted at once" \
-    || fail "a capped probation was promoted at once"
-recorded="$(cut -d' ' -f2 "$BOXMUNGE_ROOT/upgrade-root/probation-expiry")"
+expect 0 "" "check-probation carries on with a lengthened probation"
+[[ -f "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] && pass "a lengthened probation is not promoted at once" \
+    || fail "a lengthened probation was promoted at once"
+recorded="$(cut -d' ' -f3 "$BOXMUNGE_ROOT/upgrade-root/probation-expiry")"
 now="$(date +%s)"
 [[ "$recorded" -gt $((now + 5 * 3600)) && "$recorded" -le $((now + 6 * 3600)) ]] \
-    && pass "the capped expiry is a fresh probation's length away" || fail "recorded expiry $recorded (now $now)"
+    && pass "the recorded expiry is a fresh probation's length away" || fail "recorded expiry $recorded (now $now)"
 # Deploy cannot lengthen it again: a later, longer expires_at is ignored.
-write_probation "1.4.0" "b" "2999-06-01T00:00:00+00:00"
+forge_probation "1.4.0" "b" "2999-06-01T00:00:00+00:00"
 run_shim check-probation
-[[ "$(cut -d' ' -f2 "$BOXMUNGE_ROOT/upgrade-root/probation-expiry")" == "$recorded" ]] \
+[[ "$(cut -d' ' -f3 "$BOXMUNGE_ROOT/upgrade-root/probation-expiry")" == "$recorded" ]] \
     && pass "a rewritten expires_at does not move the recorded expiry" || fail "recorded expiry moved"
 # It can still end the probation early, as ever.
-write_probation "1.4.0" "b" "2000-01-01T00:00:00+00:00"
+forge_probation "1.4.0" "b" "2000-01-01T00:00:00+00:00"
 run_shim check-probation
 expect 0 "promoted" "an earlier expires_at still ends the probation"
 drop_root
@@ -122,7 +121,7 @@ drop_root
 # A temp file a run killed between writing and renaming left in
 # upgrade-root/ is removed by the next write of that file.
 on_probation
-mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+rm "$BOXMUNGE_ROOT/upgrade-root/probation-expiry"  # an older shim's probation: adopted, so recorded
 echo "half" > "$BOXMUNGE_ROOT/upgrade-root/.probation-expiry.AbC123"
 run_shim check-probation
 [[ ! -e "$BOXMUNGE_ROOT/upgrade-root/.probation-expiry.AbC123" && -f "$BOXMUNGE_ROOT/upgrade-root/probation-expiry" ]] \
@@ -132,7 +131,6 @@ drop_root
 # A malformed expiry record is named as such: it is root's file, not
 # deploy's probation.json.
 on_probation
-mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
 echo "a soon" > "$BOXMUNGE_ROOT/upgrade-root/probation-expiry"
 run_shim check-probation
 expect 1 "upgrade-root/probation-expiry is malformed" "a malformed expiry record is named"
@@ -154,11 +152,10 @@ done
 # Likewise once the expiry is recorded: one more than a probation's length
 # ahead means the clock went back, and it is moved to a probation from now.
 on_probation
-mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
-echo "a $(( $(date +%s) + 10 * 3600 ))" > "$BOXMUNGE_ROOT/upgrade-root/probation-expiry"
+record_probation 1.4.0 "$(( $(date +%s) + 10 * 3600 ))"
 run_shim check-probation
 expect 0 "the clock went back" "a recorded expiry beyond a probation from now says the clock went back"
-recorded="$(cut -d' ' -f2 "$BOXMUNGE_ROOT/upgrade-root/probation-expiry")"
+recorded="$(cut -d' ' -f3 "$BOXMUNGE_ROOT/upgrade-root/probation-expiry")"
 [[ "$recorded" -le $(( $(date +%s) + 6 * 3600 )) && -f "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] \
     && pass "the recorded expiry is moved to a probation from now, not promoted" || fail "recorded $recorded"
 drop_root

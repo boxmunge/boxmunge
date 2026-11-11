@@ -16,7 +16,7 @@ from boxmunge.config import ConfigError, load_config
 from boxmunge.docker_run import docker_env
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
-from boxmunge.legacy_stage import alert_legacy, cannot_tell, legacy_stage
+from boxmunge.legacy_stage import alert_legacy, awaiting_deploy_refusal, cannot_tell, legacy_stage
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.pause import awaiting_deploy
 from boxmunge.log import log_error, log_operation
@@ -439,6 +439,12 @@ def _check_one(name: str, paths: BoxPaths, read_only: bool) -> int:
         print(f"{name}: legacy-stage ({stage.kind}); run 'boxmunge-server legacy-stage {name}'")
         if not read_only:
             alert_legacy(paths, name, stage)
+        return 1
+    awaiting = awaiting_deploy_refusal(paths, name)
+    if awaiting is not None:
+        # Production runs the release deployed before the discarded stage;
+        # the smoke definitions on disk are the staged release's.
+        print(f"{name}: {awaiting}")
         return 1
     # A blocked (paused or CVE-quarantined) project is intentionally
     # stopped. Running smoke (which depends on a live container)

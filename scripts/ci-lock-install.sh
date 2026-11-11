@@ -10,7 +10,9 @@
 # The box set goes in one pip call, as the upgrade shim installs a slot
 # (requirements.txt is the base of -tui and -mcp), so conflicting pins fail
 # here too; requirements-dev.txt goes on top, as CI and contributors install
-# it.
+# it. A second pip call replaces a pin from the first without a word, so
+# `pip check` runs last: a dev pin below a box package's floor fails here,
+# not in a test that imports the downgraded package.
 #
 # Usage: scripts/ci-lock-install.sh <python>...
 set -euo pipefail
@@ -36,5 +38,6 @@ for python in "$@"; do
          --require-hashes)
     "${pip[@]}" "${box[@]}"
     "${pip[@]}" "${dev[@]}"
-    echo "$python: ${BOX[*]} ${DEV[*]} install"
+    "$venv/bin/pip" check
+    echo "$python: ${BOX[*]} ${DEV[*]} install and pip check"
 done

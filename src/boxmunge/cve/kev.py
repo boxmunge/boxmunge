@@ -33,7 +33,7 @@ from datetime import date, datetime, timezone
 from typing import Any
 
 from boxmunge.paths import BoxPaths
-from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 
 _LOGGER = logging.getLogger("boxmunge")
 
@@ -157,10 +157,11 @@ def load_kev(paths: BoxPaths) -> KevCatalog:
     replaces it (see KevCatalog.stale_reason).
     """
     path = paths.kev_catalog
-    if not path.exists():
-        return _EMPTY
     try:
-        data = json.loads(read_text_nofollow(path))
+        raw = read_text_nofollow_or_none(path)
+        if raw is None:
+            return _EMPTY
+        data = json.loads(raw)
         raw_ids = data.get("cve_ids")
         # A well-formed document has cve_ids as a list. A truthy non-list
         # (e.g. cve_ids: 42) is a corrupt document, not a partial one:

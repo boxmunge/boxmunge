@@ -69,3 +69,14 @@ class TestDeployStatePreservesIdentity:
         assert run_deploy("myapp", paths) == 1
         assert "different ID" in capsys.readouterr().err
         assert tree_snapshot(paths.project_dir("myapp")) == before
+
+
+@pytest.mark.parametrize("record", ["other.paused.json", "other.quarantined.json",
+                                    "other.users.json", "other.binds.json"])
+def test_another_projects_records_are_not_read_as_deploy_records(paths, tmp_path, record):
+    """Only deploy records (`<project>.json`) hold a project_id: an unreadable
+    pause or quarantine record of one project must not fail another's
+    identity check (and with it its deploy or the upgrade)."""
+    paths.deploy_state.mkdir(parents=True, exist_ok=True)
+    (paths.deploy_state / record).symlink_to(tmp_path / "gone.json")
+    check_project_identity("myapp", "01TESTULID0000000000000000", paths)

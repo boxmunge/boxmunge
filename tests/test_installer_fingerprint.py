@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """install.sh records (bootstrap/installer-fingerprint.sh), and the upgrade shim recomputes over a new bundle, one
 fingerprint covering install.sh and the files it installs from, so a release
-that changes only bootstrap/, the sshd drop-in or system/ (the boxmunge-system
-image) still re-runs install.sh."""
+that changes only bootstrap/, the sshd drop-in, system/ (the boxmunge-system
+image), a systemd unit, Caddy's compose file or the maintenance page still
+re-runs install.sh."""
 from __future__ import annotations
 
 import os
@@ -13,6 +14,10 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+# A file of each kind install.sh installs from (the fingerprint covers them all).
+INSTALLED_FROM = ("install.sh", "bootstrap/sshd-hardening.sh", "src/boxmunge/sshd/00-boxmunge.conf",
+                  "system/Dockerfile", "systemd/boxmunge-backup.timer", "caddy/compose.yml",
+                  "caddy/maintenance/index.html")
 # The part after `cd "<bundle>" && `, up to the end of the pipeline.
 _EXPR = re.compile(r'cd "[^"]+" && (find \. .*?awk \'\{print \$1\}\')')
 
@@ -28,8 +33,7 @@ def test_install_sh_and_the_shim_compute_the_same_fingerprint() -> None:
 
 
 def _bundle(root: Path) -> Path:
-    for rel in ("install.sh", "bootstrap/sshd-hardening.sh", "src/boxmunge/sshd/00-boxmunge.conf",
-                "system/Dockerfile", "src/boxmunge/shell.py"):
+    for rel in (*INSTALLED_FROM, "src/boxmunge/shell.py"):
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(f"{rel}\n")
     return root
@@ -60,8 +64,7 @@ def test_a_change_to_any_installed_from_file_changes_the_fingerprint(tmp_path: P
     bundle = _bundle(tmp_path / "bundle")
     base = _fingerprint(bundle, tmp_path)
     assert _fingerprint(bundle, tmp_path) == base
-    for rel in ("install.sh", "bootstrap/sshd-hardening.sh", "src/boxmunge/sshd/00-boxmunge.conf",
-                "system/Dockerfile"):
+    for rel in INSTALLED_FROM:
         path = bundle / rel
         original = path.read_text()
         path.write_text(original + "changed\n")
@@ -69,3 +72,16 @@ def test_a_change_to_any_installed_from_file_changes_the_fingerprint(tmp_path: P
         path.write_text(original)
     (bundle / "src/boxmunge/shell.py").write_text("python changes alone do not re-run it\n")
     assert _fingerprint(bundle, tmp_path) == base
+
+
+def test_every_bundle_path_install_sh_copies_is_fingerprinted() -> None:
+    """A path install.sh reads from the bundle but the fingerprint misses
+    would never reach a box whose upgrade skips install.sh."""
+    install = (REPO / "install.sh").read_text()
+    expr = _expr(REPO / "bootstrap" / "installer-fingerprint.sh")
+    used = set(re.findall(r'\$\{SCRIPT_DIR\}/([a-z][a-z-]*)/', install))
+    # The shim installs these itself on every upgrade (self-update, docs,
+    # canary refresh, the venv's own pip install).
+    shim_installed = {"scripts", "on-server", "canary"}
+    covered = set(re.findall(r"-path '?\./([a-z][a-z-]*)/", expr))
+    assert used - shim_installed <= covered, used - shim_installed - covered

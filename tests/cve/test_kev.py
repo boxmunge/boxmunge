@@ -152,8 +152,9 @@ class _FakeResp:
     def __exit__(self, *exc):
         return False
 
-    def read(self, limit: int = -1) -> bytes:
-        return self._body
+    def read1(self, limit: int = -1) -> bytes:
+        body, self._body = self._body, b""
+        return body
 
 
 def test_refresh_kev_non_dict_payload_does_not_raise(tmp_path, monkeypatch):

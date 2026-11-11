@@ -326,3 +326,120 @@ def test_plain_resume_still_starts_a_pause_awaiting_a_deploy(paths) -> None:
     with patch("boxmunge.commands.resume_cmd.caddy_reload"):
         assert _resume(paths) == 0 and _resume.up_calls == 1
     assert not is_paused("myapp", paths)
+
+
+
+def _scans_clean(paths, monkeypatch, image: str) -> None:
+    """The deploy's scan of `image` finds nothing quarantine-level. The image
+    id is the one the unit tier's image store reports, so the gate's check
+    that the deploy starts what was scanned runs."""
+    import hashlib
+    from boxmunge.commands import quarantine_gate
+    from boxmunge.cve.quarantine import clear_quarantine_state
+    from boxmunge.paths import BoxPaths
+    from tests.test_commands.cve_helpers import BALANCED, make_clearance
+    scanned = "sha256:" + hashlib.sha256(image.encode()).hexdigest()
+    clearance = make_clearance("myapp", {"web": (image, scanned)}, before=BALANCED)
+    monkeypatch.setattr("boxmunge.commands.release_config.clear_release", lambda *a: clearance)
+    monkeypatch.setattr(quarantine_gate, "_verify_running",
+                        lambda paths_, c, component, **kw: {"myapp-web-1": "web"})
+    monkeypatch.setattr(quarantine_gate, "_release_policies",
+                        lambda paths_, project, services: {"myapp-web-1": "always"})
+    monkeypatch.setattr(quarantine_gate, "lift_quarantine",
+                        lambda project, paths_, **kw: clear_quarantine_state(project, paths_))
+    monkeypatch.setattr(BoxPaths.__init__, "__defaults__", (paths.root,))
+
+
+def _run(command: str) -> int:
+    """`boxmunge <command>` as the deploy shell runs it."""
+    from boxmunge import cli
+    with docker_off(), patch("sys.argv", ["boxmunge", *command.split()]), \
+            pytest.raises(SystemExit) as done:
+        cli.main()
+    return done.value.code
+
+
+def _named(text: str) -> list[str]:
+    import re
+    return re.findall(r"`boxmunge ([^`]+)`", text)
+
+
+def test_the_upgrades_way_back_for_a_paused_quarantined_project_runs(
+        paths, monkeypatch) -> None:
+    """An upgrade refuses to record a paused, quarantined project whose
+    compose.yml changed since its deploy, and names the way back. Each
+    command it names runs, in order, from that state: `security resume`
+    then `resume` would not (resume runs the same start check)."""
+    from boxmunge.commands.upgrade_offline import offline_exit
+    from boxmunge.cve.quarantine import clear_quarantine_state, is_quarantined
+    from tests.test_commands.cve_helpers import seed_quarantine
+    _paused_v1(paths)
+    seed_quarantine(paths, "myapp")
+    compose = paths.project_dir("myapp") / "compose.yml"
+    compose.write_text(BIND_COMPOSE.replace("image: nginx", "image: nginx:1.27"))
+    clear_quarantine_state("myapp", paths)   # what `security resume` leaves: paused
+    assert _resume(paths) == 3   # and `resume` refuses the changed file
+    seed_quarantine(paths, "myapp")
+    commands = _named(offline_exit(paths, "myapp"))
+    assert commands == ["resume myapp --no-start", "prod-deploy myapp --redeploy"]
+    _scans_clean(paths, monkeypatch, "nginx:1.27")
+    for command in commands:
+        assert _run(command) == 0, command
+    assert not is_paused("myapp", paths) and not is_quarantined("myapp", paths)
+    assert "nginx:1.27" in compose.read_text()   # the edit is what was deployed
+
+
+def test_the_upgrades_way_back_for_a_quarantined_project_names_a_deploy_that_runs(
+        paths, monkeypatch) -> None:
+    """Not paused: `security resume` runs the start check and is refused
+    while the changed file stands; the deploy it names instead runs."""
+    from boxmunge.commands.quarantine_lift import restore_from_quarantine
+    from boxmunge.commands.upgrade_offline import offline_exit
+    from boxmunge.cve.quarantine import QuarantineError, is_quarantined
+    from tests.test_commands.cve_helpers import seed_quarantine
+    add_project("myapp", paths)
+    place_bundle(paths, timestamp=V1, files={"compose.yml": BIND_COMPOSE})
+    with docker_off():
+        assert run_deploy("myapp", paths, ref=V1) == 0
+    seed_quarantine(paths, "myapp")
+    compose = paths.project_dir("myapp") / "compose.yml"
+    compose.write_text(BIND_COMPOSE.replace("image: nginx", "image: nginx:1.27"))
+    commands = _named(offline_exit(paths, "myapp"))
+    assert commands == ["security resume myapp", "prod-deploy myapp --redeploy"]
+    # What `security resume` runs once its re-scan is clear:
+    with docker_off(), pytest.raises(QuarantineError, match="compose.yml changed"):
+        restore_from_quarantine(paths, "myapp", component="security-resume")
+    _scans_clean(paths, monkeypatch, "nginx:1.27")
+    assert _run(commands[1]) == 0
+    assert not is_quarantined("myapp", paths)
+
+
+@pytest.mark.parametrize("quarantined", [False, True], ids=["paused", "quarantined"])
+def test_the_upgrades_way_back_says_when_each_way_applies(paths, quarantined) -> None:
+    from boxmunge.commands.upgrade_offline import offline_exit
+    from boxmunge.cve.quarantine import clear_quarantine_state
+    from boxmunge.pause import clear_paused_state
+    from tests.test_commands.cve_helpers import seed_quarantine
+    _paused_v1(paths)
+    if quarantined:
+        clear_paused_state("myapp", paths)
+        seed_quarantine(paths, "myapp")
+    text = offline_exit(paths, "myapp")
+    first = "security resume myapp" if quarantined else "resume myapp"
+    assert f"`boxmunge {first}` once the project's files are back as deployed" in text
+    assert "to deploy them as they are" in text
+    if quarantined:
+        clear_quarantine_state("myapp", paths)
+
+
+def test_an_unreadable_deploy_record_still_gets_a_way_back(paths) -> None:
+    """A git project's redeploy names its deployed commit from the deploy
+    record; one that cannot be read must not turn the upgrade's refusal
+    into a traceback. Its bare deploy is accepted (no inbox)."""
+    from boxmunge.commands.upgrade_offline import offline_exit
+    from tests.test_commands.cve_helpers import seed_quarantine
+    (paths.project_dir("gitapp") / "repo").mkdir(parents=True)
+    paths.project_deploy_state("gitapp").write_text("{broken")
+    seed_quarantine(paths, "gitapp")
+    text = offline_exit(paths, "gitapp")
+    assert "`boxmunge prod-deploy gitapp`" in text

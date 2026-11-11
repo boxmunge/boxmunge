@@ -27,6 +27,7 @@ from boxmunge.commands.upgrade_steps import (
 from boxmunge.commands.upgrade_notify import notify_locked_skips, notify_refused
 from boxmunge.deploy_dirs import fix_command, prepare_deploy_dirs
 from boxmunge.docker import caddy_reload, DockerError
+from boxmunge.legacy_stage import staged_by
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import ManifestError
 from boxmunge.migration import MigrationError
@@ -101,9 +102,10 @@ def _migrate_regenerate_reload(
         print("  Refused projects keep their previous configs and containers and "
               "are not restarted. Fix the cause each line names and redeploy.")
     for name, kind in sorted(excluded.legacy.items()):
-        print(f"  LEFT AS IS: {name}: a release staged by boxmunge 0.10.1 ({kind}); "
+        print(f"  LEFT AS IS: {name}: a release staged by {staged_by(kind)} ({kind}); "
               f"resolve it with boxmunge-server legacy-stage {name}")
-    for name, why in sorted({**excluded.install, **excluded.undetermined}.items()):
+    for name, why in sorted({**excluded.install, **excluded.undetermined,
+                             **excluded.unreadable}.items()):
         print(f"  LEFT AS IS: {name}: {why}")
     if excluded.busy:
         print(f"  Skipped (busy; keeps its previous configs until its next deploy, resume "

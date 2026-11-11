@@ -34,7 +34,7 @@ LIFECYCLES = ("registered", "pre_registered", "quarantined", "paused", "monitor_
 
 INSTALL_VIEW = nullable(obj({"id": STRING, "source": enum(*SOURCES), "ref": STRING,
                              "phase": enum(*PHASES, *ABANDON_PHASES)}))
-LEGACY_VIEW = nullable(obj({"kind": enum("bundle", "git", "leftover"),
+LEGACY_VIEW = nullable(obj({"kind": enum("bundle", "git", "leftover", "pre0101"),
                             "evidence": nullable(enum("untouched", "recreated", "unknown"))}))
 
 PROJECT_VIEW = obj({
@@ -90,7 +90,7 @@ def _legacy_view(paths: BoxPaths, name: str) -> dict[str, Any] | None:
         raise StateError(cannot_tell(name, e)) from e
     if stage is None:
         return None
-    if stage.kind == "leftover":
+    if stage.kind in ("leftover", "pre0101"):
         return {"kind": stage.kind, "evidence": None}
     try:
         found = evidence(paths, name, stage).classification

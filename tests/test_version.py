@@ -46,3 +46,18 @@ class TestInstalledVersion:
         paths = BoxPaths(root=tmp_path / "bm")
         version = read_installed_version(paths)
         assert version == FALLBACK_VERSION
+
+
+class TestPackageVersionAttribute:
+    """The upgrade shims of v0.6.x to v0.9.1 import-test boxmunge.__version__."""
+
+    def test_reads_the_build_version(self) -> None:
+        import boxmunge
+        from boxmunge.version import get_build_version
+        assert boxmunge.__version__ == get_build_version()
+
+    def test_other_names_still_raise(self) -> None:
+        import boxmunge
+        import pytest
+        with pytest.raises(AttributeError, match="no_such_name"):
+            boxmunge.no_such_name  # noqa: B018

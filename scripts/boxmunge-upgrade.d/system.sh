@@ -100,6 +100,21 @@ refresh_docs_for_slot() {
     fi
 }
 
+# install_by_rename <src> <dest>: <src> as <dest>, 0755 and root's (root
+# makes the temp), through a temp file renamed over <dest>. install(1)
+# truncates and rewrites <dest> in place, and bash reads a script from its
+# file as it runs: writing through the running shim's inode would hand this
+# very upgrade the new bytes part-way through (sshd execs boxmunge-sftp for
+# every SFTP request, too). A temp a run killed before its rename is removed
+# by the next (bin/ is root's, and every caller holds upgrade.lock).
+install_by_rename() {
+    local tmp prefix
+    prefix="$(dirname "$2")/.$(basename "$2")"
+    rm -f "$prefix".*
+    tmp="$(mktemp "$prefix.XXXXXX")"
+    { cp "$1" "$tmp" && chmod 0755 "$tmp" && mv -f "$tmp" "$2"; } || { rm -f "$tmp"; return 1; }
+}
+
 # self_update_shim <bundle_dir>: install the bundle's shim (and other bin/
 # wrappers) over the running ones. Without this, shim fixes would take effect
 # only on the upgrade after they ship. Gated on `bash -n`, and on the shim
@@ -118,7 +133,7 @@ self_update_shim() {
             bm_log error upgrade "shim self-update skipped: unbuilt shim" "{}"
         else
             log "Self-updating upgrade shim from bundle..."
-            install -m 0755 -o root -g root "$new_shim" "$BIN_DIR/boxmunge-upgrade"
+            install_by_rename "$new_shim" "$BIN_DIR/boxmunge-upgrade"
             bm_log info upgrade "shim self-updated" "{}"
         fi
     fi
@@ -129,7 +144,7 @@ self_update_shim() {
         f="$bundle/scripts/$name"
         [[ -f "$f" ]] || continue
         if bash -n "$f" 2>/dev/null; then
-            install -m 0755 -o root -g root "$f" "$BIN_DIR/$name"
+            install_by_rename "$f" "$BIN_DIR/$name"
             bm_log info upgrade "wrapper self-updated" "{\"name\": \"$name\"}"
         else
             log "ERROR: new $name has syntax errors; refusing to install. Old wrapper retained."
@@ -141,8 +156,8 @@ self_update_shim() {
 # ---------------------------------------------------------------------------
 # System upgrade: re-run the bundle's install.sh before the slot swap when it
 # differs from the one this box last ran, so new system pieces (apt packages,
-# systemd timers, install.sh-only migrations) are in place by the time the new
-# venv goes live. install.sh records a fingerprint of itself and the files it
+# systemd units, Caddy's compose file, install.sh-only migrations) are in
+# place by the time the new venv goes live. install.sh records a fingerprint of itself and the files it
 # installs from at the end of every successful run; the shim computes the same
 # over the new bundle (tests/test_installer_fingerprint.py).
 # ---------------------------------------------------------------------------
@@ -178,7 +193,7 @@ system_upgrade() {
         preflight_fail "$version" "$from_version" "system_upgrade_failed: install_sh_syntax" \
             "ERROR: bundled install.sh has syntax errors; refusing to run system upgrade" system_upgrade
     fi
-    new_hash="$( (cd "$bundle" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' -o -path './system/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}')"
+    new_hash="$( (cd "$bundle" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' -o -path './system/*' -o -path './systemd/*' -o -path ./caddy/compose.yml -o -path './caddy/maintenance/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}')"
     current_hash="$(installer_fingerprint)" || exit 1
     if [[ "$new_hash" == "$current_hash" ]]; then
         log "install.sh unchanged (${new_hash:0:8}); skipping system upgrade"

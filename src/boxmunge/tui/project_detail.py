@@ -10,6 +10,7 @@ from textual.widgets import (
     TabbedContent, TabPane,
 )
 
+from boxmunge.caddy import read_override
 from boxmunge.docker import compose_command
 from boxmunge.docker_run import docker_env
 from boxmunge.manifest import load_manifest, ManifestError
@@ -169,19 +170,19 @@ class ProjectDetailScreen(Screen):
         else:
             self.query_one("#manifest-view", Static).update("manifest.yml not found")
 
-        caddy_path = self.paths.project_caddy_site(self.project_name)
-        override = self.paths.project_caddy_override(self.project_name)
-        if override.exists():
-            caddy_content = override.read_text()
-            label = "[bold]caddy.override.conf[/] (custom override active)\n\n"
-        elif caddy_path.exists():
-            caddy_content = caddy_path.read_text()
-            label = "[bold]Generated Caddy config[/]\n\n"
-        else:
-            caddy_content = ""
-            label = "No Caddy config generated yet"
+        self.query_one("#caddy-view", Static).update(self._caddy_text())
 
-        self.query_one("#caddy-view", Static).update(label + caddy_content)
+    def _caddy_text(self) -> str:
+        try:
+            override = read_override(self.paths.project_caddy_override(self.project_name))
+        except OSError as e:
+            return f"[bold]caddy.override.conf[/] (refused)\n\n{e}"
+        if override is not None:
+            return f"[bold]caddy.override.conf[/] (custom override active)\n\n{override}"
+        caddy_path = self.paths.project_caddy_site(self.project_name)
+        if caddy_path.exists():
+            return f"[bold]Generated Caddy config[/]\n\n{caddy_path.read_text()}"
+        return "No Caddy config generated yet"
 
     async def _tail_logs(self, service: str | None = None) -> None:
         """Start tailing docker compose logs in the background."""
@@ -205,13 +206,21 @@ class ProjectDetailScreen(Screen):
                 stderr=asyncio.subprocess.STDOUT,
                 env=docker_env(),
             )
+        except OSError as e:
+            log_widget.write(f"Cannot follow the logs: {e}")
+            return
+        try:
             while True:
                 line = await process.stdout.readline()
                 if not line:
                     break
                 log_widget.write(line.decode("utf-8", errors="replace").rstrip())
-        except (OSError, asyncio.CancelledError):
-            pass
+        finally:
+            # A tab switch or filter cycle cancels this task: stop the
+            # follower with it instead of leaving it running.
+            if process.returncode is None:
+                process.terminate()
+            await process.wait()
 
     def on_tabbed_content_tab_activated(
         self, event: TabbedContent.TabActivated

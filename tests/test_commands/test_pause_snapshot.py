@@ -224,3 +224,23 @@ def test_a_pause_after_data_chown_keeps_the_chown_s_pairing(
     kept = pending(paths, "myapp")
     assert (kept["name"], kept["taken_by"]) == (
         "myapp-2026-11-01T100000-prechown.tar.gz.age", "data chown")
+
+
+def test_the_upgrades_way_back_from_an_unreadable_pause_record_pauses(
+        live_v1, tmp_path, capsys) -> None:
+    """A project whose pause record cannot be read is stopped: nothing runs
+    to dump, so a pause that takes a snapshot is refused. The upgrade's
+    message names the pause that works from there once the record is gone."""
+    from boxmunge.commands.upgrade_offline import unreadable_record
+    paths = live_v1
+    assert _pause(paths) == 0
+    record = paths.project_paused_state("myapp")
+    record.unlink()
+    record.symlink_to(tmp_path / "gone.json")
+    why = unreadable_record(paths, "myapp").text
+    assert "`boxmunge pause myapp --no-snapshot` to keep it paused" in why
+    record.unlink()   # "remove it as root"
+    assert _pause(paths, service_running=False) == 1   # the snapshot has nothing to dump
+    capsys.readouterr()
+    assert _pause(paths, service_running=False, no_snapshot=True) == 0
+    assert is_paused("myapp", paths)

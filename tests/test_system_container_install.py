@@ -269,7 +269,7 @@ def test_a_successful_run_is_complete(tmp_path: Path, from_shim: int) -> None:
 def test_the_install_fails_after_everything_else_and_before_the_fingerprint() -> None:
     final = INSTALL_SH.index("\nfail_if_incomplete\n")
     for step in ("\nrefresh_caddy\n", "\nrefresh_system_container\n", 'install-sudoers\n',
-                 "systemctl enable --now", 'install-docs "${SCRIPT_DIR}/on-server"'):
+                 "bootstrap/systemd-units.sh", 'install-docs "${SCRIPT_DIR}/on-server"'):
         assert INSTALL_SH.index(step) < final, step
     assert final < INSTALLER_WRITE.search(INSTALL_SH).start()
     assert final < INSTALL_SH.index('installed successfully"\n')

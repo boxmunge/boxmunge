@@ -194,7 +194,7 @@ def _hold(paths: BoxPaths, project: str, cve: str, *, reasserting: bool) -> Enfo
     stay refused until probation ends."""
     action = ("its quarantine for {cve} would be re-asserted" if reasserting
               else "it would be quarantined for {cve}").format(cve=cve)
-    message = (f"{project}: {action}, but it has a release staged by boxmunge 0.10.1: "
+    message = (f"{project}: {action}, but it has a release staged by boxmunge 0.10.1 or earlier: "
                f"a quarantine would stop production, and security resume and "
                f"legacy-stage stay refused until probation ends. Resolve it with "
                f"`boxmunge-server legacy-stage {project}`.")

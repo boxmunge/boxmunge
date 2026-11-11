@@ -441,3 +441,7 @@ boxmunge exposes a subset of its command set via the Model Context Protocol (MCP
   `/dev/null` and fd 1 is stderr, so nothing a tool runs (docker, git, a stray prompt) can read
   from or write into the JSON-RPC stream
 - No additional network ports or attack surface
+- No telemetry: the server removes the OpenTelemetry tracing that the `mcp` SDK installs by
+  default, so it records no spans and sends nothing anywhere
+- Serves agents on MCP protocol versions 2024-11-05 through 2025-11-25 (the `mcp` 1.x clients)
+  and 2026-07-28

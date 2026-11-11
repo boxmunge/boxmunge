@@ -13,14 +13,20 @@ overlay and bind record, which still agree.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from boxmunge.compose import load_user_compose, prepare_compose_override, render_compose_override
 from boxmunge.compose_guard import check_start
+from boxmunge.cve.quarantine import QuarantineError, is_quarantined, read_quarantine_state
 from boxmunge.fileutil import atomic_write_bytes
 from boxmunge.fs_nofollow import open_regular_nofollow
+from boxmunge.manifest import CURRENT_SCHEMA_VERSION
+from boxmunge.pause import is_paused, read_paused_state
 from boxmunge.paths import BoxPaths
+from boxmunge.redeploy_hint import redeploy_or_bare
+from boxmunge.state import StateError
 
 _STAYS = "it keeps its previous overlay and bind record and stays offline"
 
@@ -110,6 +116,18 @@ def regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> 
     return None
 
 
+def in_memory_line(name: str, written: object) -> str:
+    """The dry run's line for a git project whose repository manifest is
+    migrated in memory (the checkout is not rewritten)."""
+    if written is None:
+        return (f"{name}: repository manifest.yml has no schema_version; the "
+                f"upgrade will alert to set it to {CURRENT_SCHEMA_VERSION} in the "
+                f"repository")
+    return (f"{name}: repository manifest.yml uses schema v{written}; migrated in "
+            f"memory to v{CURRENT_SCHEMA_VERSION} (the upgrade will alert to update "
+            f"it in the repository)")
+
+
 def offline_dry_run_line(paths: BoxPaths, name: str, manifest: dict[str, Any],
                          reason: str) -> str:
     """The dry run's line for the project: the refusal the apply would make,
@@ -125,3 +143,59 @@ def offline_dry_run_line(paths: BoxPaths, name: str, manifest: dict[str, Any],
     except Exception as e:  # noqa: BLE001 — the apply refuses on any failure
         return f"{refused} its compose overlay could not be regenerated ({e})"
     return f"{name}: {reason}; keeps its maintenance page, overlay renders OK"
+
+
+def offline_exit(paths: BoxPaths, name: str) -> str:
+    """The ways back for a paused or quarantined project the upgrade
+    refused, each with when it applies. Resume and `security resume` run
+    the start checks, so they work once the project's files are back as
+    deployed; a deploy takes them as they are. A deploy is refused while
+    the project is paused, so `resume --no-start` hands the pause to it,
+    and a quarantine lets it through, scanned, and lifts once it starts."""
+    deploy = f"`boxmunge {redeploy_or_bare(paths, name)}`"
+    back = "once the project's files are back as deployed"
+    if not is_paused(name, paths):
+        return (f"run `boxmunge security resume {name}` {back}, or {deploy} to deploy them "
+                f"as they are (its images are scanned first; once it starts the quarantine "
+                f"lifts)")
+    from_pause = f"`boxmunge resume {name} --no-start`, then {deploy}"
+    if not is_quarantined(name, paths):
+        return f"run `boxmunge resume {name}` {back}, or {from_pause} to deploy them as they are"
+    return (f"run {from_pause}: its images are scanned first, and once it starts the pause "
+            f"ends and the quarantine lifts")
+
+
+@dataclass(frozen=True)
+class UnreadableRecord:
+    """A project whose pause or quarantine record cannot be read (corrupt,
+    or a link): the upgrade cannot tell whether it is meant to be offline,
+    so it leaves it as it is and reports it (upgrade_exclusions)."""
+    text: str
+
+    def __str__(self) -> str:
+        return self.text
+
+
+def unreadable_record(paths: BoxPaths, name: str) -> UnreadableRecord | None:
+    """Why the project's pause or quarantine record cannot be read, naming
+    the file and the commands that work once it is removed, or None."""
+    problems: list[str] = []
+    ways: list[str] = []
+    try:
+        read_quarantine_state(name, paths)
+    except QuarantineError as e:
+        problems.append(f"its quarantine record cannot be read ({e})")
+        ways.append(f"`boxmunge security scan {name}`, which quarantines it again if its "
+                    f"images still call for it")
+    try:
+        read_paused_state(name, paths)
+    except StateError as e:
+        problems.append(f"its pause record cannot be read ({e})")
+        # Its containers are stopped: a pause's snapshot has nothing to dump.
+        ways.append(f"`boxmunge pause {name} --no-snapshot` to keep it paused")
+    if not problems:
+        return None
+    it = "them" if len(problems) > 1 else "it"
+    ways.append(f"`boxmunge {redeploy_or_bare(paths, name)}` to bring it back on this release")
+    return UnreadableRecord(f"{'; '.join(problems)}. Inspect {it} and remove {it} as root, "
+                            f"then run {', '.join(ways[:-1])}, or {ways[-1]}")

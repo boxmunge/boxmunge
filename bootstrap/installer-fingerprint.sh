@@ -12,7 +12,8 @@
 # tests/test_installer_fingerprint.py) and re-runs install.sh before the slot
 # swap when they differ, so new system pieces (apt packages, systemd units,
 # install.sh-only migrations) need no manual re-run. A release that changes
-# only bootstrap/sshd-hardening.sh, or only system/Dockerfile, re-runs it too.
+# only bootstrap/sshd-hardening.sh, system/Dockerfile, a systemd unit, Caddy's
+# compose file or the maintenance page re-runs it too.
 #
 # It is kept in root-only upgrade-root/: releases up to 0.11.3 kept it in
 # deploy-writable state/, where deploy could plant a link, a FIFO or the
@@ -36,7 +37,7 @@ chmod 0700 "${DIR}"
 case "${1:-}" in
     record)
         bundle="${2:?Usage: installer-fingerprint.sh record <bundle_dir>}"
-        (cd "${bundle}" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' -o -path './system/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}' > "${FILE}.tmp"
+        (cd "${bundle}" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' -o -path './system/*' -o -path './systemd/*' -o -path ./caddy/compose.yml -o -path './caddy/maintenance/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}' > "${FILE}.tmp"
         chmod 0600 "${FILE}.tmp"
         mv -f "${FILE}.tmp" "${FILE}"
         ;;

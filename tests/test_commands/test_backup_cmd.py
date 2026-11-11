@@ -403,6 +403,25 @@ class TestListSnapshots:
         snaps = list_snapshots(paths, "myapp")
         assert snaps == []
 
+    def test_a_dangling_or_any_link_is_skipped_with_a_warning(
+            self, paths: BoxPaths, tmp_path) -> None:
+        """backups/ is deploy-writable: a dangling link there used to make
+        backup, restore, test-restore and the pause snapshot die on stat()."""
+        _setup_project(paths, MANIFEST_WITH_BACKUP)
+        bdir = paths.project_backups("myapp")
+        bdir.mkdir(parents=True, exist_ok=True)
+        (bdir / "myapp-2026-03-28T020000.tar.gz.age").write_bytes(b"a")
+        (bdir / "myapp-2026-03-29T020000.tar.gz.age").symlink_to(tmp_path / "gone")
+        elsewhere = tmp_path / "elsewhere.age"
+        elsewhere.write_bytes(b"x")
+        (bdir / "myapp-2026-03-30T020000.tar.gz.age").symlink_to(elsewhere)
+
+        snaps = list_snapshots(paths, "myapp")
+
+        assert [s.name for s in snaps] == ["myapp-2026-03-28T020000.tar.gz.age"]
+        log = paths.log_file.read_text()
+        assert "myapp-2026-03-29T020000.tar.gz.age" in log and "not a regular file" in log
+
 
 class TestBackupAllIsolation:
     """One project whose name or state cannot be used must not stop the

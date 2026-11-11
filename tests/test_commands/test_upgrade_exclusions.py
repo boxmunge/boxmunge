@@ -149,7 +149,7 @@ def test_apply_passes_the_excluded_set_to_the_restart(paths) -> None:
 
 def test_the_apply_log_tells_each_kind_of_exclusion_apart(paths) -> None:
     excluded = Exclusions(legacy={"a": "git"}, install={"b": "why"}, busy=["c"],
-                          undetermined={"d": "cannot tell"})
+                          undetermined={"d": "cannot tell"}, unreadable={"e": "record"})
     from boxmunge.commands.upgrade_steps import ManifestMigration, Regeneration, Restart
     with patch("boxmunge.commands.upgrade_cmd.sanitize_latest_stash"), \
             patch("boxmunge.commands.upgrade_cmd.apply_projects",
@@ -161,7 +161,8 @@ def test_the_apply_log_tells_each_kind_of_exclusion_apart(paths) -> None:
             patch("boxmunge.commands.upgrade_cmd.log_operation") as logged:
         assert _run_apply(paths, "0.10.1", "0.11.0") == 0
     assert logged.call_args.kwargs["detail"]["excluded"] == {
-        "legacy_stage": ["a"], "undetermined": ["d"], "open_install": ["b"], "busy": ["c"]}
+        "legacy_stage": ["a"], "undetermined": ["d"], "open_install": ["b"], "busy": ["c"],
+        "unreadable_record": ["e"]}
 
 
 def _empty():

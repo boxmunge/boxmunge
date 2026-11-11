@@ -49,6 +49,7 @@ from boxmunge.userns.volumes import data_dir, move, recreate
 
 COMPONENT = "userns-migrate"
 FINISH = "userns-migrate (to resume) or userns-rollback"
+LEFT_SHOWN = 5  # entries named per tree in the journal; the rest are counted
 
 
 class SwitchUndone(MigrationError):
@@ -71,14 +72,25 @@ def shift_journalled(j: Journal, tree: Path, direction: Direction, save: Save,
     """Journal the tree's setuid list, then shift it (shift.py's docstring).
     `seed` is the key of the same tree's earlier shift the other way, whose
     list holds a mode a kill inside it may have cleared. Ids already in the
-    target range are accepted only once a shift of this tree has begun."""
+    target range are accepted only once a shift of this tree has begun.
+    Entries an inverse shift left alone (ids in neither range: there is no
+    owner to give them back) are journalled under `left:<key>`, for the
+    rollback's result and alert (steps.left_alone)."""
     resumed = key in j.setid
     setid = {**j.setid.get(seed or "", {}), **scan_tree(tree, j.offset, direction).setid,
              **j.setid.get(key, {})}
     if not resumed or setid != j.setid[key]:
         j.setid[key] = setid  # also the mark that this tree's shift has begun
         save()
-    shift_tree(tree, j.offset, direction, setid, resumed=resumed)
+    left = shift_tree(tree, j.offset, direction, setid, resumed=resumed).left_alone
+    if left:
+        j.items[f"left:{key}"] = (
+            f"{len(left)} {'entry' if len(left) == 1 else 'entries'} with ids outside both "
+            f"ranges keep their owners: {', '.join(left[:LEFT_SHOWN])}"
+            + (f", and {len(left) - LEFT_SHOWN} more" if len(left) > LEFT_SHOWN else ""))
+        save()
+    elif j.items.pop(f"left:{key}", None) is not None:
+        save()
 
 
 def _phase0(paths: BoxPaths, j: Journal | None, timers: TimerControl,

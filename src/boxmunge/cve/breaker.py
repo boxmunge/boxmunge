@@ -31,7 +31,7 @@ from pathlib import Path
 
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
-from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 
 # Share of the scanned projects one CVE (or the run) may newly quarantine
 # before the breaker trips. Never below 2: one project quarantining alone is
@@ -107,11 +107,11 @@ def breaker_path(paths: BoxPaths) -> Path:
 def read_held(paths: BoxPaths) -> dict[str, frozenset[str]]:
     """Held projects → CVEs. Missing file → nothing held. Corrupt → raise."""
     path = breaker_path(paths)
-    if not path.exists():
-        return {}
     try:
-        data = json.loads(read_text_nofollow(path))
-        held = data["held"]
+        raw = read_text_nofollow_or_none(path)
+        if raw is None:
+            return {}
+        held = json.loads(raw)["held"]
         if not isinstance(held, dict):
             raise TypeError("'held' is not a mapping")
         return {str(p): frozenset(str(c) for c in cves) for p, cves in held.items()}
@@ -122,10 +122,9 @@ def read_held(paths: BoxPaths) -> dict[str, frozenset[str]]:
 def alert_pending(paths: BoxPaths) -> bool:
     """True when the held set changed but its alert was never delivered."""
     path = breaker_path(paths)
-    if not path.exists():
-        return False
     try:
-        return json.loads(read_text_nofollow(path)).get("alert_pending") is True
+        raw = read_text_nofollow_or_none(path)
+        return raw is not None and json.loads(raw).get("alert_pending") is True
     except (OSError, ValueError, AttributeError) as e:
         raise BreakerError(f"cannot read {path}: {e}") from e
 
