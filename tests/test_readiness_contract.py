@@ -27,7 +27,7 @@ SAMPLE = Readiness(
     projects=(
         ProjectReadiness("app", (Finding(
             "project.compose", "todo", "before",
-            "app: would be refused by this release's compose validator",
+            "would be refused by this release's compose validator",
             "fix compose.yml as the message says, then prod-deploy app"),)),
         ProjectReadiness("shop", ()),
     ),

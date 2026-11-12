@@ -16,7 +16,7 @@ from tests.readiness_helpers import IMAGE, Recorder, add_project, make_box
 
 BLOCK = Finding("box.compose_version", "block", "before", "Compose is too old",
                 "as root: apt-get install --only-upgrade docker-compose-plugin")
-TODO = Finding("project.compose", "todo", "before", "shop: would be refused",
+TODO = Finding("project.compose", "todo", "before", "would be refused",
                "fix compose.yml, then `prod-deploy shop`")
 
 
@@ -74,7 +74,7 @@ def test_text_lists_box_then_projects_with_remedies() -> None:
     assert text.index("fix: as root: apt-get") < projects_at
     assert "  alpha: pass, nothing to do" in text
     shop = text[text.index("  shop: pass"):]
-    assert "TO DO (before the upgrade) project.compose: shop: would be refused" in shop
+    assert "TO DO (before the upgrade) project.compose: would be refused" in shop
     assert "fix: fix compose.yml, then `prod-deploy shop`" in shop
 
 
