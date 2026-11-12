@@ -99,11 +99,11 @@ drop_root
 box
 for v in 1.4.0 1.3.0 1.4.0-rc.1; do
     guide "$v"
-    refused 1 "this box runs 1.4.0, and they are for a newer release; run upgrade-howto" "guide refuses $v (not newer)"
+    refused 1 "this box runs 1.4.0, and they are for a newer release; run upgrade-howto --version <a release newer than 1.4.0>" "guide refuses $v (not newer)"
 done
 echo "0.11.6" > "$BOXMUNGE_ROOT/config/version"
 guide 0.11.7
-refused 1 "0.11.7 has no upgrade notes: releases publish them from 0.11.8 on; run upgrade-howto" \
+refused 1 "0.11.7 has no upgrade notes: releases publish them from 0.11.8 on; run upgrade-howto --version <a release from 0.11.8 on>" \
     "guide refuses a release from before upgrade notes"
 [[ ! -s "$BOXMUNGE_ROOT/calls" ]] && pass "a refused version downloads nothing" || fail "calls: $(cat "$BOXMUNGE_ROOT/calls")"
 drop_root

@@ -23,7 +23,7 @@ refused() {  # refused <in a reason> <description>: the last check was refused, 
 box
 for older in 1.4.0 1.3.9 1.4.0-rc.1; do
     CHECK_TARGET="$older" run_check "$older"
-    CHECK_TARGET="$older" refused "this box runs 1.4.0, and upgrade-check checks a newer release: run upgrade-howto" \
+    CHECK_TARGET="$older" refused "this box runs 1.4.0, and upgrade-check checks a newer release: run upgrade-howto --version <a release newer than 1.4.0>" \
         "check: a downgrade or the installed version is refused: $older"
 done
 drop_root
@@ -35,7 +35,7 @@ CHECK_TARGET=0.11.7 refused "0.11.7 predates the readiness check (releases carry
     "check: a release before the first with a readiness check is refused, naming upgrade --target"
 echo "0.9.0" > "$BOXMUNGE_ROOT/config/version"
 CHECK_TARGET=0.10.1 run_check 0.10.1
-CHECK_TARGET=0.10.1 refused "0.10.1 predates the hash-pinned requirements every install needs, so this box can neither check nor install it; run upgrade-howto to see the latest release" \
+CHECK_TARGET=0.10.1 refused "0.10.1 predates the hash-pinned requirements every install needs, so this box can neither check nor install it; run upgrade-howto --version <a release newer than 0.9.0>" \
     "check: a release without the hash-pinned MCP requirements is refused, naming no command that refuses it"
 [[ "$(field 'd["reasons"][0]')" != *"upgrade --target"* ]] && pass "no upgrade --target for a release target refuses" \
     || fail "names target: $JSON"
@@ -59,7 +59,7 @@ box
 echo b > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
 echo 1.4.0 > "$BOXMUNGE_ROOT/env-a/upgrade-inflight"
 run_check 1.5.0
-refused "check-probation finishes it within minutes; run upgrade-check again after that" \
+refused "check-probation finishes it within minutes; run upgrade-check --version 1.5.0 again after that" \
     "check: an interrupted upgrade is refused, active-slot left as it is"
 rm "$BOXMUNGE_ROOT/env-a/upgrade-inflight"
 echo a > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
@@ -72,7 +72,7 @@ box
 write_probation 1.4.0 b "$SOON"
 run_check 1.5.0
 refused "1.4.0 is on probation until" "check: a recorded probation is refused, naming when it ends"
-[[ "$(field 'd["reasons"][0]')" == *"UTC, and no upgrade runs until it ends; run upgrade-check again after that" ]] \
+[[ "$(field 'd["reasons"][0]')" == *"UTC, and no upgrade runs until it ends; run upgrade-check --version 1.5.0 again after that" ]] \
     && pass "the probation refusal says to run upgrade-check again after it" || fail "probation: $JSON"
 write_probation 1.4.0 b "2026-01-01T00:00:00+00:00"
 run_check 1.5.0
@@ -143,7 +143,7 @@ rm -rf "$BOXMUNGE_ROOT/upgrade-check"
 
 echo $(( $(date +%s) - 60 )) > "$BOXMUNGE_ROOT/upgrade-root/check-last"
 KEEP_STAMP=1 run_check 1.5.0
-refused "checks start at least 10 minutes after the last one ended; run upgrade-check again from 20" "check: a second check within 600 s is refused naming the time"
+refused "checks start at least 10 minutes after the last one ended; run upgrade-check --version 1.5.0 again from 20" "check: a second check within 600 s is refused naming the time"
 [[ "$(field 'd["reasons"][0]')" =~ again\ from\ [0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}\ UTC$ ]] \
     && pass "the rate limit names the UTC time of the next check" || fail "rate limit: $JSON"
 echo $(( $(date +%s) + 86400 )) > "$BOXMUNGE_ROOT/upgrade-root/check-last"
