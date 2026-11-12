@@ -22,11 +22,11 @@ class ConfigError(Exception):
 def load_config(paths, *, lenient_values=False):
     if not lenient_values:
         raise ConfigError("'ssh_port' must be a whole number")
-    return {"pushover": {"user_key": "u", "app_token": "t"}}
+    return {"hostname": 123, "pushover": {"user_key": "u", "app_token": "t"}}
 '''
 OLDER_RELEASE = '''
 def load_config(paths):
-    return {"pushover": {"user_key": "u", "app_token": "t"}}
+    return {"hostname": "box.example.com", "pushover": {"user_key": "u", "app_token": "t"}}
 '''
 
 
@@ -48,12 +48,14 @@ def _venv_python(tmp_path: Path, config_module: str) -> Path:
     return python
 
 
-@pytest.mark.parametrize("config_module", [CHECKS_VALUES, OLDER_RELEASE],
-                         ids=["a slot that checks values", "a slot older than 0.11.9"])
-def test_the_alert_is_sent_from_either_slot(tmp_path: Path, config_module: str) -> None:
+@pytest.mark.parametrize("config_module,hostname", [
+    (CHECKS_VALUES, "123"), (OLDER_RELEASE, "box.example.com"),
+], ids=["a slot that checks values, with a refused hostname", "a slot older than 0.11.9"])
+def test_the_alert_is_sent_from_either_slot(tmp_path: Path, config_module: str,
+                                            hostname: str) -> None:
     python = _venv_python(tmp_path, config_module)
     result = subprocess.run(
         ["bash", "-c", f'source "{SLOTS}"; notify_via "{python}" "upgrade rolled back" "body" 1'],
         capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert (tmp_path / "sent").read_text() == "upgrade rolled back"
+    assert (tmp_path / "sent").read_text() == f"[{hostname}] upgrade rolled back"
