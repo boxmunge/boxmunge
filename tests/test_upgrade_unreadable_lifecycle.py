@@ -11,7 +11,8 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.commands.deploy import run_deploy
-from boxmunge.commands.upgrade_steps import check_upgrade, restart_projects
+from boxmunge.commands.upgrade_report import check_upgrade
+from boxmunge.commands.upgrade_steps import restart_projects
 from boxmunge.health_checks.projects import check_lifecycle_blocked
 from boxmunge.pause import mark_pause_complete, write_paused_state
 from boxmunge.project_registry import add_project
@@ -86,7 +87,7 @@ def test_the_project_is_left_as_is_and_the_others_are_upgraded(box) -> None:
 def test_the_dry_run_reports_the_same_exclusion(box) -> None:
     paths, _kind, record = box
     _m, _r, excluded = apply_projects(paths)
-    dry = check_upgrade(paths)
+    dry = [line.text for line in check_upgrade(paths)]
     [line] = [line for line in dry if line.startswith(f"{P}:")]
     assert "will be left as is" in line and excluded.unreadable[P] in line
     assert not any(line.startswith(f"{OTHER}:") and "left as is" in line for line in dry)

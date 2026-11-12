@@ -16,7 +16,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 
-from boxmunge.commands.upgrade_steps import check_upgrade, restart_projects
+from boxmunge.commands.upgrade_report import check_upgrade
+from boxmunge.commands.upgrade_steps import restart_projects
 from boxmunge.paths import BoxPaths
 from boxmunge.upgrade_exclusions import apply_projects
 from boxmunge.version import write_installed_version
@@ -44,8 +45,8 @@ def _box(tmp_path: Path, before_deploy=lambda paths: None) -> BoxPaths:
 
 
 def _lines(paths: BoxPaths) -> list[str]:
-    return [ln for ln in check_upgrade(paths)
-            if ln.startswith("shop:") and "migration" not in ln]
+    return [ln.text for ln in check_upgrade(paths)
+            if ln.text.startswith("shop:") and "migration" not in ln.text]
 
 
 @patch("boxmunge.compose_guard.compose_up")
