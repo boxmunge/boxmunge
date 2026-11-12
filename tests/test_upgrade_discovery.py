@@ -527,3 +527,14 @@ class TestManual:
     def test_manual_none_when_latest_is_not_newer(self, mock_open, tmp_path):
         mock_open.return_value = _endpoint(latest=_offer("0.3.0", "feature"))
         assert discover_update(_setup(tmp_path), mode="breakfix")["manual"] is None
+
+    @pytest.mark.parametrize("latest", [
+        {"version": "0.4.0"}, "0.4.0", {"version": "0.4.0", "url": "u", "class": "bogus"}])
+    @patch("urllib.request.OpenerDirector.open")
+    def test_malformed_latest_never_blocks_the_candidate(self, mock_open, tmp_path, latest):
+        mock_open.return_value = _response({
+            "status": "x", "security": _offer("0.3.2", "security"), "breakfix": None,
+            "latest": latest, "blocked": None})
+        result = discover_update(_setup(tmp_path), mode="breakfix")
+        assert result["action"] == "upgrade" and result["version"] == "0.3.2"
+        assert result["manual"] is None

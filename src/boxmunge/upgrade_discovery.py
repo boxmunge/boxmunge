@@ -193,8 +193,12 @@ def _manual_offer(result: dict[str, Any], candidate: dict[str, Any] | None,
                   blocked: dict | None, held: list[str], current: str) -> dict[str, Any] | None:
     """The newest offer when it is newer than ``current``, not held, not the
     ``candidate`` and not ``blocked`` (which has its own alert): a release the
-    operator must upgrade to by hand."""
-    latest = _endpoint_candidate(result, "latest")
+    operator must upgrade to by hand. A malformed ``latest`` gives None: the
+    notice must never stop the install path."""
+    try:
+        latest = _endpoint_candidate(result, "latest")
+    except EndpointContractError:
+        return None
     if latest is None or not newer(latest["version"], current) or latest["version"] in held:
         return None
     if candidate is not None and candidate["version"] == latest["version"]:
