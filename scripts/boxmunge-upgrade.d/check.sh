@@ -307,7 +307,7 @@ print(json.dumps({"check": 1, "target": os.environ["BM_TARGET"], "installed": os
 cmd_guide() {
     [[ $# -eq 1 && "$1" =~ $SEMVER_RE ]] || usage_exit "boxmunge-upgrade guide <version>"
     exec 3>&1 1>&2
-    local version="$1" installed notes size rc=0
+    local version="$1" installed notes size status rc=0
     installed="$(installed_version)"
     semver_lt "$installed" "$version" \
         || die "Not fetching the upgrade notes of $version: this box runs $installed, and they are for a newer release; run upgrade-howto to see the latest"
@@ -316,11 +316,13 @@ cmd_guide() {
     start_download
     notes="$TMP_DOWNLOAD/upgrade-notes.json"
     fetch_signed_sums "$version" "$TMP_DOWNLOAD" readonly || die "$FETCH_ERROR (the upgrade notes of $version)"
-    download "$notes" "$(release_url "$version" upgrade-notes.json)" --max-filesize "$NOTES_MAX_BYTES" || rc=$?
-    case "$rc" in
-        0) ;;
-        22) die "Release $version publishes no upgrade-notes.json (GitHub refused the download)" ;;
-        63) die "upgrade-notes.json of $version is over $NOTES_MAX_BYTES bytes; refusing it" ;;
+    status="$(download "$notes" "$(release_url "$version" upgrade-notes.json)" --max-filesize "$NOTES_MAX_BYTES" \
+        --write-out '%{http_code}')" || rc=$?
+    case "$rc:$status" in
+        0:*) ;;
+        22:404) die "Release $version publishes no upgrade-notes.json (GitHub answered 404)" ;;
+        22:*) die "GitHub refused the download of upgrade-notes.json of $version (HTTP $(printable "$status")); retry later" ;;
+        63:*) die "upgrade-notes.json of $version is over $NOTES_MAX_BYTES bytes; refusing it" ;;
         *) die "Failed to download upgrade-notes.json of $version (curl exit $rc); retry later" ;;
     esac
     size="$(wc -c < "$notes" | tr -d ' ')"
