@@ -12,6 +12,10 @@ value needs contract 2.
 
 The readiness command reports only `pass` or `blocked`. "Can't verify"
 belongs to the callers (the shim and the deploy side).
+
+`installed` is "0.0.0" when the box records no release it can read
+(config/version missing or malformed): "not recorded", never a release.
+It always comes with a box.upgrade_floor block that says so.
 """
 from __future__ import annotations
 
