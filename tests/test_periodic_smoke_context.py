@@ -17,6 +17,7 @@ import yaml
 
 from boxmunge.commands.check import PERIODIC_ENV, run_check
 from boxmunge.commands.check_all import run_check_all
+from boxmunge.commands.smoke_result import smoke_command
 from boxmunge.paths import BoxPaths
 from tests.deploy_helpers import mark_deployed
 
@@ -54,18 +55,18 @@ class _Exec:
 
 def test_the_periodic_tick_sets_the_context(paths):
     run = _Exec()
-    with patch("boxmunge.commands.check.subprocess.run", run), \
+    with patch("boxmunge.service_exec.subprocess.run", run), \
          patch("boxmunge.notify.send_notification", MagicMock(return_value=True)):
         assert run_check_all(paths, read_only=False) == 0
     [cmd] = run.cmds
     assert cmd[:4] == ["docker", "exec", "-e", PERIODIC_ENV]
-    assert cmd[-2:] == ["/boxmunge-scripts/smoke.sh", "web"]
+    assert cmd[-1] == smoke_command("/boxmunge-scripts/smoke.sh", "web")
 
 
 def test_check_does_not_set_it(paths):
     """`check` (and run_check, which userns commit gates on) is not the tick."""
     run = _Exec()
-    with patch("boxmunge.commands.check.subprocess.run", run):
+    with patch("boxmunge.service_exec.subprocess.run", run):
         assert run_check(NAME, paths, verbose=False) == 0
     [cmd] = run.cmds
     assert PERIODIC_ENV not in cmd
@@ -75,7 +76,7 @@ def test_gating_smoke_runs_do_not_set_it(paths):
     """Deploy, recover, lift, resume and bring-up go through run_smoke."""
     from boxmunge.health_checks.smoke import run_smoke
     run = _Exec()
-    with patch("boxmunge.commands.check.subprocess.run", run):
+    with patch("boxmunge.service_exec.subprocess.run", run):
         assert run_smoke(NAME, paths)[0]
     [cmd] = run.cmds
     assert PERIODIC_ENV not in cmd

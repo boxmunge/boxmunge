@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Smoke tests run in the containers Compose labels as the service's, so a
-custom container_name and every running replica are tested."""
+custom container_name and every running replica are tested, and a smoke
+that overruns is killed in each of them. The containers are hardened the
+way boxmunge runs a service: an init as PID 1, read-only root, no
+capabilities, not root."""
 from __future__ import annotations
 
+import time
 import uuid
+from unittest.mock import patch
 
 import pytest
 
+from boxmunge.commands import check
 from boxmunge.commands.check import run_smoke_in_container
 from tests.integration.conftest import skip_no_docker
 from tests.integration.docker_images import BUSYBOX, compose, docker, ensure_busybox, tear_down
@@ -19,9 +25,13 @@ def project(tmp_path):
     ensure_busybox()
     name = f"bmsmoke-{uuid.uuid4().hex[:8]}"
     (tmp_path / "scripts").mkdir()
+    # /tmp/hang: a script that forks a child, both outliving the timeout.
     (tmp_path / "scripts" / "smoke.sh").write_text(
-        "test ! -e /tmp/broken || { echo \"$(hostname) broken\" >&2; exit 1; }\n")
-    common = ("    command: [sleep, '3600']\n    network_mode: none\n"
+        "test ! -e /tmp/broken || { echo \"$(hostname) broken\" >&2; exit 1; }\n"
+        "test ! -e /tmp/hang || { sleep 3001 & sleep 3002; }\n")
+    common = ("    command: [sleep, '3600']\n    network_mode: none\n    init: true\n"
+              "    read_only: true\n    cap_drop: [ALL]\n    user: '65534:65534'\n"
+              "    pids_limit: 32\n    tmpfs: ['/tmp']\n"
               "    volumes: ['./scripts:/boxmunge-scripts:ro']\n")
     (tmp_path / "compose.yml").write_text(
         "services:\n"
@@ -46,3 +56,35 @@ def test_a_failing_second_replica_is_caught(project):
     result = run_smoke_in_container(project_dir, manifest, ["compose.yml"])
     assert result.status == "warning"
     assert "broken" in result.message
+
+
+def _processes(container: str) -> list[str]:
+    """Every process entry in the container (this listing's shell included),
+    by command name; one killed and not yet reaped is marked a zombie."""
+    listing = ('for f in /proc/[0-9]*/stat; do read -r line < "$f" || continue; '
+               'set -- $line; [ "$3" = Z ] && echo "$2 zombie" || echo "$2"; done')
+    return sorted(docker("exec", container, "sh", "-c", listing).splitlines())
+
+
+def test_a_smoke_that_overruns_is_killed_in_every_replica(project):
+    """0.11.6 audit F04: the timeout killed the docker client and left the
+    script and its child running in the container, more of them every tick."""
+    project_dir, name, manifest = project
+    workers = [f"{name}-worker-1", f"{name}-worker-2"]
+    before = {c: _processes(c) for c in workers}
+    for container in workers:
+        docker("exec", container, "touch", "/tmp/hang")
+    with patch.object(check, "SMOKE_TIMEOUT", 3):
+        result = run_smoke_in_container(project_dir, manifest, ["compose.yml"])
+    assert result.status == "warning"
+    assert (f"Smoke test for worker timed out (3s) in container {workers[0]} "
+            "and was stopped there") in result.message
+    # Nothing of either replica's smoke is left, once init has reaped the killed.
+    deadline = time.monotonic() + 10
+    while {c: _processes(c) for c in workers} != before and time.monotonic() < deadline:
+        time.sleep(0.5)
+    assert {c: _processes(c) for c in workers} == before
+    # The next tick starts from nothing left behind and judges the app itself.
+    for container in workers:
+        docker("exec", container, "rm", "/tmp/hang")
+    assert run_smoke_in_container(project_dir, manifest, ["compose.yml"]).status == "ok"
