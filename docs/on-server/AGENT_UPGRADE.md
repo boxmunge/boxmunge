@@ -60,9 +60,11 @@ https://github.com/boxmunge/boxmunge/releases.
 
 ## MCP and JSON
 
-The MCP tools `upgrade_howto` and `upgrade_check` take `version` and `as_json`. A check can
-outlast an MCP client's time limit: if the call times out, run `upgrade-check` in the deploy
-shell over SSH instead.
+The MCP tools `upgrade_howto` and `upgrade_check` take `version` and `as_json`. An
+`upgrade_check` call can block for as long as 40 minutes on a slow box, when `upgrade-check`
+stops waiting and says CAN'T VERIFY. If your client times out first, run `upgrade-check` in
+the deploy shell over SSH instead. Retrying less than 10 minutes after the last check ended
+is refused (CAN'T VERIFY, naming the time to retry from).
 
 - `upgrade-howto --json`: `{"guide": 1, "status": "guide|below_floor|up_to_date",
   "installed", "target", "box_before", "project_before", "project_after", "box_after",

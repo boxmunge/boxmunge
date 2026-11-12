@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -13,7 +13,7 @@ from boxmunge.commands.upgrade_check_cmd import cmd_upgrade_check, run_upgrade_c
 from boxmunge.paths import BoxPaths
 from tests.test_upgrade_check_result import finding, k3, readiness
 
-RUN = "boxmunge.commands.upgrade_check_cmd.subprocess.run"
+RUN = "boxmunge.commands.upgrade_check_cmd.subprocess.Popen"
 DISCOVER = "boxmunge.upgrade_target.discover_update"
 
 
@@ -26,9 +26,12 @@ def _box(tmp_path: Path, *, version: str = "0.11.8+abc", optout: bool = False) -
     return paths
 
 
-def _shim(doc, rc: int, stderr: str = ""):
+def _shim(doc, rc: int, stderr: str = "") -> MagicMock:
+    """A started shim that ends with `rc`, having printed `doc`."""
     stdout = doc if isinstance(doc, str) else json.dumps(doc) + "\n"
-    return subprocess.CompletedProcess([], rc, stdout=stdout.encode(), stderr=stderr.encode())
+    proc = MagicMock(returncode=rc)
+    proc.communicate.return_value = (stdout.encode(), stderr.encode())
+    return proc
 
 
 BLOCKED = k3("blocked", reasons=["the readiness check found what blocks the upgrade"],
@@ -47,6 +50,30 @@ def test_pass_runs_the_shims_check_verb_and_exits_0(tmp_path, capsys) -> None:
     captured = capsys.readouterr()
     assert captured.out.startswith("Result: PASS (complete)")
     assert "several minutes" in captured.err
+
+
+def test_a_shim_that_gives_no_verdict_in_time_is_cant_verify_and_left_alone(
+        tmp_path, capsys) -> None:
+    """deploy cannot signal the root shim, which ends within its own limits."""
+    from boxmunge.commands.upgrade_check_cmd import SHIM_TIMEOUT_SECS
+    proc = MagicMock()
+    proc.communicate.side_effect = subprocess.TimeoutExpired("sudo", SHIM_TIMEOUT_SECS)
+    with patch(RUN, return_value=proc):
+        assert run_upgrade_check(_box(tmp_path), "0.12.0", as_json=True) == 1
+    assert proc.communicate.call_args[1] == {"timeout": SHIM_TIMEOUT_SECS}
+    proc.kill.assert_not_called()
+    proc.terminate.assert_not_called()
+    doc = json.loads(capsys.readouterr().out)
+    assert (doc["result"], doc["stage"]) == ("cant_verify", "shim")
+    assert f"{SHIM_TIMEOUT_SECS} s" in doc["reasons"][0]
+    assert "upgrade-check again" in doc["reasons"][0]
+
+
+def test_the_time_limit_is_over_the_shims_own_worst_case() -> None:
+    """Three prerequisites at 60 s, the venv 900 s, the readiness check and
+    the dry run 300 s each, and a bundle download at curl's 600 s."""
+    from boxmunge.commands.upgrade_check_cmd import SHIM_TIMEOUT_SECS
+    assert SHIM_TIMEOUT_SECS > 3 * 60 + 900 + 300 + 300 + 600
 
 
 def test_exit_code_0_only_on_pass(tmp_path) -> None:

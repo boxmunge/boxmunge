@@ -57,6 +57,15 @@ def _no_verdict(target: str, installed: str, reason: str) -> CheckResult:
                        None, None, "")
 
 
+def no_verdict_in_time(target: str, installed: str, secs: int) -> CheckResult:
+    """The shim gave no verdict within `secs`: it is past its own limits."""
+    return _no_verdict(target, installed, (
+        f"the upgrade shim gave no verdict within {secs} s, so this box could not be "
+        f"verified. The check may still be running as root; it stops at its own time "
+        f"limits and cleans up after itself. Run upgrade-check again once 10 minutes have "
+        f"passed since it ended"))
+
+
 def _field(doc: dict, key: str, ok: Any, what: str) -> Any:
     if key not in doc or not ok(doc[key]):
         raise _Unreadable(f"{key} must be {what}, not {doc.get(key, '(missing)')!r}")

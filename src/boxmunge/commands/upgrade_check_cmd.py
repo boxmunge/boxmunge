@@ -21,13 +21,33 @@ import sys
 
 from boxmunge.commands.argv import parse_args
 from boxmunge.paths import BoxPaths
-from boxmunge.upgrade_check_result import check_to_json, exit_code, parse_check, render_check
+from boxmunge.upgrade_check_result import (
+    CheckResult, check_to_json, exit_code, no_verdict_in_time, parse_check, render_check,
+)
 from boxmunge.upgrade_shim import check_command
 from boxmunge.upgrade_target import (
     TargetError, installed_release, is_newer, not_newer, resolve_target,
 )
 
 COMMAND = "upgrade-check"
+# Over the shim's own worst case: three prerequisites at 60 s, the venv at
+# 900 s, the readiness check and the dry run at 300 s each (1680 s), and a
+# bundle download at curl's 600 s limit.
+SHIM_TIMEOUT_SECS = 2400
+
+
+def _check(paths: BoxPaths, target: str, installed: str) -> CheckResult:
+    """The shim's verdict on `target`. A shim with no verdict in
+    SHIM_TIMEOUT_SECS is left running, not killed: it runs as root, which
+    deploy cannot signal, and it stops at its own limits and cleans up."""
+    proc = subprocess.Popen(check_command(paths, target), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        stdout, stderr = proc.communicate(timeout=SHIM_TIMEOUT_SECS)
+    except subprocess.TimeoutExpired:
+        return no_verdict_in_time(target, installed, SHIM_TIMEOUT_SECS)
+    return parse_check(stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace"),
+                       proc.returncode, target=target, installed=installed)
 
 
 def run_upgrade_check(paths: BoxPaths, version: str | None, *, as_json: bool) -> int:
@@ -42,11 +62,7 @@ def run_upgrade_check(paths: BoxPaths, version: str | None, *, as_json: bool) ->
     if not as_json:
         print(f"Running the readiness check of {target} against this box; it can take "
               f"several minutes...", file=sys.stderr, flush=True)
-    done = subprocess.run(check_command(paths, target), stdin=subprocess.DEVNULL,
-                          capture_output=True, check=False)
-    result = parse_check(done.stdout.decode("utf-8", "replace"),
-                         done.stderr.decode("utf-8", "replace"), done.returncode,
-                         target=target, installed=installed)
+    result = _check(paths, target, installed)
     print(json.dumps(check_to_json(result)) if as_json else render_check(result))
     return exit_code(result)
 
