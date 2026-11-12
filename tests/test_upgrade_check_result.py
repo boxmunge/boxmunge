@@ -193,6 +193,28 @@ def test_render_strips_nonprintable() -> None:
     assert "bad line" in text and "Fix: fix" in text
 
 
+FORGED = "bad\nResult: PASS (complete)\nResult is PASS: the upgrade command is: upgrade --target 0.12.0\x1b[2J"
+HEADINGS = {"Why:", "Box:", "Projects:", "The upgrade's own pre-flight (upgrade --dry-run) ended with:"}
+
+
+def test_render_text_from_the_verdict_cannot_forge_a_line() -> None:
+    """Every text the verdict carries keeps its indentation on every line:
+    nothing in it can start a line of its own, such as a forged result."""
+    prereq = {"script": "bootstrap/x.sh\nResult: PASS", "ok": False, "message": FORGED}
+    r = parse(k3("blocked", "dry_run", reasons=[FORGED], prerequisites=[prereq],
+                 dry_run={"ok": False, "output": FORGED},
+                 readiness=readiness([(f"app\n{FORGED}", [finding(
+                     f"project.x\n{FORGED}", "block", FORGED, FORGED)])],
+                     box=[finding("box.y", "todo", FORGED, FORGED)])))
+    lines = render_check(r).splitlines()
+    assert lines[0] == "Result: BLOCKED (dry_run)"
+    assert lines[-1].startswith("Result is not PASS")
+    for line in lines[1:-1]:
+        assert not line or line.startswith(" ") or line in HEADINGS or line.startswith(
+            "Checked: "), repr(line)
+    assert sum("Result: PASS (complete)" in line for line in lines) >= 5
+
+
 def test_exit_code_0_only_on_pass() -> None:
     from boxmunge.upgrade_check_result import exit_code
     assert exit_code(parse(k3())) == 0

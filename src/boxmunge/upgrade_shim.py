@@ -50,6 +50,12 @@ def printable(text: str) -> str:
     return "".join(c for c in text if c == "\n" or c.isprintable())
 
 
+def printable_lines(text: str) -> list[str]:
+    """`text` as printable lines, split at newlines only (not splitlines():
+    no other control character may start a line)."""
+    return printable(text).split("\n")
+
+
 def stderr_tail(stderr: str, limit: int = 400) -> str:
     """The end of what the shim (or sudo) wrote to stderr, printable, one line."""
     text = " ".join(printable(stderr).split())

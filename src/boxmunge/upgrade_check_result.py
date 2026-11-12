@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from boxmunge.readiness_contract import ContractError, Finding, Readiness, parse, to_json
-from boxmunge.upgrade_shim import printable, stderr_tail, sudo_refusal
+from boxmunge.upgrade_shim import printable, printable_lines, stderr_tail, sudo_refusal
 
 CHECK_CONTRACT = 1
 RESULTS = ("pass", "blocked", "cant_verify")
@@ -144,14 +144,27 @@ def exit_code(r: CheckResult) -> int:
     return 0 if r.result == "pass" else 1
 
 
+def _item(first: str, text: str, indent: str) -> list[str]:
+    """`first`, then `text`, whose further lines keep `indent`: nothing the
+    verdict carries can start a line of its own (a forged result line)."""
+    head, *rest = printable_lines(text)
+    return [first + head, *(indent + line for line in rest)]
+
+
+def _one_line(text: str) -> str:
+    return " ".join(printable_lines(text))
+
+
 def _finding_lines(f: Finding, indent: str) -> list[str]:
-    return [f"{indent}[{f.severity}, {f.when}] {f.id}: {f.message}",
-            f"{indent}    Fix: {f.remedy}"]
+    return (_item(f"{indent}[{f.severity}, {f.when}] {_one_line(f.id)}: ", f.message,
+                  indent + "    ")
+            + _item(f"{indent}    Fix: ", f.remedy, indent + "         "))
 
 
 def _box_lines(r: CheckResult) -> list[str]:
-    lines = [f"  {p['script']}: " + ("met" if p["ok"] else f"NOT MET: {p['message']}")
-             for p in r.prerequisites]
+    lines = [line for p in r.prerequisites
+             for line in (_item(f"  {_one_line(p['script'])}: NOT MET: ", p["message"], "    ")
+                          if not p["ok"] else [f"  {_one_line(p['script'])}: met"])]
     if r.readiness is not None:
         lines += [line for f in r.readiness.box for line in _finding_lines(f, "  ")]
     return lines or ["  nothing to report"]
@@ -165,7 +178,7 @@ def _project_lines(r: CheckResult) -> list[str]:
         return [f"  not checked: {why}"]
     lines: list[str] = []
     for project in r.readiness.projects:
-        lines.append(f"  {project.name}: {project.result}"
+        lines.append(f"  {_one_line(project.name)}: {project.result}"
                      + ("" if project.findings else ", nothing to do"))
         lines += [line for f in project.findings for line in _finding_lines(f, "    ")]
     return lines or ["  none on this box"]
@@ -173,21 +186,23 @@ def _project_lines(r: CheckResult) -> list[str]:
 
 def render_check(r: CheckResult) -> str:
     """The verdict as text: result, reasons, box, every project, then what
-    to do. Printable characters and newlines only."""
+    to do. Printable characters and newlines only, and only the first and
+    last lines start with "Result"."""
     lines = [f"Result: {_SHOWN[r.result]} ({r.stage})",
              f"Checked: an upgrade from {r.installed} to {r.target}", ""]
     if r.reasons:
-        lines += ["Why:", *(f"  - {reason}" for reason in r.reasons), ""]
+        lines += ["Why:", *(line for reason in r.reasons for line in _item("  - ", reason,
+                                                                         "    ")), ""]
     lines += ["Box:", *_box_lines(r), "", "Projects:", *_project_lines(r), ""]
     if r.dry_run_ok is False:
         lines += ["The upgrade's own pre-flight (upgrade --dry-run) ended with:",
-                  *(f"  {line}" for line in r.dry_run_output.splitlines()), ""]
+                  *(f"  {line}" for line in printable_lines(r.dry_run_output)), ""]
     if r.result == "pass":
         lines.append(f"Result is PASS: the upgrade command is: upgrade --target {r.target}")
     else:
         lines.append("Result is not PASS: do not upgrade. Report this to the person, "
                      "per project.")
-    return "\n".join(printable(line) for line in lines)
+    return "\n".join(lines)
 
 
 def _clean(value: Any) -> Any:

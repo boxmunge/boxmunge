@@ -19,7 +19,7 @@ from dataclasses import replace
 from typing import Any
 
 from boxmunge.upgrade_notes import FILES, Entry, Guide, NotesError, parse_notes, select, version_key
-from boxmunge.upgrade_shim import printable
+from boxmunge.upgrade_shim import printable, printable_lines
 
 FORMAT = 1
 # upgrade_notes reads at most five digits a version part, so no release
@@ -65,8 +65,7 @@ def compose_guide(raw: bytes, target: str, installed: str) -> Guide:
 
 
 def _indented(text: str, indent: str) -> list[str]:
-    """Not splitlines(): a control character must not start a line."""
-    return [indent + line for line in printable(text).split("\n")]
+    return [indent + line for line in printable_lines(text)]
 
 
 def _entry_lines(e: Entry, bullet: str, indent: str) -> list[str]:
