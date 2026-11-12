@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Load and validate project manifests (manifest.yml)."""
 
+import io
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ import yaml
 
 from boxmunge.backup_command_warnings import backup_command_warnings
 from boxmunge.fileutil import LinkedTargetError, atomic_write_text
+from boxmunge.fs_nofollow import read_bytes_following
 from boxmunge.manifest_fields import (
     SERVICE_NAME_RE, backup_type_problem, deploy_problems, host_problem, port_problem,
     retention_problem, route_path_problem, strategy_problem,
@@ -31,19 +33,19 @@ def load_manifest_as_written(path: Path) -> dict[str, Any]:
     manifest) and for the upgrade's on-disk migration. Everything else
     reads through load_manifest.
 
-    Raises ManifestError, naming the file, if it doesn't exist, can't be
-    read, or can't be parsed.
+    Raises ManifestError, naming the file, if it doesn't exist, is not a
+    regular file (a FIFO is refused unopened), can't be read, or can't be parsed.
     """
-    if not path.exists():
-        raise ManifestError(f"Manifest not found: {path}")
-
-    try:
-        with open(path) as f:
-            data = yaml.safe_load(f)
+    try:  # follows a link: a git project's manifest.yml links into repo/
+        raw = read_bytes_following(path)
+    except FileNotFoundError:
+        raise ManifestError(f"Manifest not found: {path}") from None
+    except OSError as e:
+        raise ManifestError(f"Cannot read manifest {path}: {e}") from e
+    try:  # from a stream: PyYAML then quotes no line of the file in its errors
+        data = yaml.safe_load(io.BytesIO(raw))
     except yaml.YAMLError as e:
         raise ManifestError(f"Manifest is not valid YAML: {path}: {e}") from e
-    except (OSError, UnicodeDecodeError) as e:
-        raise ManifestError(f"Cannot read manifest {path}: {e}") from e
 
     if not isinstance(data, dict):
         raise ManifestError(f"Manifest is not a YAML mapping: {path}")

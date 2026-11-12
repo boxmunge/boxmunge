@@ -12,7 +12,8 @@ import yaml
 from boxmunge import unresolved_stage
 from boxmunge.commands import upgrade_cmd
 from boxmunge.commands.upgrade_cmd import run_upgrade
-from boxmunge.commands.upgrade_steps import UpgradeGateError, check_upgrade
+from boxmunge.commands.upgrade_report import check_upgrade
+from boxmunge.commands.upgrade_steps import UpgradeGateError
 from boxmunge.manifest import CURRENT_SCHEMA_VERSION
 from boxmunge.paths import BoxPaths
 from boxmunge.upgrade_exclusions import apply_projects
@@ -407,4 +408,4 @@ class TestTheUpgrade:
 
     def test_a_clean_box_passes_the_dry_run(self, box):
         _project(box, "alpha")
-        assert check_upgrade(box) == ["alpha: configs render OK"]
+        assert [line.text for line in check_upgrade(box)] == ["alpha: configs render OK"]

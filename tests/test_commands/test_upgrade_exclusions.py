@@ -7,7 +7,8 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.commands.upgrade_cmd import _run_apply, _run_dry
-from boxmunge.commands.upgrade_steps import check_upgrade, restart_projects
+from boxmunge.commands.upgrade_report import check_upgrade
+from boxmunge.commands.upgrade_steps import restart_projects
 from boxmunge.fileutil import project_lock
 from boxmunge.manifest import ManifestError
 from boxmunge.release_txn import open_txn
@@ -77,7 +78,7 @@ def test_install_and_busy_exclusions_are_alerted(paths) -> None:
 def test_dry_run_reports_an_open_install_and_leaves_it(paths) -> None:
     _deployed(paths)
     txn = _open_install(paths)
-    report = check_upgrade(paths)
+    report = [line.text for line in check_upgrade(paths)]
     assert report == [f"myapp: an install (myapp-x, {txn.phase}) is open; the project "
                       f"will be left as is"]
 
@@ -163,7 +164,7 @@ def test_one_decision_names_why_a_project_is_left(paths) -> None:
     assert isinstance(exclusion(paths, "myapp"), InstallTxn)
     txn_path(paths, "myapp").write_text("{not json")
     assert isinstance(exclusion(paths, "myapp"), ReleaseStateError)
-    assert check_upgrade(paths)[0].endswith("; the project will be left as is")
+    assert check_upgrade(paths)[0].text.endswith("; the project will be left as is")
     assert "Cannot read" in apply_projects(paths)[2].install["myapp"]
 
 
