@@ -96,6 +96,15 @@ mkfifo "$BOXMUNGE_ROOT/upgrade-state/probation.json"
 RUN_DESC="probation.json a FIFO" run_check 1.5.0
 refused "is unreadable or malformed" "check: a FIFO at probation.json is refused, not read"
 rm "$BOXMUNGE_ROOT/upgrade-state/probation.json"
+head -c 1048577 /dev/zero > "$BOXMUNGE_ROOT/upgrade-state/probation.json"
+RUN_DESC="probation.json over 1 MiB" run_check 1.5.0
+refused "is unreadable or malformed" "check: a planted probation.json over 1 MiB is refused, not read whole"
+rm "$BOXMUNGE_ROOT/upgrade-state/probation.json"
+head -c 1048577 /dev/zero > "$BOXMUNGE_ROOT/upgrade-state/blocklist.json"
+RUN_DESC="blocklist.json over 1 MiB" run_check 1.5.0
+[[ "$RC" -eq 1 && -z "$JSON" && "$ERR" == *"blocklist.json is over 1048576 bytes; refusing to read it as root"* ]] \
+    && pass "check: a planted blocklist over 1 MiB stops the check, saying so" || fail "huge blocklist: rc=$RC $ERR"
+rm "$BOXMUNGE_ROOT/upgrade-state/blocklist.json"
 ln -s /etc/hostname "$BOXMUNGE_ROOT/upgrade-state/probation.json"
 RUN_DESC="probation.json a link" run_check 1.5.0
 refused "is unreadable or malformed" "check: a link at probation.json is refused, not followed"

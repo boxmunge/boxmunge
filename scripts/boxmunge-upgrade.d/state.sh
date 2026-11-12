@@ -42,11 +42,13 @@ refuse_symlink() {
 # read_untrusted <file>: print a deploy-writable file. A FIFO would block a
 # plain read forever with upgrade.lock held, and a link swapped in after
 # refuse_symlink would be read through, so the file is opened O_NOFOLLOW |
-# O_NONBLOCK and anything but a regular file is refused. Use it as
+# O_NONBLOCK and anything but a regular file is refused; so is one over
+# UNTRUSTED_MAX_BYTES, which no state file root reads comes near. Use it as
 # value="$(read_untrusted <file>)" || exit 1 (it has already said why).
+UNTRUSTED_MAX_BYTES=1048576
 read_untrusted() {
     local rc=0
-    python3 - "$1" <<'PYRU' || rc=$?
+    python3 - "$1" "$UNTRUSTED_MAX_BYTES" <<'PYRU' || rc=$?
 import errno, os, stat, sys
 try:
     fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -55,11 +57,15 @@ except OSError as e:
 with os.fdopen(fd, "rb") as f:
     if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
         sys.exit(3)
-    sys.stdout.buffer.write(f.read())
+    data = f.read(int(sys.argv[2]) + 1)
+    if len(data) > int(sys.argv[2]):
+        sys.exit(4)
+    sys.stdout.buffer.write(data)
 PYRU
     case "$rc" in
         0) ;;
         3) die_logged "$1 is a symlink, FIFO or other non-regular file; refusing to read it as root. Remove it and re-run." ;;
+        4) die_logged "$1 is over $UNTRUSTED_MAX_BYTES bytes; refusing to read it as root. Remove it and re-run." ;;
         *) die_logged "Cannot read $1; inspect it and repair or remove it" ;;
     esac
 }
