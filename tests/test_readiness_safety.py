@@ -77,14 +77,26 @@ def test_writes_nothing(box, fake_containers) -> None:
 
 
 def test_only_inspection_docker_calls(box, recorder, monkeypatch) -> None:
+    """Every command is run captured (subprocess.run); a streamed one
+    (Popen: up, pull, build) is never started."""
+    import subprocess
+    started = []
+
+    def popen(cmd, *args, **kwargs):
+        started.append([str(part) for part in cmd])
+        raise AssertionError(f"started {cmd}")
+    monkeypatch.setattr(subprocess, "Popen", popen)
     monkeypatch.setattr("boxmunge.docker_containers.local_image", REAL_LOCAL_IMAGE)
     _a_busy_box(box)
+    add_project(box, "paused")
+    box.project_paused_state("paused").write_text('{"reason": "maintenance"}')
     evaluate(box)
     docker = recorder.docker()
     assert ["docker", "image", "inspect", IMAGE] in docker
     assert ["docker", "compose", "version", "--short"] in docker
     for argv in docker:
         assert not FORBIDDEN & set(argv), argv
+    assert started == []
 
 
 def test_fifo_manifest_does_not_block(box) -> None:
@@ -161,6 +173,36 @@ def test_manifest_loader_refuses_a_fifo_and_caps_the_size(tmp_path) -> None:
     with pytest.raises(OSError, match="larger than 64 bytes"):
         read_bytes_following(big, limit=64)
     assert read_bytes_following(big, limit=1024).startswith(b"project: shop")
+
+
+def test_a_fifo_swapped_in_between_stat_and_open_is_refused_not_waited_on(
+        tmp_path, monkeypatch) -> None:
+    """The open is non-blocking and checked again after it: without either,
+    this stalls (a blocking open of a FIFO) or reads it as empty."""
+    target = tmp_path / "manifest.yml"
+    target.write_text("project: x\n")
+    real_stat, swapped = os.stat, []
+
+    def stat_then_swap(path, *args, **kwargs):
+        st = real_stat(path, *args, **kwargs)
+        if os.fspath(path) == str(target) and not swapped:
+            swapped.append(True)
+            os.unlink(target)
+            os.mkfifo(target)
+        return st
+    monkeypatch.setattr(os, "stat", stat_then_swap)
+    out: dict = {}
+
+    def read() -> None:
+        try:
+            out["data"] = read_bytes_following(target)
+        except OSError as e:
+            out["error"] = e
+    worker = threading.Thread(target=read, daemon=True)
+    worker.start()
+    worker.join(5)
+    assert not worker.is_alive(), "the open waited on the FIFO"
+    assert swapped and "not a regular file" in str(out.get("error")), out
 
 
 def test_dry_run_output_unchanged(box, capsys) -> None:
