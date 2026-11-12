@@ -119,8 +119,11 @@ load_active_slot() {
 standby_slot() { [[ "$ACTIVE_SLOT" == "a" ]] && echo "b" || echo "a"; }
 active_venv() { echo "$BOXMUNGE_ROOT/env-$ACTIVE_SLOT"; }
 
-# acquire_lock [skip]: take upgrade.lock once per run. With "skip", a busy
-# lock exits 0 (the health timer retries on its next fire); otherwise it dies.
+# acquire_lock [skip|try]: take upgrade.lock once per run. With "skip", a
+# busy lock exits 0 (the health timer retries on its next fire); with "try"
+# (a readiness check), it returns 1 and counts no skip; otherwise it dies.
+# Only "try" leaves check-probation's skip count (lock-skips) alone when it
+# takes the lock: a readiness check is not a check-probation run.
 #
 # upgrade.lock is in root-only upgrade-root/, so deploy cannot replace it to
 # let a second upgrade run. Every shim and release an upgrade can start from
@@ -154,6 +157,7 @@ acquire_lock() {
         local foreign="$BM_UPGRADE_LOCK_FOREIGN"
         unset BM_UPGRADE_LOCK_FOREIGN
         [[ "${1:-}" != "skip" ]] || lock_busy_skip "$foreign was not root's when opened"
+        [[ "${1:-}" != "try" ]] || return 1
         die_logged "$foreign was replaced by a file that is not root's as it was opened (the deploy user is racing for it to stall upgrades); refusing to lock it. Retry; if it keeps happening, find what runs as deploy and stop it."
     fi
     if [[ "${BM_UPGRADE_LOCK_FD:-}" != 9 ]]; then
@@ -178,9 +182,10 @@ for fd, path in ((9, sys.argv[1]), (8, sys.argv[2])):
         || die "$why (it was replaced, or the descriptor came from elsewhere); refusing to lock it. Remove it and re-run."
     if ! flock -n 9 || ! flock -n 8; then
         [[ "${1:-}" != "skip" ]] || lock_busy_skip "upgrade.lock is held"
+        [[ "${1:-}" != "try" ]] || return 1
         die "Another upgrade is in progress"
     fi
-    rm -f "$LOCK_SKIPS_FILE"
+    [[ "${1:-}" == "try" ]] || rm -f "$LOCK_SKIPS_FILE"
     LOCK_HELD=1
 }
 

@@ -173,12 +173,12 @@ mkdir -p "$BOXMUNGE_ROOT/units"
 [[ -z "${STUB_MAX_SECS:-}" || "$secs" -le "$STUB_MAX_SECS" ]] || secs="$STUB_MAX_SECS"
 cd "$dir"
 rc=0
-python3 -c 'import subprocess, sys
-p = subprocess.Popen(sys.argv[2:])
+python3 -c 'import os, signal, subprocess, sys
+p = subprocess.Popen(sys.argv[2:], start_new_session=True)
 try:
     rc = p.wait(timeout=int(sys.argv[1]))
 except subprocess.TimeoutExpired:
-    p.terminate()
+    os.killpg(p.pid, signal.SIGKILL)  # the whole unit, as systemd stops its cgroup
     p.wait()
     sys.exit(200)
 sys.exit(201 if rc < 0 else rc)' "$secs" env -i "${envs[@]}" "$@" || rc=$?

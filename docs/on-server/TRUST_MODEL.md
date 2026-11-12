@@ -319,10 +319,10 @@ On a host with no deploy user the hook is not run and the deploy fails, saying s
 
 ### What deploy may ask root to do
 
-`/etc/sudoers.d/boxmunge-deploy` grants deploy exactly three shim invocations:
+`/etc/sudoers.d/boxmunge-deploy` grants deploy exactly five shim invocations:
 
 ```text
-deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmunge/bin/boxmunge-upgrade target *, /opt/boxmunge/bin/boxmunge-upgrade repair-deps
+deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmunge/bin/boxmunge-upgrade target *, /opt/boxmunge/bin/boxmunge-upgrade repair-deps, /opt/boxmunge/bin/boxmunge-upgrade check *, /opt/boxmunge/bin/boxmunge-upgrade guide *
 ```
 
 - `auto` discovers the latest release and upgrades to it.
@@ -335,14 +335,42 @@ deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmun
   release's bundle, verified like an upgrade's; it refuses if the live venv
   runs another version. It builds, swaps and removes no venv, so it is allowed
   during probation.
+- `check <version>` runs a newer release's own readiness check against the box
+  and prints one JSON answer. It changes no upgrade state: the blocklist, the
+  slots, the interruption, pip and cosign counts, probation and the stash stay
+  byte-identical whatever happens. It first refuses a version that is not newer
+  than the installed one, predates the check (0.11.8), or is blocklisted, and
+  any check while an upgrade or rollback is unfinished, during a probation
+  (`probation.json` is only read, never acted on), during a stopped userns
+  migration, or within ten minutes of the last check. As root it then downloads
+  the release and verifies it like an upgrade, without the lock and without
+  touching the cosign count, into `/opt/boxmunge/upgrade-check/`, which is
+  root's (0755; the bundle and results inside are 0700) and removed when the
+  check ends. The bundle's listed prerequisite scripts (`bootstrap/prerequisites`)
+  run as root, and a scratch venv is built from its hash-pinned requirements
+  (outside the A/B slots), each inside `systemd-run` with `ProtectSystem=strict`
+  and a time limit. Last, holding the upgrade lock for at most ten minutes, the
+  release's `upgrade-readiness --json` and `upgrade --dry-run` run **as
+  deploy**, confined the same way with nothing writable: deploy starts the
+  check and reads its findings, so running them as root would let a link deploy
+  plants in a project make root read a file into a finding. Only the Docker
+  socket is still reachable from them, which the readiness rules use to inspect.
+  The ten-minute stamp (`upgrade-root/check-last`) and the one-at-a-time lock
+  (`upgrade-root/check.lock`) are root-only, so deploy cannot reset either.
+- `guide <version>` prints a newer release's `upgrade-notes.json` exactly as
+  published, and only once its own line in the release's cosign-signed
+  `SHA256SUMS` verifies it (at most 1 MiB). It runs no release code, takes no
+  lock and changes nothing.
 
 Everything else is root-only: `run` (the auto-update timer), `check-probation`
 (the health timer), `clear-blocklist`, `install-sudoers`, `install-docs`, the
-`userns-*` commands, and `force-target <version>`, the operator override that
-skips the blocklist and the downgrade floor. sudo matches the whole
-argument string, so `target *` cannot reach `force-target`, and `auto` and
-`repair-deps` take no further words. The auto-update timer's
-`run` applies the same downgrade floor and skips blocklisted versions.
+`userns-*` commands, `_check-run` (the part of `check` that holds the upgrade
+lock), and `force-target <version>`, the operator override that skips the
+blocklist and the downgrade floor. sudo matches the whole argument string, so
+`target *`, `check *` and `guide *` cannot reach `force-target` or
+`_check-run`, each of them takes exactly one version, and `auto` and
+`repair-deps` take no further words. The auto-update timer's `run` applies the
+same downgrade floor and skips blocklisted versions.
 
 The rule text lives in the shim (`boxmunge-upgrade install-sudoers`). install.sh
 calls it, and so does every upgrade before it installs anything, after checking

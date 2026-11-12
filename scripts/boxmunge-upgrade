@@ -6,11 +6,15 @@
 # Python code — it only calls Python commands as subprocesses and checks
 # exit codes. This ensures rollback works even if the new code is broken.
 #
-# Entry points (deploy may sudo only the three marked *; see install-sudoers):
+# Entry points (deploy may sudo only the five marked *; see install-sudoers):
 # * auto                       discover the latest release and upgrade to it
 # * target <version>           upgrade to a specific newer, non-blocklisted version
 # * repair-deps                install the installed release's hash-pinned
 #                              dependencies into the live slot (also in probation)
+# * check <version>            run a newer release's readiness check against this
+#                              box, changing nothing; prints JSON (check.sh)
+# * guide <version>            print a newer release's signed upgrade-notes.json
+#   _check-run <version> <installed>  check's part under upgrade.lock (check runs it)
 #   force-target <version>     operator only: ignore the blocklist and downgrade floor
 #   run <version> <url> [<class>]  auto-update timer: upgrade to a discovered
 #                              version of release class <class> (the bundle URL
@@ -24,10 +28,10 @@
 #   userns-commit              operator only: delete the old root after the soak
 #
 # In the source tree the functions live in boxmunge-upgrade.d/ (state, slots,
-# probation, health, release, system, userns). The release build (scripts/build-shim.py)
-# inlines them, so the shim a box runs is this one self-contained file:
-# whatever installs it (install.sh, or an older release's shim
-# self-updating) copies only this file.
+# probation, health, release, system, userns, readiness, check). The release
+# build (scripts/build-shim.py) inlines them, so the shim a box runs is this
+# one self-contained file: whatever installs it (install.sh, or an older
+# release's shim self-updating) copies only this file.
 #
 # Cross-version contract: the crash-safety markers (upgrade-inflight,
 # rollback-inflight; see slots.sh) may be left by this shim and found by a
@@ -126,7 +130,7 @@ die_logged() {
 SHIM_LIB_DIR="$(dirname "$SHIM_PATH")/boxmunge-upgrade.d"
 [[ -d "$SHIM_LIB_DIR" ]] \
     || die "This is the unbuilt source shim and $SHIM_LIB_DIR is missing; install a release bundle, whose shim is built"
-for lib in state slots probation health release system userns; do
+for lib in state slots probation health release system userns readiness check; do
     # shellcheck source=/dev/null
     source "$SHIM_LIB_DIR/$lib.sh"
 done
@@ -438,5 +442,8 @@ case "${1:-}" in
     userns-rollback) shift; cmd_userns_rollback "$@" ;;
     userns-commit)   shift; cmd_userns_commit "$@" ;;
     repair-deps)     shift; cmd_repair_deps "$@" ;;
-    *)               die "Usage: boxmunge-upgrade {run|auto|target|force-target|check-probation|clear-blocklist|install-sudoers|install-docs|userns-migrate|userns-rollback|userns-commit|repair-deps} [args]" ;;
+    check)           shift; cmd_check "$@" ;;
+    guide)           shift; cmd_guide "$@" ;;
+    _check-run)      shift; cmd_check_run "$@" ;;
+    *)               die "Usage: boxmunge-upgrade {run|auto|target|force-target|check-probation|clear-blocklist|install-sudoers|install-docs|userns-migrate|userns-rollback|userns-commit|repair-deps|check|guide} [args]" ;;
 esac
