@@ -18,10 +18,14 @@
 #            bundle's install.sh, a stand-in: `fail` exits like an apt outage,
 #            `ok` runs the real install.sh's steps that tell a shim's run from
 #            one by hand and act on it (the floor check, the venv install, the
-#            shim install and the version record). Then the installed shim
-#            must work.
+#            shim install, deploy's sudo rule as the new shim writes it, and
+#            the version record). Then the installed shim must work, and
+#            deploy's rule must be the new shim's: an old shim writes only
+#            its own, so install.sh is how the new rule reaches a box.
 # Network, signing, pip and the venvs are stubbed: a venv is the stubs plus a
 # `release` file naming what pip "installed" into it. pip records its calls.
+# visudo is the real one (the image has sudo): every rule a shim writes must
+# pass it.
 # shellcheck disable=SC2016  # stub bodies are literal bash
 set -uo pipefail
 MODE="$1" OLD="$2" WAS="$3"
@@ -35,7 +39,6 @@ st() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$1"; chmod +x "$1"; }
 st /stub/bin/python3 "if [[ \"\$1 \$2\" == '-m venv' ]]; then mkdir -p \"\$3\"; cp -R /mockvenv/bin \"\$3/\"; exit 0; fi; exec $REALPY \"\$@\""
 st /stub/bin/curl 'cp "/rel/$(basename "${@: -1}")" "$3"'
 st /stub/bin/cosign 'exit 0'
-st /stub/bin/visudo 'exit 0'
 st /stub/bin/sha256sum "if [[ \"\$1\" == -c ]]; then cat >/dev/null; exit 0; fi; exec $REALSHA \"\$@\""
 st /mockvenv/bin/pip 'echo "$0 $*" >> /tmp/pip.log
 venv="$(dirname "$0")/.."
@@ -111,6 +114,8 @@ case "$MODE" in
           grep -F 'bootstrap/upgrade-floor.sh"' "$I"
           sed -n '/^if \[\[ "${FROM_UPGRADE_SHIM}" -eq 0 \]\]; then$/,/^fi$/p' "$I"
           grep -F 'bootstrap/install-shim.sh"' "$I"
+          echo 'cp "$BOXMUNGE_SUDOERS_FILE" /tmp/sudoers-before-install-sh'
+          grep -Fx '"${BOXMUNGE_ROOT}/bin/boxmunge-upgrade" install-sudoers' "$I"
           sed -n '/^INSTALLED_VERSION=/,/^fi$/p' "$I"
         } > /tmp/install.sh ;;
     *) echo "usage: shim_hop.sh <floor|ok|fail> <old-shim> <installed>" >&2; exit 2 ;;
@@ -150,6 +155,7 @@ box_facts() {  # box_facts <prefix>
 [[ "$MODE" != ok ]] || touch /tmp/watch-apply
 echo "HOP rc=$(shim /tmp/hop.log target "$NEW")"
 rm -f /tmp/watch-apply
+[[ ! -e "$BOXMUNGE_SUDOERS_FILE" ]] || cp "$BOXMUNGE_SUDOERS_FILE" /tmp/sudoers-after-hop
 box_facts ""
 for shim in "$OLD" /bundle/boxmunge/scripts/boxmunge-upgrade "/t/old_shims/boxmunge-upgrade-v$BRIDGE"; do
     ! cmp -s "$R/bin/boxmunge-upgrade" "$shim" || echo "SHIM_IS=$(basename "$shim")"
@@ -179,5 +185,10 @@ for log in hop bridge clear; do
     [[ -e "/tmp/$log.log" ]] || continue
     echo "--- $log log"
     cat "/tmp/$log.log"
+done
+for rule in before-install-sh after-hop; do
+    [[ -e "/tmp/sudoers-$rule" ]] || continue
+    echo "--- sudoers $rule"
+    cat "/tmp/sudoers-$rule"
 done
 echo "--- end"
