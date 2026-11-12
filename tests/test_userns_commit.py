@@ -116,11 +116,16 @@ def test_graph_driver_store_is_removed_and_verified(paths, tmp_path, monkeypatch
 
 def test_a_commit_resumed_after_a_crash_measures_against_the_first_size(
         paths, tmp_path, monkeypatch, remapped) -> None:
-    (tmp_path / "overlay2").mkdir()
+    """The first run journalled the store's size, deleted nearly all of it,
+    then died. What is left is under 10% of the journalled size, but all of
+    the store as measured now: only the journalled figure lets it pass."""
+    (tmp_path / "overlay2" / "layer").mkdir(parents=True)
+    (tmp_path / "overlay2" / "layer" / "f").write_bytes(b"x" * 5_000)
+    monkeypatch.setattr(cm, "remove_docker_tree", lambda root: None)
     _journal(paths, tmp_path, {"driver_type": "", "store_root": str(tmp_path / "overlay2"),
-                               "size": 100000})
+                               "size": 1_000_000})
     j = load_journal(paths)
-    j.items["commit-before"] = "100000"  # the first run deleted the layers, then died
+    j.items["commit-before"] = "1000000"
     save_journal(paths, j)
     assert cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img").phase == "committed"
 
@@ -152,8 +157,8 @@ def test_a_commit_wedged_by_a_shrunk_store_completes(paths, tmp_path, remapped) 
 
 def test_commit_rerun_after_an_interrupted_deletion_completes(
         paths, tmp_path, monkeypatch, remapped, alerts) -> None:
-    """The rerun finishes the deletion and measures it against the size
-    journalled when the first run began, not what that run left."""
+    """The first run journals the store's size and dies part-way through
+    deleting it; the rerun deletes the rest and commits."""
     store = tmp_path / "overlay2"
     for layer in ("a", "b"):
         (store / layer).mkdir(parents=True)
