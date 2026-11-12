@@ -1,7 +1,9 @@
 # shellcheck shell=bash
 # release.sh — release bundles: fetching one and verifying its signature and
-# checksum, the hash-pinned requirements a slot is built from, and
-# repair-deps, which installs them into the live slot.
+# checksum, the hash-pinned requirements a slot is built from, how an upgrade
+# fails before its swap (preflight_fail and the failures that are the box's
+# doing, not the release's), and repair-deps, which installs the requirements
+# into the live slot.
 # Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
 # the shim that releases ship.
 
@@ -67,6 +69,68 @@ cosign_reason() {
     printf '%s' "${reason:0:300}"
 }
 
+# preflight_fail <version> <from_version> <blocklist_reason> <message> [stage] [detail]
+#
+# Abort before the slot swap: drop the half-built standby venv, blocklist
+# the version so auto-update stops retrying it, and report the failure, with
+# <detail> (by default the blocklist reason) as the report's reason.
+preflight_fail() {
+    log "$4"
+    remove_slot "$(standby_slot)"
+    add_blocklist "$1" "$3"
+    report_failure "$1" "$2" "${5:-preflight}" "${6:-$3}"
+    exit 1
+}
+
+# dependency_install_failed <version> <from_version>: pip could not install
+# the bundle's hash-pinned dependencies. That is rarely the release's fault
+# (a network blip, the disk filling mid-install), so, as for an interrupted
+# upgrade, the first failure of a version is not blocklisted or reported to
+# the fleet service and auto-update retries it; a second in a row is.
+dependency_install_failed() {
+    local version="$1" from_version="$2" count
+    count=$(( $(pip_failures "$version") + 1 ))
+    pip_failures "$version" "$count"
+    [[ "$count" -lt 2 ]] || preflight_fail "$version" "$from_version" "preflight_failed: pip_install_deps" \
+        "Failed to install hash-pinned dependencies from bundle ($count times in a row); blocklisting $version"
+    log "Failed to install hash-pinned dependencies from bundle; not blocklisted, auto-update will retry $version"
+    remove_slot "$(standby_slot)"
+    bm_log warn upgrade "dependency install failed" "{\"version\": \"$version\", \"failures\": $count}"
+    send_notification "boxmunge upgrade failed" "Could not install the dependencies of $version (not blocklisted; auto-update will retry it)"
+    exit 1
+}
+
+# stash_failed <version> <output>: the platform stash was refused (a symlink
+# it cannot hold) or failed (a full disk) before anything changed. That is the
+# box's doing, not the release's, so the version is not blocklisted or
+# reported; the standby is dropped and the operator alerted, so an unattended
+# auto-update stopping here every run is seen.
+stash_failed() {
+    local version="$1" output="$2"
+    log "Stash creation failed, aborting; $version not blocklisted: $output"
+    remove_slot "$(standby_slot)"
+    bm_log error upgrade "upgrade to $version aborted before any change: stash creation failed: $output" \
+        "{\"version\": \"$version\"}"
+    send_notification "boxmunge upgrade failed" \
+        "The platform stash failed, so the upgrade to $version stopped before changing anything (not blocklisted; auto-update will retry it). Fix this and retry: $output"
+    exit 1
+}
+
+# extract_failed <version> <message>: the bundle passed its checksum but did
+# not extract, so the box failed (a full disk under the download directory),
+# not the release: like stash_failed, not blocklisted or reported, and the
+# operator is alerted, so an auto-update stopping here every run is seen.
+extract_failed() {
+    local version="$1" message="$2"
+    log "$message; $version not blocklisted"
+    remove_slot "$(standby_slot)"
+    bm_log error upgrade "upgrade to $version aborted before any change: bundle extract failed" \
+        "{\"version\": \"$version\"}"
+    send_notification "boxmunge upgrade failed" \
+        "The verified bundle of $version did not extract, so the upgrade stopped before changing anything (not blocklisted; auto-update will retry it). Free disk space and retry: $message"
+    exit 1
+}
+
 # cosign_verify_failed <version> <from_version>: an upgrade's fetch_release
 # failed at cosign_verify. A bad signature and an unreachable Sigstore (cosign
 # searches Rekor online) look alike, and cosign's error text is not a stable
@@ -105,88 +169,106 @@ require_free_space() {
     [[ "$avail_mb" -ge 250 ]] || die "Insufficient disk space: ${avail_mb}MB available, need 250MB"
 }
 
+# The shim's scratch, removed when it exits, by one EXIT trap (cleanup_scratch):
+# TMP_DOWNLOAD (start_download) and, for a readiness check that took
+# check.lock, OWNED_CHECK_DIR (check.sh).
 TMP_DOWNLOAD=""
-cleanup_download() { [[ -z "$TMP_DOWNLOAD" ]] || rm -rf "$TMP_DOWNLOAD"; }
+OWNED_CHECK_DIR=""
+cleanup_scratch() {
+    [[ -z "$TMP_DOWNLOAD" ]] || rm -rf "$TMP_DOWNLOAD"
+    [[ -z "$OWNED_CHECK_DIR" ]] || rm -rf "$OWNED_CHECK_DIR"
+}
 
 # start_download: TMP_DOWNLOAD becomes a fresh root-only directory, removed
 # when the shim exits.
 start_download() {
     TMP_DOWNLOAD="$(mktemp -d)"
-    trap cleanup_download EXIT
+    trap cleanup_scratch EXIT
 }
 
-# fetch_release <version> <dir>: download release <version>'s bundle and its
-# signed SHA256SUMS into <dir>, verify both, and extract the bundle to
-# <dir>/boxmunge. On failure it returns 1 with FETCH_STEP (the step that
-# failed, for a blocklist reason) and FETCH_ERROR set; nothing outside <dir>
-# has changed. Every step but the last fails on the release or its download;
-# bundle_extract fails on the box (the bundle passed its checksum, so it is
-# the release's own bytes: a full disk). Callers run it as
+# fetch_release <version> <dir> [readonly]: download release <version>'s
+# bundle and its signed SHA256SUMS into <dir>, verify both, and extract the
+# bundle to <dir>/boxmunge. On failure it returns 1 with FETCH_STEP (the step
+# that failed, for a blocklist reason) and FETCH_ERROR set; nothing outside
+# <dir> has changed. Every step but the last fails on the release or its
+# download; bundle_extract fails on the box (the bundle passed its checksum,
+# so it is the release's own bytes: a full disk). Callers run it as
 # `fetch_release ... || <handle the failure>`, which suspends set -e here, so
-# every step checks its own result.
+# every step checks its own result. With readonly (a readiness check), a
+# verified signature leaves the cosign failure count alone (fetch_signed_sums).
 FETCH_STEP=""
 FETCH_ERROR=""
-# download <dest> <url>: every download runs with upgrade.lock held, so a
-# stalled connection must not park the upgrade (and check-probation, which
-# skips while the lock is held) indefinitely.
-download() { curl -sLf -o "$1" --connect-timeout 30 --max-time 600 --proto =https --proto-redir =https "$2"; }
+# release_url <version> <file>: where release <version> publishes <file>.
+release_url() { echo "https://github.com/boxmunge/boxmunge/releases/download/v$1/$2"; }
+# download <dest> <url> [<curl option>...]: every download of an upgrade runs
+# with upgrade.lock held, so a stalled connection must not park the upgrade
+# (and check-probation, which skips while the lock is held) indefinitely.
+download() { curl -sLf -o "$1" --connect-timeout 30 --max-time 600 --proto =https --proto-redir =https "${@:3}" "$2"; }
 # shellcheck disable=SC2034  # FETCH_STEP is read by upgrade_to, in the shim itself
 fetch_failed() { FETCH_STEP="$1"; FETCH_ERROR="$2"; }
 
 fetch_release() {
-    local version="$1" dir="$2"
-    local base="https://github.com/boxmunge/boxmunge/releases/download/v${version}"
+    local version="$1" dir="$2" mode="${3:-}"
     local bundle="boxmunge-${version}.tar.gz"
 
-    log "Downloading bundle from ${base}/${bundle}"
-    download "$dir/$bundle" "$base/$bundle" \
+    log "Downloading bundle from $(release_url "$version" "$bundle")"
+    download "$dir/$bundle" "$(release_url "$version" "$bundle")" \
         || { fetch_failed bundle_download "Failed to download bundle"; return 1; }
-    download "$dir/SHA256SUMS" "$base/SHA256SUMS" \
-        || { fetch_failed checksum_download "Failed to download SHA256SUMS"; return 1; }
-    download "$dir/SHA256SUMS.sig" "$base/SHA256SUMS.sig" \
-        || { fetch_failed signature_download "Failed to download SHA256SUMS.sig (release is unsigned or sig artifact missing)"; return 1; }
-    download "$dir/SHA256SUMS.cert" "$base/SHA256SUMS.cert" \
-        || { fetch_failed certificate_download "Failed to download SHA256SUMS.cert (release is unsigned or cert artifact missing)"; return 1; }
-
-    # Verify cosign signature on SHA256SUMS BEFORE running sha256sum -c.
-    #
-    # This breaks the circularity of the prior design (where SHA256SUMS and
-    # the bundle came from the same release URL — an attacker who replaced
-    # the bundle could replace SHA256SUMS in lockstep). Cosign's keyless
-    # signature chains to a Fulcio cert tying SHA256SUMS to the release
-    # workflow on a tagged release of this exact repo; without the OIDC
-    # issuer pinning the attacker would need to compromise GitHub Actions
-    # OIDC, not just the release artifacts.
-    #
-    # cosign is hard-required: if the host is missing it, abort.
-    verify_release_signature "$dir" \
-        || { fetch_failed cosign_verify "Cosign verification of SHA256SUMS FAILED, refusing to install: $COSIGN_REASON"; return 1; }
-    cosign_failures "$version" 0
-    log "Cosign signature on SHA256SUMS verified (release-workflow identity)"
-    bm_log info upgrade "signature verified" "{\"version\": \"$version\"}"
-
-    # Verify checksum.
-    #
-    # SHA256SUMS lines are produced by `sha256sum <file>` and have the
-    # canonical form: `<64-hex-hash>  <filename>` (two spaces, bare filename
-    # — the release workflow takes care to write bare filenames).
-    #
-    # We do NOT pass --ignore-missing: it makes `sha256sum -c` succeed when
-    # the SHA256SUMS file lists zero matching files. An adversary who could
-    # publish a SHA256SUMS without a line for our bundle would then pass
-    # verification trivially. So instead we (a) require that SHA256SUMS
-    # contains a line for the exact bundle filename we just downloaded, and
-    # (b) run the full check. SHA256SUMS may also list boxmunge-install.sh and
-    # other release artefacts we did not download; the check is restricted to
-    # the bundle line.
-    grep -q "  ${bundle}\$" "$dir/SHA256SUMS" \
-        || { fetch_failed checksum_missing_entry "Checksum verification FAILED: SHA256SUMS does not list ${bundle}"; return 1; }
-    (cd "$dir" && grep "  ${bundle}\$" SHA256SUMS | sha256sum -c -) \
-        || { fetch_failed checksum_mismatch "Checksum verification FAILED"; return 1; }
+    fetch_signed_sums "$version" "$dir" "$mode" || return 1
+    verify_listed "$dir" "$bundle" checksum || return 1
 
     local out
     out="$(tar xzf "$dir/$bundle" -C "$dir" 2>&1)" \
         || { fetch_failed bundle_extract "Failed to extract the verified bundle in $dir: $out"; return 1; }
+}
+
+# fetch_signed_sums <version> <dir> [readonly]: download release <version>'s
+# SHA256SUMS with its signature and certificate into <dir>, and verify the
+# signature. A verified one clears the version's cosign failure count
+# (cosign_verify_failed), except with readonly: a readiness check or a guide
+# changes no upgrade state. Sets FETCH_STEP and FETCH_ERROR like fetch_release.
+#
+# The signature is checked BEFORE any checksum: SHA256SUMS and the bundle come
+# from the same release URL, so an attacker who replaced the bundle could
+# replace SHA256SUMS in lockstep. Cosign's keyless signature chains to a
+# Fulcio cert tying SHA256SUMS to the release workflow on a tagged release of
+# this exact repo (the OIDC issuer is pinned), so forging one means
+# compromising GitHub Actions OIDC, not just the release artifacts. cosign is
+# hard-required: if the host is missing it, this fails.
+fetch_signed_sums() {
+    local version="$1" dir="$2" mode="${3:-}"
+    download "$dir/SHA256SUMS" "$(release_url "$version" SHA256SUMS)" \
+        || { fetch_failed checksum_download "Failed to download SHA256SUMS"; return 1; }
+    download "$dir/SHA256SUMS.sig" "$(release_url "$version" SHA256SUMS.sig)" \
+        || { fetch_failed signature_download "Failed to download SHA256SUMS.sig (release is unsigned or sig artifact missing)"; return 1; }
+    download "$dir/SHA256SUMS.cert" "$(release_url "$version" SHA256SUMS.cert)" \
+        || { fetch_failed certificate_download "Failed to download SHA256SUMS.cert (release is unsigned or cert artifact missing)"; return 1; }
+    verify_release_signature "$dir" \
+        || { fetch_failed cosign_verify "Cosign verification of SHA256SUMS FAILED, refusing to install: $COSIGN_REASON"; return 1; }
+    [[ "$mode" == readonly ]] || cosign_failures "$version" 0
+    log "Cosign signature on SHA256SUMS verified (release-workflow identity)"
+    bm_log info upgrade "signature verified" "{\"version\": \"$version\"}"
+}
+
+# verify_listed <dir> <file> <step>: <dir>/<file> is what the verified
+# <dir>/SHA256SUMS says. SHA256SUMS lines are `sha256sum <file>` output,
+# `<64-hex-hash>  <filename>` (two spaces, a bare filename), and must hold
+# exactly one line ending `  <file>`. No --ignore-missing: it makes
+# `sha256sum -c` pass when SHA256SUMS lists none of the files, so a SHA256SUMS
+# published without the line would pass trivially. SHA256SUMS lists other
+# artefacts too, so only that line is checked. Fails with FETCH_STEP
+# <step>_missing_entry (no line) or <step>_mismatch (a wrong hash, or more
+# than one line).
+verify_listed() {
+    local dir="$1" file="$2" step="$3" line count
+    line="  ${file//./\\.}\$"
+    count="$(grep -cE "$line" "$dir/SHA256SUMS")" || true
+    [[ "$count" != 0 ]] \
+        || { fetch_failed "${step}_missing_entry" "Checksum verification FAILED: SHA256SUMS does not list ${file}"; return 1; }
+    [[ "$count" == 1 ]] \
+        || { log "SHA256SUMS lists ${file} $count times"; fetch_failed "${step}_mismatch" "Checksum verification FAILED"; return 1; }
+    (cd "$dir" && grep -E "$line" SHA256SUMS | sha256sum -c - >&2) \
+        || { fetch_failed "${step}_mismatch" "Checksum verification FAILED"; return 1; }
 }
 
 # The bundle's hash-pinned requirements files (covered by the signed
@@ -205,15 +287,19 @@ missing_requirement() {
     return 1
 }
 
-# install_pinned_deps <bundle> <slot>: install every PINNED_REQUIREMENTS file
-# of <bundle> into env-<slot>, hash-checked, so nothing beyond the pins is
-# resolved. No pip self-upgrade (one more unpinned download) and no cache
-# (nothing builds up under /root). Check missing_requirement first.
-install_pinned_deps() {
+# install_pinned_deps_into <bundle> <venv_dir>: install every
+# PINNED_REQUIREMENTS file of <bundle> into the venv, hash-checked, so nothing
+# beyond the pins is resolved. No pip self-upgrade (one more unpinned
+# download) and no cache (nothing builds up under /root). Check
+# missing_requirement first.
+install_pinned_deps_into() {
     local req reqs=()
     for req in "${PINNED_REQUIREMENTS[@]}"; do reqs+=(-r "$1/$req"); done
-    "$BOXMUNGE_ROOT/env-$2/bin/pip" install --quiet --no-cache-dir --require-hashes "${reqs[@]}"
+    "$2/bin/pip" install --quiet --no-cache-dir --require-hashes "${reqs[@]}"
 }
+
+# install_pinned_deps <bundle> <slot>: the same into env-<slot>.
+install_pinned_deps() { install_pinned_deps_into "$1" "$BOXMUNGE_ROOT/env-$2"; }
 
 # repair-deps: install the installed release's hash-pinned dependencies into
 # the live slot, from that release's own bundle, fetched and verified as an

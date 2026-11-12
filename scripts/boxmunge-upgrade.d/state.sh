@@ -70,9 +70,10 @@ replace_file() {
 
 # write_root_file <file> <line>: replace a file in root-only upgrade-root/
 # (created if missing) by rename, so a reader never sees half of it. A temp a
-# run killed before its rename left (every caller holds upgrade.lock, so none
-# is in use) is swept first, and a failed write removes its own. No trap: it
-# would replace the shim's EXIT trap (cleanup_download), and SIGKILL skips one.
+# run killed before its rename left (every caller holds upgrade.lock, or
+# check.lock for the readiness check's own stamp, so none is in use) is swept
+# first, and a failed write removes its own. No trap: it would replace the
+# shim's EXIT trap (cleanup_scratch), and SIGKILL skips one.
 write_root_file() {
     local tmp prefix
     refuse_symlink "$UPGRADE_ROOT_DIR"

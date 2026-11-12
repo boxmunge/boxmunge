@@ -132,68 +132,6 @@ for lib in state slots probation health release system userns; do
 done
 # <<< boxmunge-upgrade.d
 
-# preflight_fail <version> <from_version> <blocklist_reason> <message> [stage] [detail]
-#
-# Abort before the slot swap: drop the half-built standby venv, blocklist
-# the version so auto-update stops retrying it, and report the failure, with
-# <detail> (by default the blocklist reason) as the report's reason.
-preflight_fail() {
-    log "$4"
-    remove_slot "$(standby_slot)"
-    add_blocklist "$1" "$3"
-    report_failure "$1" "$2" "${5:-preflight}" "${6:-$3}"
-    exit 1
-}
-
-# dependency_install_failed <version> <from_version>: pip could not install
-# the bundle's hash-pinned dependencies. That is rarely the release's fault
-# (a network blip, the disk filling mid-install), so, as for an interrupted
-# upgrade, the first failure of a version is not blocklisted or reported to
-# the fleet service and auto-update retries it; a second in a row is.
-dependency_install_failed() {
-    local version="$1" from_version="$2" count
-    count=$(( $(pip_failures "$version") + 1 ))
-    pip_failures "$version" "$count"
-    [[ "$count" -lt 2 ]] || preflight_fail "$version" "$from_version" "preflight_failed: pip_install_deps" \
-        "Failed to install hash-pinned dependencies from bundle ($count times in a row); blocklisting $version"
-    log "Failed to install hash-pinned dependencies from bundle; not blocklisted, auto-update will retry $version"
-    remove_slot "$(standby_slot)"
-    bm_log warn upgrade "dependency install failed" "{\"version\": \"$version\", \"failures\": $count}"
-    send_notification "boxmunge upgrade failed" "Could not install the dependencies of $version (not blocklisted; auto-update will retry it)"
-    exit 1
-}
-
-# stash_failed <version> <output>: the platform stash was refused (a symlink
-# it cannot hold) or failed (a full disk) before anything changed. That is the
-# box's doing, not the release's, so the version is not blocklisted or
-# reported; the standby is dropped and the operator alerted, so an unattended
-# auto-update stopping here every run is seen.
-stash_failed() {
-    local version="$1" output="$2"
-    log "Stash creation failed, aborting; $version not blocklisted: $output"
-    remove_slot "$(standby_slot)"
-    bm_log error upgrade "upgrade to $version aborted before any change: stash creation failed: $output" \
-        "{\"version\": \"$version\"}"
-    send_notification "boxmunge upgrade failed" \
-        "The platform stash failed, so the upgrade to $version stopped before changing anything (not blocklisted; auto-update will retry it). Fix this and retry: $output"
-    exit 1
-}
-
-# extract_failed <version> <message>: the bundle passed its checksum but did
-# not extract, so the box failed (a full disk under the download directory),
-# not the release: like stash_failed, not blocklisted or reported, and the
-# operator is alerted, so an auto-update stopping here every run is seen.
-extract_failed() {
-    local version="$1" message="$2"
-    log "$message; $version not blocklisted"
-    remove_slot "$(standby_slot)"
-    bm_log error upgrade "upgrade to $version aborted before any change: bundle extract failed" \
-        "{\"version\": \"$version\"}"
-    send_notification "boxmunge upgrade failed" \
-        "The verified bundle of $version did not extract, so the upgrade stopped before changing anything (not blocklisted; auto-update will retry it). Free disk space and retry: $message"
-    exit 1
-}
-
 # run <version> <url> [<class>]: the auto-update timer's entry point (root
 # only). Releases before 0.10.1 pass no class.
 cmd_run() {

@@ -140,6 +140,86 @@ BUSYLOCK="$(mktemp -d)"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$BUSYLOCK/flock"
 chmod +x "$BUSYLOCK/flock"
 
+# SYSTEMD_RUN_STUB: prepend to PATH for a systemd-run that runs the unit's
+# command here, and the systemctl that reports how it ended. systemd-run
+# records its argv in $BOXMUNGE_ROOT/calls and honours --setenv (in a clean
+# environment, as a unit gets; STUB_UNIT_PATH is put in front of the PATH it
+# sets, for the test's own stand-ins), --working-directory and -p
+# RuntimeMaxSec=N (cut to STUB_MAX_SECS when that is lower). It ends as
+# `systemd-run --wait` does: the command's exit code, 255 for a signal, and 1
+# for Result=timeout; a unit that failed stays loaded for `systemctl show`
+# until `systemctl reset-failed`, as a transient unit does without --collect.
+SYSTEMD_RUN_STUB="$(mktemp -d)"
+cat > "$SYSTEMD_RUN_STUB/systemd-run" <<'EOF'
+#!/usr/bin/env bash
+echo "systemd-run $*" >> "$BOXMUNGE_ROOT/calls"
+unit="" secs="" dir="" envs=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --) shift; break ;;
+        --unit=*) unit="${1#--unit=}" ;;
+        --setenv=PATH=*) envs+=("PATH=${STUB_UNIT_PATH:+$STUB_UNIT_PATH:}${1#--setenv=PATH=}") ;;
+        --setenv=*) envs+=("${1#--setenv=}") ;;
+        --working-directory=*) dir="${1#--working-directory=}" ;;
+        -p) shift; [[ "$1" != RuntimeMaxSec=* ]] || secs="${1#RuntimeMaxSec=}" ;;
+        --quiet|--wait|--pipe) ;;
+        *) echo "systemd-run stand-in: unexpected argument $1" >&2; exit 64 ;;
+    esac
+    shift
+done
+[[ -n "$unit" && -n "$secs" && -n "$dir" && $# -gt 0 ]] || { echo "systemd-run stand-in: no unit, limit, directory or command" >&2; exit 64; }
+mkdir -p "$BOXMUNGE_ROOT/units"
+[[ ! -e "$BOXMUNGE_ROOT/units/$unit" ]] || { echo "Unit $unit.service was already loaded" >&2; exit 1; }
+[[ -z "${STUB_MAX_SECS:-}" || "$secs" -le "$STUB_MAX_SECS" ]] || secs="$STUB_MAX_SECS"
+cd "$dir"
+rc=0
+python3 -c 'import subprocess, sys
+p = subprocess.Popen(sys.argv[2:])
+try:
+    rc = p.wait(timeout=int(sys.argv[1]))
+except subprocess.TimeoutExpired:
+    p.terminate()
+    p.wait()
+    sys.exit(200)
+sys.exit(201 if rc < 0 else rc)' "$secs" env -i "${envs[@]}" "$@" || rc=$?
+case "$rc" in
+    0) exit 0 ;;
+    200) echo timeout > "$BOXMUNGE_ROOT/units/$unit"; exit 1 ;;
+    201) echo signal > "$BOXMUNGE_ROOT/units/$unit"; exit 255 ;;
+    *) echo exit-code > "$BOXMUNGE_ROOT/units/$unit"; exit "$rc" ;;
+esac
+EOF
+cat > "$SYSTEMD_RUN_STUB/systemctl" <<'EOF'
+#!/usr/bin/env bash
+echo "systemctl $*" >> "$BOXMUNGE_ROOT/calls"
+state="$BOXMUNGE_ROOT/units/${*: -1}"
+state="${state%.service}"
+case "$1" in
+    show) if [[ -f "$state" ]]; then printf 'LoadState=loaded\nResult=%s\n' "$(cat "$state")"; else printf 'LoadState=not-found\nResult=success\n'; fi ;;
+    reset-failed) [[ -f "$state" ]] || { echo "Unit ${*: -1} not loaded." >&2; exit 1; }; rm -f "$state" ;;
+    *) echo "systemctl stand-in: unexpected $*" >&2; exit 64 ;;
+esac
+EOF
+chmod +x "$SYSTEMD_RUN_STUB"/*
+
+# with_shim_functions <cmd...>: run <cmd> in a subshell that has every
+# constant and function of the shim under test (built first, when it is the
+# source shim) and has run none of its commands.
+SHIM_FUNCTIONS=""
+with_shim_functions() {
+    if [[ -z "$SHIM_FUNCTIONS" ]]; then
+        local built="$SHIM"
+        SHIM_FUNCTIONS="$(mktemp)"
+        if grep -q '^# >>> boxmunge-upgrade.d:' "$SHIM"; then
+            built="$SHIM_FUNCTIONS.built"
+            python3 "$REPO_DIR/scripts/build-shim.py" "$SHIM" "$built"
+        fi
+        awk 'index($0, "case \"${1:-}\" in") == 1 { exit } { print }' "$built" > "$SHIM_FUNCTIONS"
+    fi
+    # shellcheck source=/dev/null
+    ( source "$SHIM_FUNCTIONS"; "$@" )
+}
+
 # new_root [slot]: fresh BOXMUNGE_ROOT whose active slot is <slot> (default a),
 # with a mock boxmunge-server and python in both slots and a consistent
 # active-slot file and env-active symlink.
@@ -245,7 +325,8 @@ age_swap() {
 drop_root() { rm -rf "$BOXMUNGE_ROOT"; unset BOXMUNGE_ROOT; }
 
 finish() {
-    rm -rf "$FAKEBIN" "$FAILVISUDO" "$BUSYLOCK"
+    rm -rf "$FAKEBIN" "$FAILVISUDO" "$BUSYLOCK" "$SYSTEMD_RUN_STUB"
+    [[ -z "$SHIM_FUNCTIONS" ]] || rm -f "$SHIM_FUNCTIONS" "$SHIM_FUNCTIONS.built"
     echo ""
     echo "Results: $PASS passed, $FAIL failed"
     [[ "$FAIL" -eq 0 ]]
