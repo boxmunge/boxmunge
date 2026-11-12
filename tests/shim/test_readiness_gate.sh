@@ -203,6 +203,18 @@ grep -q "^systemd-run .*--unit=boxmunge-check-readiness-[0-9]* .*-p User=deploy 
 drop_root
 rm -rf "$RELEASE"
 
+# The case 0.12 brings: the target itself is the breaking release.
+release 1.5.0
+box "$BLOCKED" 1
+run_shim target 1.5.0
+expect 1 "Not upgrading to 1.5.0: its readiness check found what blocks it" \
+    "gate: a target that is itself the breaking release is gated"
+[[ "$OUT" == *"crosses the breaking release 1.5.0"* ]] && pass "the refusal names the target as the breaking release" \
+    || fail "out: $OUT"
+refused_unchanged "gate, breaking target"
+drop_root
+rm -rf "$RELEASE"
+
 # --- not crossing ------------------------------------------------------------------
 
 for breaking in "" 1.4.0 1.3.0 1.6.0; do
