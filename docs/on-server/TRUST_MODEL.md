@@ -332,20 +332,32 @@ deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmun
   version is allowed.
 - An upgrade that crosses a breaking release, by `auto`, `target` or the
   auto-update timer's `run`, must first pass the target's own readiness check.
-  Whether it crosses one is read from the target's `upgrade-notes.json`, which
-  must have its own line in the release's cosign-signed `SHA256SUMS`, never
-  from the unsigned discovery answer. The target's prerequisite scripts run
-  before its venv is built, and its `upgrade-readiness --json` runs, as deploy
-  and confined like `check` below, against the standby it has built. A box
-  that is not ready is refused before anything changes: the standby is
-  removed, and nothing is blocklisted or reported. Security and break-fix
-  releases are non-breaking, so they install ungated. After any upgrade, the
-  new release's readiness check lists each project's to-dos in one
-  low-priority alert. The operator's root-only `force-target` skips the gate.
-  The gate stops a careless agent, not a hostile deploy user. The readiness
-  check runs as deploy, so deploy can tamper with that process and make it
-  answer pass. deploy can already reach the Docker socket, so this gives it
-  nothing it lacked.
+  - **Which upgrades are gated:** whether an upgrade crosses a breaking release
+    is read only from the target's `upgrade-notes.json`, never from the
+    unsigned discovery answer. That file must have its own line in the
+    release's cosign-signed `SHA256SUMS`. A release whose signed notes are
+    missing, mismatched or unreadable fails its pre-flight and is blocklisted,
+    like a bad bundle.
+  - **Class does not matter, only crossing:** an upgrade that crosses no
+    breaking release installs ungated, as every security and break-fix update
+    within a minor line does. One that crosses a breaking release is gated
+    whatever its class.
+  - **What the gate runs:**
+    1. The target's prerequisite scripts, as root and confined like `check`'s,
+       before its venv is built.
+    2. Its `upgrade-readiness --json`, as deploy and confined like `check`'s,
+       against the standby it has built. This runs before the release's own
+       `upgrade --dry-run`.
+  - **A box that is not ready** is refused before anything changes: the
+    standby is removed, and nothing is blocklisted or reported. A dry run that
+    refuses after the readiness check has passed is still a pre-flight failure.
+  - **After any upgrade,** the new release's readiness check lists each
+    project's to-dos in one low-priority alert.
+  - **Override:** the operator's root-only `force-target` skips the gate.
+  - **Not a security boundary:** the gate stops a careless agent, not a hostile
+    deploy user. The readiness check runs as deploy, so deploy can tamper with
+    that process and make it answer pass. deploy can already reach the Docker
+    socket, so this gives it nothing it lacked.
 - `repair-deps` takes no argument. It installs the hash-pinned dependencies of
   the installed release (`config/version` again) into the live venv, from that
   release's bundle, verified like an upgrade's; it refuses if the live venv
