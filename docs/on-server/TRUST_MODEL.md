@@ -449,7 +449,7 @@ prints the same report with no side effects.
 ## Security and Break-fix Releases
 
 Every release has a class recorded in the version-check service's
-`releases.json`: `security`, `breakfix` (a critical non-security fix), or
+`releases.json`: `security`, `breakfix` (an important fix that prevents issues; you shouldn't fall behind on it), or
 `feature`. Security releases are applied automatically within 12 hours.
 Break-fix releases are applied the same way unless the box sets
 `auto_update.breakfix: false` in `boxmunge.yml`. Feature releases are never

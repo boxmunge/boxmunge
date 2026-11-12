@@ -223,10 +223,12 @@ runtime lock also pins (click, idna, pygments): nothing installs them in one pip
    swaps, and watches a probation window. A release that fails probation is rolled back and
    blocklisted.
 
-Security releases apply automatically. Break-fix releases (critical non-security fixes) apply
-automatically unless the box sets `auto_update.breakfix: false` in `boxmunge.yml`. Feature releases
-wait for the operator to run `upgrade`. Use `breakfix` only for a fix that cannot wait for the
-operator; a fix for a vulnerability is always `security`.
+Security releases apply automatically. Break-fix releases (important fixes that prevent issues;
+you shouldn't fall behind on them) apply automatically unless the box sets
+`auto_update.breakfix: false` in `boxmunge.yml`. Feature releases wait for the operator to run
+`upgrade`. The `breakfix` class is about prevention, not urgency: use it for a non-security fix that
+keeps boxes from running into trouble later and that every box should take. A fix for a
+vulnerability is always `security`.
 
 Set `"breaking": true` on any release that changes an operator workflow, or could make an existing
 project, manifest, compose file, command line or upload method fail. A breaking release bumps the
