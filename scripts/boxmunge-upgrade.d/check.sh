@@ -12,9 +12,11 @@
 # NOTES_MAX_BYTES) and carries the readiness command.
 FIRST_NOTES_RELEASE="0.11.8"
 NOTES_MAX_BYTES=1048576
-# One check at a time (check.lock), and at most one every CHECK_WINDOW_SECS
-# (check-last, the epoch second the last one began): a check downloads a
-# release and builds a venv as root. Both root-only, in upgrade-root/.
+# One check at a time (check.lock), each starting at least CHECK_WINDOW_SECS
+# after the last one began and after it ended (check-last, the epoch second
+# of the later): a check downloads a release and builds a venv as root, and
+# holds upgrade.lock for up to ten minutes, so back-to-back checks must not
+# be able to keep it held. Both root-only, in upgrade-root/.
 CHECK_WINDOW_SECS=600
 CHECK_LOCK_FILE="$UPGRADE_ROOT_DIR/check.lock"
 CHECK_STAMP_FILE="$UPGRADE_ROOT_DIR/check-last"
@@ -29,6 +31,7 @@ CHECK_FREE_MB=400
 CHECK_VERSION=""
 CHECK_INSTALLED=""
 CHECK_OUT=""
+CHECK_STAMPED=0
 
 usage_exit() { echo "Usage: $1" >&2; exit 2; }
 
@@ -49,6 +52,7 @@ cmd_check() {
     check_refusals
     prepare_check_dir
     write_root_file "$CHECK_STAMP_FILE" "$(date +%s)"
+    CHECK_STAMPED=1
     bm_log info upgrade "readiness check started" "{\"version\": \"$CHECK_VERSION\"}"
 
     local bundle="$CHECK_DIR/download/boxmunge" rc=0 missing
@@ -138,8 +142,16 @@ check_rate_limit() {
         || check_refused "$CHECK_STAMP_FILE is malformed; the operator removes it as supervisor (sudo rm $CHECK_STAMP_FILE), then run upgrade-check again"
     now="$(date +%s)"
     if (( now - 10#$last >= 0 && now - 10#$last < CHECK_WINDOW_SECS )); then
-        check_refused "a readiness check ran less than $((CHECK_WINDOW_SECS / 60)) minutes ago, and one runs at most every $((CHECK_WINDOW_SECS / 60)) minutes; run upgrade-check again from $(utc_time $((10#$last + CHECK_WINDOW_SECS)))"
+        check_refused "the last readiness check ran less than $((CHECK_WINDOW_SECS / 60)) minutes ago, and checks start at least $((CHECK_WINDOW_SECS / 60)) minutes after the last one ended; run upgrade-check again from $(utc_time $((10#$last + CHECK_WINDOW_SECS)))"
     fi
+}
+
+# check_exit: the EXIT trap of a check that owns the scratch. One that got as
+# far as its stamp stamps again as it ends, however it ends, so the next can
+# start only CHECK_WINDOW_SECS after this one has let go of upgrade.lock.
+check_exit() {
+    [[ "$CHECK_STAMPED" -eq 0 ]] || write_root_file "$CHECK_STAMP_FILE" "$(date +%s)"
+    cleanup_scratch
 }
 
 utc_time() { python3 -I -c 'import sys, time; print(time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(int(sys.argv[1]))))' "$1"; }
@@ -159,7 +171,7 @@ sys.exit(st.st_uid != os.geteuid() or st.st_mode & 0o022)' "$BOXMUNGE_ROOT" \
     # however the shim exits. A refusal before here leaves everything as it was.
     # shellcheck disable=SC2034  # read by cleanup_scratch (release.sh)
     OWNED_CHECK_DIR="$CHECK_DIR"
-    trap cleanup_scratch EXIT
+    trap check_exit EXIT
     rm -rf "$CHECK_DIR"
     mkdir -m 0755 "$CHECK_DIR"
     mkdir -m 0700 "$CHECK_DIR/download" "$CHECK_DIR/out"

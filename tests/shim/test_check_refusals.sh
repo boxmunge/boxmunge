@@ -131,7 +131,7 @@ rm -rf "$BOXMUNGE_ROOT/upgrade-check"
 
 echo $(( $(date +%s) - 60 )) > "$BOXMUNGE_ROOT/upgrade-root/check-last"
 KEEP_STAMP=1 run_check 1.5.0
-refused "one runs at most every 10 minutes; run upgrade-check again from 20" "check: a second check within 600 s is refused naming the time"
+refused "checks start at least 10 minutes after the last one ended; run upgrade-check again from 20" "check: a second check within 600 s is refused naming the time"
 [[ "$(field 'd["reasons"][0]')" =~ again\ from\ [0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}\ UTC$ ]] \
     && pass "the rate limit names the UTC time of the next check" || fail "rate limit: $JSON"
 echo $(( $(date +%s) + 86400 )) > "$BOXMUNGE_ROOT/upgrade-root/check-last"

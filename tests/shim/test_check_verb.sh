@@ -121,9 +121,13 @@ drop_root
 
 box
 touch "$BOXMUNGE_ROOT/mock/readiness.sleep"
+began="$(date +%s)"
 run_check 1.5.0
 expect_check 1 cant_verify readiness "did not finish within 300 s; retry when the box is less busy" \
     "check: readiness timeout is cant_verify naming the limit"
+[[ "$(cat "$BOXMUNGE_ROOT/upgrade-root/check-last")" -ge $((began + STUB_MAX_SECS)) ]] \
+    && pass "a check stamps again as it ends: the next waits 10 minutes from its end" \
+    || fail "end stamp: $(cat "$BOXMUNGE_ROOT/upgrade-root/check-last"), began $began"
 ran "dry_run: lock" && fail "a dry run after a timed-out readiness: $(calls)" || pass "no dry run after a readiness timeout"
 rm "$BOXMUNGE_ROOT/mock/readiness.sleep"
 
