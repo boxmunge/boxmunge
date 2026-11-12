@@ -213,3 +213,48 @@ def test_never_laxer_than_the_dry_run(box) -> None:
     box.project_manifest("alpha").write_text("services: [\n")
     assert run_upgrade(box, dry_run=True) == 1
     assert evaluate(box).result == "blocked"
+
+
+# --- a check that fails is a block, never a missing verdict -------------------
+
+def _manifest_with(paths, name: str, **values) -> None:
+    import yaml
+    path = paths.project_manifest(name)
+    path.write_text(yaml.dump({**yaml.safe_load(path.read_text()), **values}))
+
+
+@pytest.mark.parametrize("env_files, error", [(5, "TypeError"), ([5], "TypeError")])
+def test_a_project_check_that_fails_is_unreadable_naming_it(box, env_files, error) -> None:
+    add_project(box, "alpha")
+    add_project(box, "shop")
+    _manifest_with(box, "shop", env_files=env_files)
+    r = evaluate(box)
+    finding = _only(r, "project.unreadable")
+    assert finding.message.startswith(f"project shop could not be checked: {error}: ")
+    assert ids(r) == [("shop", "project.unreadable")] and r.result == "blocked"
+
+
+def test_a_box_rule_that_fails_is_a_block_naming_it(box, monkeypatch) -> None:
+    def broken():
+        raise RuntimeError("compose version probe broke")
+    monkeypatch.setattr("boxmunge.readiness.compose_version_problem", broken)
+    finding = _only(evaluate(box), "box.compose_version")
+    assert finding.message == ("box.compose_version could not be checked: RuntimeError: "
+                               "compose version probe broke")
+
+
+def test_projects_that_cannot_be_listed_are_a_dry_run_block(box, monkeypatch) -> None:
+    def broken(paths):
+        raise PermissionError(13, "Permission denied", str(paths.projects))
+    monkeypatch.setattr("boxmunge.readiness._unenterable", broken)
+    r = evaluate(box)
+    assert _only(r, "box.dry_run").message.startswith(
+        "the projects could not be checked: PermissionError: ")
+    assert r.projects == ()
+
+
+def test_an_open_install_with_an_unreadable_pause_record_is_left_as_is(box) -> None:
+    add_project(box, "shop")
+    open_install(box, "shop")
+    box.project_paused_state("shop").write_text("{not json")
+    assert ids(evaluate(box)) == [("shop", "project.left_as_is")]

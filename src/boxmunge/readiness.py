@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -234,18 +235,56 @@ def _project(paths: BoxPaths, name: str, refused: list[DryRunLine],
     return ProjectReadiness(name, tuple(findings + _missing_images(paths, name, docker)))
 
 
+def _crash(what: str, e: Exception) -> str:
+    return f"{what} could not be checked: {type(e).__name__}: {e}"
+
+
+def _box_rule(rule: str, check: Callable[[], list[Finding]]) -> list[Finding]:
+    """A box rule's findings; one that fails is a block naming the failure,
+    never a missing verdict (stdout must stay one contract-1 object)."""
+    try:
+        return check()
+    except Exception as e:  # noqa: BLE001 — reported as a block, never swallowed
+        return [_block(rule, _crash(rule, e), f"fix what the message names, {_RECHECK}")]
+
+
+def _project_rule(paths: BoxPaths, name: str, check: Callable[[], ProjectReadiness]
+                  ) -> ProjectReadiness:
+    """A project's findings; a check that fails on it is project.unreadable
+    naming the failure and the project."""
+    try:
+        return check()
+    except Exception as e:  # noqa: BLE001 — reported as a block, never swallowed
+        return ProjectReadiness(name, (_block(UNREADABLE, _crash(f"project {name}", e),
+                                              _unreadable_remedy(paths, name)),))
+
+
+def _prescreened(paths: BoxPaths, name: str) -> ProjectReadiness:
+    finding = _unreadable(paths, paths.project_dir(name))
+    return ProjectReadiness(name, (finding,) if finding is not None else ())
+
+
 def _evaluate(paths: BoxPaths) -> Readiness:
     installed = _installed(paths)
-    box = _floor(paths, installed) + _compose_version()
+    box = (_box_rule(UPGRADE_FLOOR, lambda: _floor(paths, installed))
+           + _box_rule(COMPOSE_VERSION, _compose_version))
     docker = _Docker()
-    unreadable = _unenterable(paths)
-    names = sorted({project_dir.name for project_dir in _project_dirs(paths)} | set(unreadable))
-    unreadable.update({name: finding for name in names if name not in unreadable
-                       and (finding := _unreadable(paths, paths.project_dir(name))) is not None})
-    refused, failed = _dry_run(paths, set(unreadable), docker)
+    try:
+        unenterable = _unenterable(paths)
+        names = sorted({d.name for d in _project_dirs(paths)} | set(unenterable))
+    except Exception as e:  # noqa: BLE001 — as the dry run, which lists them first
+        box += [_block(DRY_RUN, _crash("the projects", e), f"fix what the message names, "
+                                                           f"{_RECHECK}")]
+        unenterable, names = {}, []
+    screened = {name: ProjectReadiness(name, (unenterable[name],)) if name in unenterable
+                else _project_rule(paths, name, lambda name=name: _prescreened(paths, name))
+                for name in names}
+    unreadable = {name for name, project in screened.items() if project.findings}
+    refused, failed = _dry_run(paths, unreadable, docker)
     projects = tuple(
-        ProjectReadiness(name, (unreadable[name],)) if name in unreadable
-        else _project(paths, name, refused.get(name, []), docker)
+        screened[name] if name in unreadable
+        else _project_rule(paths, name, lambda name=name: _project(
+            paths, name, refused.get(name, []), docker))
         for name in names)
     return Readiness(release=parse_version_string(get_build_version())[0],
                      installed=installed or FALLBACK_VERSION,

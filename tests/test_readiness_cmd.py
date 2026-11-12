@@ -82,3 +82,17 @@ def test_text_for_a_ready_box() -> None:
     text = render_text(Readiness("0.12.0", "0.11.8", (), ()))
     assert text.endswith("Box:\n  ready\n\nProjects:\n  none")
     assert ": PASS" in text.splitlines()[0]
+
+
+def test_json_even_when_a_rule_fails(box, monkeypatch, capsys) -> None:
+    """The shim reads stdout: a rule that fails is a block in the object,
+    never a traceback in place of it."""
+    add_project(box, "alpha")
+
+    def broken(name, paths):
+        raise TypeError("'int' object is not iterable")
+    monkeypatch.setattr("boxmunge.readiness.gather_validation", broken)
+    assert _main(["--json"], monkeypatch) == 1
+    readiness = parse(json.loads(capsys.readouterr().out))
+    [finding] = readiness.projects[0].findings
+    assert finding.id == "project.unreadable" and "TypeError" in finding.message
