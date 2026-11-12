@@ -74,7 +74,8 @@ _REACH = ("Boxes on {major}.x apply it automatically when no breaking release (t
           "included) lies between their version and this one")
 PREAMBLE = {
     "security": "[security] Security release. " + _REACH + ".",
-    "breakfix": ("[breakfix] Break-fix release: a critical non-security fix. " + _REACH
+    "breakfix": ("[breakfix] Break-fix release: an important fix that prevents issues; "
+                 "you shouldn't fall behind on it. " + _REACH
                  + ", unless boxmunge.yml sets auto_update.breakfix: false."),
     "feature": ("Feature release. Boxes do not apply it automatically; operators run "
                 "`upgrade` when ready."),
