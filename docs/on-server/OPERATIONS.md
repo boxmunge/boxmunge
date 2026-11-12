@@ -1717,7 +1717,10 @@ sudo /opt/boxmunge/bin/boxmunge-upgrade userns-commit            # after the 48-
 ```
 
 `--check` changes nothing and always exits 0; its last line is the verdict (what stops it, such as a
-daemon that does not answer, is a refusal too). Each `REFUSED:` line names one offender and what to
+daemon that does not answer, is a refusal too). After a migration that stopped before its daemon
+switch, it first names the commands that resume or undo it, then runs the checks the resume runs
+again (images included); if the switch itself was interrupted, the resume puts the old daemon back
+before its checks, so `--check` says so instead. Each `REFUSED:` line names one offender and what to
 do. It refuses, among others: Docker older than 28.0; a `daemon.json` with another `data-root`,
 `storage-driver`, `userns-remap` or `containerd-snapshotter: true`, with `containerd-namespace`, or
 with a `containerd` socket other than the system one; a containerd image store on a containerd other
