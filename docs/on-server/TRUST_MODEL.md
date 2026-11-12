@@ -342,6 +342,10 @@ deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmun
   releases are non-breaking, so they install ungated. After any upgrade, the
   new release's readiness check lists each project's to-dos in one
   low-priority alert. The operator's root-only `force-target` skips the gate.
+  The gate stops a careless agent, not a hostile deploy user. The readiness
+  check runs as deploy, so deploy can tamper with that process and make it
+  answer pass. deploy can already reach the Docker socket, so this gives it
+  nothing it lacked.
 - `repair-deps` takes no argument. It installs the hash-pinned dependencies of
   the installed release (`config/version` again) into the live venv, from that
   release's bundle, verified like an upgrade's; it refuses if the live venv
