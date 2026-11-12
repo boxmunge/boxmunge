@@ -119,7 +119,7 @@ jobs:
           path: dist/
 
       - name: Install cosign
-        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
 
       - name: Build upgrade notes
         # What each release asks of projects and boxes, compiled from
@@ -164,7 +164,7 @@ jobs:
             --generated-json "$RUNNER_TEMP/generated-notes.json" --out dist/release-notes.md
 
       - name: Create draft GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           files: |
             dist/boxmunge-install.sh
