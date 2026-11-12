@@ -81,8 +81,7 @@ Run `./tests/vm/vm-test.py teardown` when done.
 ## Other scenarios
 
 - `tests/vm/vm-staging.py <scenario>` — a 0.10.1 box upgrading to this tree's
-  build around a stage (`discard`, `keep-then-rollback`, `hotfix-during-stage`,
-  `probation-rollback`).
+  build around a stage (`hotfix-during-stage`, `probation-rollback`).
 - `tests/vm/vm-userns.py docker29|docker28` — the user-namespace migration
   rehearsal: a 0.10.1 box (Docker 29 on the containerd store, or Docker 28 on
   overlay2) upgrades, does what `userns-migrate --check` asks, migrates while

@@ -20,17 +20,13 @@ versioned_dirs() { compgen -G "$BOXMUNGE_ROOT/.docs.*" | grep -cv '\.link$' || t
 # --- install-docs ---------------------------------------------------------
 
 new_root a
-mkdir -p "$BOXMUNGE_ROOT/docs"
-echo "old" > "$BOXMUNGE_ROOT/docs/OPERATIONS.md"
-echo "gone" > "$BOXMUNGE_ROOT/docs/RETIRED.md"
+[[ ! -e "$BOXMUNGE_ROOT/docs" ]] || fail "new_root left a docs/: this test starts from a first install"
 src1="$(docs_src "OPERATIONS.md=v1 ops" "TRUST_MODEL.md=v1 trust")"
 run_shim install-docs "$src1"
-expect 0 "Installed docs" "install-docs replaces a plain docs directory"
-[[ -L "$BOXMUNGE_ROOT/docs" ]] && pass "docs/ is now a swappable symlink" || fail "docs/ is not a symlink"
+expect 0 "Installed docs" "a first install-docs succeeds"
+[[ -L "$BOXMUNGE_ROOT/docs" ]] && pass "docs/ is a swappable symlink" || fail "docs/ is not a symlink"
 [[ "$(cat "$BOXMUNGE_ROOT/docs/OPERATIONS.md")" == "v1 ops" ]] && pass "doc content installed" \
     || fail "doc content not installed"
-[[ ! -e "$BOXMUNGE_ROOT/docs/RETIRED.md" ]] && pass "doc missing from the release is removed" \
-    || fail "stale doc survived"
 [[ "$(file_mode "$BOXMUNGE_ROOT/docs/TRUST_MODEL.md")" == "644" ]] && pass "docs are 0644" \
     || fail "doc mode is $(file_mode "$BOXMUNGE_ROOT/docs/TRUST_MODEL.md")"
 
@@ -53,6 +49,24 @@ expect 1 "no *.md docs" "install-docs refuses a source without docs"
 [[ "$(cat "$BOXMUNGE_ROOT/docs/OPERATIONS.md")" == "v2 ops" ]] && pass "docs untouched after refusal" \
     || fail "docs changed after refusal"
 rm -rf "$src1" "$src2" "$empty"
+drop_root
+
+# docs/ as a plain directory (an install of a release before 0.11.7 that never
+# finished left one): refused, the directory as it was, nothing staged.
+new_root a
+mkdir "$BOXMUNGE_ROOT/docs"
+echo "kept" > "$BOXMUNGE_ROOT/docs/OLD.md"
+src1="$(docs_src "OPERATIONS.md=v1 ops")"
+run_shim install-docs "$src1"
+expect 1 "$BOXMUNGE_ROOT/docs is not the link boxmunge keeps there" "install-docs refuses a plain docs directory"
+[[ "$OUT" == *"sudo mv $BOXMUNGE_ROOT/docs $BOXMUNGE_ROOT/docs.old"* ]] && pass "the refusal says how to move it aside" \
+    || fail "no remedy: $OUT"
+[[ "$OUT" != *"Installed docs"* && "$OUT" != *Traceback* ]] && pass "no success line and no traceback" || fail "out: $OUT"
+[[ -d "$BOXMUNGE_ROOT/docs" && ! -L "$BOXMUNGE_ROOT/docs" && "$(cat "$BOXMUNGE_ROOT/docs/OLD.md")" == "kept" ]] \
+    && pass "the plain directory is left as it was" || fail "the plain directory changed"
+[[ -z "$(compgen -G "$BOXMUNGE_ROOT/.docs.*" || true)" ]] && pass "no staged docs or link left behind" \
+    || fail "left behind: $(compgen -G "$BOXMUNGE_ROOT/.docs.*")"
+rm -rf "$src1"
 drop_root
 
 # --- probation rollback restores the previous release's docs ---------------

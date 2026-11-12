@@ -18,7 +18,7 @@ def _setup_paths(tmp_path: Path) -> BoxPaths:
               "caddy/sites", "upgrade-state"]:
         (paths.root / d).mkdir(parents=True)
     paths.config_file.write_text("hostname: test\nadmin_email: t@t\n")
-    write_installed_version(paths, "0.2.0", "abc1234")
+    write_installed_version(paths, "0.11.0", "abc1234")
     return paths
 
 

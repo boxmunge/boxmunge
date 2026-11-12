@@ -12,7 +12,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from boxmunge.mcp_server import _TOOL_DEFS
-from boxmunge.mcp_tools import capture_tool_call
 from boxmunge.shell import ALLOWED_COMMANDS
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -93,24 +92,6 @@ class TestDestructiveToolsNeedConfirm:
             result = handler("myapp", confirm=True)
         assert run.call_args[1]["yes"] is True
         assert result["success"] is True
-
-
-class TestCapture:
-    def test_stderr_is_captured(self) -> None:
-        def noisy() -> int:
-            print("progress")
-            print("ERROR: it broke", file=sys.stderr)
-            return 1
-        result = capture_tool_call(noisy)
-        assert result["messages"] == ["progress", "ERROR: it broke"]
-
-    def test_input_cannot_read_the_protocol(self) -> None:
-        def prompts() -> int:
-            input("Type yes: ")
-            return 0
-        result = capture_tool_call(prompts)
-        assert result["success"] is False
-        assert any("ERROR" in m for m in result["messages"])
 
 
 class TestProtocolIsolation:

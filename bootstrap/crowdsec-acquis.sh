@@ -4,10 +4,9 @@
 # Run by install.sh on every install and upgrade, once Caddy is up; idempotent.
 #
 # Checks boxmunge-caddy is the system Caddy, writes the Caddy acquisition and
-# parser and the crowdsec unit's limits, removes the file acquisition earlier
-# releases appended to acquis.yaml, corrects the SSH filter they appended,
-# installs the HTTP scenarios if missing, restarts CrowdSec and checks that it
-# tails boxmunge-caddy and parses a Caddy access line into those scenarios.
+# parser and the crowdsec unit's limits, installs the HTTP scenarios if
+# missing, restarts CrowdSec and checks that it tails boxmunge-caddy and
+# parses a Caddy access line into those scenarios.
 # Anything short of that exits non-zero: a CrowdSec that silently reads
 # nothing is worse than a failed install.
 #
@@ -24,8 +23,6 @@ CADDY_CONTAINER=boxmunge-caddy
 CADDY_COMPOSE="${BOXMUNGE_ROOT:-/opt/boxmunge}/caddy/compose.yml"
 ACQUIS=/etc/crowdsec/acquis.d/boxmunge-caddy.yaml
 PARSER=/etc/crowdsec/parsers/s01-parse/boxmunge-caddy-logs.yaml
-LEGACY_ACQUIS=/etc/crowdsec/acquis.yaml
-LEGACY_LOG="${BOXMUNGE_ROOT:-/opt/boxmunge}/caddy/logs/access.log"
 DROPIN=/etc/systemd/system/crowdsec.service.d/boxmunge-limits.conf
 CROWDSEC_LOG=/var/log/crowdsec.log
 VERIFY_SECONDS=60
@@ -110,30 +107,6 @@ require_system_caddy() {
        docker compose -f ${CADDY_COMPOSE} up -d"
 }
 
-# crowdsec.sh used to append exactly this block; nothing else of ours is there.
-remove_legacy_acquisition() {
-    [[ -f "${LEGACY_ACQUIS}" ]] || return 0
-    LEGACY_LOG="${LEGACY_LOG}" perl -0777 -i -pe \
-        's/\n---\nsource: file\nfilenames:\n  - \Q$ENV{LEGACY_LOG}\E\nlabels:\n  type: caddy\n//g' \
-        "${LEGACY_ACQUIS}"
-    if grep -qF "caddy/logs" "${LEGACY_ACQUIS}"; then
-        fail "${LEGACY_ACQUIS} still reads a file under caddy/logs, which the remapped
-       Caddy controls. Remove that entry by hand (CrowdSec reads Caddy through
-       ${ACQUIS} now), then run the install or upgrade again."
-    fi
-}
-
-# Earlier bootstraps appended this filter where acquis.yaml had no journal
-# source; Debian's unit is ssh.service, so it matched nothing.
-fix_ssh_filter() {
-    [[ -f "${LEGACY_ACQUIS}" ]] || return 0
-    sed -i 's/^  - "_SYSTEMD_UNIT=sshd\.service"$/  - "_SYSTEMD_UNIT=ssh.service"/' "${LEGACY_ACQUIS}"
-    if grep -qF "_SYSTEMD_UNIT=sshd.service" "${LEGACY_ACQUIS}"; then
-        fail "${LEGACY_ACQUIS} filters the journal on sshd.service, which Debian does not
-       have (its unit is ssh.service). Correct that entry by hand and run this again."
-    fi
-}
-
 # The HTTP enricher and scenarios come with crowdsecurity/caddy. An install
 # whose collection step failed (crowdsec.sh used to hide that) never got them.
 # Only then is the hub contacted: an outage must not fail every upgrade, nor
@@ -209,8 +182,6 @@ ${out}"
 require_system_caddy
 write_acquisition
 write_parser
-remove_legacy_acquisition
-fix_ssh_filter
 install_scenarios
 write_limits
 restart_and_verify

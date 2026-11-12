@@ -147,6 +147,20 @@ class FakeContainers:
             if isinstance(spec, dict) and isinstance(spec.get("image"), str)
         ]
 
+    def inventory(self, project: str | None = None, **_):
+        """Stands in for `compose_inventory.running_inventory`: the running,
+        non-one-off containers above, of one project or of every one."""
+        from boxmunge.compose_inventory import RunningInventory
+
+        projects = [project] if project is not None else sorted({*self.by_project, *self.models})
+        found: dict[str, dict[str, tuple[str, ...]]] = {}
+        for p in projects:
+            for c in self(p):
+                if c.running and not c.oneoff:
+                    found.setdefault(p, {})[c.service] = tuple(sorted(
+                        (*found.get(p, {}).get(c.service, ()), c.name)))
+        return RunningInventory(found, {})
+
     def local_image(self, ref: str):
         from boxmunge.docker_containers import LocalImage
 
@@ -179,6 +193,7 @@ def fake_containers(request, monkeypatch) -> FakeContainers:
     fake = FakeContainers()
     if not request.node.get_closest_marker("integration"):
         monkeypatch.setattr("boxmunge.docker_containers.project_containers", fake)
+        monkeypatch.setattr("boxmunge.compose_inventory.running_inventory", fake.inventory)
         monkeypatch.setattr("boxmunge.docker_containers.project_volumes", lambda p: [])
         monkeypatch.setattr("boxmunge.docker_containers.local_image", fake.local_image)
         # The start guard inspects a project's existing container bind mounts;
@@ -195,9 +210,6 @@ def fake_containers(request, monkeypatch) -> FakeContainers:
                             lambda project_name: [])
         # Who a project's containers run as (deploy's user-change check).
         monkeypatch.setattr("boxmunge.docker_containers.container_users",
-                            lambda project_name: {})
-        # The legacy-stage evidence asks when production's containers were made.
-        monkeypatch.setattr("boxmunge.docker_containers.created_times",
                             lambda project_name: {})
         # Whether a data chown snapshot's service has run since (pending_snapshot).
         monkeypatch.setattr("boxmunge.docker_containers.start_states",

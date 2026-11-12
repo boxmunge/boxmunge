@@ -161,15 +161,14 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `bind_sources.py` | `_load_record` | a project's bind-source record | `state/` |
 | `run_as.py` | `read_users` | a project's users record | `state/` |
 | `user_drift.py` | `held_back` | a project's user-drift record | `state/` |
-| `legacy_stage.py` | `_read_records`, `_state_active`, `_json_doc`, `stage_time` | `legacy-stages.json`, a pre-0.10.1 stage's state, records and reflog | `state/`, `projects/<p>/` |
-| `legacy_stage_ops.py` | `_prestage_ref` | `.releases/prestage/meta.json` | `projects/<p>/` |
 | `cve/suppressions.py` | `load_suppressions`, `_load_history` | `security/suppressions.yml` and its history | `projects/<p>/` (the host's list is in `config/`) |
 | `release.py` | `_read_meta` | `.releases/live.json`, `previous.json` | `projects/<p>/` |
 | `release_keep.py` | `_reads_as` | `.releases/previous.json`, compared before it is rewritten | `projects/<p>/` |
 | `release_txn.py` | `load_txn`, `_sha` | `.releases/install.json` | `projects/<p>/` |
 | `staged_release.py` | `load_slot` | the staging slot's `meta.json` | `projects/<p>/` |
 | `data_dirs.py` | `_load_record` | `.releases/data-dirs.json` | `projects/<p>/` |
-| `bind_mounts.py` | `_entries` | a compose file, when the caller asks for no-follow | `projects/<p>/` |
+| `unresolved_stage.py` | `_state_active`, `_records` | a stage state file from 0.10.1 or earlier, `legacy-stages.json` | `state/` |
+| `bind_mounts.py` | `_services` | a compose file, when the caller asks for no-follow | `projects/<p>/` |
 | `compose_up_steps.py` | `restore_build_names` | the generated compose overlay | `projects/<p>/` |
 | `overlay_users.py` | `_overlay_users` | the generated compose overlay | `projects/<p>/` |
 | `upgrade_state.py` | `_read_json` | `probation.json`, `blocklist.json` | `upgrade-state/` |
@@ -188,7 +187,7 @@ These open a no-follow, non-blocking descriptor themselves (`open_regular_nofoll
 | `log_rotation.py` | `first_entry_day`, `_archive` |
 | `restore_safety.py` | `verify_plaintext` |
 | `stash.py` | `_open_archive` |
-| `stash_rewrite.py` | `_verify`, `_rewrite` |
+| `commands/log_cmd.py` | `parse_log_file` |
 | `commands/restore.py` | `_run_restore_command` |
 | `commands/upgrade_offline.py` | `_read` |
 | `commands/userns_cmd.py` | `_held_on` |
@@ -220,7 +219,7 @@ added again under the same name reuses them. Create a new lock under `state/` wi
 | `state/secrets-locks/.host.lock` | `SecretsFile.locked` | writes of the host secrets file | kept for good |
 | `state/.registry.lock` | `fileutil.registry_lock` | read, change and save of `projects.txt` | kept for good |
 | `state/.caddy.lock` | `docker.caddy_config_lock` | writing Caddy site config and reloading | kept for good |
-| `state/.legacy-stages.lock` | `legacy_stage` | the legacy-stage records | kept for good |
+| `state/.legacy-stages.lock` | nothing since 0.11.7: `legacy-stage` took it, up to 0.11.6 | (the legacy-stage records) | left on a box where an older release made it |
 | `state/container-updates/.lock` | `commands/container_update_cmd.py` (doesn't wait) | one container-update run at a time | kept for good |
 | `logs/.<log name>.lock` | `log_rotation` (doesn't wait) | rotating that log | kept for good |
 | `upgrade-root/upgrade.lock` | the upgrade shim, `upgrade_state.upgrade_lock` (doesn't wait: `UpgradeInProgress`) | one platform upgrade at a time | kept for good |
@@ -346,6 +345,29 @@ The full trust chain is in `docs/on-server/TRUST_MODEL.md`.
 
 The client is published to PyPI by `.github/workflows/publish-cli.yml` on a `cli-v*` tag, using
 PyPI Trusted Publishing, so no API token exists anywhere.
+
+### The upgrade floor
+
+A release installs only over 0.11.0 or later: `UPGRADE_FLOOR` in `src/boxmunge/upgrade_floor.py`,
+and the same value in `bootstrap/upgrade-floor.sh` for an `install.sh` run by hand (a test keeps
+the two equal). Below the floor the release refuses in the old shim's pre-flight, before that
+shim changes anything, and names the bridge release (`BRIDGE_RELEASE`, 0.11.6): the last
+release that installs over an older box. `tests/integration/test_shim_hop.py` runs released
+shims against the tree. Below the floor it proves the refusal leaves the box on its release and
+still able to install the bridge release; from the floor up, that the hop completes.
+
+Code that exists only for a source below the floor is deleted. Code kept for a source above it
+says, where it lives, which floor retires it. Today that is 0.11.1 (the `report_failure` probe
+in the shim; re-owning root-made directories in `deploy_dirs.py`), 0.11.5 (a rollback with no
+recorded stash), 0.11.6 (adopting a probation with no root record) and 0.11.7 (the shim's
+legacy lock; `bootstrap/caddy-log-path.sh`, which refuses a box whose Caddy configs write a log
+under `/var/log/caddy`; `unresolved_stage.py`, which refuses a box that still holds a stage
+0.10.1 or earlier made, with `unresolved_stage_install.py` and `bootstrap/unresolved-stage.sh`,
+which ask it for an `install.sh` run by hand).
+
+To raise the floor, announce it in the release notes of the release that becomes the bridge,
+then in the next release change the constants in both files, move the hop test's shims across,
+and delete what the new floor retires.
 
 ## The version-check admin pages
 

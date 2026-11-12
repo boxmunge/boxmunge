@@ -13,10 +13,9 @@ from boxmunge.api.registry import Action
 from boxmunge.api.result import ActionError, ErrorCode
 from boxmunge.api.schema import INTEGER, NULLABLE_STRING, STRING, arr, enum, obj
 from boxmunge.api.timefmt import TIMESTAMP, utc_timestamp
-from boxmunge.commands.log_cmd import filter_log_entries
+from boxmunge.commands.log_cmd import query_log
 from boxmunge.docker import DockerError
 from boxmunge.manifest import load_manifest
-from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError
 
 LOGS_TAIL_DEFAULT = 100
@@ -88,37 +87,18 @@ def _oplog_query(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
         raise ActionError(ErrorCode.INVALID_PARAMS,
                           f"since may reach back at most {SINCE_MAX_DAYS} days "
                           f"({SINCE_MAX_DAYS}d); {since!r} is further.")
-    entries = filter_log_entries(
-        _entries(ctx.paths),
-        project=params.get("project"), component=params.get("component"),
-        level=params.get("level"), since=params.get("since"),
-        tail=params.get("tail", OPLOG_TAIL_DEFAULT),
+    read = query_log(
+        ctx.paths, project=params.get("project"), component=params.get("component"),
+        level=params.get("level"), since=since,
+        tail=params.get("tail", OPLOG_TAIL_DEFAULT), required_keys=_ENTRY_KEYS,
     )
-    return {"entries": [_entry_view(entry) for entry in entries]}
-
-
-def _entries(paths: BoxPaths) -> list[dict[str, Any]]:
-    """Every operational log entry. A line that is not an entry (torn by a
-    crash, or hand-edited) fails the query, naming the line, rather than
-    vanishing from what a dashboard shows; the CLI's `log` warns and exits 1."""
-    path = paths.log_file
-    if not path.exists():
-        return []
-    entries = []
-    with path.open() as log:
-        for lineno, line in enumerate(log, start=1):
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-            except ValueError as e:
-                raise StateError(f"{path}:{lineno} is not JSON ({e}); repair or remove "
-                                 f"that line") from e
-            if not isinstance(entry, dict) or not _ENTRY_KEYS <= entry.keys():
-                raise StateError(f"{path}:{lineno} is not an operational log entry: "
-                                 f"{line.strip()[:200]}")
-            entries.append(entry)
-    return entries
+    if read.torn:
+        # The CLI's `log` warns and exits 1; here a line that is not an entry
+        # fails the query, naming it, rather than vanish from a dashboard.
+        more = len(read.torn) - 1
+        raise StateError(read.torn[0] + (f" (and {more} more such line(s) in the files "
+                                         f"this query read)" if more else ""))
+    return {"entries": [_entry_view(entry) for entry in read.entries]}
 
 
 def _entry_view(entry: dict[str, Any]) -> dict[str, Any]:

@@ -6,9 +6,20 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from boxmunge.commands import check
+from boxmunge.commands import check, check_all
 from boxmunge.commands.smoke_result import SmokeResult
-from tests.test_legacy_stage_undetermined import _deployed
+
+
+def _deployed(paths) -> None:
+    from boxmunge.commands.deploy import run_deploy
+    from boxmunge.project_registry import add_project
+    from tests.bundle_helpers import place_bundle
+    from tests.stage_helpers import V1
+    from tests.txn_helpers import docker_off
+    add_project("myapp", paths)
+    place_bundle(paths, timestamp=V1)
+    with docker_off():
+        assert run_deploy("myapp", paths, ref=V1) == 0
 
 
 def _with_smoke(paths) -> None:
@@ -23,8 +34,8 @@ def test_one_smoke_run_and_its_message_is_recorded(paths) -> None:
     results = [SmokeResult(status="critical", message="db unreachable"),
                SmokeResult(status="ok", message="")]
     with patch.object(check, "run_smoke_in_container", side_effect=results) as smoke, \
-            patch.object(check, "update_health_state") as health:
-        assert check._check_one("myapp", paths, read_only=False) == 2
+            patch.object(check_all, "update_health_state") as health:
+        assert check_all._check_one("myapp", paths, read_only=False) == 2
     assert smoke.call_count == 1
     assert health.call_args.args[:3] == ("myapp", 2, "db unreachable")
 
@@ -33,6 +44,6 @@ def test_a_pass_records_no_message(paths) -> None:
     _with_smoke(paths)
     with patch.object(check, "run_smoke_in_container",
                       return_value=SmokeResult(status="ok", message="")), \
-            patch.object(check, "update_health_state") as health:
-        assert check._check_one("myapp", paths, read_only=False) == 0
+            patch.object(check_all, "update_health_state") as health:
+        assert check_all._check_one("myapp", paths, read_only=False) == 0
     assert health.call_args.args[:3] == ("myapp", 0, "")

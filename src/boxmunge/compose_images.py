@@ -44,6 +44,12 @@ _IMAGE_ID_RE = re.compile(r"(?:sha256:)?[0-9a-f]+", re.IGNORECASE)
 _PLATFORM_REF_RE = re.compile(
     re.escape(BUILT_IMAGE_HOST) + r"(?::\d+)?/([^/\s\"']*)", re.IGNORECASE,
 )
+# Exactly a built image's reference: the platform host, the compose project
+# and service as Docker components, an optional tag and an optional digest.
+_BUILT_REF_RE = re.compile(
+    re.escape(BUILT_IMAGE_HOST) + rf"/({_COMPONENT_RE.pattern})/({_COMPONENT_RE.pattern})"
+    r"(?::([A-Za-z0-9_][A-Za-z0-9_.-]{0,127}))?(?:@sha256:([0-9a-f]{64}))?",
+)
 _FROM_RE = re.compile(r"^\s*FROM\s+(?:--\S+\s+)*(\S+)(?:\s+AS\s+(\S+))?", re.IGNORECASE)
 _FROM_FLAG_RE = re.compile(r"--from=([^\s,]+)", re.IGNORECASE)
 # Any spelling of the platform host, or a fragment of it that only makes
@@ -67,6 +73,41 @@ def is_platform_image(ref: str) -> bool:
 def built_image_name(compose_project: str, service: str) -> str:
     """The name the overlay gives a build service's image."""
     return f"{BUILT_IMAGE_HOST}/{compose_project}/{service}"
+
+
+def describe_image(ref: str) -> str:
+    """What an operator reads in place of an image reference.
+
+    A built image's name (`boxmunge.invalid/<project>/<service>`, with an
+    optional tag and digest) reads as a misconfiguration to anyone who
+    meets it raw, so it is described: `<project>'s <service> image, built
+    on this box (digest <12 hex>)`, `for staging` when the compose project
+    is the staging one. Anything else, a registry image or a reference
+    that is not exactly that shape, is returned as it is: a description is
+    never guessed. Logs keep the raw reference; this is for messages.
+    """
+    m = _BUILT_REF_RE.fullmatch(ref)
+    if m is None:
+        return ref
+    compose_project, service, tag, digest = m.groups()
+    staging = compose_project.endswith(_STAGING)
+    project = compose_project[:-len(_STAGING)] if staging else compose_project
+    text = f"{project}'s {service} image, built on this box"
+    if staging:
+        text += " for staging"
+    notes = []
+    if tag is not None and tag != "latest":
+        notes.append(f"tag {tag}")
+    if digest is not None:
+        notes.append(f"digest {digest[:12]}")
+    return f"{text} ({', '.join(notes)})" if notes else text
+
+
+def image_phrase(ref: str) -> str:
+    """`describe_image` for a built image, `image <ref>` for any other: for
+    a message whose subject is the image."""
+    text = describe_image(ref)
+    return text if text != ref else f"image {ref}"
 
 
 def _own_owners(project: str) -> frozenset[str]:

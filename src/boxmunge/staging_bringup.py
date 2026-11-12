@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from boxmunge.bind_sources import BindSourceError
 from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.caddy_journal import write_site
-from boxmunge.compose import ComposeError, load_user_compose
+from boxmunge.compose import ComposeError
 from boxmunge.commands import deploy_checks, deploy_images, deploy_storage
 from boxmunge.commands.chown_staging import rechownable
 from boxmunge.compose_guard import compose_up_checked
@@ -64,14 +64,15 @@ def _staging_auth(project_name: str, paths: BoxPaths) -> tuple[str, str] | None:
     return auth_user, hashed
 
 
-def _decide_users(paths: BoxPaths, project: str, manifest: dict[str, Any], *,
-                  pull: bool) -> tuple[Clearance | None, dict[str, ServiceUser]]:
+def _decide_users(paths: BoxPaths, project: str, manifest: dict[str, Any], *, pull: bool,
+                  ) -> tuple[Clearance | None, dict[str, ServiceUser], dict[str, Any]]:
     """Build staging's images (`pull`: with --pull), decide and record who
     each service runs as (deploy_images), and write the slot's overlay
     with those users. A CVE-quarantined project's staging starts only if
     every image it would start scans clean (quarantine_gate; its clearance
     is returned, to check what the start ran); production stays
-    quarantined. Returns the clearance and the users."""
+    quarantined. Returns the clearance, the users and the release's
+    resolved compose.yml, which the overlay was written from."""
     slot = slot_dir(paths, project)
     print("  Building images and deciding who each service runs as...")
     try:
@@ -82,10 +83,11 @@ def _decide_users(paths: BoxPaths, project: str, manifest: dict[str, Any], *,
                      if is_quarantined(project, paths) else None)
     except (RunAsError, ComposeResolveError) as e:
         raise DeployRefused([str(e)]) from e
-    write_staging_overlay(paths, project, manifest, release_dir(slot), slot, users)
+    user_compose = write_staging_overlay(paths, project, manifest, release_dir(slot), slot,
+                                         users)
     deploy_images.record_release_users(paths, staging_release_target(paths, project),
                                        manifest, users, component="stage")
-    return clearance, users
+    return clearance, users, user_compose
 
 
 def _give_and_check_owners(paths: BoxPaths, project: str, plan: CopyPlan | None,
@@ -114,9 +116,7 @@ def _prepare_storage(paths: BoxPaths, project: str, manifest: dict[str, Any], *,
     """Decide staging's users, check staging's files from the slot and,
     with copy_data, copy production's data into staging's created, never
     started containers. Returns the quarantine gate's clearance, if any."""
-    clearance, users = _decide_users(paths, project, manifest, pull=pull)
-    release = release_dir(slot_dir(paths, project))
-    user_compose = load_user_compose(release / "compose.yml", project)
+    clearance, users, user_compose = _decide_users(paths, project, manifest, pull=pull)
     # Deploy-time warnings, repeated by design (spec "Deploy-time warning").
     warn_off_services(paths, manifest, component="stage")
     warn_writable_state(paths, manifest, user_compose, component="stage")

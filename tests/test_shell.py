@@ -135,7 +135,6 @@ class TestAllowedCommands:
             "bundle",            # Local-dev only — packages a project on the developer's machine.
             "install-txn",       # Operator-only: dropping a stale install record.
             "project-forget",    # Operator-only (root): drops a registry entry with no project.
-            "legacy-stage",      # Operator-only (root): resolves a stage left by 0.10.1.
             "staging-teardown-all",  # Root-only: run by the upgrade shim before a rollback.
             "userns",            # Root-only: the userns migration, through the upgrade shim.
             "auto-update",       # Root-only: its lock is in root-only upgrade-root/ (`upgrade`

@@ -29,26 +29,20 @@ from boxmunge.userns import offset as uo
 from boxmunge.userns.durable import barrier
 from boxmunge.userns.images import IMAGES_DIR, remove_tars
 from boxmunge.userns.inventory import CONTAINERD_STORE, Inventory
-from boxmunge.userns.journal import FORWARD, Journal, load_journal, save_journal
-from boxmunge.userns.preflight_checks import dir_size
-from boxmunge.userns.switch import MigrationError, remove_docker_tree
+from boxmunge.userns.journal import (
+    COMMIT_STARTED, Journal, State, finish_hint, load_journal, save_journal, state,
+)
+from boxmunge.userns.switch import (
+    MigrationError, remove_docker_tree, require_remapped, store_size,
+)
 
 COMPONENT = "userns-commit"
 SOAK = timedelta(hours=48)
-# Journalled before the first deletion: from then on there is no rollback.
-COMMIT_STARTED = "commit-before"
 _GC_LEASE = "boxmunge-userns-commit-gc"
 _LISTINGS = {"containers": ("containers", "ls", "-q"), "images": ("images", "ls", "-q"),
              "leases": ("leases", "ls", "-q"), "content blobs": ("content", "ls", "-q")}
 _SNAPSHOTTER = "io.containerd.snapshotter.v1"
 _OLD_ROOT_DIRS = ("containers", "volumes", "image")
-
-
-def _old_store_size(prior: dict, old_root: Path) -> int:
-    """The old store as phase 0 measured it (switch.prior_store)."""
-    if prior["driver_type"] == CONTAINERD_STORE:
-        return dir_size(Path(prior["store_root"]))
-    return dir_size(old_root / "overlay2") + dir_size(old_root / "image")
 
 
 def _ctr(prior: dict, *args: str) -> str:
@@ -142,12 +136,16 @@ def _old_volumes_with_data(old_root: Path) -> list[str]:
     return left
 
 
-def _check_containerd(prior: dict, info: dict, s: int) -> None:
+def _check_containerd(j: Journal, info: dict) -> None:
     """The old daemon's containerd, as phase 0 recorded it, against the one
     the remapped daemon reports. The migration changed only the remap keys,
     so the remapped daemon must use the same containerd, in the namespace
     dockerd derives from the old one (moby-<s>.<s>); in the old namespace
-    itself (containerd-namespace set), the commit would empty the live one."""
+    itself (containerd-namespace set), the commit would empty the live one.
+    Once the commit began deleting the old root there is no rollback, so the
+    refusals then say to put the daemon's flags back and commit again."""
+    prior, s = j.prior_store, j.offset
+    began = COMMIT_STARTED in j.items
     if "containerd" not in prior:
         raise MigrationError(
             "this migration was journalled before boxmunge recorded the old daemon's "
@@ -161,28 +159,33 @@ def _check_containerd(prior: dict, info: dict, s: int) -> None:
         raise MigrationError(
             f"the remapped daemon uses the old daemon's containerd namespace {namespace} "
             f"(containerd-namespace is set), so commit cannot tell the old images from the "
-            f"live ones. Run userns-rollback, remove containerd-namespace from daemon.json or "
-            f"dockerd's flags, and migrate again")
+            f"live ones. " + ("Remove containerd-namespace from daemon.json or dockerd's "
+                              "flags, then run userns-commit again" if began else
+                              "Run userns-rollback, remove containerd-namespace from "
+                              "daemon.json or dockerd's flags, and migrate again"))
     want = f"{old['namespace']}-{s}.{s}"
     if (address, namespace) != (old["address"], want):
         raise MigrationError(
             f"the remapped daemon uses containerd at {address}, namespace {namespace}, not "
             f"{old['address']}, namespace {want} as the migration left it; daemon.json or "
-            f"dockerd's flags changed during the soak. Put them back, or run userns-rollback")
+            f"dockerd's flags changed during the soak. Put them back"
+            + (", then run userns-commit again" if began else ", or run userns-rollback"))
+
+
+def _refuse(j: Journal | None) -> Journal:
+    if state(j) not in (State.APPLIED, State.COMMITTING):
+        raise MigrationError(f"nothing to commit: {finish_hint(j)}")
+    return j
 
 
 def _checked(paths: BoxPaths, j: Journal | None, now: datetime) -> Journal:
-    if j is None or j.direction != FORWARD or j.phase != "applied":
-        raise MigrationError(f"nothing to commit (journal: "
-                             f"{'none' if j is None else f'{j.direction} {j.phase}'})")
+    j = _refuse(j)
     applied = datetime.fromisoformat(str(j.applied_at))
     if now - applied < SOAK:
         raise MigrationError(f"soak until {(applied + SOAK).isoformat()} before committing")
-    if uo.remap_offset(paths) != j.offset:
-        raise MigrationError("the daemon is not remapped as the journal says; see "
-                             "docker-userns in health")
+    require_remapped(paths, j.offset)
     if j.prior_store["driver_type"] == CONTAINERD_STORE:
-        _check_containerd(j.prior_store, uo.docker_info(), j.offset)
+        _check_containerd(j, uo.docker_info())
     left = _old_volumes_with_data(Path(Inventory.from_json(j.inventory).root))
     if left:
         raise MigrationError(
@@ -216,7 +219,7 @@ def commit(paths: BoxPaths, *, now: datetime | None = None,
 
 def _check_freed(prior: dict, old_root: Path, before: int) -> None:
     """What was deleted as directories: the old store must have gone."""
-    freed = before - _old_store_size(prior, old_root)
+    freed = before - store_size(prior, old_root)
     if freed < 0.9 * prior["size"]:
         raise MigrationError(f"only {freed} bytes were freed under {prior['store_root']}, not "
                              f"the old store's {prior['size']} (less 10%); inspect what is "
@@ -227,7 +230,7 @@ def _commit(paths: BoxPaths, j: Journal, images_dir: Path) -> Journal:
     prior = j.prior_store
     old_root = Path(Inventory.from_json(j.inventory).root)
     if COMMIT_STARTED not in j.items:
-        j.items[COMMIT_STARTED] = str(_old_store_size(prior, old_root))
+        j.items[COMMIT_STARTED] = str(store_size(prior, old_root))
         save_journal(paths, j)
     before = int(j.items[COMMIT_STARTED])
     remove_tars(images_dir)

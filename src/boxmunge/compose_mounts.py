@@ -8,6 +8,11 @@ source is rejected when it is a denied host path, lies inside one, or is
 a parent of one (mounting `/run` exposes `/run/docker.sock` just as
 surely as mounting the socket itself). Any other source must stay inside
 the project directory, so one project cannot mount another's files.
+
+Every other module that asks which host paths a model mounts, whether a
+mount is read-only, where a path lies in the project, or whether one path
+is inside another, asks here (`bind_entries`, `read_only`, `project_rel`,
+`path_within`), so a rule about bind sources is written once.
 """
 from __future__ import annotations
 
@@ -15,7 +20,7 @@ import os
 import posixpath
 import re
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator, NamedTuple
 
 from boxmunge.paths import BoxPaths
 
@@ -78,6 +83,62 @@ def is_bind_entry(entry: Any) -> bool:
     return src is not None and _is_path_like(src)
 
 
+def read_only(entry: Any) -> bool:
+    """True if a volume entry declares itself read-only: `read_only: true`
+    in the long syntax, an `ro` option in the short one. Anything else,
+    a missing key included, is read-write."""
+    if isinstance(entry, dict):
+        return entry.get("read_only") is True
+    parts = entry.split(":")
+    return len(parts) > 2 and "ro" in parts[2].split(",")
+
+
+class BindEntry(NamedTuple):
+    """One host path a compose model mounts."""
+    section: str        # "services", "secrets" or "configs"
+    name: str           # the service, or the secret's or config's key
+    source: str         # as written
+    path: str           # absolute and normalised; symlinks are not resolved
+    read_write: bool
+    target: str | None  # where a service mounts it; None for a secret or config
+
+
+def service_bind_entries(name: str, svc: Any, base_dir: Path) -> Iterator[BindEntry]:
+    """One service's bind mounts, in the order written. A named or anonymous
+    volume, a tmpfs or image mount, and a long-syntax bind with no source
+    are not host paths and are left out."""
+    volumes = svc.get("volumes") if isinstance(svc, dict) else None
+    for entry in volumes if isinstance(volumes, list) else ():
+        src = volume_source(entry)
+        if src is None or not is_bind_entry(entry):
+            continue
+        target = str(entry.get("target")) if isinstance(entry, dict) else entry.split(":")[1]
+        yield BindEntry("services", name, src, _host_path(src, base_dir),
+                        not read_only(entry), target)
+
+
+def file_entries(model: dict[str, Any], base_dir: Path) -> Iterator[BindEntry]:
+    """The `file:` of every top-level secret and config, which Compose
+    bind-mounts read-only into the services that use it."""
+    for section in ("secrets", "configs"):
+        decls = model.get(section)
+        for key, decl in (decls.items() if isinstance(decls, dict) else ()):
+            path = decl.get("file") if isinstance(decl, dict) else None
+            if isinstance(path, str):
+                yield BindEntry(section, key, path, _host_path(path, base_dir), False, None)
+
+
+def bind_entries(model: dict[str, Any], base_dir: Path) -> Iterator[BindEntry]:
+    """Every host path a compose model mounts: each service's bind mounts,
+    then the secret and config files. `base_dir` is the directory relative
+    sources are read from. Nothing is judged here (a `$` in a source, a
+    path outside the project): that is `check_volumes`' and the callers'."""
+    services = model.get("services")
+    for name, svc in (services.items() if isinstance(services, dict) else ()):
+        yield from service_bind_entries(name, svc, base_dir)
+    yield from file_entries(model, base_dir)
+
+
 def has_env_substitution(src: str) -> bool:
     """True if the source contains Compose variable substitution anywhere
     (`$VAR` or `${VAR}`), which cannot be verified statically."""
@@ -92,23 +153,56 @@ def _normalise(path: str) -> str:
     return norm
 
 
-def host_path_forms(src: str, base_dir: Path) -> tuple[str, str]:
-    """Return (normalised, symlink-resolved) absolute forms of a bind source."""
+def _host_path(src: str, base_dir: Path) -> str:
     if src.startswith("~"):
         expanded = os.path.expanduser(src)
     elif src.startswith("/"):
         expanded = src
     else:
         expanded = os.path.join(str(base_dir), src)
-    norm = _normalise(expanded)
+    return _normalise(expanded)
+
+
+def host_path_forms(src: str, base_dir: Path) -> tuple[str, str]:
+    """Return (normalised, symlink-resolved) absolute forms of a bind source."""
+    norm = _host_path(src, base_dir)
     return norm, _normalise(os.path.realpath(norm))
 
 
-def _within(path: str, root: str) -> bool:
-    """True if `path` equals `root` or lies below it."""
+def path_within(path: str, root: str) -> bool:
+    """True if `path` equals `root` or lies below it. Both are normalised
+    paths of one form (both absolute, or both relative to one directory);
+    `/` holds every absolute path. Nothing is resolved: a caller that cares
+    about symlinks compares the resolved forms too."""
     if root == "/":
         return True
     return path == root or path.startswith(root + "/")
+
+
+def project_rel(source: str, project_dir: Path, *, literal: bool = False) -> str | None:
+    """A host path's place inside the project dir ("." for the dir itself),
+    or None when it lies outside it; a relative `source` is taken from the
+    project dir, as Compose reads it. Spelled forms are tried before resolved
+    ones, so the answer does not depend on set order. ``literal`` never
+    follows the source's own links: for a path the caller joined from a
+    relative input, whose links are production's, not the release's, or one
+    that must be walked from the project dir without following any."""
+    if source.startswith("~"):
+        return None
+    found: str | None = None
+    # Compare both spelled and resolved paths: /opt may be a symlink.
+    for base in dict.fromkeys((os.path.normpath(project_dir), os.path.realpath(project_dir))):
+        candidates = [os.path.normpath(os.path.join(base, source))]
+        if os.path.isabs(source) and not literal:
+            candidates.append(os.path.realpath(source))
+        for path in dict.fromkeys(candidates):
+            rel = os.path.relpath(path, base)
+            if rel == ".." or rel.startswith(".." + os.sep):
+                continue
+            if rel != ".":
+                return rel
+            found = rel
+    return found
 
 
 def _both_spellings(path: str) -> set[str]:
@@ -128,12 +222,12 @@ def denied_host_path(src: str, base_dir: Path, paths: BoxPaths) -> str | None:
 
     for cand in sorted(candidates):
         for form, raw in system.items():
-            if _within(cand, form) or _within(form, cand):
+            if path_within(cand, form) or path_within(form, cand):
                 return raw
         for root in root_forms:
-            if _within(root, cand):
+            if path_within(root, cand):
                 return str(paths.root)
-            if _within(cand, root) and not any(
+            if path_within(cand, root) and not any(
                 cand.startswith(p + "/") for p in project_forms
             ):
                 return str(paths.root)
@@ -145,7 +239,7 @@ def outside_roots(src: str, base_dir: Path, roots: Iterable[Path]) -> bool:
     lies inside one of the allowed roots."""
     root_forms = {form for root in roots for form in _both_spellings(str(root))}
     return not all(
-        any(_within(cand, root) for root in root_forms)
+        any(path_within(cand, root) for root in root_forms)
         for cand in host_path_forms(src, base_dir)
     )
 

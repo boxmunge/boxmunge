@@ -204,11 +204,16 @@ def scan_tree(root: Path, offset: int, direction: Direction, *,
 
 
 def shift_tree(root: Path, offset: int, direction: Direction,
-               setid: dict[str, int] | None = None, *, resumed: bool = False) -> ShiftReport:
+               setid: dict[str, int] | None = None, *, resumed: bool = False,
+               scan: Scan | None = None) -> ShiftReport:
     """Scan, then shift every entry. Raises ShiftRefused before any change
     (and, for a hard link that appeared since the scan, at that entry).
-    `setid` is the journalled list of an earlier scan (module docstring)."""
-    scan = scan_tree(root, offset, direction, resumed=resumed)
+    `setid` is the journalled list of an earlier scan (module docstring).
+    `scan` is the caller's own scan_tree of this tree, taken with the same
+    offset, direction and `resumed` and with nothing using the tree since:
+    the tree is then not scanned again."""
+    if scan is None:
+        scan = scan_tree(root, offset, direction, resumed=resumed)
     if scan.problems:
         raise ShiftRefused(root, scan.problems)
     modes = {**scan.setid, **(setid or {})}  # the journalled list knows the original modes

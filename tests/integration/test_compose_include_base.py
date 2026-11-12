@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from boxmunge import compose_references, compose_resolve
+from boxmunge import compose_references, compose_resolve, docker
 from boxmunge.compose_validate import ComposeSecurityError, validate_user_compose
 from boxmunge.paths import BoxPaths
 
@@ -128,8 +128,12 @@ def box(tmp_path: Path) -> BoxPaths:
 def test_compose_really_reads_the_other_project(
     box: BoxPaths, files: dict, leaked: str, _match: str,
 ) -> None:
-    """The premise: real Compose reads the victim project for every shape."""
-    model = compose_resolve.resolve_compose_config(_write(box.project_dir("evil"), files), "evil")
+    """The premise: real Compose reads the victim project for every shape.
+    Compose itself is asked, with the call the resolve makes: the resolve
+    raises what boxmunge's own walk of the files refuses, as these are."""
+    compose = _write(box.project_dir("evil"), files)
+    model = json.loads(docker.compose_config(
+        compose.parent, [compose.name], project_name="evil", all_profiles=True))
     assert leaked in json.dumps(model), model
 
 
@@ -157,7 +161,9 @@ def test_model_check_refuses_what_a_diverging_walk_would_miss(
     """Belt and braces: with the literal walk blinded, the env_file real
     Compose resolves outside the project is still refused."""
     compose = _write(box.project_dir("evil"), ESCAPES["path list env_file"][0])
-    monkeypatch.setattr(compose_references, "walk_references", lambda *a, **kw: ([], []))
+    walk = compose_references.walk_sources
+    monkeypatch.setattr(compose_references, "walk_sources",
+                        lambda *a, **kw: ([], [], walk(*a, **kw)[2]))
     with pytest.raises(ComposeSecurityError, match=r"env_file .*victim/secrets.env.*outside"):
         validate_user_compose(compose, box, project_name="evil")
 

@@ -143,7 +143,7 @@ def test_the_scan_finds_the_checked_call_sites() -> None:
         "commands/recover_cmd.py", "commands/restore.py",
         "commands/resume_cmd.py", "commands/rollback.py", "commands/upgrade_offline.py",
         "commands/upgrade_steps.py", "container_update.py", "cve/quarantine.py",
-        "legacy_stage_ops.py", "production_stopped.py", "staging_bringup.py", "staging_data.py",
+        "production_stopped.py", "staging_bringup.py", "staging_data.py",
         "userns/bringup.py",
     ]
 
@@ -295,92 +295,12 @@ def test_staging_copy_refuses_before_stopping_production(tampered) -> None:
     _assert_refused(tampered)
 
 
-# ---------------------------------------------------------------------------
-# While boxmunge 0.10.1's stage is on disk, production is not recreated from
-# the project directory's files
-# ---------------------------------------------------------------------------
-
-LEGACY = "has a release staged by boxmunge 0.10.1"
-
-
 def _untamper(tampered):
     paths = tampered[0]
     uploads = paths.project_dir(NAME) / "data" / "uploads"
     uploads.unlink()
     uploads.mkdir()
     return tampered
-
-
-@pytest.fixture
-def staged(tampered):
-    """An untampered project with a release staged over it by 0.10.1 (the
-    old layout: production's release kept in .releases/prestage/)."""
-    paths = _untamper(tampered)[0]
-    (paths.project_releases(NAME) / "prestage" / "release").mkdir(parents=True)
-    return tampered
-
-
-def _assert_refused_while_staged(staged) -> None:
-    paths, sent, up, start = staged
-    up.assert_not_called()
-    start.assert_not_called()
-    assert any("start refused" in t for t in sent), sent
-    assert LEGACY in paths.log_file.read_text()
-
-
-def test_upgrade_restart_refuses_while_staged(staged) -> None:
-    from boxmunge.commands.upgrade_steps import restart_projects
-    restart = restart_projects(staged[0], refused=())
-    assert restart.succeeded == [] and restart.failed == []
-    assert restart.start_refused == [NAME]
-    _assert_refused_while_staged(staged)
-
-
-def test_recover_refuses_while_staged(staged, capsys) -> None:
-    from boxmunge.commands import recover_cmd
-    from boxmunge.state import write_state
-    paths = staged[0]
-    write_state(paths.project_health_state(NAME), {"status": "critical_stopped"})
-    with patch.object(recover_cmd, "caddy_reload"):
-        assert recover_cmd.run_recover(NAME, paths, yes=True) == 1
-    # recover's core refuses a legacy stage before it reaches a start.
-    staged[2].assert_not_called()
-    staged[3].assert_not_called()
-    assert "boxmunge-server legacy-stage shop" in capsys.readouterr().err
-
-
-def test_container_update_refuses_while_staged(staged, fake_containers) -> None:
-    import boxmunge.container_update as cu  # noqa: F401 (patched by name)
-    from boxmunge.commands.container_update_cmd import update_project
-    from boxmunge.container_update_targets import UpdateTarget
-    paths = staged[0]
-    target = UpdateTarget(name=NAME, project_dir=paths.project_dir(NAME),
-                          compose_files=["compose.yml"], strategy="rollback_to_previous",
-                          has_backup=False)
-    with patch.object(cu, "compose_pull"), \
-            patch.object(cu, "detect_image_changes", return_value={"web": "nginx:1.28"}), \
-            patch.object(cu, "tag_image") as retag:
-        result = update_project(paths, target, dry_run=False)
-    assert result["status"] == "failed" and LEGACY in result["reason"]
-    retag.assert_not_called()
-    _assert_refused_while_staged(staged)
-
-
-def test_staged_project_starts_once_unstaged(staged) -> None:
-    import shutil
-    from boxmunge.commands.upgrade_steps import restart_projects
-    paths, _, up, _ = staged
-    shutil.rmtree(paths.project_releases(NAME) / "prestage")
-    assert restart_projects(paths, refused=()).succeeded == [NAME]
-    up.assert_called_once()
-
-
-def test_container_start_refuses_while_staged(staged) -> None:
-    from boxmunge.compose_guard import start_containers_checked
-    with patch("boxmunge.docker_containers.container_bind_sources", return_value=[]), \
-            pytest.raises(ComposeRefused, match="legacy-stage"):
-        start_containers_checked(staged[0], NAME, [f"{NAME}-web-1"], component="data-adopt")
-    _assert_refused_while_staged(staged)
 
 
 def test_production_and_staging_starts_are_allowed_while_slot_staged(tampered) -> None:

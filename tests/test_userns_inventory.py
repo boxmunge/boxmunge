@@ -62,17 +62,19 @@ def _docker(paths, tmp_path):
             assert "-a" in cmd
             r.stdout = "sha256:img\nsha256:loose\nsha256:img\n"
         elif cmd[:3] == ["docker", "network", "ls"]:
-            r.stdout = "b0\nb1\nb2\n" if "driver=bridge" in cmd else "n1\n"
+            assert cmd[3:] == ["-q", "--no-trunc"]  # every network, whatever its driver
+            r.stdout = "b0\nb1\nb2\nh0\nm0\n"
         elif cmd[:3] == ["docker", "network", "inspect"]:
-            if cmd[3:] == ["b0", "b1", "b2"]:
-                r.stdout = json.dumps([
-                    {"Name": "bridge", "Id": "b0" * 32},
-                    {"Name": "boxmunge-proxy", "Id": "0123456789ab" + "f" * 52, "Options": None},
-                    {"Name": "shop_default", "Id": "e" * 64,
-                     "Options": {"com.docker.network.bridge.name": "br-shop"}}])
-            else:
-                r.stdout = json.dumps([{"Driver": "bridge", "IPAM": {"Config": [
-                    {"Subnet": "172.30.0.0/16"}]}, "Options": None, "Labels": {}}])
+            assert cmd[3:] == ["b0", "b1", "b2", "h0", "m0"]
+            r.stdout = json.dumps([
+                {"Name": "bridge", "Id": "b0" * 32, "Driver": "bridge"},
+                {"Name": "boxmunge-proxy", "Id": "0123456789ab" + "f" * 52, "Driver": "bridge",
+                 "IPAM": {"Config": [{"Subnet": "172.30.0.0/16"}]}, "Options": None,
+                 "Labels": {}},
+                {"Name": "shop_default", "Id": "e" * 64, "Driver": "bridge",
+                 "Options": {"com.docker.network.bridge.name": "br-shop"}},
+                {"Name": "host", "Id": "a" * 64, "Driver": "host"},
+                {"Name": "shop_lan", "Id": "c" * 64, "Driver": "macvlan"}])
         elif cmd[:3] == ["docker", "container", "inspect"]:
             r.stdout = json.dumps(containers)
         elif cmd[:3] == ["docker", "volume", "inspect"]:
@@ -114,9 +116,34 @@ def test_inventory_from_docker(paths, tmp_path, monkeypatch) -> None:
     assert inv.images[0].refs == ["postgres:16@sha256:" + "f" * 64] and inv.images[0].carried
     assert inv.images[0].tags == ["postgres:16"]  # the containerd store's name@digest is no tag
     assert not inv.images[1].carried
-    assert inv.network["ipam"]["Config"] == [{"Subnet": "172.30.0.0/16"}]
-    assert inv.bridges == ["br-0123456789ab", "br-shop"]  # docker0 is every daemon's
+    assert inv.network == {"driver": "bridge", "ipam": {"Config": [{"Subnet": "172.30.0.0/16"}]},
+                           "options": {}, "labels": {}}
+    # docker0 is every daemon's; a host or macvlan network has no bridge interface.
+    assert inv.bridges == ["br-0123456789ab", "br-shop"]
     assert Inventory.from_json(json.loads(json.dumps(inv.to_json()))) == inv
+
+
+def test_an_inventory_lists_and_inspects_the_networks_once(paths, tmp_path, monkeypatch) -> None:
+    """The proxy network's settings and the bridges come from one listing."""
+    docker, calls = _docker(paths, tmp_path), []
+    monkeypatch.setattr(inv_mod, "_run", lambda cmd, **kw: (calls.append(cmd), docker(cmd, **kw))[1])
+    _info(monkeypatch)
+    monkeypatch.setattr(inv_mod, "load_registered_projects", lambda p: {"shop"})
+    take_inventory(paths)
+    assert [c[:3] for c in calls if c[1] == "network"] == [["docker", "network", "ls"],
+                                                           ["docker", "network", "inspect"]]
+
+
+def test_no_proxy_network_and_no_network_at_all(monkeypatch) -> None:
+    class R:
+        stdout = "h0\n"
+    monkeypatch.setattr(inv_mod, "_run", lambda cmd, **kw: R())
+    monkeypatch.setattr(inv_mod, "_json", lambda cmd: [{"Name": "host", "Id": "a" * 64,
+                                                        "Driver": "host"}])
+    assert inv_mod._networks() == ({}, [])
+    R.stdout = ""
+    monkeypatch.setattr(inv_mod, "_json", lambda cmd: pytest.fail("nothing to inspect"))
+    assert inv_mod._networks() == ({}, [])
 
 
 def test_recorded_data_no_container_mounts_is_carried(paths, tmp_path, monkeypatch) -> None:

@@ -31,7 +31,6 @@ from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.lifecycle import BlockReason, is_blocked, paused_refusal
-from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.pause import (
@@ -155,8 +154,6 @@ def resume_locked(
     Returns the exit code and, if the post-resume smoke test failed, its
     message, so the caller can alert after releasing the lock.
     """
-    if refuse_if_legacy_stage(paths, project_name):
-        return 1, None
     if not _refuse_unless_resumable(project_name, paths):
         return 1, None
     install = open_install_reason(paths, project_name)
@@ -188,7 +185,8 @@ def resume_locked(
     # Check compose.yml and the bind sources BEFORE any container action. A
     # hostile compose.yml introduced while the project was paused must not
     # survive even an image pull or the release of its restart policies
-    # (audit A-NEW-1); the start below checks again. Containers made before
+    # (audit A-NEW-1); the start below runs on this check only while every
+    # file it read is unchanged, and checks again otherwise. Containers made before
     # the own-file rules are recreated from the checked files, not refused:
     # resume is the pause's only exit, and a deploy (the other way to
     # replace them) is refused while the project is paused.
@@ -196,8 +194,8 @@ def resume_locked(
         stale = stale_containers(paths, project_name, component="resume",
                                  compose_files=compose_files)
         recreate = stale is not None
-        check_start(paths, project_name, component="resume", compose_files=compose_files,
-                    deploying=recreate)
+        checked = check_start(paths, project_name, component="resume",
+                              compose_files=compose_files, deploying=recreate)
     except ComposeRefused as e:
         # Exit code 3 reserved for compose hardening rejections (audit H-N2).
         print(f"ERROR: {e} {_deploy_hint(project_name, paths)}", file=sys.stderr)
@@ -251,7 +249,7 @@ def resume_locked(
     try:
         compose_up_checked(paths, project_name, component="resume",
                            compose_files=compose_files, deploying=recreate,
-                           force_recreate=recreate)
+                           force_recreate=recreate, earlier=checked)
     except DockerError as e:
         print(f"ERROR: compose up failed: {e}", file=sys.stderr)
         log_error("resume", f"compose up failed: {e}", paths,
@@ -344,8 +342,6 @@ def hand_to_deploy_locked(project_name: str, paths: BoxPaths) -> int:
     resume cannot start and only a deploy can repair. It stays paused for
     everything else until that deploy starts it. A quarantined project's
     deploy is scanned first (quarantine_gate). Caller holds the lock."""
-    if refuse_if_legacy_stage(paths, project_name):
-        return 1
     block = is_blocked(project_name, paths)
     if block is not None and block.reason is BlockReason.MIGRATING:
         print(f"ERROR: {block.refuse_message}", file=sys.stderr)

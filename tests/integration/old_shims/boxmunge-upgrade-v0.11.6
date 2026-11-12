@@ -1,0 +1,2464 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2034  # constants below are used by the sourced libraries
+# boxmunge-upgrade — orchestrates platform upgrades with rollback safety.
+#
+# This script is intentionally simple and self-contained. It NEVER imports
+# Python code — it only calls Python commands as subprocesses and checks
+# exit codes. This ensures rollback works even if the new code is broken.
+#
+# Entry points (deploy may sudo only the three marked *; see install-sudoers):
+# * auto                       discover the latest release and upgrade to it
+# * target <version>           upgrade to a specific newer, non-blocklisted version
+# * repair-deps                install the installed release's hash-pinned
+#                              dependencies into the live slot (also in probation)
+#   force-target <version>     operator only: ignore the blocklist and downgrade floor
+#   run <version> <url> [<class>]  auto-update timer: upgrade to a discovered
+#                              version of release class <class> (the bundle URL
+#                              is always derived from <version>)
+#   check-probation            health timer: promote or roll back a probation
+#   clear-blocklist <version>  operator only: forget a failed version
+#   install-sudoers            install.sh and upgrades: (re)write deploy's sudo rule
+#   install-docs <dir>         install.sh and upgrades: replace docs/ with <dir>/*.md
+#   userns-migrate [--check]   operator only: remap the Docker daemon (check: read-only report)
+#   userns-rollback            operator only: undo an uncommitted or interrupted migration
+#   userns-commit              operator only: delete the old root after the soak
+#
+# In the source tree the functions live in boxmunge-upgrade.d/ (state, slots,
+# probation, health, release, system, userns). The release build (scripts/build-shim.py)
+# inlines them, so the shim a box runs is this one self-contained file:
+# whatever installs it (install.sh, or an older release's shim
+# self-updating) copies only this file.
+#
+# Cross-version contract: the crash-safety markers (upgrade-inflight,
+# rollback-inflight; see slots.sh) may be left by this shim and found by a
+# later one. Every later shim must honour them before it deletes any slot.
+
+set -euo pipefail
+
+# Root starts in the caller's directory (sudo keeps it), which deploy may
+# control, and `python3 -c` / `python3 -` put the working directory first on
+# sys.path, so a planted json.py there would run as root. Leave it, and keep
+# every Python this shim runs from importing from it.
+SHIM_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+SHIM_ARGS=("$@")
+cd /
+export PYTHONSAFEPATH=1
+
+BOXMUNGE_ROOT="${BOXMUNGE_ROOT:-/opt/boxmunge}"
+STATE_DIR="$BOXMUNGE_ROOT/upgrade-state"
+ACTIVE_SLOT_FILE="$STATE_DIR/active-slot"
+BLOCKLIST_FILE="$STATE_DIR/blocklist.json"
+PROBATION_FILE="$STATE_DIR/probation.json"
+# Root-only (BOXMUNGE_ROOT is root:root 0755); see acquire_lock and
+# failure_count in state.sh.
+UPGRADE_ROOT_DIR="$BOXMUNGE_ROOT/upgrade-root"
+LOCK_FILE="$UPGRADE_ROOT_DIR/upgrade.lock"
+LEGACY_LOCK_FILE="$STATE_DIR/upgrade.lock"
+INTERRUPTED_FILE="$UPGRADE_ROOT_DIR/interrupted.json"
+PIP_FAILURES_FILE="$UPGRADE_ROOT_DIR/pip-failures.json"
+COSIGN_FAILURES_FILE="$UPGRADE_ROOT_DIR/cosign-failures.json"
+# Written by install.sh; see system_upgrade in system.sh.
+INSTALLER_HASH_FILE="$UPGRADE_ROOT_DIR/installer.sha256"
+# The last release whose bundle has no requirements-mcp.txt. Every install
+# needs it, so this shim cannot install that release or any before it.
+LAST_RELEASE_WITHOUT_MCP_LOCK="0.10.1"
+PROBATION_HOURS=6
+BIN_DIR="$BOXMUNGE_ROOT/bin"
+VERSION_FILE="$BOXMUNGE_ROOT/config/version"
+SUDOERS_FILE="${BOXMUNGE_SUDOERS_FILE:-/etc/sudoers.d/boxmunge-deploy}"
+
+log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) boxmunge-upgrade: $*" >&2; }
+die() { log "FATAL: $*"; exit 1; }
+
+[[ "$BOXMUNGE_ROOT" == /* ]] || die "BOXMUNGE_ROOT must be an absolute path, not '$BOXMUNGE_ROOT'"
+
+# bm_log <level> <component> <msg> [<detail-json>]
+#
+# Best-effort write to /opt/boxmunge/logs/boxmunge.log via the active venv's
+# Python (so `boxmunge log` surfaces shim phase events alongside everything
+# else). The shim is the operator's only recovery surface — a logging
+# failure must not crash the upgrade — so the body is wrapped in
+# `2>/dev/null || true`.
+#
+# Levels: info | warn | error. Detail JSON defaults to {}.
+#
+# Through the live slot's python. Before load_active_slot has settled which
+# slot that is (its own refusals), through either slot's: both are root's.
+bm_log() {
+    local slot slots=(a b)
+    [[ -z "${ACTIVE_SLOT:-}" ]] || slots=("$ACTIVE_SLOT")
+    for slot in "${slots[@]}"; do
+        bm_log_via "$BOXMUNGE_ROOT/env-$slot/bin/python" "$@" && return 0
+    done
+    return 0
+}
+
+# bm_log_via <python> <level> <component> <msg> [<detail-json>]: bm_log through
+# that venv's python, returning whether it was written.
+bm_log_via() {
+    local python="$1" level="$2" component="$3" msg="$4" detail="${5:-"{}"}"
+    BM_LEVEL="$level" BM_COMPONENT="$component" BM_MSG="$msg" BM_DETAIL="$detail" \
+        "$python" - <<'PYBM' 2>/dev/null
+import json, os
+from boxmunge.paths import BoxPaths
+from boxmunge.log import log_operation, log_warning, log_error
+fns = {"info": log_operation, "warn": log_warning, "error": log_error}
+fn = fns.get(os.environ["BM_LEVEL"], log_operation)
+try:
+    detail = json.loads(os.environ["BM_DETAIL"])
+except Exception:
+    detail = {"raw": os.environ.get("BM_DETAIL", "")}
+fn(os.environ["BM_COMPONENT"], os.environ["BM_MSG"], BoxPaths(), detail=detail)
+PYBM
+}
+
+# die_logged <message>: die, and put the reason in the operational log first.
+# For what the health timer runs: it discards check-probation's exit status
+# and stderr, so a plain die there would leave nothing for `boxmunge log`,
+# health or the operator to see.
+die_logged() {
+    bm_log error upgrade "$1"
+    die "$1"
+}
+
+# >>> inlined from boxmunge-upgrade.d/state.sh by scripts/build-shim.py
+# state.sh — validation of everything the shim reads, the active slot, the
+# lock, the blocklist, per-version failure counts, and the upgrade policy.
+# Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
+# the shim that releases ship.
+
+# ---------------------------------------------------------------------------
+# Deploy-writable state.
+#
+# upgrade-state/ is root:deploy 0770 so the deploy shell can end probation
+# early. Everything read from it is therefore untrusted input to this root
+# process. Each value is checked against a strict allowlist before it can
+# reach an executable path, a URL, or an rm -rf, and anything else stops the
+# shim. Symlinks are refused, every read opens without following a link or
+# blocking on a FIFO (read_untrusted), and writes go through rename(2), so a
+# planted link is replaced rather than followed.
+# ---------------------------------------------------------------------------
+SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+ACTIVE_SLOT=""
+LOCK_HELD=0
+
+printable() { local s="${1:0:80}"; printf '%s' "${s//[^[:alnum:]._+-]/?}"; }
+
+# These four refuse corrupt or planted state, often under the health timer,
+# which discards the shim's stderr: die_logged, so `boxmunge log` shows why.
+require_slot() {  # require_slot <value> <where>
+    [[ "$1" == "a" || "$1" == "b" ]] \
+        || die_logged "Invalid slot '$(printable "$1")' in $2 (expected a or b); refusing to continue"
+}
+
+require_semver() {  # require_semver <value> <where>
+    [[ "$1" =~ $SEMVER_RE ]] \
+        || die_logged "Invalid version '$(printable "$1")' in $2 (expected semver like 0.3.5 or 0.3.5-rc.1)"
+}
+
+refuse_symlink() {
+    [[ ! -L "$1" ]] || die_logged "$1 is a symlink; refusing to use it as root. Remove it and re-run."
+}
+
+# read_untrusted <file>: print a deploy-writable file. A FIFO would block a
+# plain read forever with upgrade.lock held, and a link swapped in after
+# refuse_symlink would be read through, so the file is opened O_NOFOLLOW |
+# O_NONBLOCK and anything but a regular file is refused. Use it as
+# value="$(read_untrusted <file>)" || exit 1 (it has already said why).
+read_untrusted() {
+    local rc=0
+    python3 - "$1" <<'PYRU' || rc=$?
+import errno, os, stat, sys
+try:
+    fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+except OSError as e:
+    sys.exit(3 if e.errno == errno.ELOOP else f"{sys.argv[1]}: {e.strerror}")
+with os.fdopen(fd, "rb") as f:
+    if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+        sys.exit(3)
+    sys.stdout.buffer.write(f.read())
+PYRU
+    case "$rc" in
+        0) ;;
+        3) die_logged "$1 is a symlink, FIFO or other non-regular file; refusing to read it as root. Remove it and re-run." ;;
+        *) die_logged "Cannot read $1; inspect it and repair or remove it" ;;
+    esac
+}
+
+# replace_file <src> <dest>: rename(2), which never follows a link at <dest>.
+# (GNU mv would move <src> INTO <dest> if <dest> were a link to a directory.)
+replace_file() {
+    python3 -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$1" "$2"
+}
+
+# write_root_file <file> <line>: replace a file in root-only upgrade-root/
+# (created if missing) by rename, so a reader never sees half of it. A temp a
+# run killed before its rename left (every caller holds upgrade.lock, so none
+# is in use) is swept first, and a failed write removes its own. No trap: it
+# would replace the shim's EXIT trap (cleanup_download), and SIGKILL skips one.
+write_root_file() {
+    local tmp prefix
+    refuse_symlink "$UPGRADE_ROOT_DIR"
+    [[ -d "$UPGRADE_ROOT_DIR" ]] || mkdir -m 0700 "$UPGRADE_ROOT_DIR"
+    prefix="$UPGRADE_ROOT_DIR/.$(basename "$1")"
+    rm -f "$prefix".*
+    tmp="$(mktemp "$prefix.XXXXXX")"
+    { printf '%s\n' "$2" > "$tmp" && replace_file "$tmp" "$1"; } || { rm -f "$tmp"; die_logged "Cannot write $1"; }
+}
+
+# load_active_slot: set ACTIVE_SLOT from the root-owned env-active symlink and
+# the deploy-writable active-slot file. Both must name a or b, and they must
+# agree: a forged active-slot would otherwise make the live venv look like
+# the standby, and the next upgrade would rm -rf it. The one exception is a
+# crash inside swap_to, proven by a root-owned upgrade-inflight or
+# rollback-inflight marker in either slot (both are written before any swap):
+# then root's env-active is the truth and active-slot is rewritten to match.
+load_active_slot() {
+    local from_file="" from_link="" target
+    refuse_symlink "$ACTIVE_SLOT_FILE"
+    if [[ -e "$ACTIVE_SLOT_FILE" ]]; then
+        from_file="$(read_untrusted "$ACTIVE_SLOT_FILE")" || exit 1
+        require_slot "$from_file" "$ACTIVE_SLOT_FILE"
+    fi
+    if [[ -L "$BOXMUNGE_ROOT/env-active" ]]; then
+        target="$(readlink "$BOXMUNGE_ROOT/env-active")"
+        case "$target" in
+            "$BOXMUNGE_ROOT/env-a") from_link="a" ;;
+            "$BOXMUNGE_ROOT/env-b") from_link="b" ;;
+            *) die_logged "env-active points at '$(printable "$target")', not env-a or env-b; point it back at the live venv as supervisor: sudo ln -sfn $BOXMUNGE_ROOT/env-<a or b> $BOXMUNGE_ROOT/env-active" ;;
+        esac
+    fi
+    if [[ -n "$from_file" && -n "$from_link" && "$from_file" != "$from_link" ]]; then
+        [[ -e "$(inflight_marker a)" || -e "$(inflight_marker b)" || -e "$(rollback_marker a)" || -e "$(rollback_marker b)" ]] \
+            || die_logged "active-slot says '$from_file' but env-active points at env-$from_link; refusing to guess which venv is live. env-active is root's and names the live venv: unless an upgrade is running, put it back as supervisor: echo $from_link | sudo tee $ACTIVE_SLOT_FILE"
+        log "WARN: active-slot disagrees with env-active after an interrupted swap; following env-active (slot $from_link)"
+        write_active_slot_file "$from_link"
+    fi
+    ACTIVE_SLOT="${from_link:-$from_file}"
+    [[ -n "$ACTIVE_SLOT" ]] || die_logged "No active slot: neither $ACTIVE_SLOT_FILE nor $BOXMUNGE_ROOT/env-active exists; reinstall as root from the installed release's GitHub release (sudo bash boxmunge-install.sh)"
+}
+
+standby_slot() { [[ "$ACTIVE_SLOT" == "a" ]] && echo "b" || echo "a"; }
+active_venv() { echo "$BOXMUNGE_ROOT/env-$ACTIVE_SLOT"; }
+
+# acquire_lock [skip]: take upgrade.lock once per run. With "skip", a busy
+# lock exits 0 (the health timer retries on its next fire); otherwise it dies.
+#
+# upgrade.lock is in root-only upgrade-root/, so deploy cannot replace it to
+# let a second upgrade run. Shims up to 0.10.1 lock upgrade-state/upgrade.lock
+# (LEGACY_LOCK_FILE) instead: the one that installs this shim keeps running,
+# holding only that, until its upgrade ends, and a 0.10.1 venv that upgrade
+# rolls back to locks only that too. So this shim locks both, the root-only
+# one first; the legacy lock matters only against those. It goes once no box
+# can run a 0.10.1 shim or venv: when a release's pre-flight refuses to be
+# installed over 0.10.1 or earlier.
+#
+# Deploy can plant anything at the legacy lock, and swap it between any check
+# and the open. Every bash redirection follows a link, and the writing ones
+# create a missing target, so bash never opens a lock: open_lock_and_reexec
+# has Python open both without following a link or blocking on a FIFO, refuse
+# anything but a plain regular file, put them on fds 9 and 8 and run this shim
+# again with the same arguments. That run finds BM_UPGRADE_LOCK_FD=9 and
+# checks fds 9 and 8 are the two lock files before it takes the flocks.
+#
+# Deploy can also lock the legacy file, root's or one it put there, to stall
+# every upgrade and probation check. Shims up to 0.10.1 made it 0644, which
+# deploy can open: the opener makes it 0600 on every run, so deploy cannot
+# newly open it. One deploy opened before that keeps its lock (an open
+# descriptor is not revoked); check-probation counts the skips that causes
+# (lock_busy_skip). A lock file that is not root's is replaced
+# (replace_foreign_legacy_lock); if deploy wins a race and plants one between
+# that and the open, the opener runs this shim again with
+# BM_UPGRADE_LOCK_FOREIGN naming it, counted like a held lock.
+acquire_lock() {
+    [[ "$LOCK_HELD" -eq 1 ]] && return 0
+    if [[ -n "${BM_UPGRADE_LOCK_FOREIGN:-}" ]]; then
+        local foreign="$BM_UPGRADE_LOCK_FOREIGN"
+        unset BM_UPGRADE_LOCK_FOREIGN
+        [[ "${1:-}" != "skip" ]] || lock_busy_skip "$foreign was not root's when opened"
+        die_logged "$foreign was replaced by a file that is not root's as it was opened (the deploy user is racing for it to stall upgrades); refusing to lock it. Retry; if it keeps happening, find what runs as deploy and stop it."
+    fi
+    if [[ "${BM_UPGRADE_LOCK_FD:-}" != 9 ]]; then
+        refuse_symlink "$UPGRADE_ROOT_DIR"
+        [[ -d "$UPGRADE_ROOT_DIR" ]] || mkdir -m 0700 "$UPGRADE_ROOT_DIR"
+        mkdir -p "$STATE_DIR"
+        refuse_symlink "$LOCK_FILE"
+        refuse_symlink "$LEGACY_LOCK_FILE"
+        replace_foreign_legacy_lock
+        open_lock_and_reexec
+    fi
+    unset BM_UPGRADE_LOCK_FD  # children inherit fds 9 and 8, never the claim that they are checked
+    local why
+    why="$(python3 -c 'import os, stat, sys
+for fd, path in ((9, sys.argv[1]), (8, sys.argv[2])):
+    try:
+        held, name = os.fstat(fd), os.lstat(path)
+    except OSError:
+        sys.exit(f"fd {fd} is not {path}")
+    if not (stat.S_ISREG(held.st_mode) and (held.st_dev, held.st_ino) == (name.st_dev, name.st_ino)):
+        sys.exit(f"fd {fd} is not {path}")' "$LOCK_FILE" "$LEGACY_LOCK_FILE" 2>&1)" \
+        || die "$why (it was replaced, or the descriptor came from elsewhere); refusing to lock it. Remove it and re-run."
+    if ! flock -n 9 || ! flock -n 8; then
+        [[ "${1:-}" != "skip" ]] || lock_busy_skip "upgrade.lock is held"
+        die "Another upgrade is in progress"
+    fi
+    rm -f "$LOCK_SKIPS_FILE"
+    LOCK_HELD=1
+}
+
+# replace_foreign_legacy_lock: the legacy lock is in deploy-writable
+# upgrade-state/, so deploy can unlink root's and hold a flock on its own
+# file at the name, stalling every upgrade and probation check. Only root
+# runs upgrades, so a lock file that is not root's is never a real one: it is
+# removed (unlinking a name never follows a link) and recreated as root's,
+# with a warning. One deploy swaps in between is refused (open_lock_and_reexec).
+replace_foreign_legacy_lock() {
+    [[ -e "$LEGACY_LOCK_FILE" && ! -O "$LEGACY_LOCK_FILE" ]] || return 0
+    log "WARN: $LEGACY_LOCK_FILE is not root's (the deploy user replaced it); replacing it with root's"
+    bm_log warn upgrade "legacy upgrade lock not root's: replaced" "{}"
+    rm -f "$LEGACY_LOCK_FILE"
+}
+
+# lock_busy_skip <why>: check-probation could not take upgrade.lock (<why>),
+# and retries on the next health-timer fire (every five minutes). One skip is routine;
+# LOCK_SKIPS_ALERT in a row (an hour) is not: no upgrade holds the lock that
+# long, so something else does (deploy can hold the legacy one), and no
+# probation is promoted or rolled back meanwhile. The count is kept in
+# root-only upgrade-root/ (only the health timer skips, one run at a time),
+# and an error goes to the operational log at every LOCK_SKIPS_ALERT.
+LOCK_SKIPS_FILE="$UPGRADE_ROOT_DIR/lock-skips"
+LOCK_SKIPS_ALERT=12
+lock_busy_skip() {
+    local count
+    count="$(cat "$LOCK_SKIPS_FILE" 2>/dev/null)" || true
+    [[ "$count" =~ ^[0-9]+$ ]] || count=0
+    count=$((count + 1))
+    write_root_file "$LOCK_SKIPS_FILE" "$count"
+    log "Another upgrade is in progress; skipping ($count in a row: $1)"
+    [[ $((count % LOCK_SKIPS_ALERT)) -ne 0 ]] || bm_log error upgrade \
+        "check-probation could not take upgrade.lock $count times in a row (last: $1), so no probation is promoted or rolled back. Find the holder as supervisor: sudo lslocks | grep upgrade.lock"
+    exit 0
+}
+
+# open_lock_and_reexec: see acquire_lock. Replaces this process; prints a
+# FATAL line like die() when a lock file cannot be used.
+open_lock_and_reexec() {
+    exec python3 -c '
+import errno, os, stat, sys, time
+locks, shell, shim, args = sys.argv[1:3], sys.argv[3], sys.argv[4], sys.argv[5:]
+
+def fatal(path, what):
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    sys.exit(f"{now} boxmunge-upgrade: FATAL: {path} {what}; refusing to use it as root. Remove it and re-run.")
+
+for path, target in zip(locks, (9, 8)):
+    try:
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except OSError as e:
+        fatal(path, "is a symlink" if e.errno == errno.ELOOP else f"cannot be opened ({e.strerror})")
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+        fatal(path, "is not a plain regular file")
+    if st.st_uid != os.geteuid():
+        os.environ.pop("BM_UPGRADE_LOCK_FD", None)
+        os.environ["BM_UPGRADE_LOCK_FOREIGN"] = path
+        os.execv(shell, [shell, shim, *args])
+    if stat.S_IMODE(st.st_mode) != 0o600:
+        os.fchmod(fd, 0o600)  # shims up to 0.10.1 made the legacy one 0644
+    os.set_blocking(fd, True)
+    if fd != target:
+        os.dup2(fd, target)
+        os.close(fd)
+    os.set_inheritable(target, True)
+os.environ["BM_UPGRADE_LOCK_FD"] = "9"
+os.execv(shell, [shell, shim, *args])
+' "$LOCK_FILE" "$LEGACY_LOCK_FILE" "$BASH" "$SHIM_PATH" "${SHIM_ARGS[@]+"${SHIM_ARGS[@]}"}"
+}
+
+# is_blocklisted <version>: 0 if listed, 1 if not. A blocklist that is not a
+# JSON object keyed by semver strings is corrupt or tampered with: stop.
+is_blocklisted() {
+    local rc=0 content
+    refuse_symlink "$BLOCKLIST_FILE"
+    [[ -e "$BLOCKLIST_FILE" ]] || return 1
+    content="$(read_untrusted "$BLOCKLIST_FILE")" || exit 1
+    printf '%s' "$content" | BM_VERSION="$1" BM_SEMVER_RE="$SEMVER_RE" python3 -c '
+import json, os, re, sys
+try:
+    bl = json.loads(sys.stdin.read())
+except ValueError as e:
+    print(f"blocklist unreadable: {e}", file=sys.stderr)
+    sys.exit(3)
+pattern = re.compile(os.environ["BM_SEMVER_RE"])
+if not isinstance(bl, dict) or not all(isinstance(k, str) and pattern.fullmatch(k) for k in bl):
+    print("blocklist is not an object keyed by semver versions", file=sys.stderr)
+    sys.exit(3)
+sys.exit(0 if os.environ["BM_VERSION"] in bl else 1)
+' || rc=$?
+    case "$rc" in
+        0|1) return "$rc" ;;
+        *) die "$BLOCKLIST_FILE is malformed; inspect it and repair or remove it" ;;
+    esac
+}
+
+# write_active_slot_file <slot>: the temp file is written, chmod'd and synced
+# through the descriptor that created it. upgrade-state/ is deploy-writable,
+# so reopening the temp by name could follow a link deploy renamed over it.
+write_active_slot_file() {
+    BM_SLOT="$1" BM_FILE="$ACTIVE_SLOT_FILE" python3 - <<'PYAS'
+import os, tempfile
+path = os.environ["BM_FILE"]
+directory = os.path.dirname(path)
+fd, tmp = tempfile.mkstemp(dir=directory, prefix=".active-slot.")
+try:
+    with os.fdopen(fd, "w") as f:
+        f.write(os.environ["BM_SLOT"] + "\n")
+        f.flush()
+        os.fchmod(f.fileno(), 0o644)
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+except BaseException:
+    if os.path.lexists(tmp):
+        os.unlink(tmp)
+    raise
+dir_fd = os.open(directory, os.O_RDONLY)
+os.fsync(dir_fd)
+os.close(dir_fd)
+PYAS
+}
+
+add_blocklist() {
+    local version="$1" reason="$2"
+    BM_VERSION="$version" BM_REASON="$reason" "$(active_venv)/bin/python" -c "
+import os
+from boxmunge.upgrade_state import add_to_blocklist
+from boxmunge.paths import BoxPaths
+add_to_blocklist(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_REASON'])
+"
+}
+
+# Failures that are rarely the release's fault are counted per version, so
+# the first one is retried and only a repeat blocklists:
+#   interruptions <version> [<count>]  the upgrade was interrupted after its
+#                                      venv swap (a power cut, a kill)
+#   pip_failures <version> [<count>]   its hash-pinned dependencies failed to
+#                                      install (a network blip, a full disk)
+#   cosign_failures <version> [<count>]  cosign refused its signature (an
+#                                      unreachable Sigstore looks the same)
+# Each prints the count, or sets it (0 forgets it).
+interruptions() { failure_count "$INTERRUPTED_FILE" "$@"; }
+pip_failures() { failure_count "$PIP_FAILURES_FILE" "$@"; }
+cosign_failures() { failure_count "$COSIGN_FAILURES_FILE" "$@"; }
+
+# failure_count <file> <version> [<count>]: the counts behind the above. Kept
+# in a root-only directory, not deploy-writable upgrade-state/, so deploy
+# cannot wedge recovery with a malformed file. Written by fsync + rename +
+# directory fsync.
+failure_count() {
+    local file="$1"
+    shift
+    refuse_symlink "$UPGRADE_ROOT_DIR"
+    refuse_symlink "$file"
+    [[ $# -eq 1 || -d "$UPGRADE_ROOT_DIR" ]] || mkdir -m 0700 "$UPGRADE_ROOT_DIR"
+    BM_VERSION="$1" BM_COUNT="${2:-}" BM_FILE="$file" BM_SEMVER_RE="$SEMVER_RE" python3 - <<'PYINT' \
+        || die "$file is malformed; inspect it and repair or remove it"
+import json, os, re, sys, tempfile
+path, version, count = os.environ["BM_FILE"], os.environ["BM_VERSION"], os.environ["BM_COUNT"]
+counts = {}
+if os.path.exists(path):
+    with open(path) as f:
+        counts = json.load(f)
+pattern = re.compile(os.environ["BM_SEMVER_RE"])
+if not isinstance(counts, dict) or not all(
+        isinstance(k, str) and pattern.fullmatch(k) and type(v) is int for k, v in counts.items()):
+    sys.exit(f"{os.path.basename(path)} is not an object of semver version -> count")
+if not count:
+    print(counts.get(version, 0))
+    sys.exit(0)
+counts.pop(version, None)
+if int(count):
+    counts[version] = int(count)
+directory = os.path.dirname(path)
+fd, tmp = tempfile.mkstemp(dir=directory, prefix=f".{os.path.basename(path)}.")
+with os.fdopen(fd, "w") as f:
+    json.dump(counts, f)
+    f.flush()
+    os.fsync(f.fileno())
+os.replace(tmp, path)
+dir_fd = os.open(directory, os.O_RDONLY)
+os.fsync(dir_fd)
+os.close(dir_fd)
+PYINT
+}
+
+# ---------------------------------------------------------------------------
+# Upgrade policy: what each entry point may install.
+# ---------------------------------------------------------------------------
+
+# semver_lt <a> <b>: true when <a> has lower semver precedence than <b>.
+semver_lt() {
+    BM_A="$1" BM_B="$2" python3 - <<'PYSV'
+import os, sys
+def key(v):
+    core, _, pre = v.partition("-")
+    nums = tuple(int(x) for x in core.split("."))
+    if not pre:
+        return nums, 1, ()
+    return nums, 0, tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split("."))
+sys.exit(0 if key(os.environ["BM_A"]) < key(os.environ["BM_B"]) else 1)
+PYSV
+}
+
+# installed_version: the semver recorded in config/version (root-owned; the
+# config dir is not deploy-writable).
+installed_version() {
+    local v
+    [[ -f "$VERSION_FILE" ]] || die "No installed version recorded at $VERSION_FILE"
+    v="$(cat "$VERSION_FILE")"
+    v="${v%%+*}"
+    require_semver "$v" "$VERSION_FILE"
+    echo "$v"
+}
+
+# check_policy <version> <mode>: mode is run (timer), target (deploy) or
+# force (operator). Only force may install a blocklisted or older version,
+# and no mode a release from before the hash-pinned MCP requirements. That
+# refusal is about this shim, not the release, so it is never blocklisted.
+check_policy() {
+    local version="$1" mode="$2" installed operator_hint
+    require_semver "$version" "requested version"
+    if ! semver_lt "$LAST_RELEASE_WITHOUT_MCP_LOCK" "$version"; then
+        die "Bundle $version predates the hash-pinned requirements-mcp.txt every install needs; force-target cannot go below the first release after $LAST_RELEASE_WITHOUT_MCP_LOCK"
+    fi
+    operator_hint="To override, run as supervisor: sudo $BIN_DIR/boxmunge-upgrade force-target $version"
+    if [[ "$mode" == "force" ]]; then
+        log "WARN: operator override: blocklist and downgrade floor not enforced for $version"
+        return 0
+    fi
+    if is_blocklisted "$version"; then
+        if [[ "$mode" == "run" ]]; then
+            log "Version $version is blocklisted, skipping"
+            exit 0
+        fi
+        die "Version $version is blocklisted on this box (it failed an earlier upgrade). $operator_hint"
+    fi
+    installed="$(installed_version)"
+    if semver_lt "$version" "$installed"; then
+        die "Refusing to downgrade from $installed to $version. $operator_hint"
+    fi
+}
+# <<< boxmunge-upgrade.d/state.sh
+
+# >>> inlined from boxmunge-upgrade.d/slots.sh by scripts/build-shim.py
+# slots.sh — the two venv slots: whether a slot can be trusted, the
+# crash-safety markers, the swap, and rollback.
+# Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
+# the shim that releases ship.
+
+# ---------------------------------------------------------------------------
+# Crash-safety markers. Both live inside a venv slot, which is root-owned, so
+# deploy cannot forge them, and each is synced to disk before the swap it
+# guards.
+#
+#   upgrade-inflight   "<version>"
+#       In the slot an upgrade installs, from just before the swap until
+#       probation is recorded. While it is in the live slot, the standby is
+#       the proven release and must not be deleted.
+#   rollback-inflight  "<version>\n<stage>\n<interruption count>"
+#       In the slot a rollback returns to, from just before its swap until the
+#       rollback has finished. check-probation finishes a rollback cut short.
+#
+# CROSS-VERSION CONTRACT: a box can crash under this shim and come back under
+# a later one (the next upgrade self-updates the shim before its swap, and
+# install.sh may be re-run). Every later shim must honour both markers as
+# described in resume_rollback and recover_interrupted_upgrade (probation.sh),
+# or migrate them, and must never delete a slot that holds one, or the slot a
+# marker says is the rollback target, without resolving it first.
+# ---------------------------------------------------------------------------
+inflight_marker() { echo "$BOXMUNGE_ROOT/env-$1/upgrade-inflight"; }
+rollback_marker() { echo "$BOXMUNGE_ROOT/env-$1/rollback-inflight"; }
+
+# slot_works <slot>: the slot's boxmunge-server runs. Checked before a slot is
+# trusted to take over, and before another slot is deleted on its strength.
+slot_works() {
+    local server="$BOXMUNGE_ROOT/env-$1/bin/boxmunge-server"
+    [[ -x "$server" ]] && "$server" --version >/dev/null 2>&1
+}
+
+# slot_version <slot>: the X.Y.Z release the slot runs (`--version` prints
+# "boxmunge X.Y.Z[+build]"), or nothing when it cannot say.
+slot_version() {
+    "$BOXMUNGE_ROOT/env-$1/bin/boxmunge-server" --version 2>/dev/null \
+        | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true
+}
+
+# rollback_target_ok <slot>: a working venv that is not a half-finished upgrade.
+rollback_target_ok() { slot_works "$1" && [[ ! -e "$(inflight_marker "$1")" ]]; }
+
+# remove_slot <slot>: the only way the shim deletes a venv slot. Never the one
+# env-active points at, and never while the live slot does not work: then
+# <slot> may be all that is left to run the platform.
+remove_slot() {
+    local slot="$1"
+    require_slot "$slot" "slot removal"
+    [[ "$slot" != "$ACTIVE_SLOT" && "$(readlink "$BOXMUNGE_ROOT/env-active" 2>/dev/null)" != "$BOXMUNGE_ROOT/env-$slot" ]] \
+        || die_logged "Refusing to remove env-$slot: it is the live slot"
+    slot_works "$ACTIVE_SLOT" \
+        || die_logged "Refusing to remove env-$slot: the live slot env-$ACTIVE_SLOT is not a working venv; inspect both as supervisor"
+    rm -rf "${BOXMUNGE_ROOT:?}/env-$slot"
+}
+
+swap_to() {
+    local slot="$1"
+    require_slot "$slot" "swap target"
+    slot_works "$slot" || die "Refusing to swap to env-$slot: it is not a working venv"
+    ln -sfn "$BOXMUNGE_ROOT/env-$slot" "$BOXMUNGE_ROOT/env-active"
+    write_active_slot_file "$slot"
+    ACTIVE_SLOT="$slot"
+    # Durable before anything runs on the new slot: an apply that migrated
+    # state must never come back after a crash under the other slot's code.
+    sync
+    # The user-facing /opt/boxmunge/bin/boxmunge-server wrapper already routes
+    # through env-active/bin/boxmunge-server, so the symlink swap above
+    # is sufficient — no need to touch the wrapper itself.
+    log "Swapped active to slot $slot"
+}
+
+# report_failure <version> <from_version> <stage> [detail]: best-effort report
+# to the fleet service. Never fails the upgrade, but says on stderr when the
+# report could not be sent (the python side prints the reason).
+report_failure() {
+    local version="$1" from_version="$2" stage="$3" detail="${4:-}"
+    BM_VERSION="$version" BM_FROM_VERSION="$from_version" BM_STAGE="$stage" BM_DETAIL="$detail" "$(active_venv)/bin/python" -c "
+import inspect, os
+from boxmunge.report_failure import report_failure
+# The active venv is the release being left: one older than this shim has no detail parameter.
+extra = {'detail': os.environ['BM_DETAIL']} if 'detail' in inspect.signature(report_failure).parameters else {}
+report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.environ['BM_STAGE'], **extra)
+" || { log "WARNING: the upgrade failure report could not be sent"; } || :
+}
+
+# notify_via <python> <title> <message> [priority]: send a Pushover alert
+# through that venv's python. Returns 0 when sent, 3 when Pushover is not
+# configured, anything else when it could not be sent.
+notify_via() {
+    local python="$1" title="$2" message="$3" priority="${4:-0}"
+    BM_TITLE="$title" BM_MESSAGE="$message" BM_PRIORITY="$priority" "$python" -c "
+import os, sys
+from boxmunge.config import load_config
+from boxmunge.pushover import send_notification
+from boxmunge.paths import BoxPaths
+config = load_config(BoxPaths())
+po = config.get('pushover', {})
+if not (po.get('user_key') and po.get('app_token')):
+    sys.exit(3)
+sys.exit(0 if send_notification(po['user_key'], po['app_token'], os.environ['BM_TITLE'], os.environ['BM_MESSAGE'],
+                                int(os.environ['BM_PRIORITY'])) else 1)
+" 2>/dev/null
+}
+
+# send_notification <title> <message> [priority]: best effort through the live
+# slot's python: no upgrade step fails on an alert, but one that could not be
+# sent is said on stderr. rollback_impossible needs to know, and uses
+# notify_via.
+send_notification() {
+    local rc=0
+    notify_via "$(active_venv)/bin/python" "$@" || rc=$?
+    [[ "$rc" -eq 0 || "$rc" -eq 3 ]] || log "WARN: alert not delivered (exit $rc): $1"
+}
+
+# ---------------------------------------------------------------------------
+# The rollback's stash. stashes/ is deploy-writable (root:deploy 0770): deploy
+# can add, rename and replace entries there, though not write the 0600 stash
+# root makes. So a rollback neither takes the newest-named stash there nor
+# opens one by name. The upgrade records the stash it made, with the version
+# it installs, in root-only upgrade-root/upgrade-stash; the rollback copies
+# exactly that archive into root-only upgrade-root/rollback-stash/, opened
+# without following a link and only if it is a plain file root owns with the
+# recorded size and sha256 (so another root-made stash renamed onto the name
+# is refused), and has the previous release restore the copy (restore_stash
+# takes an archive path since 0.10.0). The size and sha256 recorded are the
+# ones `stash create` prints ("Stash digest: <size> <sha256>", since 0.11.6),
+# of the bytes it wrote, and the file at the name must match them: hashing
+# the name alone would record whatever deploy renamed over it meanwhile. A
+# release before 0.11.6 prints no digest (it runs the stash of the upgrade to
+# 0.11.6); then the file at the name is what is recorded. A stash with link
+# members (made by a release before 0.10.2) is recorded by name alone: the
+# new release's apply rewrites it without them (D18), changing its hash. An
+# upgrade run by a shim before this one recorded nothing: its rollback takes
+# the newest-named stash, as that shim would, under the same checks.
+#
+# upgrade-stash: "<version> <name> [<size> <sha256>]"
+# ---------------------------------------------------------------------------
+STASH_RECORD_FILE="$UPGRADE_ROOT_DIR/upgrade-stash"
+STASH_COPY_DIR="$UPGRADE_ROOT_DIR/rollback-stash"
+STASH_NAME_RE='^boxmunge-stash-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}\.tar\.gz$'
+
+# stash_facts <stash>: print "<size> <sha256>" of the stash just made, with
+# " links" after when it holds link members; on failure print why and return 1.
+stash_facts() {
+    BM_STASH="$1" python3 - <<'PYREC'
+import hashlib, os, stat, sys, tarfile
+src = os.environ["BM_STASH"]
+try:
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+except OSError as e:
+    print(f"{src}, the stash just made, cannot be opened: {e.strerror}")
+    sys.exit(1)
+with os.fdopen(fd, "rb") as f:
+    st = os.fstat(f.fileno())
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_nlink != 1:
+        print(f"{src}, the stash just made, is not a plain file of root's")
+        sys.exit(1)
+    digest = hashlib.sha256()
+    while chunk := f.read(1 << 20):
+        digest.update(chunk)
+    f.seek(0)
+    try:
+        with tarfile.open(fileobj=f, mode="r:gz") as tar:
+            links = any(m.issym() for m in tar)
+    except (tarfile.TarError, OSError, EOFError):
+        links = False  # nothing the apply's rewrite would touch
+print(f"{st.st_size} {digest.hexdigest()}" + (" links" if links else ""))
+PYREC
+}
+
+# record_stash <version> <stash create output>: record the stash `stash
+# create` said it made; on failure print why and return 1.
+record_stash() {
+    local name printed facts
+    name="$(printf '%s\n' "$2" | sed -n 's/^Stash created: //p' | tail -n 1)"
+    [[ "$name" =~ $STASH_NAME_RE ]] \
+        || { echo "stash create did not name the stash it made (no 'Stash created: <name>' line): $2"; return 1; }
+    printed="$(printf '%s\n' "$2" | sed -n 's/^Stash digest: //p')"
+    [[ -z "$printed" || "$printed" =~ ^[0-9]+\ [0-9a-f]{64}$ ]] \
+        || { echo "stash create printed a digest line the shim cannot read (want one 'Stash digest: <size> <sha256>'): $2"; return 1; }
+    facts="$(stash_facts "$BOXMUNGE_ROOT/stashes/$name")" || { echo "$facts"; return 1; }
+    if [[ -n "$printed" && "${facts% links}" != "$printed" ]]; then
+        echo "$BOXMUNGE_ROOT/stashes/$name is not what stash create just wrote: it printed size and sha256 '$printed', the file there has '${facts% links}' (stashes/ is deploy-writable: something renamed or wrote another file over the name). Nothing has changed. Find what wrote to stashes/, then retry: sudo $BOXMUNGE_ROOT/bin/boxmunge-upgrade target $1"
+        return 1
+    fi
+    if [[ "$facts" == *" links" ]]; then
+        log "The stash $name has link members (an older release made it); the upgrade rewrites it without them, so it is recorded by name alone"
+        write_root_file "$STASH_RECORD_FILE" "$1 $name"
+    else
+        write_root_file "$STASH_RECORD_FILE" "$1 $name $facts"
+    fi
+}
+
+# copy_rollback_stash <new_version>: copy the stash the rollback of
+# <new_version> restores into STASH_COPY_DIR and print the copy's path; on
+# failure print why and return 1.
+copy_rollback_stash() {
+    local recorded="" name="" size="" sha="" r_version r_name r_size r_sha r_extra
+    local hash_re='^([0-9]+ [0-9a-f]{64})?$'
+    refuse_symlink "$STASH_RECORD_FILE"
+    refuse_symlink "$STASH_COPY_DIR"
+    [[ ! -e "$STASH_RECORD_FILE" ]] || recorded="$(cat "$STASH_RECORD_FILE")"
+    if [[ -n "$recorded" ]]; then
+        read -r r_version r_name r_size r_sha r_extra <<< "$recorded"
+        if [[ ! "$r_name" =~ $STASH_NAME_RE || -n "${r_extra:-}" || ! "${r_size:+$r_size $r_sha}" =~ $hash_re ]]; then
+            echo "$STASH_RECORD_FILE is malformed ('$(printable "$recorded")'); restore the stash this upgrade made by hand as supervisor: check that sudo boxmunge-server stash list names it first (stashes/ is deploy-writable), then run: sudo boxmunge-server stash restore --latest; sudo boxmunge-server upgrade --apply"
+            return 1
+        elif [[ "$r_version" == "$1" ]]; then
+            name="$r_name" size="${r_size:-}" sha="${r_sha:-}"
+        else
+            log "WARN: $STASH_RECORD_FILE ('$(printable "$recorded")') is not the stash of the upgrade to $1; taking the newest-named stash"
+        fi
+    fi
+    BM_STASHES="$BOXMUNGE_ROOT/stashes" BM_NAME="$name" BM_SIZE="$size" BM_SHA="$sha" BM_DEST="$STASH_COPY_DIR" python3 - <<'PYSTASH'
+import errno, fnmatch, hashlib, os, stat, sys, tempfile
+stashes, name, dest = os.environ["BM_STASHES"], os.environ["BM_NAME"], os.environ["BM_DEST"]
+want = (int(os.environ["BM_SIZE"]), os.environ["BM_SHA"]) if os.environ["BM_SHA"] else None
+fix = (" (stashes/ is deploy-writable: it was removed, planted or replaced). Put the right stash back"
+       " or remove the wrong one, so that sudo boxmunge-server stash list names the stash this upgrade made"
+       " first; then, as supervisor, run: sudo boxmunge-server stash restore --latest;"
+       " sudo boxmunge-server upgrade --apply")
+
+def refuse(why):
+    print(why + fix)
+    sys.exit(1)
+
+if not name:
+    names = sorted(n for n in os.listdir(stashes) if fnmatch.fnmatch(n, "boxmunge-stash-*.tar.gz"))
+    if not names:
+        refuse(f"no stash in {stashes} to restore")
+    name = names[-1]
+    print(f"WARN: no stash recorded for this upgrade; restoring the newest-named, {name}", file=sys.stderr)
+src = os.path.join(stashes, name)
+try:
+    fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+except OSError as e:
+    refuse(f"{src} {'is a symlink' if e.errno == errno.ELOOP else 'cannot be opened: ' + e.strerror}")
+with os.fdopen(fd, "rb") as f:
+    st = os.fstat(f.fileno())
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.geteuid() or st.st_nlink != 1:
+        refuse(f"{src} is not a plain file of root's")
+    os.makedirs(dest, mode=0o700, exist_ok=True)
+    for old in os.listdir(dest):
+        os.unlink(os.path.join(dest, old))
+    out_fd, tmp = tempfile.mkstemp(dir=dest, prefix=".copy.")
+    digest = hashlib.sha256()
+    with os.fdopen(out_fd, "wb") as out:
+        while chunk := f.read(1 << 20):
+            digest.update(chunk)
+            out.write(chunk)
+        out.flush()
+        os.fsync(out.fileno())
+    if want and (os.path.getsize(tmp), digest.hexdigest()) != want:
+        os.unlink(tmp)
+        refuse(f"{src} is not the stash this upgrade made (its size or sha256 differs from the record)")
+copy = os.path.join(dest, name)
+os.replace(tmp, copy)
+print(copy)
+PYSTASH
+}
+
+# restore_stash_copy <archive>: the previous (now live) release restores
+# <archive>; prints what it says.
+restore_stash_copy() {
+    BM_STASH="$1" "$(active_venv)/bin/python" -c "
+import os, sys
+from pathlib import Path
+from boxmunge.paths import BoxPaths
+from boxmunge.stash import StashError, restore_stash
+try:
+    print('Restored from:', restore_stash(BoxPaths(), Path(os.environ['BM_STASH'])).name)
+except (OSError, StashError) as e:
+    sys.exit(f'ERROR: {e}')
+"
+}
+
+# rollback_partial <new_version> <from_version> <stage> <prev_slot> <step> <exit> <output>
+#
+# The venv is back on the previous slot but disk state may be partly
+# upgraded, a hybrid the old code is not guaranteed to handle. Hard failure
+# demanding operator attention; exit 2 so monitoring can tell it from a
+# clean rollback (exit 1). The rollback marker goes too: retrying on every
+# health tick would only repeat the alert, and the operator now owns this.
+rollback_partial() {
+    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" step="$5" rc="$6" output="$7"
+    log "ERROR: $step failed during rollback (exit $rc)"
+    log "ERROR: $step output: $output"
+    bm_log error upgrade "rollback partial — manual intervention required" \
+        "{\"version\": \"$new_version\", \"stage\": \"$stage\", \"step\": \"$step\", \"exit\": $rc}"
+    add_blocklist "$new_version" "${stage}_partial_rollback"
+    [[ "$stage" == interrupted ]] || report_failure "$new_version" "$from_version" "apply_partial_rollback" "rollback_step_failed: ${step} exit ${rc}"
+    # Truncate output in the alert body — Pushover messages are length-limited.
+    send_notification "boxmunge ROLLBACK PARTIAL" \
+        "ROLLBACK PARTIAL — manual intervention required.
+Version: $new_version
+Stage: $stage
+Failed step: $step (exit $rc)
+Output (truncated): ${output:0:500}"
+    rm -f "$(rollback_marker "$prev_slot")"
+    log "Rollback PARTIAL: venv reverted to slot $prev_slot but $step failed"
+    exit 2
+}
+
+# do_rollback <new_version> <from_version> <stage> <prev_slot> [detail]: return
+# to <prev_slot>; [detail] says why, for complete_rollback. The rollback-inflight marker is on disk before the swap, so a
+# crash anywhere from here on is finished by the next check-probation.
+#
+# An interruption (stage "interrupted": a power cut or kill) is rarely the
+# release's fault. The first one of a version is not blocklisted, so
+# auto-update retries it; a second one is, so a release whose apply reliably
+# hangs or is killed cannot loop. The count is decided here, kept in the
+# marker, and recorded only once the rollback has succeeded.
+do_rollback() {
+    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" detail="${5:-}" count=0
+    rollback_target_ok "$prev_slot" \
+        || die_logged "Cannot roll back $new_version: env-$prev_slot is not a working venv, or is itself a half-finished upgrade; inspect it as supervisor"
+    [[ "$stage" != interrupted ]] || count=$(( $(interruptions "$new_version") + 1 ))
+    printf '%s\n%s\n%s\n' "$new_version" "$stage" "$count" > "$(rollback_marker "$prev_slot")"
+    sync
+    complete_rollback "$new_version" "$from_version" "$stage" "$prev_slot" "$count" "$detail"
+}
+
+# legacy_caddy_log_note <version>: what the active (previous) release costs CrowdSec. A
+# release from before Caddy logged to stdout writes Caddy's access log to a
+# tmpfs inside the container that nothing reads (caddy/compose.yml), so
+# HTTP-layer detection is off until the next upgrade. Read from that
+# release's own root-owned code, never from the deploy-writable site files.
+legacy_caddy_log_note() {
+    if grep -qsF "output file /var/log/caddy/access.log" \
+            "$(active_venv)"/lib/python3*/site-packages/boxmunge/caddy.py; then
+        echo " HTTP-layer detection is off until the next upgrade: $1 writes Caddy's access log to a file CrowdSec does not read."
+    fi
+}
+
+# teardown_before_rollback: staging-teardown-all with the active (new)
+# release. It alerts per project itself and exits 0 even when a project
+# fails; a non-zero exit means it did not finish (killed by the timeout,
+# crashed, or could not start), so which projects still hold a slot is
+# unknown and the alert here names the generic manual commands. It never
+# blocks the rollback. The 600 s budget covers one compose down per staged
+# project; a box with many slack staging stacks may need longer, and then
+# keeps the rest (harmless to the older release) with this alert.
+teardown_before_rollback() {
+    local rc=0
+    timeout --kill-after=10 600 "$(active_venv)/bin/boxmunge-server" staging-teardown-all \
+        --reason platform-rollback || rc=$?
+    [[ "$rc" -ne 0 ]] || return 0
+    local msg="staging teardown before the rollback did not finish (exit $rc); staged releases may remain under <p>/.releases/staged/; the older release ignores them; remove each with: docker compose -p <p>-staging --project-directory <p>/.releases/staged/release -f <p>/.releases/staged/compose.staging-base.yml -f <p>/.releases/staged/compose.boxmunge-staging.yml down, then rm -rf <p>/.releases/staged and rm caddy/sites/<p>-staging.conf"
+    log "WARN: $msg"
+    bm_log warn upgrade "staging teardown before the rollback did not finish" "{\"exit\": $rc}"
+    send_notification "boxmunge rollback: staged releases not torn down" "$msg" 1
+}
+
+# complete_rollback <new_version> <from_version> <stage> <prev_slot> <count> [detail]:
+# everything after the marker. [detail] (why, when the stage alone does not
+# say) goes into the log once swapped, since before that the logging venv may
+# be the broken one, and with the failure report; a resumed rollback has none. Safe to run again after a crash part-way: the
+# swap is skipped once done, the stash restore and re-apply are idempotent,
+# and the interruption count is set, not incremented.
+complete_rollback() {
+    local new_version="$1" from_version="$2" stage="$3" prev_slot="$4" count="$5" detail="${6:-}"
+    log "ROLLBACK: $new_version failed at stage=$stage, reverting to slot $prev_slot"
+    bm_log warn upgrade "rollback initiated" "{\"version\": \"$new_version\", \"from_version\": \"$from_version\", \"stage\": \"$stage\"}"
+
+    # D14: the release being rolled back from tears down its staged releases
+    # (an older release does not know .releases/staged/). Only before the
+    # swap: once swapped, the active venv is the older release.
+    if [[ "$ACTIVE_SLOT" != "$prev_slot" ]]; then
+        teardown_before_rollback
+    fi
+    [[ "$ACTIVE_SLOT" == "$prev_slot" ]] || swap_to "$prev_slot"
+    if [[ -n "$detail" ]]; then
+        log "ROLLBACK reason: $detail"
+        bm_log warn upgrade "rolling back $new_version: $detail" "{\"version\": \"$new_version\", \"stage\": \"$stage\"}"
+    fi
+    # Any probation ended with this rollback. Left behind, it would name the
+    # now-live slot as previous_slot.
+    rm -f "$PROBATION_FILE"
+    clear_probation_markers
+
+    # 1. Stash restore returns config + state to the pre-upgrade snapshot: a
+    #    root-only copy of the stash this upgrade made (copy_rollback_stash).
+    local output rc=0 archive
+    archive="$(copy_rollback_stash "$new_version")" || rollback_partial "$new_version" "$from_version" "$stage" \
+        "$prev_slot" "stash restore" 1 "$archive"
+    output="$(restore_stash_copy "$archive" 2>&1)" || rc=$?
+    [[ "$rc" -eq 0 ]] || rollback_partial "$new_version" "$from_version" "$stage" "$prev_slot" \
+        "stash restore" "$rc" "$output"
+    log "$output"
+
+    # 2. Re-apply with the previous release's code. The stash holds inputs
+    #    (manifests, compose, secrets), not generated output: the overlays and
+    #    Caddy sites on disk, and the running containers, are still the new
+    #    release's. --apply regenerates both with the old code, reloads Caddy
+    #    and restarts projects, so a generator regression is really undone.
+    rc=0
+    output="$("$(active_venv)/bin/boxmunge-server" upgrade --apply 2>&1)" || rc=$?
+    [[ "$rc" -eq 0 ]] || rollback_partial "$new_version" "$from_version" "$stage" "$prev_slot" \
+        "re-apply of the previous release" "$rc" "$output"
+
+    refresh_docs_for_slot "$prev_slot"
+    local note
+    note="$(legacy_caddy_log_note "$from_version")"
+    if [[ -n "$note" ]]; then
+        log "WARNING:$note"
+        bm_log warn upgrade "HTTP-layer detection off after rollback" "{\"version\": \"$from_version\"}"
+    fi
+    # The box is back on the previous release. Drop the marker before any
+    # bookkeeping, the interruption count included: if that fails (a corrupt
+    # interrupted.json, say), the next fire must not restore and re-apply
+    # (restarting every project) all over again. A crash right here loses
+    # one interruption from the count: at worst one extra retry.
+    rm -f "$(rollback_marker "$prev_slot")"
+    rm -rf "$STASH_RECORD_FILE" "$STASH_COPY_DIR"
+    [[ "$stage" != interrupted ]] || interruptions "$new_version" "$count"
+    if [[ "$stage" == interrupted ]]; then
+        # Not reported to the fleet service: a power cut must not count
+        # toward suppressing a release. The operator still hears of it.
+        local outcome="not blocklisted; auto-update will retry it"
+        if [[ "$count" -ge 2 ]]; then
+            add_blocklist "$new_version" "$stage"
+            outcome="interrupted $count times, now blocklisted"
+        fi
+        bm_log warn upgrade "interrupted upgrade rolled back" "{\"version\": \"$new_version\", \"interruptions\": $count}"
+        send_notification "boxmunge ROLLBACK" "Rolled back $new_version: the upgrade was interrupted ($outcome).$note"
+    else
+        add_blocklist "$new_version" "$stage"
+        report_failure "$new_version" "$from_version" "$stage" "$detail"
+        send_notification "boxmunge ROLLBACK" "Rolled back $new_version (stage: $stage).$note"
+    fi
+
+    log "Rollback complete: reverted to $from_version"
+    exit 1
+}
+# <<< boxmunge-upgrade.d/slots.sh
+
+# >>> inlined from boxmunge-upgrade.d/probation.sh by scripts/build-shim.py
+# probation.sh — reading probation.json, deferring upgrades while a release
+# is unproven, and check-probation: finishing interrupted rollbacks and
+# upgrades, promotion, and rollback.
+# Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
+# the shim that releases ship.
+
+# A probation and root's record of it. probation.json is deploy-writable:
+# deploy may end a probation early (by removing it), but must neither start
+# one nor lengthen one, or it could defer every upgrade for good. So
+# upgrade_to records each probation it starts, before writing probation.json,
+# in root-only upgrade-root/probation-expiry:
+#   "<slot> <version> <expiry>"  the live slot, the release on probation, and
+#                                when the probation ends (seconds since 1970)
+#   "none"                       no probation since the last one ended
+# A probation.json that does not match the record (its live slot and version)
+# was not started by an upgrade: it is removed, logged and alerted
+# (refuse_unrecorded_probation). The probation ends at the earlier of the
+# recorded expiry and expires_at. A recorded expiry more than a probation's
+# length ahead means the clock went back (an NTP step, a VM restore); it is
+# moved to a probation's length from now rather than promoting at once, which
+# deleted the rollback target.
+#
+# A probation an older shim (0.11.5 or earlier) started has no record (none,
+# or that shim's "<slot> <expiry>"). It is adopted when root's own state
+# shows the upgrade it names (config/version is that release), and ends a
+# probation's length after env-active was swapped: one past that (the box was
+# off, say) is promoted at once, which is all a planted one could make
+# happen, and the record then says none is running. Otherwise it is refused
+# like any unrecorded one.
+PROBATION_EXPIRY_FILE="$UPGRADE_ROOT_DIR/probation-expiry"
+
+# record_probation <version>: root's record of a probation starting now.
+record_probation() {
+    write_root_file "$PROBATION_EXPIRY_FILE" "$ACTIVE_SLOT $1 $(( $(date +%s) + PROBATION_HOURS * 3600 ))"
+}
+
+# read_probation: parse probation.json, against root's record, into
+# PROB_VERSION, PROB_PREV_SLOT, PROB_EXPIRED (yes/no), PROB_EXPIRES_AT
+# (re-formatted in UTC, so safe to print), PROB_STATUS (recorded, adopted or
+# unrecorded), PROB_NOTE (clock_back, lengthened or nothing), PROB_RECORD (the
+# record to keep) and PROB_RECORDED (the record as found). It changes nothing:
+# settle_probation acts on the result.
+read_probation() {
+    local out content installed valid='^([ab] [^ ]+ [0-9]+|[ab] [0-9]+|none)$'
+    refuse_symlink "$PROBATION_FILE"
+    content="$(read_untrusted "$PROBATION_FILE")" || exit 1
+    refuse_symlink "$PROBATION_EXPIRY_FILE"
+    PROB_RECORDED=""
+    [[ ! -e "$PROBATION_EXPIRY_FILE" ]] || PROB_RECORDED="$(cat "$PROBATION_EXPIRY_FILE")"
+    [[ -z "$PROB_RECORDED" || "$PROB_RECORDED" =~ $valid ]] \
+        || die_logged "$PROBATION_EXPIRY_FILE is malformed. As supervisor, remove it and $PROBATION_FILE: that ends the probation, keeping the live release"
+    installed="$(installed_version)"
+    out="$(printf '%s' "$content" | BM_RECORDED="$PROB_RECORDED" BM_SLOT="$ACTIVE_SLOT" BM_HOURS="$PROBATION_HOURS" \
+        BM_INSTALLED="$installed" BM_ENV_ACTIVE="$BOXMUNGE_ROOT/env-active" python3 -c '
+import json, os, sys
+from datetime import datetime, timedelta, timezone
+d = json.loads(sys.stdin.read())
+keys = ("version", "previous_slot", "expires_at")
+if not isinstance(d, dict) or not all(isinstance(d.get(k), str) and "\n" not in d[k] for k in keys):
+    sys.exit("probation.json must hold string version, previous_slot and expires_at")
+expires = datetime.fromisoformat(d["expires_at"])
+if expires.tzinfo is None:
+    sys.exit("probation.json expires_at has no timezone")
+now = datetime.now(timezone.utc)
+length = timedelta(hours=int(os.environ["BM_HOURS"]))
+record = os.environ["BM_RECORDED"].split()  # checked by the caller
+status, note, recorded = "unrecorded", "", now
+if len(record) == 3 and record[:2] == [os.environ["BM_SLOT"], d["version"]]:
+    status, recorded = "recorded", datetime.fromtimestamp(int(record[2]), timezone.utc)
+elif len(record) < 3 and record != ["none"] and d["version"] == os.environ["BM_INSTALLED"]:
+    swapped = datetime.fromtimestamp(os.lstat(os.environ["BM_ENV_ACTIVE"]).st_mtime, timezone.utc)
+    status, recorded = "adopted", swapped + length
+if recorded > now + length:
+    recorded, note = now + length, "clock_back"
+elif expires > recorded + timedelta(minutes=1):
+    note = "lengthened"
+ends = min(expires, recorded)
+print(d["version"])
+print(d["previous_slot"])
+print("yes" if now >= ends else "no")
+print(ends.strftime("%Y-%m-%d %H:%M UTC"))
+print(status)
+print(note)
+print(int(recorded.timestamp()))
+'
+)" || die_logged "$PROBATION_FILE is malformed; refusing to act on it"
+    PROB_VERSION="$(echo "$out" | sed -n '1p')"
+    PROB_PREV_SLOT="$(echo "$out" | sed -n '2p')"
+    PROB_EXPIRED="$(echo "$out" | sed -n '3p')"
+    PROB_EXPIRES_AT="$(echo "$out" | sed -n '4p')"
+    PROB_STATUS="$(echo "$out" | sed -n '5p')"
+    PROB_NOTE="$(echo "$out" | sed -n '6p')"
+    require_semver "$PROB_VERSION" "$PROBATION_FILE"
+    require_slot "$PROB_PREV_SLOT" "$PROBATION_FILE"
+    PROB_RECORD="$ACTIVE_SLOT $PROB_VERSION $(echo "$out" | sed -n '7p')"
+}
+
+# settle_probation: act on what read_probation found.
+settle_probation() {
+    [[ "$PROB_STATUS" != unrecorded ]] || refuse_unrecorded_probation
+    if [[ "$PROB_STATUS" == adopted ]]; then
+        local ends="it ends at $PROB_EXPIRES_AT"
+        [[ "$PROB_EXPIRED" == no ]] || ends="it ran past its end with no check ($PROB_EXPIRES_AT; was the box off?), so it is promoted now"
+        log "WARN: the probation of $PROB_VERSION has no record (an older shim started it); adopted, as root's state shows that upgrade: $ends"
+        bm_log warn upgrade "probation started by an older shim adopted" "{\"version\": \"$PROB_VERSION\"}"
+    fi
+    [[ "$PROB_RECORD" == "$PROB_RECORDED" ]] || write_root_file "$PROBATION_EXPIRY_FILE" "$PROB_RECORD"
+    case "$PROB_NOTE" in
+        lengthened)
+            log "WARN: $PROBATION_FILE expires_at is later than the probation root recorded; it ends at $PROB_EXPIRES_AT" ;;
+        clock_back)
+            log "WARN: the probation of $PROB_VERSION was to end more than ${PROBATION_HOURS}h from now, so the clock went back; it now ends at $PROB_EXPIRES_AT"
+            bm_log warn upgrade "probation expiry moved: the clock went back" "{\"version\": \"$PROB_VERSION\"}" ;;
+    esac
+}
+
+# refuse_unrecorded_probation: probation.json names a probation no upgrade on
+# this box started (root's record names another slot or release, says none
+# is running, or an older shim's probation lacks the evidence above). Deploy
+# can write that file, and one it planted would defer upgrades and refuse
+# targets for a probation's length, again each time it is planted. It has no
+# authority, so it is removed, with an error in the operational log and an
+# alert: the run stops, and the next one carries on as if it was never there.
+refuse_unrecorded_probation() {
+    local msg="$PROBATION_FILE names $PROB_VERSION on probation, but no upgrade on this box started that probation (root's record, $PROBATION_EXPIRY_FILE, does not match it; one an older shim started counts only for the installed release), so it was removed and nothing else changed; the next run carries on. If it comes back, something running as the deploy user is writing it: find and stop it."
+    rm -f "$PROBATION_FILE"
+    send_notification "boxmunge: planted probation removed" "$msg" 1
+    die_logged "$msg"
+}
+
+# load_probation: 0 with PROB_* set while a release is on probation, 1 when
+# there is none. A probation naming the live slot as previous_slot is stale
+# (an older shim's rollback left it behind; deploy may remove it anyway), so
+# it is removed with a warning. previous_slot need not hold a working venv:
+# a pre-0.11 shim could recycle it mid-probation. Only a rollback needs it
+# (do_rollback checks); promotion deletes it, and demanding it here left such
+# a probation unable to expire, deferring every upgrade for good (#119).
+load_probation() {
+    [[ -e "$PROBATION_FILE" || -L "$PROBATION_FILE" ]] || return 1
+    read_probation
+    if [[ "$PROB_PREV_SLOT" == "$ACTIVE_SLOT" ]]; then
+        [[ ! -e "$(inflight_marker "$ACTIVE_SLOT")" ]] \
+            || die_logged "$PROBATION_FILE names the live slot during an interrupted upgrade; refusing to act on it"
+        log "WARN: removing stale $PROBATION_FILE: previous_slot '$PROB_PREV_SLOT' is the live slot"
+        bm_log warn upgrade "stale probation removed" "{\"version\": \"$PROB_VERSION\"}"
+        rm -f "$PROBATION_FILE"
+        return 1
+    fi
+    settle_probation
+}
+
+# work_interrupted: an upgrade or rollback was cut short, and check-probation
+# has yet to finish it.
+work_interrupted() {
+    [[ -e "$(inflight_marker "$ACTIVE_SLOT")" || -e "$(rollback_marker a)" || -e "$(rollback_marker b)" ]]
+}
+
+# refuse_during_probation <version> <mode>: while a release is on probation,
+# the standby slot holds the last proven release and is the only rollback
+# target. Building another release there would leave nothing proven to fall
+# back to, so every entry point, force-target included, waits until
+# check-probation promotes or rolls back; likewise while it has an interrupted
+# upgrade or rollback to finish. This is a deferral, not a failure of
+# <version>: no blocklist entry and no failure report. The timer (run) exits
+# 0 like a blocklisted version, and retries on its next run.
+refuse_during_probation() {
+    local version="$1" mode="$2" why retry
+    if work_interrupted; then
+        why="an earlier upgrade or rollback was interrupted, and the health timer's check-probation finishes it within minutes"
+        retry="Retry after that."
+    elif load_probation; then
+        why="$PROB_VERSION is on probation (it ends $PROB_EXPIRES_AT)"
+        [[ "$PROB_EXPIRED" == "no" ]] || why="$PROB_VERSION is on probation (it has expired and the health timer promotes it within minutes)"
+        if rollback_target_ok "$PROB_PREV_SLOT"; then
+            why="$why and slot $PROB_PREV_SLOT holds the previous release, the only rollback target"
+        else
+            why="$why; its rollback target, slot $PROB_PREV_SLOT, is not a working venv, so a failing health check cannot roll it back"
+        fi
+        retry="Retry after the probation ends."
+        [[ "$mode" != "force" ]] || retry="To accept $PROB_VERSION now and end its probation, remove $PROBATION_FILE and re-run."
+    else
+        return 0
+    fi
+    bm_log warn upgrade "upgrade deferred: probation active" "{\"version\": \"$version\", \"mode\": \"$mode\"}"
+    if [[ "$mode" == "run" ]]; then
+        log "Not upgrading to $version: $why. Deferred; auto-update retries on its next run."
+        exit 0
+    fi
+    die "Not upgrading to $version: $why. $retry"
+}
+
+# resume_rollback: a rollback-inflight marker means a rollback was cut short.
+# Finish it onto the slot holding the marker: the swap if it never happened,
+# then the stash restore and re-apply again, then the bookkeeping.
+resume_rollback() {
+    local slot marker version="" stage="" count=""
+    for slot in "$ACTIVE_SLOT" "$(standby_slot)"; do
+        marker="$(rollback_marker "$slot")"
+        [[ -e "$marker" ]] || continue
+        { read -r version; read -r stage; read -r count; } < "$marker" || true
+        require_semver "$version" "$marker"
+        [[ "$stage" =~ ^[a-z_]+$ && "$count" =~ ^[0-9]+$ ]] \
+            || die_logged "$marker is malformed; inspect both slots as supervisor"
+        rollback_target_ok "$slot" \
+            || die_logged "$marker is in env-$slot, which is not a working venv; inspect both slots as supervisor"
+        log "Resuming the interrupted rollback of $version (stage $stage) onto slot $slot"
+        complete_rollback "$version" "$("$BOXMUNGE_ROOT/env-$slot/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")" \
+            "$stage" "$slot" "$count"
+    done
+}
+
+# recover_interrupted_upgrade: the live slot still carries upgrade-inflight,
+# so the shim died after the swap and before probation was recorded (unless
+# it died just after recording it). Apply may not have finished, so roll back
+# to the standby, the proven release. A marker left in the standby means the
+# swap never happened; the orphan cleanup that follows removes that slot.
+recover_interrupted_upgrade() {
+    local marker version
+    marker="$(inflight_marker "$ACTIVE_SLOT")"
+    [[ -e "$marker" ]] || return 0
+    version="$(cat "$marker")"
+    require_semver "$version" "$marker"
+    if load_probation && [[ "$PROB_VERSION" == "$version" ]]; then
+        rm -f "$marker"
+        return 0
+    fi
+    log "Upgrade to $version was interrupted after the venv swap — rolling back"
+    do_rollback "$version" "$("$BOXMUNGE_ROOT/env-$(standby_slot)/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")" \
+        interrupted "$(standby_slot)"
+}
+
+# clear_probation_markers: forget what check-probation counted or said about
+# a probation (all in root-only upgrade-root/), and record that none is
+# running. Whenever a probation ends or starts, so a new one never inherits
+# them.
+clear_probation_markers() {
+    rm -f "$UPGRADE_ROOT_DIR/rollback-impossible" "$UPGRADE_ROOT_DIR/rollback-impossible.logged" \
+        "$UPGRADE_ROOT_DIR/live-slot-failed" "$HEALTH_BASELINE_FILE" "$HEALTH_UNJUDGED_FILE"
+    [[ "$(cat "$PROBATION_EXPIRY_FILE" 2>/dev/null)" == none ]] || write_root_file "$PROBATION_EXPIRY_FILE" none
+}
+
+# rollback_impossible <version> <prev_slot> <why>: the release on probation
+# failed (<why>), but the previous slot cannot take over (a pre-0.11 shim may
+# have recycled it). Said once per probation, as an error and an alert; later
+# timer fires only print it, rather than adding an error to the log every five
+# minutes. With a live slot that still runs, expiry promotes the release; with
+# one that does not, nothing can until it is reinstalled.
+rollback_impossible() {
+    local version="$1" prev_slot="$2" why="$3" next
+    next="Run boxmunge health as supervisor to see what failed; the probation ends, promoting $version, at $PROB_EXPIRES_AT."
+    slot_works "$ACTIVE_SLOT" \
+        || next="Nothing runs the platform until $version is reinstalled into the live slot: as root, run the installer from the $version GitHub release (sudo bash boxmunge-install.sh). The health timer then carries on with the probation."
+    local msg="$version $why, but cannot be rolled back: env-$prev_slot, its rollback target, is not a working venv. $next"
+    alert_once "$version" "$prev_slot" "$msg"
+    die "$msg"
+}
+
+# alert_once <version> <prev_slot> <msg>: put <msg> in the operational log and
+# send it as an alert, each once per probation: a marker in upgrade-root/
+# records each that went out, and the next fire retries only what did not.
+# Either venv's python may be the broken one, so each is tried, the live
+# slot's first. An alert counts as sent when Pushover took it or is not
+# configured. What did not go out is said on stderr and in the system
+# journal, which the health timer keeps.
+alert_once() {
+    local version="$1" prev_slot="$2" msg="$3" python rc missing=()
+    local alerted="$UPGRADE_ROOT_DIR/rollback-impossible" logged="$UPGRADE_ROOT_DIR/rollback-impossible.logged"
+    local pythons=("$(active_venv)/bin/python" "$BOXMUNGE_ROOT/env-$prev_slot/bin/python")
+    if [[ "$(cat "$logged" 2>/dev/null)" != "$version" ]]; then
+        for python in "${pythons[@]}"; do
+            if [[ -x "$python" ]] && bm_log_via "$python" error upgrade "$msg"; then
+                echo "$version" > "$logged"
+                break
+            fi
+        done
+        [[ "$(cat "$logged" 2>/dev/null)" == "$version" ]] || missing+=("to the operational log")
+    fi
+    if [[ "$(cat "$alerted" 2>/dev/null)" != "$version" ]]; then
+        for python in "${pythons[@]}"; do
+            [[ -x "$python" ]] || continue
+            rc=0
+            notify_via "$python" "boxmunge rollback needed but impossible" "$msg" 1 || rc=$?
+            if [[ "$rc" -eq 0 || "$rc" -eq 3 ]]; then
+                echo "$version" > "$alerted"
+                break
+            fi
+        done
+        [[ "$(cat "$alerted" 2>/dev/null)" == "$version" ]] || missing+=("as an alert")
+    fi
+    [[ "${#missing[@]}" -gt 0 ]] || return 0
+    local where="${missing[0]}"
+    [[ "${#missing[@]}" -eq 1 ]] || where="${missing[0]} or ${missing[1]}"
+    log "ALERT NOT DELIVERED ($where): $msg"
+    logger -t boxmunge-upgrade -p user.crit -- "ALERT NOT DELIVERED ($where): $msg" \
+        || log "ERROR: the system journal did not take it either"
+}
+
+# probation_failed <version> <prev_slot> <why> [detail]: roll the release on
+# probation back to the previous slot, or say why it cannot be. [detail] goes
+# with the failure report and into the log once the rollback has swapped.
+probation_failed() {
+    local version="$1" prev_slot="$2" why="$3" detail="${4:-}" from_version
+    rollback_target_ok "$prev_slot" || rollback_impossible "$version" "$prev_slot" "$why"
+    from_version="$("$BOXMUNGE_ROOT/env-$prev_slot/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")"
+    log "CRITICAL: $version $why during probation — rolling back"
+    do_rollback "$version" "$from_version" "health_probation" "$prev_slot" "$detail"
+}
+
+# check_live_slot <version> <prev_slot>: a live slot that cannot run
+# boxmunge-server cannot be checked or promoted (promotion deletes the
+# previous slot, which remove_slot refuses while the live one is dead), so it
+# is rolled back, expired or not. Not on one failure: a healthy release must
+# not be rolled back and blocklisted for a blip. Every failure counts, a crash
+# (a signal: 128 and up) included; consecutive ones are counted in a
+# root-only marker, which a working run resets. The count is keyed by the
+# live slot, not by the version in deploy-writable probation.json, which deploy
+# could rewrite between runs to start it again. Two in a row roll back, or
+# four when the latest only timed out (124, or 137 once timeout escalated to
+# SIGKILL), since a busy box can be slow for a while.
+check_live_slot() {
+    local version="$1" prev_slot="$2" server out rc=0 why count=0 seen="" needed=2
+    local marker="$UPGRADE_ROOT_DIR/live-slot-failed"
+    server="$(active_venv)/bin/boxmunge-server"
+    if [[ -x "$server" ]]; then
+        out="$(timeout --kill-after=10 60 "$server" --version 2>&1)" || rc=$?
+    else
+        out="not executable"
+        rc=126
+    fi
+    if [[ "$rc" -eq 0 ]]; then
+        rm -f "$marker"
+        return 0
+    fi
+    out="$(printf '%s' "$out" | tail -n 1 | tr -d '\n' | tr -c '[:print:]' '?')"
+    why="env-$ACTIVE_SLOT/bin/boxmunge-server --version exited $rc: ${out:0:200}"
+    read -r seen count < "$marker" 2>/dev/null || true
+    [[ "$seen" == "$ACTIVE_SLOT" && "$count" =~ ^[0-9]+$ ]] || count=0
+    count=$((count + 1))
+    local state="does not run"
+    if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+        state="did not answer"
+        needed=4
+    fi
+    if [[ "$count" -lt "$needed" ]]; then
+        echo "$ACTIVE_SLOT $count" > "$marker"
+        log "WARN: the live slot $state ($why), $count time(s) in a row; $version is rolled back at $needed"
+        bm_log warn upgrade "live slot $state" \
+            "{\"version\": \"$version\", \"slot\": \"$ACTIVE_SLOT\", \"exit\": $rc, \"in_a_row\": $count}"
+        exit 0
+    fi
+    probation_failed "$version" "$prev_slot" "is broken: $why" "live_venv_dead: $why"
+}
+
+cmd_check_probation() {
+    load_active_slot
+    acquire_lock skip  # an upgrade is in progress; retry on the next health-timer fire
+    resume_rollback
+    recover_interrupted_upgrade
+
+    local inactive
+    inactive="$(standby_slot)"
+    if ! load_probation; then
+        clear_probation_markers
+        rm -rf "$STASH_RECORD_FILE" "$STASH_COPY_DIR"
+        # No probation, so a standby venv is an orphan: left by a rollback, an
+        # upgrade that failed before its swap, or a promotion made from the
+        # deploy context (deploy cannot rmtree root-owned dirs).
+        if [[ -d "$BOXMUNGE_ROOT/env-$inactive" ]]; then
+            log "Cleaning up orphan venv in inactive slot $inactive"
+            remove_slot "$inactive"
+        fi
+        exit 0
+    fi
+    local version="$PROB_VERSION" prev_slot="$PROB_PREV_SLOT"
+
+    check_live_slot "$version" "$prev_slot"
+
+    # Expiry next: promotion needs no rollback target (it deletes it).
+    if [[ "$PROB_EXPIRED" == "yes" ]]; then
+        log "Probation expired for $version — promoting"
+        remove_slot "$prev_slot"
+        rm -f "$PROBATION_FILE"
+        clear_probation_markers
+        rm -rf "$STASH_RECORD_FILE" "$STASH_COPY_DIR"
+        interruptions "$version" 0
+        log "Version $version promoted"
+        bm_log info upgrade "probation passed" "{\"version\": \"$version\"}"
+        exit 0
+    fi
+
+    # The health check (health.sh), 180 s. A health error the baseline from
+    # before the upgrade lacks rolls back. One that could not run at all
+    # (126/127) has the live slot checked again, as above, and rolled back if
+    # it still does not run on the next fire. One that gave no verdict (it did
+    # not finish, or gave no valid report) is counted (health_unjudged).
+    local baseline
+    baseline="$(probation_baseline)"
+    health_run 180 "$baseline"
+    case "${HEALTH_VERDICT%% *}" in
+        failed)
+            log "New health errors since the upgrade: ${HEALTH_VERDICT#failed }"
+            probation_failed "$version" "$prev_slot" "failed its probation health check" \
+                "new_health_errors: ${HEALTH_VERDICT#failed }" ;;
+        not_run)
+            log "WARN: the probation health check of $version could not run (exit ${HEALTH_VERDICT#not_run }); checking the live slot"
+            check_live_slot "$version" "$prev_slot"
+            log "WARN: the live slot runs; the next health-timer run checks $version again" ;;
+        ok)
+            rm -f "$HEALTH_UNJUDGED_FILE"
+            [[ "$HEALTH_VERDICT" == ok ]] \
+                || log "WARN: health errors that were there before the upgrade, not counted against $version: ${HEALTH_VERDICT#ok }" ;;
+        *) health_unjudged "$version" "$prev_slot" "$baseline" ;;
+    esac
+
+    exit 0
+}
+# <<< boxmunge-upgrade.d/probation.sh
+
+# >>> inlined from boxmunge-upgrade.d/health.sh by scripts/build-shim.py
+# health.sh — the `health --json` report a release is judged by: run within a
+# time budget, required to be a valid report, and compared with the report
+# the previous release gave just before the upgrade.
+# Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
+# the shim that releases ship.
+#
+# A health error that was already there before the upgrade (a firewall left
+# off, a project's Caddy site the operator broke) is not the new release's
+# doing, and rolling the platform back would not fix it, so it does not roll
+# the release back; an error that was not there does. The comparison is by
+# check name. The report from before the upgrade is kept for the probation in
+# root-only upgrade-root/health-baseline, keyed by the slot the upgrade
+# installed:
+#   "<slot> report [<check name>...]"  the errors health reported before
+#   "<slot> unanswered"                health did not finish before either
+# With no baseline (health gave no valid report before the upgrade, or an
+# older shim started the probation), every error counts.
+
+HEALTH_BASELINE_FILE="$UPGRADE_ROOT_DIR/health-baseline"
+HEALTH_UNJUDGED_FILE="$UPGRADE_ROOT_DIR/health-unjudged"
+
+# health_run <budget> [<baseline>]: run the live slot's `health --json` within
+# <budget> seconds (--kill-after escalates to SIGKILL for a wedged docker
+# socket) and set HEALTH_VERDICT to its verdict against <baseline> (see
+# health_judge).
+health_run() {
+    local budget="$1" baseline="${2:-}" rc=0 out
+    out="$(timeout --kill-after=10 "$budget" "$(active_venv)/bin/boxmunge-server" health --json 2>/dev/null)" || rc=$?
+    HEALTH_VERDICT="$(health_judge "$rc" "$out" "$baseline")"
+}
+
+# health_judge <exit> <stdout> <baseline>: one line, the verdict word first:
+#   ok [<pre-existing error>...]  a valid report with no new error
+#   failed <new error>...         a valid report with an error the baseline lacks
+#   not_run <exit>                126/127: timeout could not run health at all
+#   unanswered <exit>             it timed out or was killed (124 and up)
+#   no_report <why>               anything else: a crash before the report (an
+#                                 import failure), output that is not the
+#                                 report, or a report its exit code disagrees with
+# <baseline> is a health-baseline line without its slot, or empty.
+health_judge() {
+    case "$1" in
+        126|127) echo "not_run $1"; return 0 ;;
+    esac
+    [[ "$1" -lt 124 ]] || { echo "unanswered $1"; return 0; }
+    printf '%s' "$2" | BM_RC="$1" BM_BASELINE="$3" python3 -c '
+import json, os, re, sys
+rc, baseline = int(os.environ["BM_RC"]), os.environ["BM_BASELINE"].split()
+
+def no_report(why):
+    print(f"no_report {why}")
+    sys.exit(0)
+
+try:
+    report = json.loads(sys.stdin.read())
+except ValueError:
+    no_report(f"exit {rc} without a JSON report")
+checks = report.get("checks") if isinstance(report, dict) else None
+if not isinstance(checks, list) or not checks or not all(
+        isinstance(c, dict) and isinstance(c.get("name"), str) and re.fullmatch(r"[a-z0-9][a-z0-9-]*", c["name"])
+        and c.get("status") in ("ok", "warn", "error", "skip") for c in checks):
+    no_report(f"exit {rc} with JSON that is not a health report")
+statuses = {c["status"] for c in checks}
+expected = 2 if "error" in statuses else 1 if "warn" in statuses else 0
+if report.get("exit_code") != expected or rc != expected:
+    no_report(f"exit {rc} with a report whose checks mean exit {expected}")
+errors = sorted({c["name"] for c in checks if c["status"] == "error"})
+known = set(baseline[1:]) if baseline[:1] == ["report"] else set()
+new = [e for e in errors if e not in known]
+print(" ".join(["failed", *new] if new else ["ok", *errors]))
+'
+}
+
+# health_baseline_line: the baseline (without the slot) that HEALTH_VERDICT
+# gives, a run of the release about to be replaced judged against no baseline
+# (so "failed" lists every error), or nothing.
+health_baseline_line() {
+    case "${HEALTH_VERDICT%% *}" in
+        ok) echo "report" ;;
+        failed) echo "report${HEALTH_VERDICT#failed}" ;;
+        unanswered) echo "unanswered" ;;
+    esac
+}
+
+# probation_baseline: the recorded baseline for the live slot (without the
+# slot), or nothing.
+probation_baseline() {
+    local line valid='^[ab] (report( [a-z0-9][a-z0-9-]*)*|unanswered)$'
+    refuse_symlink "$HEALTH_BASELINE_FILE"
+    [[ -e "$HEALTH_BASELINE_FILE" ]] || return 0
+    line="$(cat "$HEALTH_BASELINE_FILE")"
+    [[ "$line" =~ $valid ]] \
+        || die_logged "$HEALTH_BASELINE_FILE is malformed; remove it (every health error then counts against the release on probation)"
+    [[ "${line%% *}" != "$ACTIVE_SLOT" ]] || echo "${line#* }"
+}
+
+# health_unjudged <version> <prev_slot> <baseline>: the probation health check
+# gave no verdict (HEALTH_VERDICT is unanswered or no_report). Counted, like a
+# live slot that does not run (check_live_slot), in a root-only marker keyed
+# by the live slot that a judged run resets: two in a row without a report
+# roll the release back, or six (half an hour) when the latest only did not
+# finish in time, since a busy box can be slow for a while. A health that did
+# not finish before the upgrade either is not counted.
+health_unjudged() {
+    local version="$1" prev_slot="$2" baseline="$3" kind="${HEALTH_VERDICT%% *}" detail="${HEALTH_VERDICT#* }"
+    local seen="" count=0 needed=2 what="gave no valid report ($detail)"
+    if [[ "$kind" == unanswered ]]; then
+        what="did not finish within its time budget (exit $detail)"
+        needed=6
+        if [[ "$baseline" == unanswered ]]; then
+            log "WARN: the probation health check of $version $what, as it did before the upgrade; not counted against it"
+            return 0
+        fi
+    fi
+    [[ ! -e "$HEALTH_UNJUDGED_FILE" ]] || read -r seen count < "$HEALTH_UNJUDGED_FILE" || true
+    [[ "$seen" == "$ACTIVE_SLOT" && "$count" =~ ^[0-9]+$ ]] || count=0
+    count=$((count + 1))
+    if [[ "$count" -lt "$needed" ]]; then
+        write_root_file "$HEALTH_UNJUDGED_FILE" "$ACTIVE_SLOT $count"
+        log "WARN: the probation health check of $version $what, $count time(s) in a row; $version is rolled back at $needed"
+        bm_log warn upgrade "probation health check without a verdict" \
+            "{\"version\": \"$version\", \"slot\": \"$ACTIVE_SLOT\", \"verdict\": \"$kind\", \"in_a_row\": $count}"
+        exit 0
+    fi
+    probation_failed "$version" "$prev_slot" "health check $what $count times in a row" "health_${kind}: $detail"
+}
+# <<< boxmunge-upgrade.d/health.sh
+
+# >>> inlined from boxmunge-upgrade.d/release.sh by scripts/build-shim.py
+# release.sh — release bundles: fetching one and verifying its signature and
+# checksum, the hash-pinned requirements a slot is built from, and
+# repair-deps, which installs them into the live slot.
+# Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
+# the shim that releases ship.
+
+# Cosign verification pins. The release workflow keyless-signs SHA256SUMS via
+# Sigstore's Fulcio + Rekor. We pin the OIDC issuer and the workflow identity
+# so a signature from any other workflow (or any other repo) is rejected.
+COSIGN_CERT_IDENTITY_REGEXP='^https://github\.com/boxmunge/boxmunge/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$'
+COSIGN_OIDC_ISSUER='https://token.actions.githubusercontent.com'
+
+# verify_release_signature <download_dir>
+#
+# Verifies $download_dir/SHA256SUMS against $download_dir/SHA256SUMS.sig with
+# certificate $download_dir/SHA256SUMS.cert, pinning the certificate identity
+# to this repo's release workflow on a vX.Y.Z tag.
+#
+# Hard-requires cosign on PATH; aborts noisily if missing. Returns 0 on success
+# and non-zero on any failure (cosign missing, signature/cert files missing,
+# verification failed), with COSIGN_REASON saying why: cosign's own error
+# output, as cosign_reason cleans it.
+COSIGN_REASON=""
+verify_release_signature() {
+    local download_dir="${1:?usage: verify_release_signature <download_dir>}"
+    if ! command -v cosign >/dev/null 2>&1; then
+        COSIGN_REASON="cosign is not installed"
+        log "ERROR: cosign required for upgrade verification but not installed."
+        log "       Re-run install.sh on this host, or install cosign manually."
+        return 1
+    fi
+    local sums="$download_dir/SHA256SUMS"
+    local sig="$download_dir/SHA256SUMS.sig"
+    local cert="$download_dir/SHA256SUMS.cert"
+    if [[ ! -f "$sig" || ! -f "$cert" ]]; then
+        COSIGN_REASON="the release has no SHA256SUMS.sig or SHA256SUMS.cert"
+        log "ERROR: cosign signature/certificate not found in release artifacts"
+        log "       missing: $([[ -f "$sig" ]] || echo "SHA256SUMS.sig") $([[ -f "$cert" ]] || echo "SHA256SUMS.cert")"
+        return 1
+    fi
+    local err rc=0
+    err="$(cosign verify-blob \
+        --certificate-identity-regexp "$COSIGN_CERT_IDENTITY_REGEXP" \
+        --certificate-oidc-issuer "$COSIGN_OIDC_ISSUER" \
+        --signature "$sig" \
+        --certificate "$cert" \
+        "$sums" 2>&1 >/dev/null)" || rc=$?
+    [[ "$rc" -ne 0 ]] || return 0
+    COSIGN_REASON="$(cosign_reason "$rc" "$err")"
+    return 1
+}
+
+# cosign_reason <exit code> <stderr>: cosign's error output as one line of
+# printable ASCII, cut to 300 characters. It goes into the log, an alert and
+# the fleet failure report, so no control character or escape reaches them:
+# line breaks and tabs become spaces, anything else unprintable a '?'. The
+# warnings cosign 3 prints first for the detached flags are left out, so the
+# error itself fits in the 200 characters a failure report carries.
+cosign_reason() {
+    local reason
+    reason="$(printf '%s\n' "${2:0:4096}" | { grep -v '^Flag --[a-z-]* has been deprecated' || true; } \
+        | LC_ALL=C tr '\n\r\t' '   ' | LC_ALL=C tr -c '[:print:]' '?' | LC_ALL=C tr -s ' ')"
+    reason="${reason# }"
+    reason="${reason% }"
+    reason="${reason:-cosign exited $1 and said nothing}"
+    printf '%s' "${reason:0:300}"
+}
+
+# cosign_verify_failed <version> <from_version>: an upgrade's fetch_release
+# failed at cosign_verify. A bad signature and an unreachable Sigstore (cosign
+# searches Rekor online) look alike, and cosign's error text is not a stable
+# interface to tell them apart. So, as for a pip failure, the first refusal of
+# a version is alerted and logged with cosign's reason but not blocklisted or
+# reported, and auto-update retries it on its next run, with a fresh download;
+# a second in a row blocklists and reports it. The count (cosign_failures,
+# per version) lives in root-only upgrade-root/, so deploy can neither reset
+# nor raise it; a verified signature of that same version clears it
+# (fetch_release), and blocklisting forgets it.
+cosign_verify_failed() {
+    local version="$1" from_version="$2" count
+    count=$(( $(cosign_failures "$version") + 1 ))
+    if [[ "$count" -ge 2 ]]; then
+        cosign_failures "$version" 0
+        local detail="preflight_failed: cosign_verify: $COSIGN_REASON"
+        preflight_fail "$version" "$from_version" "preflight_failed: cosign_verify" \
+            "$FETCH_ERROR ($count times in a row); blocklisting $version" preflight "${detail:0:200}"
+    fi
+    cosign_failures "$version" "$count"
+    log "$FETCH_ERROR; $version not blocklisted: auto-update retries it, and a second failure in a row blocklists it"
+    remove_slot "$(standby_slot)"
+    bm_log warn upgrade "signature verification of $version failed (not blocklisted; a second failure in a row blocklists it): $COSIGN_REASON" \
+        "{\"version\": \"$version\", \"failures\": $count}"
+    send_notification "boxmunge upgrade failed" \
+        "Cosign could not verify the signature of $version: $COSIGN_REASON (not blocklisted; auto-update retries it, and a second failure in a row blocklists it)"
+    exit 1
+}
+
+# require_free_space: an upgrade or a repair needs 250MB under BOXMUNGE_ROOT.
+# A slot is about 90MB on Debian, MCP included. pip runs with --no-cache-dir,
+# so no wheel cache builds up under /root; the rest is headroom for the stash.
+require_free_space() {
+    local avail_mb
+    avail_mb=$(df -m "$BOXMUNGE_ROOT" | awk 'NR==2{print $4}')
+    [[ "$avail_mb" -ge 250 ]] || die "Insufficient disk space: ${avail_mb}MB available, need 250MB"
+}
+
+TMP_DOWNLOAD=""
+cleanup_download() { [[ -z "$TMP_DOWNLOAD" ]] || rm -rf "$TMP_DOWNLOAD"; }
+
+# start_download: TMP_DOWNLOAD becomes a fresh root-only directory, removed
+# when the shim exits.
+start_download() {
+    TMP_DOWNLOAD="$(mktemp -d)"
+    trap cleanup_download EXIT
+}
+
+# fetch_release <version> <dir>: download release <version>'s bundle and its
+# signed SHA256SUMS into <dir>, verify both, and extract the bundle to
+# <dir>/boxmunge. On failure it returns 1 with FETCH_STEP (the step that
+# failed, for a blocklist reason) and FETCH_ERROR set; nothing outside <dir>
+# has changed. Every step but the last fails on the release or its download;
+# bundle_extract fails on the box (the bundle passed its checksum, so it is
+# the release's own bytes: a full disk). Callers run it as
+# `fetch_release ... || <handle the failure>`, which suspends set -e here, so
+# every step checks its own result.
+FETCH_STEP=""
+FETCH_ERROR=""
+# download <dest> <url>: every download runs with upgrade.lock held, so a
+# stalled connection must not park the upgrade (and check-probation, which
+# skips while the lock is held) indefinitely.
+download() { curl -sLf -o "$1" --connect-timeout 30 --max-time 600 --proto =https --proto-redir =https "$2"; }
+# shellcheck disable=SC2034  # FETCH_STEP is read by upgrade_to, in the shim itself
+fetch_failed() { FETCH_STEP="$1"; FETCH_ERROR="$2"; }
+
+fetch_release() {
+    local version="$1" dir="$2"
+    local base="https://github.com/boxmunge/boxmunge/releases/download/v${version}"
+    local bundle="boxmunge-${version}.tar.gz"
+
+    log "Downloading bundle from ${base}/${bundle}"
+    download "$dir/$bundle" "$base/$bundle" \
+        || { fetch_failed bundle_download "Failed to download bundle"; return 1; }
+    download "$dir/SHA256SUMS" "$base/SHA256SUMS" \
+        || { fetch_failed checksum_download "Failed to download SHA256SUMS"; return 1; }
+    download "$dir/SHA256SUMS.sig" "$base/SHA256SUMS.sig" \
+        || { fetch_failed signature_download "Failed to download SHA256SUMS.sig (release is unsigned or sig artifact missing)"; return 1; }
+    download "$dir/SHA256SUMS.cert" "$base/SHA256SUMS.cert" \
+        || { fetch_failed certificate_download "Failed to download SHA256SUMS.cert (release is unsigned or cert artifact missing)"; return 1; }
+
+    # Verify cosign signature on SHA256SUMS BEFORE running sha256sum -c.
+    #
+    # This breaks the circularity of the prior design (where SHA256SUMS and
+    # the bundle came from the same release URL — an attacker who replaced
+    # the bundle could replace SHA256SUMS in lockstep). Cosign's keyless
+    # signature chains to a Fulcio cert tying SHA256SUMS to the release
+    # workflow on a tagged release of this exact repo; without the OIDC
+    # issuer pinning the attacker would need to compromise GitHub Actions
+    # OIDC, not just the release artifacts.
+    #
+    # cosign is hard-required: if the host is missing it, abort.
+    verify_release_signature "$dir" \
+        || { fetch_failed cosign_verify "Cosign verification of SHA256SUMS FAILED, refusing to install: $COSIGN_REASON"; return 1; }
+    cosign_failures "$version" 0
+    log "Cosign signature on SHA256SUMS verified (release-workflow identity)"
+    bm_log info upgrade "signature verified" "{\"version\": \"$version\"}"
+
+    # Verify checksum.
+    #
+    # SHA256SUMS lines are produced by `sha256sum <file>` and have the
+    # canonical form: `<64-hex-hash>  <filename>` (two spaces, bare filename
+    # — the release workflow takes care to write bare filenames).
+    #
+    # We do NOT pass --ignore-missing: it makes `sha256sum -c` succeed when
+    # the SHA256SUMS file lists zero matching files. An adversary who could
+    # publish a SHA256SUMS without a line for our bundle would then pass
+    # verification trivially. So instead we (a) require that SHA256SUMS
+    # contains a line for the exact bundle filename we just downloaded, and
+    # (b) run the full check. SHA256SUMS may also list boxmunge-install.sh and
+    # other release artefacts we did not download; the check is restricted to
+    # the bundle line.
+    grep -q "  ${bundle}\$" "$dir/SHA256SUMS" \
+        || { fetch_failed checksum_missing_entry "Checksum verification FAILED: SHA256SUMS does not list ${bundle}"; return 1; }
+    (cd "$dir" && grep "  ${bundle}\$" SHA256SUMS | sha256sum -c -) \
+        || { fetch_failed checksum_mismatch "Checksum verification FAILED"; return 1; }
+
+    local out
+    out="$(tar xzf "$dir/$bundle" -C "$dir" 2>&1)" \
+        || { fetch_failed bundle_extract "Failed to extract the verified bundle in $dir: $out"; return 1; }
+}
+
+# The bundle's hash-pinned requirements files (covered by the signed
+# SHA256SUMS). A slot gets every one, in one pip run: it is built from
+# scratch, so anything left out is gone after the swap, and without
+# requirements-mcp.txt agents cannot operate the box.
+PINNED_REQUIREMENTS=(requirements-build.txt requirements-tui.txt requirements-mcp.txt)
+
+# missing_requirement <bundle>: print the first PINNED_REQUIREMENTS file
+# <bundle> lacks; returns 1 when it has them all.
+missing_requirement() {
+    local req
+    for req in "${PINNED_REQUIREMENTS[@]}"; do
+        [[ -f "$1/$req" ]] || { echo "$req"; return 0; }
+    done
+    return 1
+}
+
+# install_pinned_deps <bundle> <slot>: install every PINNED_REQUIREMENTS file
+# of <bundle> into env-<slot>, hash-checked, so nothing beyond the pins is
+# resolved. No pip self-upgrade (one more unpinned download) and no cache
+# (nothing builds up under /root). Check missing_requirement first.
+install_pinned_deps() {
+    local req reqs=()
+    for req in "${PINNED_REQUIREMENTS[@]}"; do reqs+=(-r "$1/$req"); done
+    "$BOXMUNGE_ROOT/env-$2/bin/pip" install --quiet --no-cache-dir --require-hashes "${reqs[@]}"
+}
+
+# repair-deps: install the installed release's hash-pinned dependencies into
+# the live slot, from that release's own bundle, fetched and verified as an
+# upgrade fetches it. An upgrade is run by the box's current shim, which
+# installs only the requirements files it knows: up to 0.10.1 that left
+# requirements-mcp.txt out, so the new release came up without MCP. pip
+# leaves what is already installed as pinned alone; no slot is built,
+# swapped or removed. Deploy may sudo it (with no arguments). Allowed during
+# probation: it changes only the live slot, never the standby a rollback
+# needs.
+cmd_repair_deps() {
+    [[ $# -eq 0 ]] || die "Usage: boxmunge-upgrade repair-deps"
+    load_active_slot
+    acquire_lock
+    if work_interrupted; then
+        die "Not repairing: an earlier upgrade or rollback was interrupted, and the health timer's check-probation finishes it within minutes. Retry after that."
+    fi
+    local version running missing
+    version="$(installed_version)"
+    running="$(slot_version "$ACTIVE_SLOT")"
+    [[ "$running" == "$version" ]] \
+        || die "The live slot env-$ACTIVE_SLOT runs boxmunge '${running:-nothing}', but $VERSION_FILE records $version; refusing to install $version's dependencies into it. Inspect it as supervisor"
+
+    require_free_space
+    log "Repairing the hash-pinned dependencies of $version in the live slot $ACTIVE_SLOT"
+    start_download
+    fetch_release "$version" "$TMP_DOWNLOAD" || die "$FETCH_ERROR (nothing was changed)"
+    if missing="$(missing_requirement "$TMP_DOWNLOAD/boxmunge")"; then
+        die "Bundle $version has no hash-pinned $missing; refusing an unpinned install. Nothing was changed."
+    fi
+    # A live slot this breaks: during probation the health timer rolls it back.
+    local broken="inspect env-$ACTIVE_SLOT as supervisor"
+    [[ ! -e "$PROBATION_FILE" ]] \
+        || broken="$version is on probation, so the health timer rolls back to the previous release once two of its runs in a row (5 minutes apart) find it so"
+    if ! install_pinned_deps "$TMP_DOWNLOAD/boxmunge" "$ACTIVE_SLOT"; then
+        local state="its boxmunge-server still runs"
+        slot_works "$ACTIVE_SLOT" || state="its boxmunge-server NO LONGER RUNS ($broken)"
+        die "pip could not install the hash-pinned dependencies of $version into the live slot $ACTIVE_SLOT (see above), and $state; retry once the cause (network, disk space) is fixed"
+    fi
+    slot_works "$ACTIVE_SLOT" \
+        || die "env-$ACTIVE_SLOT/bin/boxmunge-server no longer runs after the dependency install; $broken"
+    bm_log info upgrade "dependencies repaired" "{\"version\": \"$version\", \"slot\": \"$ACTIVE_SLOT\"}"
+    log "Installed every hash-pinned dependency of $version into the live slot $ACTIVE_SLOT"
+}
+# <<< boxmunge-upgrade.d/release.sh
+
+# >>> inlined from boxmunge-upgrade.d/system.sh by scripts/build-shim.py
+# system.sh — deploy's sudo rule, on-box docs, the shim's own self-update and
+# the system upgrade (the bundle's install.sh re-run).
+# Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
+# the shim that releases ship.
+
+# ---------------------------------------------------------------------------
+# deploy's sudo rule. Owned here so install.sh and every upgrade write the
+# same text; a box whose rule predates a tightening is fixed on its next
+# upgrade. sudo matches the whole argument string against each pattern, so
+# `target *` cannot reach force-target or any other subcommand, and `auto`
+# and `repair-deps` take no further words.
+# ---------------------------------------------------------------------------
+sudoers_rule() {
+    cat <<EOF
+# Managed by boxmunge-upgrade install-sudoers; rewritten on every install and upgrade.
+deploy ALL=(root) NOPASSWD: $BIN_DIR/boxmunge-upgrade auto, $BIN_DIR/boxmunge-upgrade target *, $BIN_DIR/boxmunge-upgrade repair-deps
+EOF
+}
+
+cmd_install_sudoers() {
+    local tmp
+    if [[ -f "$SUDOERS_FILE" && ! -L "$SUDOERS_FILE" ]] && cmp -s <(sudoers_rule) "$SUDOERS_FILE"; then
+        return 0
+    fi
+    # A dot in the name keeps sudo from reading the temp file mid-write.
+    tmp="$(mktemp "$(dirname "$SUDOERS_FILE")/.boxmunge-deploy.XXXXXX")"
+    sudoers_rule > "$tmp"
+    chmod 0440 "$tmp"
+    if ! visudo -cqf "$tmp" >/dev/null; then
+        rm -f "$tmp"
+        die "Generated sudoers rule failed visudo; $SUDOERS_FILE left unchanged"
+    fi
+    replace_file "$tmp" "$SUDOERS_FILE"
+    log "Wrote deploy sudo rule to $SUDOERS_FILE"
+}
+
+# ---------------------------------------------------------------------------
+# On-box docs (served by agent-help). Each venv slot keeps the docs of the
+# release it holds in env-<slot>/boxmunge-docs, so a rollback can put the
+# matching docs back. docs/ is a symlink to a versioned sibling directory and
+# is swapped by rename: a reader sees the old set or the new set, never a
+# partial or empty one. Doc files missing from the new set disappear.
+# ---------------------------------------------------------------------------
+slot_docs() { echo "$BOXMUNGE_ROOT/env-$1/boxmunge-docs"; }
+
+# install_docs <dir>: returns non-zero (and changes nothing) if <dir> has no
+# *.md files.
+install_docs() {
+    local src="$1" docs="$BOXMUNGE_ROOT/docs" stage link previous old=""
+    if ! compgen -G "$src/*.md" >/dev/null; then
+        log "ERROR: no *.md docs in $src; $docs left unchanged"
+        return 1
+    fi
+    stage="$(mktemp -d "$BOXMUNGE_ROOT/.docs.XXXXXX")"
+    cp "$src"/*.md "$stage/"
+    chmod 0644 "$stage"/*.md
+    chmod 0755 "$stage"
+    if [[ "$(id -u)" -eq 0 ]]; then chown -R root:root "$stage"; fi
+    link="$stage.link"
+    ln -s "$(basename "$stage")" "$link"
+    previous="$(readlink "$docs" 2>/dev/null || true)"
+    if [[ -d "$docs" && ! -L "$docs" ]]; then
+        # One-time move from a plain directory (installs before this change).
+        old="$stage.old"
+        mv "$docs" "$old"
+    fi
+    replace_file "$link" "$docs"
+    [[ -z "$old" ]] || rm -rf "$old"
+    if [[ "$previous" =~ ^\.docs\.[A-Za-z0-9]+$ ]]; then rm -rf "${BOXMUNGE_ROOT:?}/$previous"; fi
+    log "Installed docs from $src"
+}
+
+cmd_install_docs() {
+    local src="${1:?Usage: boxmunge-upgrade install-docs <dir>}"
+    [[ "$src" == /* ]] || die "install-docs needs an absolute path (the shim runs from /), not '$src'"
+    install_docs "$src" || die "install-docs failed"
+}
+
+# seed_slot_docs <slot>: a slot installed by install.sh (or an older shim)
+# has no docs copy; record the live docs as its own so a rollback to it
+# restores them.
+seed_slot_docs() {
+    local dest
+    dest="$(slot_docs "$1")"
+    if [[ ! -d "$dest" ]] && compgen -G "$BOXMUNGE_ROOT/docs/*.md" >/dev/null; then
+        mkdir -p "$dest"
+        cp "$BOXMUNGE_ROOT/docs/"*.md "$dest/"
+    fi
+}
+
+# refresh_docs_for_slot <slot>: best effort, because a docs failure must not
+# undo an upgrade or a rollback. Logged loudly so it is not missed.
+refresh_docs_for_slot() {
+    local src
+    src="$(slot_docs "$1")"
+    if [[ ! -d "$src" ]] || ! install_docs "$src"; then
+        log "ERROR: docs not refreshed for slot $1 ($src missing or empty); agent-help may be stale"
+        bm_log error upgrade "docs refresh failed" "{\"slot\": \"$1\"}"
+    fi
+}
+
+# install_by_rename <src> <dest>: <src> as <dest>, 0755 and root's (root
+# makes the temp), through a temp file renamed over <dest>. install(1)
+# truncates and rewrites <dest> in place, and bash reads a script from its
+# file as it runs: writing through the running shim's inode would hand this
+# very upgrade the new bytes part-way through (sshd execs boxmunge-sftp for
+# every SFTP request, too). A temp a run killed before its rename is removed
+# by the next (bin/ is root's, and every caller holds upgrade.lock).
+install_by_rename() {
+    local tmp prefix
+    prefix="$(dirname "$2")/.$(basename "$2")"
+    rm -f "$prefix".*
+    tmp="$(mktemp "$prefix.XXXXXX")"
+    { cp "$1" "$tmp" && chmod 0755 "$tmp" && mv -f "$tmp" "$2"; } || { rm -f "$tmp"; return 1; }
+}
+
+# self_update_shim <bundle_dir>: install the bundle's shim (and other bin/
+# wrappers) over the running ones. Without this, shim fixes would take effect
+# only on the upgrade after they ship. Gated on `bash -n`, and on the shim
+# being a built one: a syntactically broken or unbuilt shim would brick
+# `boxmunge-upgrade` until install.sh is re-run, so it is refused and the
+# running shim kept (the venv install still goes ahead; the fix is just
+# deferred to the next release).
+self_update_shim() {
+    local bundle="$1" new_shim="$1/scripts/boxmunge-upgrade" f name
+    if [[ -f "$new_shim" ]]; then
+        if ! bash -n "$new_shim" 2>/dev/null; then
+            log "ERROR: new shim has syntax errors; refusing to install. Old shim retained."
+            bm_log error upgrade "shim self-update skipped: bash -n failed" "{}"
+        elif grep -q '^# >>> boxmunge-upgrade.d:' "$new_shim"; then
+            log "ERROR: bundle carries an unbuilt source shim; refusing to install. Old shim retained."
+            bm_log error upgrade "shim self-update skipped: unbuilt shim" "{}"
+        else
+            log "Self-updating upgrade shim from bundle..."
+            install_by_rename "$new_shim" "$BIN_DIR/boxmunge-upgrade"
+            bm_log info upgrade "shim self-updated" "{}"
+        fi
+    fi
+    # Other wrappers under bin/ the bundle ships. boxmunge-sftp is the SFTP
+    # wrapper invoked by sshd (it refuses deploy).
+    # shellcheck disable=SC2043  # one wrapper today; new bin/ wrappers go in this list
+    for name in boxmunge-sftp; do
+        f="$bundle/scripts/$name"
+        [[ -f "$f" ]] || continue
+        if bash -n "$f" 2>/dev/null; then
+            install_by_rename "$f" "$BIN_DIR/$name"
+            bm_log info upgrade "wrapper self-updated" "{\"name\": \"$name\"}"
+        else
+            log "ERROR: new $name has syntax errors; refusing to install. Old wrapper retained."
+            bm_log error upgrade "wrapper self-update skipped: bash -n failed" "{\"name\": \"$name\"}"
+        fi
+    done
+}
+
+# ---------------------------------------------------------------------------
+# System upgrade: re-run the bundle's install.sh before the slot swap when it
+# differs from the one this box last ran, so new system pieces (apt packages,
+# systemd units, Caddy's compose file, install.sh-only migrations) are in
+# place by the time the new venv goes live. install.sh records a fingerprint of itself and the files it
+# installs from at the end of every successful run; the shim computes the same
+# over the new bundle (tests/test_installer_fingerprint.py).
+# ---------------------------------------------------------------------------
+
+# installer_fingerprint: print the fingerprint install.sh last recorded, or
+# nothing when there is none. It is in root-only upgrade-root/. Releases up to
+# 0.11.3 kept it in deploy-writable state/, which is never read: deploy could
+# put a link there (root would read the target into the logs), a FIFO (the
+# upgrade would block with the lock held) or the bundle's own hash (root
+# would skip install.sh). A box upgrading from one of those has none here
+# yet, so install.sh runs once, the safe default, and records it.
+installer_fingerprint() {
+    refuse_symlink "$UPGRADE_ROOT_DIR"
+    refuse_symlink "$INSTALLER_HASH_FILE"
+    [[ -e "$INSTALLER_HASH_FILE" ]] || return 0
+    read_untrusted "$INSTALLER_HASH_FILE"
+}
+
+# system_upgrade <bundle_dir> <version> <from_version>: install.sh is gated on
+# `bash -n` like the shim's self-update: a syntactically broken one must not
+# brick the box. If it fails, the upgrade fails before the swap (the version
+# is blocklisted, the previous venv stays live) and the operator diagnoses it.
+# Called with --upgrade-shim, install.sh also installs its bundle's
+# hash-pinned requirements into the standby (bootstrap/venv-deps.sh); after
+# the shim's own install pip has nothing to do. That is for older shims,
+# which install only the requirements files they know.
+system_upgrade() {
+    local bundle="$1" version="$2" from_version="$3"
+    local new_install_sh="$1/install.sh" new_hash current_hash sysup_exit=0
+    [[ -f "$new_install_sh" ]] || return 0
+    if ! bash -n "$new_install_sh" 2>/dev/null; then
+        bm_log error upgrade "system upgrade skipped: bash -n failed" "{\"version\": \"$version\"}"
+        preflight_fail "$version" "$from_version" "system_upgrade_failed: install_sh_syntax" \
+            "ERROR: bundled install.sh has syntax errors; refusing to run system upgrade" system_upgrade
+    fi
+    new_hash="$( (cd "$bundle" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' -o -path './system/*' -o -path './systemd/*' -o -path ./caddy/compose.yml -o -path './caddy/maintenance/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}')"
+    current_hash="$(installer_fingerprint)" || exit 1
+    if [[ "$new_hash" == "$current_hash" ]]; then
+        log "install.sh unchanged (${new_hash:0:8}); skipping system upgrade"
+        return 0
+    fi
+    if [[ -z "$current_hash" ]]; then
+        log "No installer fingerprint in $UPGRADE_ROOT_DIR (new=${new_hash:0:8}); running system upgrade..."
+    else
+        log "install.sh changed (current=$(printable "${current_hash:0:8}"), new=${new_hash:0:8}); running system upgrade..."
+    fi
+    bm_log info upgrade "system upgrade started" \
+        "{\"new_hash\": \"${new_hash:0:16}\", \"prev_hash\": \"$(printable "${current_hash:0:16}")\"}"
+    bash "$new_install_sh" --upgrade-shim || sysup_exit=$?
+    if [[ "$sysup_exit" -ne 0 ]]; then
+        bm_log error upgrade "system upgrade failed" "{\"exit_code\": $sysup_exit}"
+        preflight_fail "$version" "$from_version" "system_upgrade_failed: install_sh_exit_${sysup_exit}" \
+            "ERROR: install.sh failed (exit ${sysup_exit}); aborting upgrade before slot swap" system_upgrade
+    fi
+    bm_log info upgrade "system upgrade completed" "{\"hash\": \"${new_hash:0:16}\"}"
+}
+# <<< boxmunge-upgrade.d/system.sh
+
+# >>> inlined from boxmunge-upgrade.d/userns.sh by scripts/build-shim.py
+# userns.sh — the root-only user-namespace migration (OPERATIONS.md,
+# "User-namespace remapping"). The supervisor runs these through sudo; they
+# are not in deploy's sudo rule. The Python core (`boxmunge-server userns
+# ...`) refuses to run unless it inherits this shim's upgrade.lock.
+
+USERNS_JOURNAL="$UPGRADE_ROOT_DIR/userns-migration.json"
+# The first release that understands a remapped daemon. A release before it
+# would start the system container in the remapped namespace.
+FIRST_USERNS_RELEASE="0.11.0"
+
+# userns_state: "<direction> <phase>" from the journal ("forward commit"
+# for an applied migration whose commit began), or nothing when there is
+# none. The directory is root-only; the file is still opened
+# without following a link.
+userns_state() {
+    refuse_symlink "$UPGRADE_ROOT_DIR"
+    refuse_symlink "$USERNS_JOURNAL"
+    [[ -e "$USERNS_JOURNAL" ]] || return 0
+    BM_FILE="$USERNS_JOURNAL" python3 -c 'import json, os
+fd = os.open(os.environ["BM_FILE"], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+with os.fdopen(fd) as f:
+    doc = json.load(f)
+d, p = doc["direction"], doc["phase"]
+assert isinstance(d, str) and isinstance(p, str) and d.isalpha() and p.replace("-", "").isalpha()
+if p == "applied" and "commit-before" in (doc.get("items") or {}):
+    p = "commit"
+print(d, p)' 2>/dev/null || die "$USERNS_JOURNAL is malformed; inspect it (boxmunge-server userns check)"
+}
+
+# userns_guard_target <version>: force-target may not go below the first
+# release that understands remapping while the box is remapped.
+userns_guard_target() {
+    local state
+    state="$(userns_state)"
+    if [[ "$state" == "forward applied" || "$state" == "forward commit" || "$state" == "forward committed" ]] \
+            && semver_lt "$1" "$FIRST_USERNS_RELEASE"; then
+        die "Refusing $1: this box's Docker daemon is remapped (userns migration ${state#* }), and releases before $FIRST_USERNS_RELEASE would start the system container in the remapped namespace."
+    fi
+}
+
+# userns_finish <state>: the subcommand that finishes a stopped <state>.
+userns_finish() {
+    case "$1" in
+        "forward commit") echo "userns-commit" ;;
+        rollback\ *) echo "userns-rollback" ;;
+        *) echo "userns-migrate (to resume) or userns-rollback" ;;
+    esac
+}
+
+# userns_refuse_mid_migration <version> <mode>: no upgrade while a migration,
+# its rollback or its commit is stopped part-way: an upgrade restarts
+# projects, which would start them on data that is only partly shifted, or
+# from a store being deleted.
+userns_refuse_mid_migration() {
+    local state
+    state="$(userns_state)"
+    case "${state#* }" in
+        ""|applied|committed|rolled-back) return 0 ;;
+    esac
+    bm_log warn upgrade "upgrade deferred: userns migration in progress" "{\"version\": \"$1\"}"
+    if [[ "$2" == "run" ]]; then
+        log "Not upgrading to $1: a userns $state is in progress. Deferred; auto-update retries on its next run."
+        exit 0
+    fi
+    die "Not upgrading to $1: a userns $state is stopped part-way. Finish it first: sudo $BOXMUNGE_ROOT/bin/boxmunge-upgrade $(userns_finish "$state")."
+}
+
+userns_run() {  # userns_run <check|migrate|rollback|commit>
+    load_active_slot
+    if [[ "$1" != "check" ]]; then
+        acquire_lock
+        if [[ "$1" == "migrate" ]]; then
+            if [[ -e "$(inflight_marker "$ACTIVE_SLOT")" || -e "$(rollback_marker a)" || -e "$(rollback_marker b)" ]]; then
+                die "Not migrating: an upgrade or rollback was interrupted; the health timer's check-probation finishes it within minutes. Retry after that."
+            fi
+            if load_probation; then
+                die "Not migrating: $PROB_VERSION is on probation until $PROB_EXPIRES_AT. Migrate after it ends."
+            fi
+        fi
+    fi
+    bm_log info userns "userns $1 started" "{}"
+    "$(active_venv)/bin/boxmunge-server" userns "$1"
+}
+
+cmd_userns_migrate() {
+    case "$#:${1:-}" in
+        0:) userns_run migrate ;;
+        1:--check) userns_run check ;;
+        *) die "Usage: boxmunge-upgrade userns-migrate [--check]" ;;
+    esac
+}
+
+cmd_userns_rollback() { [[ $# -eq 0 ]] || die "Usage: boxmunge-upgrade userns-rollback"; userns_run rollback; }
+cmd_userns_commit() { [[ $# -eq 0 ]] || die "Usage: boxmunge-upgrade userns-commit"; userns_run commit; }
+# <<< boxmunge-upgrade.d/userns.sh
+
+# preflight_fail <version> <from_version> <blocklist_reason> <message> [stage] [detail]
+#
+# Abort before the slot swap: drop the half-built standby venv, blocklist
+# the version so auto-update stops retrying it, and report the failure, with
+# <detail> (by default the blocklist reason) as the report's reason.
+preflight_fail() {
+    log "$4"
+    remove_slot "$(standby_slot)"
+    add_blocklist "$1" "$3"
+    report_failure "$1" "$2" "${5:-preflight}" "${6:-$3}"
+    exit 1
+}
+
+# dependency_install_failed <version> <from_version>: pip could not install
+# the bundle's hash-pinned dependencies. That is rarely the release's fault
+# (a network blip, the disk filling mid-install), so, as for an interrupted
+# upgrade, the first failure of a version is not blocklisted or reported to
+# the fleet service and auto-update retries it; a second in a row is.
+dependency_install_failed() {
+    local version="$1" from_version="$2" count
+    count=$(( $(pip_failures "$version") + 1 ))
+    pip_failures "$version" "$count"
+    [[ "$count" -lt 2 ]] || preflight_fail "$version" "$from_version" "preflight_failed: pip_install_deps" \
+        "Failed to install hash-pinned dependencies from bundle ($count times in a row); blocklisting $version"
+    log "Failed to install hash-pinned dependencies from bundle; not blocklisted, auto-update will retry $version"
+    remove_slot "$(standby_slot)"
+    bm_log warn upgrade "dependency install failed" "{\"version\": \"$version\", \"failures\": $count}"
+    send_notification "boxmunge upgrade failed" "Could not install the dependencies of $version (not blocklisted; auto-update will retry it)"
+    exit 1
+}
+
+# stash_failed <version> <output>: the platform stash was refused (a symlink
+# it cannot hold) or failed (a full disk) before anything changed. That is the
+# box's doing, not the release's, so the version is not blocklisted or
+# reported; the standby is dropped and the operator alerted, so an unattended
+# auto-update stopping here every run is seen.
+stash_failed() {
+    local version="$1" output="$2"
+    log "Stash creation failed, aborting; $version not blocklisted: $output"
+    remove_slot "$(standby_slot)"
+    bm_log error upgrade "upgrade to $version aborted before any change: stash creation failed: $output" \
+        "{\"version\": \"$version\"}"
+    send_notification "boxmunge upgrade failed" \
+        "The platform stash failed, so the upgrade to $version stopped before changing anything (not blocklisted; auto-update will retry it). Fix this and retry: $output"
+    exit 1
+}
+
+# extract_failed <version> <message>: the bundle passed its checksum but did
+# not extract, so the box failed (a full disk under the download directory),
+# not the release: like stash_failed, not blocklisted or reported, and the
+# operator is alerted, so an auto-update stopping here every run is seen.
+extract_failed() {
+    local version="$1" message="$2"
+    log "$message; $version not blocklisted"
+    remove_slot "$(standby_slot)"
+    bm_log error upgrade "upgrade to $version aborted before any change: bundle extract failed" \
+        "{\"version\": \"$version\"}"
+    send_notification "boxmunge upgrade failed" \
+        "The verified bundle of $version did not extract, so the upgrade stopped before changing anything (not blocklisted; auto-update will retry it). Free disk space and retry: $message"
+    exit 1
+}
+
+# run <version> <url> [<class>]: the auto-update timer's entry point (root
+# only). Releases before 0.10.1 pass no class.
+cmd_run() {
+    [[ $# -eq 2 || $# -eq 3 ]] || die "Usage: boxmunge-upgrade run <version> <url> [<class>]"
+    upgrade_to "$1" run "${3:-}"
+}
+
+# applied_alert <version> <mode> <class>: the title, a tab, and the message of
+# the alert a successful upgrade sends. Only a release discovery named says
+# its class; target and force-target install one by version alone.
+applied_alert() {
+    local version="$1" mode="$2" class="$3" title how=""
+    case "$class" in
+        security) title="boxmunge security update applied" ;;
+        breakfix) title="boxmunge break-fix update applied" ;;
+        feature)  title="boxmunge feature update applied" ;;
+        "")       title="boxmunge upgrade applied" ;;
+    esac
+    case "$mode" in
+        target) how="targeted upgrade; " ;;
+        force)  how="operator-forced upgrade; " ;;
+    esac
+    printf '%s\t%s\n' "$title" "Updated to $version (${how}probation: ${PROBATION_HOURS}h)"
+}
+
+# upgrade_to <version> <mode> [<class>]: the upgrade itself, after the policy
+# check. <mode> is run (timer and auto), target or force (see check_policy);
+# <class> is the release class discovery gave, if any.
+upgrade_to() {
+    local version="$1" mode="$2" class="${3:-}"
+    case "$class" in
+        ""|feature|breakfix|security) ;;
+        *) die "Unknown release class '$(printable "$class")' for $version (expected feature, breakfix or security)" ;;
+    esac
+
+    load_active_slot
+    acquire_lock
+    check_policy "$version" "$mode"
+    refuse_during_probation "$version" "$mode"
+    userns_refuse_mid_migration "$version" "$mode"
+    [[ "$mode" != "force" ]] || userns_guard_target "$version"
+    cmd_install_sudoers
+    seed_slot_docs "$ACTIVE_SLOT"
+
+    local prev_slot from_version standby
+    prev_slot="$ACTIVE_SLOT"
+    # The fleet service wants the bare X.Y.Z.
+    from_version="$(slot_version "$ACTIVE_SLOT")"
+    from_version="${from_version:-unknown}"
+    standby="$(standby_slot)"
+
+    # 0. BASELINE: the health of the release being replaced, so a problem that
+    # was there before the upgrade does not roll this one back (health.sh).
+    log "Checking health before the upgrade..."
+    local baseline
+    health_run 180
+    baseline="$(health_baseline_line)"
+    case "$baseline" in
+        "") log "WARN: health gave no report before the upgrade ($HEALTH_VERDICT); every health error after it counts against $version" ;;
+        report) ;;
+        report\ *) log "Health errors before the upgrade, not counted against $version:${baseline#report}" ;;
+        unanswered) log "WARN: health did not finish before the upgrade either; that alone does not count against $version" ;;
+    esac
+
+    # 1. PREPARE
+    log "Preparing standby venv (slot $standby)..."
+    require_free_space
+
+    remove_slot "$standby"
+    python3 -m venv "$BOXMUNGE_ROOT/env-$standby"
+
+    # Download the bundle from its GitHub release and verify its signature
+    # and checksum (fetch_release).
+    start_download
+    # shellcheck disable=SC2153  # TMP_DOWNLOAD is set by start_download
+    local tmp_download="$TMP_DOWNLOAD"
+    if ! fetch_release "$version" "$tmp_download"; then
+        [[ "$FETCH_STEP" != bundle_extract ]] || extract_failed "$version" "$FETCH_ERROR"
+        [[ "$FETCH_STEP" != cosign_verify ]] || cosign_verify_failed "$version" "$from_version"
+        preflight_fail "$version" "$from_version" "preflight_failed: $FETCH_STEP" "$FETCH_ERROR"
+    fi
+
+    # Dependencies only from the bundle's hash-pinned requirements (covered by
+    # the signed SHA256SUMS), every one of them, MCP included; the package
+    # itself with no further resolution, built by the hash-pinned backend.
+    local bundle="$tmp_download/boxmunge" missing
+    if missing="$(missing_requirement "$bundle")"; then
+        preflight_fail "$version" "$from_version" "preflight_failed: no_pinned_requirements" \
+            "Bundle has no hash-pinned $missing; refusing an unpinned install"
+    fi
+    install_pinned_deps "$bundle" "$standby" || dependency_install_failed "$version" "$from_version"
+    pip_failures "$version" 0
+    "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --no-cache-dir --no-deps --no-build-isolation "$bundle" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: pip_install" \
+            "Failed to install boxmunge from bundle"
+    compgen -G "$tmp_download/boxmunge/on-server/*.md" >/dev/null \
+        || preflight_fail "$version" "$from_version" "preflight_failed: bundle_docs" \
+            "Bundle has no on-server/*.md docs"
+    mkdir -p "$(slot_docs "$standby")"
+    cp "$tmp_download/boxmunge/on-server/"*.md "$(slot_docs "$standby")/"
+
+    # 2. PRE-FLIGHT
+    log "Running pre-flight checks..."
+
+    # Pre-flight import test: verify the new venv can import boxmunge and
+    # report a non-empty version. v0.9.0 dropped the stale
+    # `boxmunge.__version__` constant (drift-prone, not actually the source
+    # of truth) — read from `boxmunge.version.get_build_version()` instead,
+    # which has been the canonical accessor since v0.5.
+    "$BOXMUNGE_ROOT/env-$standby/bin/python" -c "from boxmunge.version import get_build_version; print(get_build_version())" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: import" \
+            "Pre-flight FAILED: import test"
+
+    "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge-server" --version >/dev/null 2>&1 \
+        || preflight_fail "$version" "$from_version" "preflight_failed: cli_version" \
+            "Pre-flight FAILED: CLI version check"
+
+    "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge-server" upgrade --dry-run \
+        || preflight_fail "$version" "$from_version" "preflight_failed: dry_run" \
+            "Pre-flight FAILED: dry-run upgrade"
+
+    log "Pre-flight passed"
+
+    # 3. STASH (using active/trusted venv)
+    log "Creating platform stash..."
+    local stash_out
+    stash_out="$("$(active_venv)/bin/boxmunge-server" stash create 2>&1)" \
+        || stash_failed "$version" "$stash_out"
+    log "$stash_out"
+    local stash_problem
+    stash_problem="$(record_stash "$version" "$stash_out")" || stash_failed "$version" "$stash_problem"
+
+    # 3a. Refresh tree-level templates that aren't shipped in the venv.
+    # Today: the canary project, used by `boxmunge self-test`. Without this,
+    # an auto-updated host has no /opt/boxmunge/canary and self-test errors.
+    # Runs as root; perms aren't a concern. Overwrite any prior dir.
+    if [[ -d "$tmp_download/boxmunge/canary" ]]; then
+        log "Refreshing /opt/boxmunge/canary from bundle..."
+        rm -rf "$BOXMUNGE_ROOT/canary"
+        cp -r "$tmp_download/boxmunge/canary" "$BOXMUNGE_ROOT/canary"
+        chown -R root:root "$BOXMUNGE_ROOT/canary"
+        bm_log info upgrade "canary refreshed" "{\"version\": \"$version\"}"
+    fi
+
+    # 3b. Self-update the upgrade shim and its libraries (see self_update_shim).
+    self_update_shim "$tmp_download/boxmunge"
+
+    # 3c. System upgrade: re-run the bundle's install.sh if it changed (see
+    # system_upgrade).
+    system_upgrade "$tmp_download/boxmunge" "$version" "$from_version"
+
+    # 4. SWAP. Until probation is recorded, the marker is what keeps
+    # check-probation from deleting the previous slot as an orphan after a
+    # crash; it is synced to disk before the new slot can go live.
+    echo "$version" > "$(inflight_marker "$standby")"
+    sync
+    log "Swapping to standby venv (slot $standby)..."
+    swap_to "$standby"
+
+    # 5. APPLY (using new active venv)
+    log "Applying upgrade..."
+    "$(active_venv)/bin/boxmunge-server" upgrade --apply || {
+        do_rollback "$version" "$from_version" "apply" "$prev_slot"
+    }
+
+    # 6. VERIFY. The post-swap quick check (60 s; probation does the long
+    # validation). Only a health error the baseline lacks rolls back here.
+    # One that gives no verdict (it did not run, finish or report) is left to
+    # check-probation, which counts it: swap_to has just run this slot's
+    # boxmunge-server, so one such run is more likely a blip than a broken
+    # release worth blocklisting.
+    log "Running health check..."
+    health_run 60 "$baseline"
+    case "${HEALTH_VERDICT%% *}" in
+        failed)
+            log "New health errors after the swap: ${HEALTH_VERDICT#failed }"
+            do_rollback "$version" "$from_version" "health_immediate" "$prev_slot" "new_health_errors: ${HEALTH_VERDICT#failed }" ;;
+        ok) [[ "$HEALTH_VERDICT" == ok ]] \
+                || log "WARN: health errors that were there before the upgrade, not counted against $version: ${HEALTH_VERDICT#ok }" ;;
+        *) log "WARN: the health check after the swap gave no verdict ($HEALTH_VERDICT); the probation checks again" ;;
+    esac
+
+    # 7. ENTER PROBATION. Root's record of it goes first (probation.sh): a
+    # crash before probation.json is written leaves a record and no
+    # probation, which check-probation rolls back as an interrupted upgrade.
+    log "Entering probation for $version..."
+    clear_probation_markers
+    record_probation "$version"
+    BM_VERSION="$version" BM_PREV_SLOT="$prev_slot" BM_HOURS="$PROBATION_HOURS" "$(active_venv)/bin/python" -c "
+import os
+from boxmunge.upgrade_state import write_probation
+from boxmunge.paths import BoxPaths
+write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT'], hours=int(os.environ['BM_HOURS']))
+"
+    [[ -z "$baseline" ]] || write_root_file "$HEALTH_BASELINE_FILE" "$ACTIVE_SLOT $baseline"
+    bm_log info upgrade "probation entered" "{\"version\": \"$version\", \"prev_slot\": \"$prev_slot\", \"hours\": $PROBATION_HOURS}"
+    rm -f "$(inflight_marker "$ACTIVE_SLOT")"
+    refresh_docs_for_slot "$ACTIVE_SLOT"
+
+    local alert
+    alert="$(applied_alert "$version" "$mode" "$class")"
+    send_notification "${alert%%$'\t'*}" "${alert#*$'\t'}"
+    log "Upgrade to $version complete, probation started"
+    exit 0
+}
+
+cmd_auto() {
+    local result action version class msg
+    load_active_slot
+    acquire_lock  # before discovery, and held through the upgrade itself
+    result="$("$(active_venv)/bin/boxmunge-server" _discover-update --json 2>/dev/null)" || \
+        die "Discovery failed (boxmunge-server _discover-update returned non-zero)"
+
+    action="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("action",""))')"
+
+    case "$action" in
+        upgrade)
+            version="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+            class="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("class") or "")')"
+            log "Manual upgrade: discovered $(printable "$version")"
+            upgrade_to "$version" run "$class"
+            ;;
+        up_to_date)
+            log "Already on latest version"
+            exit 0
+            ;;
+        blocklisted)
+            log "Latest version is blocklisted on this box; nothing to do"
+            exit 0
+            ;;
+        error)
+            msg="$(echo "$result" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("message","(no message)"))')"
+            die "Discovery error: $msg"
+            ;;
+        *)
+            die "Unknown action from _discover-update: $action"
+            ;;
+    esac
+}
+
+# target <version>: reachable by deploy through sudo, so exactly one argument
+# (sudo's `target *` would otherwise let extra words through).
+cmd_target() {
+    [[ $# -eq 1 ]] || die "Usage: boxmunge-upgrade target <version>"
+    require_semver "$1" "requested version"
+    log "Targeted upgrade: $1"
+    upgrade_to "$1" target
+}
+
+cmd_force_target() {
+    [[ $# -eq 1 ]] || die "Usage: boxmunge-upgrade force-target <version>"
+    require_semver "$1" "requested version"
+    log "Operator-forced upgrade: $1"
+    upgrade_to "$1" force
+}
+
+cmd_clear_blocklist() {
+    local version="${1:?Usage: boxmunge-upgrade clear-blocklist <version>}"
+    require_semver "$version" "requested version"
+    load_active_slot
+    BM_VERSION="$version" "$(active_venv)/bin/python" -c "
+import os
+from boxmunge.upgrade_state import remove_from_blocklist
+from boxmunge.paths import BoxPaths
+remove_from_blocklist(BoxPaths(), os.environ['BM_VERSION'])
+"
+    interruptions "$version" 0
+    pip_failures "$version" 0
+    log "Cleared $version from blocklist"
+}
+
+case "${1:-}" in
+    run)             shift; cmd_run "$@" ;;
+    auto)            [[ $# -eq 1 ]] || die "Usage: boxmunge-upgrade auto"; cmd_auto ;;
+    target)          shift; cmd_target "$@" ;;
+    force-target)    shift; cmd_force_target "$@" ;;
+    check-probation) cmd_check_probation ;;
+    clear-blocklist) shift; cmd_clear_blocklist "$@" ;;
+    install-sudoers) cmd_install_sudoers ;;
+    install-docs)    shift; cmd_install_docs "$@" ;;
+    userns-migrate)  shift; cmd_userns_migrate "$@" ;;
+    userns-rollback) shift; cmd_userns_rollback "$@" ;;
+    userns-commit)   shift; cmd_userns_commit "$@" ;;
+    repair-deps)     shift; cmd_repair_deps "$@" ;;
+    *)               die "Usage: boxmunge-upgrade {run|auto|target|force-target|check-probation|clear-blocklist|install-sudoers|install-docs|userns-migrate|userns-rollback|userns-commit|repair-deps} [args]" ;;
+esac

@@ -45,11 +45,16 @@ cmd_install_sudoers() {
 slot_docs() { echo "$BOXMUNGE_ROOT/env-$1/boxmunge-docs"; }
 
 # install_docs <dir>: returns non-zero (and changes nothing) if <dir> has no
-# *.md files.
+# *.md files, or if docs/ is anything but the link (a rename cannot replace a
+# directory with a link, and what is in one is not boxmunge's to delete).
 install_docs() {
-    local src="$1" docs="$BOXMUNGE_ROOT/docs" stage link previous old=""
+    local src="$1" docs="$BOXMUNGE_ROOT/docs" stage link previous
     if ! compgen -G "$src/*.md" >/dev/null; then
         log "ERROR: no *.md docs in $src; $docs left unchanged"
+        return 1
+    fi
+    if [[ -e "$docs" && ! -L "$docs" ]]; then
+        log "ERROR: $docs is not the link boxmunge keeps there, so the docs were not installed and it is left unchanged. Move it aside (sudo mv $docs $docs.old), then run the install or upgrade again"
         return 1
     fi
     stage="$(mktemp -d "$BOXMUNGE_ROOT/.docs.XXXXXX")"
@@ -60,13 +65,11 @@ install_docs() {
     link="$stage.link"
     ln -s "$(basename "$stage")" "$link"
     previous="$(readlink "$docs" 2>/dev/null || true)"
-    if [[ -d "$docs" && ! -L "$docs" ]]; then
-        # One-time move from a plain directory (installs before this change).
-        old="$stage.old"
-        mv "$docs" "$old"
+    if ! replace_file "$link" "$docs"; then
+        rm -rf "$stage" "$link"
+        log "ERROR: could not replace $docs (see above); it is left unchanged"
+        return 1
     fi
-    replace_file "$link" "$docs"
-    [[ -z "$old" ]] || rm -rf "$old"
     if [[ "$previous" =~ ^\.docs\.[A-Za-z0-9]+$ ]]; then rm -rf "${BOXMUNGE_ROOT:?}/$previous"; fi
     log "Installed docs from $src"
 }
@@ -77,9 +80,8 @@ cmd_install_docs() {
     install_docs "$src" || die "install-docs failed"
 }
 
-# seed_slot_docs <slot>: a slot installed by install.sh (or an older shim)
-# has no docs copy; record the live docs as its own so a rollback to it
-# restores them.
+# seed_slot_docs <slot>: a slot installed by install.sh has no docs copy;
+# record the live docs as its own so a rollback to it restores them.
 seed_slot_docs() {
     local dest
     dest="$(slot_docs "$1")"
@@ -95,7 +97,7 @@ refresh_docs_for_slot() {
     local src
     src="$(slot_docs "$1")"
     if [[ ! -d "$src" ]] || ! install_docs "$src"; then
-        log "ERROR: docs not refreshed for slot $1 ($src missing or empty); agent-help may be stale"
+        log "ERROR: docs not refreshed for slot $1 from $src (missing, empty, or refused above); agent-help may be stale"
         bm_log error upgrade "docs refresh failed" "{\"slot\": \"$1\"}"
     fi
 }
@@ -180,10 +182,8 @@ installer_fingerprint() {
 # `bash -n` like the shim's self-update: a syntactically broken one must not
 # brick the box. If it fails, the upgrade fails before the swap (the version
 # is blocklisted, the previous venv stays live) and the operator diagnoses it.
-# Called with --upgrade-shim, install.sh also installs its bundle's
-# hash-pinned requirements into the standby (bootstrap/venv-deps.sh); after
-# the shim's own install pip has nothing to do. That is for older shims,
-# which install only the requirements files they know.
+# Called with --upgrade-shim, install.sh touches no venv: the shim has built
+# the standby from the bundle's hash-pinned requirements already.
 system_upgrade() {
     local bundle="$1" version="$2" from_version="$3"
     local new_install_sh="$1/install.sh" new_hash current_hash sysup_exit=0

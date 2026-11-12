@@ -14,6 +14,7 @@ import sys
 import pytest
 import yaml
 
+from boxmunge import compose_inventory
 from boxmunge.commands import health_cmd
 from boxmunge.commands.health_cmd import HealthCheck, run_guarded, run_health
 from boxmunge.health_checks import hardening, sshd, userns
@@ -21,6 +22,8 @@ from boxmunge.health_checks.projects import check_project_containers
 from boxmunge.paths import BoxPaths
 
 LEGACY = "site-staging"
+# The real listing; the autouse fake_containers fixture replaces it per test.
+REAL_INVENTORY = compose_inventory.running_inventory
 
 
 def _ok(name: str):
@@ -103,17 +106,19 @@ def test_broken_project_inputs_warn_and_the_report_completes(broken_box, capsys)
     assert "nohosts: cannot generate its Caddy config: 'hosts' must contain" in drift
 
 
-def test_project_containers_timeout_is_a_warning_naming_the_project(paths, monkeypatch):
+def test_project_containers_timeout_is_a_warning_naming_the_command(paths, monkeypatch):
+    """One `docker ps` lists every project's containers, so it is the command named."""
     _project(paths, "myapp", _manifest("myapp"))
 
     def timeout(cmd, **_):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=10)
 
+    monkeypatch.setattr(compose_inventory, "running_inventory", REAL_INVENTORY)
     monkeypatch.setattr(subprocess, "run", timeout)
     check = check_project_containers(paths)
     assert check.status == "warn"
-    assert "myapp" in check.detail and "did not answer within 10s" in check.detail
-    assert "docker compose" in check.detail
+    assert "did not answer within 10s" in check.detail
+    assert "`docker ps --filter label=com.docker.compose.project" in check.detail
 
 
 def _raise_timeout(cmd, *a, **k):
@@ -234,7 +239,7 @@ def test_a_data_driven_exception_still_warns(paths, exc):
                          ids=["check-module", "module-it-imports"])
 @pytest.mark.usefixtures("docker_down", "platform_ok")
 def test_an_unimportable_module_fails_its_check_with_exit_2(paths, monkeypatch, capsys, broken):
-    monkeypatch.delitem(sys.modules, "boxmunge.health_checks.alerts")
+    monkeypatch.delitem(sys.modules, "boxmunge.health_checks.alerts", raising=False)
     monkeypatch.setitem(sys.modules, broken, None)   # import of it raises ImportError
     rc = run_health(paths, as_json=True)
     checks = {c["name"]: c for c in json.loads(capsys.readouterr().out)["checks"]}

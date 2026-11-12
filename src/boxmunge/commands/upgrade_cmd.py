@@ -6,8 +6,8 @@ reload Caddy -> restart projects -> self-test -> health -> report.
 
 Dispatch modes:
   --dry-run   render migrated manifests + configs in memory; writes nothing
-  --apply     stash rewrite (D18) then migrate/regen/reload/restart/
-              version-write only (shim handles stash, health, rollback)
+  --apply     migrate/regen/reload/restart/version-write only (shim
+              handles stash, health, rollback)
   (default)   full five-step flow with stash, self-test, and health check
 """
 
@@ -19,39 +19,49 @@ from boxmunge.commands.upgrade_steps import (
     ManifestMigration,
     Regeneration,
     Restart,
+    UnresolvedStages,
     UpgradeGateError,
     check_upgrade,
     git_ownership_warnings,
     restart_projects,
 )
-from boxmunge.commands.upgrade_notify import notify_locked_skips, notify_refused
+from boxmunge.commands.upgrade_notify import (
+    notify_locked_skips, notify_refused, notify_unresolved_stages,
+)
 from boxmunge.deploy_dirs import fix_command, prepare_deploy_dirs
 from boxmunge.docker import caddy_reload, DockerError
-from boxmunge.legacy_stage import staged_by
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import ManifestError
 from boxmunge.migration import MigrationError
 from boxmunge.paths import BoxPaths
 from boxmunge.stash import create_stash, prune_stashes
-from boxmunge.stash_rewrite import sanitize_latest_stash
+from boxmunge.upgrade_floor import BelowUpgradeFloor, require_upgrade_floor
 from boxmunge.upgrade_exclusions import Exclusions, apply_projects, notify_exclusions
 from boxmunge.version import read_installed_version, write_installed_version, get_build_version, parse_version_string
 
 
 def _run_dry(paths: BoxPaths) -> int:
     """Pre-flight for the shim: render every project's migrated manifest and
-    configs in memory. Writes, locks and logs nothing. Returns 0 if --apply
-    would get through migration and regeneration, 1 otherwise."""
+    configs in memory. Changes and locks nothing, and logs and alerts only
+    a refusal for an unresolved stage. Returns 0 if --apply would get
+    through migration and regeneration, 1 otherwise."""
     print("boxmunge upgrade --dry-run")
     print("==========================\n")
+    try:
+        require_upgrade_floor(paths, get_build_version())
+    except BelowUpgradeFloor as refusal:
+        print(f"  ERROR: {refusal}", file=sys.stderr)
+        return 1
     try:
         report = check_upgrade(paths)
     except Exception as e:
         semver, _ = parse_version_string(get_build_version())
-        print(f"  ERROR: {e}", file=sys.stderr)
-        print(f"  The upgrade shim blocklists this version after a failed dry run: once it "
-              f"is fixed, run `sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist "
-              f"{semver}` and retry.", file=sys.stderr)
+        retry = (f"The upgrade shim blocklists this version after a failed dry run: once it "
+                 f"is fixed, run `sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist "
+                 f"{semver}` and retry.")
+        print(f"  ERROR: {e}\n  {retry}", file=sys.stderr)
+        if isinstance(e, UnresolvedStages):
+            notify_unresolved_stages(paths, semver, f"{e}\n{retry}")
         return 1
     for line in report:
         print(f"  {line}")
@@ -101,11 +111,7 @@ def _migrate_regenerate_reload(
     if regen.refused:
         print("  Refused projects keep their previous configs and containers and "
               "are not restarted. Fix the cause each line names and redeploy.")
-    for name, kind in sorted(excluded.legacy.items()):
-        print(f"  LEFT AS IS: {name}: a release staged by {staged_by(kind)} ({kind}); "
-              f"resolve it with boxmunge-server legacy-stage {name}")
-    for name, why in sorted({**excluded.install, **excluded.undetermined,
-                             **excluded.unreadable}.items()):
+    for name, why in sorted({**excluded.install, **excluded.unreadable}.items()):
         print(f"  LEFT AS IS: {name}: {why}")
     if excluded.busy:
         print(f"  Skipped (busy; keeps its previous configs until its next deploy, resume "
@@ -171,27 +177,8 @@ def _finish(paths: BoxPaths, label: str, migrated: ManifestMigration, regen: Reg
     return 0
 
 
-def _rewrite_stash(paths: BoxPaths, step: int, total: int) -> None:
-    """D18, before anything else is written. Never fails the upgrade; a
-    failure was alerted.
-
-    The rewrite sweeps stale .rewrite-* temps, which is safe only because no
-    other rewrite can be in flight. That rests on the shim's upgrade.lock
-    (acquire_lock, held through the apply), not on any lock taken here: a
-    direct `boxmunge-server upgrade --apply` holds none, which is one reason
-    it is for the shim only."""
-    print(f"[{step}/{total}] Making the latest stash restorable by the previous release...")
-    result = sanitize_latest_stash(paths)
-    if result.changed:
-        print(f"  Dropped {len(result.dropped)} link member(s).")
-    elif result.error is None:
-        print("  Nothing to change.")
-    if result.error is not None:
-        print(f"  WARNING: stash not fully rewritten (alerted): {result.error}", file=sys.stderr)
-
-
 def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
-    """Run stash rewrite/migrate/regen/reload/restart/version-write only.
+    """Run migrate/regen/reload/restart/version-write only.
 
     The upgrade shim handles stash creation, health checks, and rollback
     externally, so we skip those here. Returns 0 on success and 1 if any
@@ -201,12 +188,11 @@ def _run_apply(paths: BoxPaths, current_version: str, new_version: str) -> int:
     print("========================\n")
     print(f"  Current: {current_version}")
     print(f"  New:     {new_version}\n")
-    _rewrite_stash(paths, 1, 4)
     try:
-        migrated, regen, excluded = _migrate_regenerate_reload(paths, 2, 4)
+        migrated, regen, excluded = _migrate_regenerate_reload(paths, 1, 3)
     except (ManifestError, MigrationError, UpgradeGateError) as e:
         return _gate_failed(paths, e)
-    restart = _restart(paths, 4, 4, regen.refused, excluded)
+    restart = _restart(paths, 3, 3, regen.refused, excluded)
     return _finish(paths, f"Apply {current_version} -> {new_version}",
                    migrated, regen, excluded, restart, new_version)
 
@@ -226,7 +212,6 @@ def _run_full(
         log_error("upgrade", f"Stash failed: {e}", paths)
         return 1
 
-    # Its own stash, made by this release, has no link members: no rewrite.
     try:
         migrated, regen, excluded = _migrate_regenerate_reload(paths, 2, 5)
     except (ManifestError, MigrationError, UpgradeGateError) as e:
@@ -292,8 +277,7 @@ probation. The flags below are for the shim and direct invocations only.
 Flags:
   --dry-run         Render manifest migrations and configs in memory and
                     report; writes nothing. The shim's pre-flight check.
-  --apply           Rewrite the latest stash for the previous release, then
-                    migrate/regen/reload/restart only. The shim calls this
+  --apply           Migrate/regen/reload/restart only. The shim calls this
                     after creating its own stash; do not use directly.
   --skip-self-test  Skip the post-upgrade self-test step.
   -h, --help        Show this message.

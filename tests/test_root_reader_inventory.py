@@ -53,9 +53,7 @@ def _sites(helpers: set[str], *, read_only: bool = False) -> set[Site]:
 ELSEWHERE: dict[Site, str] = {
     ("health_checks/upgrade_slot.py", "check_upgrade_slot"): "test_health_checks/test_upgrade_slot.py",
     ("commands/quarantine_gate.py", "lift_after_deploy"): "test_commands/test_quarantine_gate.py",
-    ("legacy_stage.py", "_json_doc"): "test_root_reads_nofollow.py",
-    ("legacy_stage.py", "_state_active"): "test_root_reads_nofollow.py",
-    ("legacy_stage.py", "stage_time"): "test_root_reads_nofollow.py",
+    ("unresolved_stage.py", "_state_active"): "test_unresolved_stage.py",
     ("release_keep.py", "_reads_as"): "test_release_record_reads.py",
     ("release_txn.py", "_sha"): "test_release_record_reads.py",
     ("start_alerts.py", "record"): "test_root_state_reads.py (recorded over a link)",
@@ -119,17 +117,18 @@ def _goes_around_the_helpers(call: ast.Call) -> bool:
 # rise fails. A lower count is welcome, and the baseline may be lowered to
 # match when convenient.
 RAW_READS: dict[str, int] = {
-    "api/actions/logs.py": 1, "api/dev/fixture_host.py": 3, "api/jobs.py": 2, "backup.py": 1,
+    "api/dev/fixture_host.py": 3, "api/jobs.py": 2, "backup.py": 1,
     "bind_mounts.py": 1, "commands/bundle_cmd.py": 1, "commands/caddy_status.py": 1,
     "commands/diff_cmd.py": 2, "commands/doctor.py": 1, "commands/health_cmd.py": 1,
-    "commands/help.py": 1, "commands/log_cmd.py": 1, "commands/logs.py": 1,
+    "commands/help.py": 1, "commands/logs.py": 1,
     "commands/stage_cmd.py": 1,
-    "compose_references.py": 1, "compose_resolve.py": 3, "compose_up_steps.py": 1,
+    "compose_references.py": 1, "compose_resolve.py": 1, "compose_up_steps.py": 1,
     "compose_validate.py": 1, "config.py": 1, "cve/kev_refresh.py": 1,
     "health_checks/projects.py": 1, "health_checks/sshd.py": 2, "health_checks/userns.py": 1,
     "manifest.py": 1, "secrets.py": 1, "staging_cleanup.py": 1, "staging_compose.py": 1,
     "staging_isolation.py": 2, "staging_prepare.py": 1, "system_container.py": 1,
-    "tui/project_detail.py": 2, "upgrade_discovery.py": 1, "userns/marker.py": 1,
+    "tui/project_detail.py": 2, "upgrade_discovery.py": 1, "upgrade_floor.py": 1,
+    "userns/marker.py": 1,
     "userns/offset.py": 6, "userns/preflight.py": 1, "userns/shift.py": 1, "userns/steps.py": 1,
     "version.py": 1,
 }

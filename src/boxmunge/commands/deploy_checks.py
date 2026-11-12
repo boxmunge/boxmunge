@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from boxmunge import docker_containers
+from boxmunge.compose_mounts import is_bind_entry, path_within, read_only
 from boxmunge.data_helper import (
     helper_output, is_anonymous, volume, volume_is_empty, volume_labels,
 )
@@ -51,9 +52,8 @@ def _short(entry: str) -> Mount:
     parts = entry.split(":")
     if len(parts) == 1:
         return Mount("anonymous", parts[0], None, False)
-    ro = len(parts) > 2 and "ro" in parts[2].split(",")
-    kind = "bind" if parts[0].startswith(("/", ".", "~")) else "volume"
-    return Mount(kind, parts[1], parts[0], ro)
+    return Mount("bind" if is_bind_entry(entry) else "volume", parts[1], parts[0],
+                 read_only(entry))
 
 
 def service_mounts(svc: dict[str, Any]) -> list[Mount]:
@@ -64,7 +64,7 @@ def service_mounts(svc: dict[str, Any]) -> list[Mount]:
         if isinstance(entry, str):
             out.append(_short(entry))
         elif isinstance(entry, dict) and isinstance(entry.get("target"), str):
-            kind, ro = entry.get("type"), entry.get("read_only") is True
+            kind, ro = entry.get("type"), read_only(entry)
             if kind == "volume":
                 out.append(Mount("volume" if entry.get("source") else "anonymous",
                                  entry["target"], entry.get("source"), ro))
@@ -261,7 +261,7 @@ def store_id(kind: str, source: str) -> str:
 
 
 def _covers(outer: str, inner: str) -> bool:
-    return outer == inner or (outer.startswith("bind:") and inner.startswith(outer + "/"))
+    return outer == inner or (outer.startswith("bind:") and path_within(inner, outer))
 
 
 def staging_owner_problems(target: ReleaseTarget, model: dict[str, Any],

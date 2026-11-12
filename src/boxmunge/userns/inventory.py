@@ -30,7 +30,7 @@ from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import load_registered_projects
 from boxmunge.release import project_data_dirs
 from boxmunge.system_container import CONTAINER_NAME
-from boxmunge.userns.offset import docker_info
+from boxmunge.userns.offset import docker_info, driver_type
 
 PROXY_NETWORK = "boxmunge-proxy"
 CONTAINERD_STORE = "io.containerd.snapshotter.v1"
@@ -227,26 +227,21 @@ def _record_data(paths: BoxPaths, projects: list[str],
     return out
 
 
-def _network() -> dict[str, Any]:
-    nets = _run(["docker", "network", "ls", "-q", "--filter", f"name=^{PROXY_NETWORK}$"],
-                capture=True).stdout.split()
-    if not nets:
-        return {}
-    doc = _json(["docker", "network", "inspect", PROXY_NETWORK])[0]
-    return {"driver": doc.get("Driver"), "ipam": doc.get("IPAM") or {},
-            "options": doc.get("Options") or {}, "labels": doc.get("Labels") or {}}
-
-
-def _bridges() -> list[str]:
-    ids = _run(["docker", "network", "ls", "-q", "--no-trunc", "--filter", "driver=bridge"],
-               capture=True).stdout.split()
-    out = []
+def _networks() -> tuple[dict[str, Any], list[str]]:
+    """The proxy network's settings ({} when there is none) and the host
+    interfaces of the bridge networks, from one listing of every network."""
+    ids = _run(["docker", "network", "ls", "-q", "--no-trunc"], capture=True).stdout.split()
+    proxy: dict[str, Any] = {}
+    bridges = []
     for doc in _json(["docker", "network", "inspect", *ids]) if ids else []:
-        if doc.get("Name") == "bridge":
-            continue  # docker0: every daemon on the host uses the same one
+        if doc.get("Name") == PROXY_NETWORK:
+            proxy = {"driver": doc.get("Driver"), "ipam": doc.get("IPAM") or {},
+                     "options": doc.get("Options") or {}, "labels": doc.get("Labels") or {}}
+        if doc.get("Driver") != "bridge" or doc.get("Name") == "bridge":
+            continue  # "bridge" is docker0: every daemon on the host uses the same one
         name = (doc.get("Options") or {}).get("com.docker.network.bridge.name")
-        out.append(name or f"br-{doc['Id'][:12]}")
-    return sorted(out)
+        bridges.append(name or f"br-{doc['Id'][:12]}")
+    return proxy, sorted(bridges)
 
 
 def _containerd(info: dict[str, Any]) -> dict[str, str]:
@@ -255,12 +250,16 @@ def _containerd(info: dict[str, Any]) -> dict[str, str]:
             "containerd_namespace": str((c.get("Namespaces") or {}).get("Containers") or "")}
 
 
+def take_containers(paths: BoxPaths) -> list[ContainerEntry]:
+    """Every container the daemon holds, stopped ones included."""
+    ids = _run(["docker", "ps", "-aq", "--no-trunc"], capture=True).stdout.split()
+    return ([_container(d, paths) for d in _json(["docker", "container", "inspect", *ids])]
+            if ids else [])
+
+
 def take_inventory(paths: BoxPaths) -> Inventory:
     info = docker_info()
-    driver_type = dict(info.get("DriverStatus") or []).get("driver-type", "")
-    ids = _run(["docker", "ps", "-aq", "--no-trunc"], capture=True).stdout.split()
-    containers = ([_container(d, paths) for d in _json(["docker", "container", "inspect", *ids])]
-                  if ids else [])
+    containers = take_containers(paths)
     names = _run(["docker", "volume", "ls", "-q"], capture=True).stdout.split()
     attached = {m.name for c in containers for m in c.mounts if m.type == "volume"}
     volumes = []
@@ -287,10 +286,11 @@ def take_inventory(paths: BoxPaths) -> Inventory:
                                       if c.image_id == d["Id"] and "@sha256:" in c.image_ref}))
               for d in (_json(["docker", "image", "inspect", *image_ids]) if image_ids else [])]
     projects = sorted(load_registered_projects(paths))
-    return Inventory(driver=str(info.get("Driver")), driver_type=driver_type,
+    network, bridges = _networks()
+    return Inventory(driver=str(info.get("Driver")), driver_type=driver_type(info),
                      root=str(info.get("DockerRootDir")),
                      server_version=str(info.get("ServerVersion")),
-                     containers=containers, volumes=volumes, images=images, network=_network(),
+                     containers=containers, volumes=volumes, images=images, network=network,
                      projects=projects, record_data=_record_data(paths, projects, containers),
                      remapped="name=userns" in (info.get("SecurityOptions") or []),
-                     bridges=_bridges(), **_containerd(info))
+                     bridges=bridges, **_containerd(info))

@@ -362,6 +362,25 @@ class TestUntagOldBuiltNames:
         assert self._untag(run) == []
         assert not any(c[:3] == ["docker", "image", "rm"] for c in calls)
 
+    def test_a_project_that_builds_nothing_and_built_nothing_asks_docker_once(self):
+        """Most projects run pulled images only. With no build service and no
+        image labelled as this project's build there is nothing to own, so
+        the containers are not listed: one `image ls` and no more, at every
+        deploy, promote, resume and upgrade restart."""
+        run, calls = self._fake("", "sha256:ppp\talpine:3.20\tmyapp\tcache\n")
+        with patch("boxmunge.built_images._run", side_effect=run):
+            assert untag_old_built_names("myapp", {}, {"cache"}) == []
+        assert [c[:3] for c in calls] == [["docker", "image", "ls"]]
+        assert "label=com.docker.compose.project=myapp" in calls[0]
+
+    def test_a_build_of_a_service_since_removed_loses_its_names_with_no_build_service(self):
+        """The project stopped building; the image it once built still
+        carries a name any other project could run."""
+        run, calls = self._fake("sha256:old myapp-old:latest\n", "")
+        with patch("boxmunge.built_images._run", side_effect=run):
+            assert untag_old_built_names("myapp", {}, {"cache"}) == ["myapp-old:latest"]
+        assert calls[-1] == ["docker", "image", "rm", "-f", "myapp-old:latest"]
+
     def test_container_gone_since_listing_uses_nothing(self):
         import subprocess
 

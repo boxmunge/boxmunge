@@ -9,7 +9,6 @@ from boxmunge.commands.confirm import confirm
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import compose_stop, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, atomic_write_text, project_lock
-from boxmunge.legacy_stage import refuse_if_legacy_stage
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.lifecycle import BlockReason, is_blocked, migration_refusal, paused_refusal
@@ -126,8 +125,6 @@ def pause_locked(project_name: str, paths: BoxPaths, reason: str | None,
     refusal = migration_refusal(f"Pausing '{project_name}'", paths)
     if refusal:
         print(f"ERROR: {refusal}", file=sys.stderr)
-        return 1
-    if refuse_if_legacy_stage(paths, project_name):
         return 1
     # Re-check under the lock: a pause or an install may have landed while
     # the operator was answering the prompt.

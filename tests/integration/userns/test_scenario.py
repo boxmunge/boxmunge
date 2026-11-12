@@ -267,7 +267,7 @@ def test_2_adopt_first_then_migrate(box, capsys) -> None:
     assert migration_in_progress(paths) is None and not refuse_if_blocked("shop", paths)
     capsys.readouterr()
     assert run_check(paths) == 0
-    assert f"VERDICT: already applied (offset {j.offset})" in capsys.readouterr().out
+    assert f"VERDICT: the userns migration is already applied (offset {j.offset})" in capsys.readouterr().out
     assert _daemon_remapped() and uo.remap_offset(paths) == j.offset
     assert {k: v for k, v in j.items.items() if k.startswith("project:")} == {
         "project:anon": "up", "project:shop": "up"}

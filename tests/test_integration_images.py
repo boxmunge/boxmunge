@@ -31,7 +31,7 @@ def test_no_declaration_is_stale() -> None:
 @pytest.mark.parametrize("module, image", [
     ("test_dump_offline.py", "alpine:3.20"),          # its own compose file
     ("test_nonroot_deploy.py", "mysql:8.4"),          # through nonroot_cases.py
-    ("test_legacy_upgrade.py", "busybox:1.36"),       # through docker_images.py
+    ("test_data_adopt.py", "busybox:1.36"),           # through docker_images.py
     ("test_backup_restore.py", "postgres:16-alpine"),  # conftest.py's fixture_project
 ])
 def test_a_module_gets_the_images_it_names_however_it_names_them(module: str,

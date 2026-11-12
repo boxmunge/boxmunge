@@ -17,12 +17,12 @@ import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from boxmunge import built_images, compose_resolve, docker_containers
-from boxmunge.compose_images import built_image_name
+from boxmunge import built_images, docker_containers
+from boxmunge.compose_images import built_image_name, describe_image
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import discard_dir
 from boxmunge.fs_nofollow import read_text_nofollow
@@ -62,8 +62,9 @@ def restore_build_names(paths: BoxPaths, project_name: str, compose_project: str
     named = built_images.name_running_builds(compose_project, built) if built else []
     if named:
         log_operation(component, f"named the images {compose_project}'s containers run: "
-                      f"{', '.join(named)} (their old names had been taken off them)",
-                      paths, project=project_name)
+                      f"{', '.join(describe_image(n) for n in named)} (their old names had "
+                      f"been taken off them)", paths, project=project_name,
+                      detail={"images": named})
 
 
 def up_failed(error: DockerError, images: dict[str, str], redo: str) -> ComposeUpFailed:
@@ -85,15 +86,14 @@ def missing_text(missing: list[tuple[str, str]]) -> str:
     return "; ".join(f"the image for {svc} ({image}) is missing" for svc, image in missing)
 
 
-def start_images(run_dir: Path, files: list[str], compose_project: str,
-                  services: list[str] | None, where: dict) -> dict[str, str]:
-    """{service: image} for every service the up would create or start:
+def start_images(model: dict[str, Any], compose_project: str,
+                 services: list[str] | None) -> dict[str, str]:
+    """{service: image} for every service the up would create or start, in
+    the model the start check resolved (every profile's services):
     `services`, or every service without a profile (boxmunge runs Compose
     with no profile enabled), and those they depend on. Compose names a
     build service without an `image:` (an overlay from before boxmunge
     named built images) `<project>-<service>`."""
-    model = compose_resolve.resolve_deployed_config(
-        run_dir, files, compose_project, all_profiles=True, **where)
     specs = model.get("services") or {}
     wanted: set[str] = set()
     todo = list(services if services is not None else

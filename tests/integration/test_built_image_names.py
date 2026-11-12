@@ -10,6 +10,7 @@ container-updated, and is finally deleted, which removes its built images.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
@@ -27,7 +28,7 @@ from boxmunge.deployed_inventory import load_deployed_inventory
 from boxmunge.docker import compose_up
 from boxmunge.docker_containers import local_image
 from boxmunge.paths import BoxPaths
-from boxmunge.staging_compose import STAGING_FILES
+from boxmunge.staged_release import release_dir, slot_dir, staging_target
 from boxmunge.staging_prepare import write_staging_files
 from tests.integration.conftest import skip_no_docker
 
@@ -162,9 +163,16 @@ def test_deploy_stage_update_and_delete_use_platform_names(project) -> None:
     assert result["status"] == "no_change", result
     assert _container_image(f"{name}-web-1") == built
 
-    # Staging builds under its own name and leaves production's alone.
-    write_staging_files(paths, name, manifest, project_dir, project_dir)
-    compose_up(project_dir, compose_files=STAGING_FILES, project_name=f"{name}-staging")
+    # Staging builds under its own name and leaves production's alone. It
+    # runs from the slot, as `stage` builds it: the release's own copy of
+    # the code, with staging's compose files beside it.
+    slot = slot_dir(paths, name)
+    release_dir(slot).mkdir(parents=True)
+    for code in ("Dockerfile", "compose.yml"):
+        shutil.copy(project_dir / code, release_dir(slot) / code)
+    write_staging_files(paths, name, manifest, release_dir(slot), slot)
+    staging = staging_target(paths, name)
+    compose_up(staging.cwd, **staging.kwargs())
     assert _container_image(f"{name}-staging-web-1") == f"boxmunge.invalid/{name}-staging/web"
     assert local_image_id(built) is not None
 

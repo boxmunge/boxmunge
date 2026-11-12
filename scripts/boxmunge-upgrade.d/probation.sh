@@ -28,6 +28,7 @@
 # off, say) is promoted at once, which is all a planted one could make
 # happen, and the record then says none is running. Otherwise it is refused
 # like any unrecorded one.
+# The adoption goes when the upgrade floor reaches 0.11.6.
 PROBATION_EXPIRY_FILE="$UPGRADE_ROOT_DIR/probation-expiry"
 
 # record_probation <version>: root's record of a probation starting now.

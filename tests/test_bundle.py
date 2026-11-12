@@ -8,8 +8,10 @@ fails CI noisily.
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
+import sys
 import tarfile
 import tomllib
 from pathlib import Path
@@ -121,3 +123,35 @@ def test_caddy_maintenance_page_bundled(bundle_path: Path):
     assert "boxmunge/caddy/maintenance/index.html" in members, (
         "bundle missing caddy/maintenance/index.html (v0.4.1 hotfix regression)"
     )
+
+
+def test_install_guard_runs_its_detector_from_the_bundle(bundle_path: Path, tmp_path: Path):
+    """bootstrap/unresolved-stage.sh runs the upgrade's detector from the
+    bundle's own src/, before install.sh installs the package: both must ship,
+    where the script looks, and the run must leave the bundle as it was."""
+    with tarfile.open(bundle_path, "r:gz") as tf:
+        tf.extractall(tmp_path, filter="data")
+    bundle = tmp_path / "boxmunge"
+    before = sorted(str(p) for p in bundle.rglob("*"))
+    box = tmp_path / "box"
+    staged = box / "projects" / "shop" / ".releases" / "prestage"
+    staged.mkdir(parents=True)
+    (box / "projects" / "shop" / "manifest.yml").write_text("project: shop\n")
+    (box / "config").mkdir()
+    (box / "config" / "version").write_text("0.11.6\n")
+    # python3 is the interpreter running the tests: the host's may be too old.
+    path = os.pathsep.join([str(Path(sys.executable).parent), os.environ["PATH"]])
+    env = {"PATH": path, "FROM_UPGRADE_SHIM": "0", "BOXMUNGE_ROOT": str(box)}
+    result = subprocess.run(
+        ["bash", str(bundle / "bootstrap" / "unresolved-stage.sh")],
+        env=env, capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 1, result.stderr
+    assert "run `boxmunge-server legacy-stage shop`" in result.stderr
+    assert sorted(str(p) for p in bundle.rglob("*")) == before
+    staged.rmdir()
+    result = subprocess.run(
+        ["bash", str(bundle / "bootstrap" / "unresolved-stage.sh")],
+        env=env, capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert (result.returncode, result.stderr) == (0, "")

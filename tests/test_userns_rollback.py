@@ -1,10 +1,13 @@
 """Rollback order: data back before the old daemon starts; soak volumes after."""
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from boxmunge.compose import ComposeError
 from boxmunge.system_container import SystemContainerError
+from boxmunge.userns import inventory as inv_mod
 from boxmunge.userns import rollback as rb
 from boxmunge.userns import switch as sw
 from boxmunge.userns.inventory import Inventory, VolumeEntry
@@ -14,6 +17,7 @@ from tests.integration.userns.dockerd import FakeTimers
 
 S = 1048576
 _REFUSE_SOAK_EDIT = rb._refuse_soak_edit  # before the fixture stands it in
+_LEFTOVERS = rb._leftovers
 
 
 def _vol(name):
@@ -273,7 +277,7 @@ def test_an_abort_that_fails_is_journalled_and_alerted(paths, monkeypatch, tmp_p
 @pytest.mark.parametrize("journal, match", [
     (None, "no userns migration"),
     (Journal(FORWARD, "committed", S), "committed"),
-    (Journal(FORWARD, "applied", S, items={"commit-before": "10"}), "finish it with userns-commit"),
+    (Journal(FORWARD, "applied", S, items={"commit-before": "10"}), "finish it: userns-commit"),
     (Journal(ROLLBACK, "rolled-back", S), "already rolled back"),
 ])
 def test_refusals(paths, journal, match) -> None:
@@ -379,3 +383,64 @@ def test_a_mount_below_the_remapped_root_is_not_deleted_through(paths, remapped,
         rb.rollback(paths, daemon=_Daemon(events), timers=FakeTimers())
     assert (new_root / "overlay2" / "l" / "merged").is_dir()
     assert "umount" in load_journal(paths).failed
+
+
+def _doc(name, project, *volumes):
+    return {"Id": f"id-{name}", "Name": f"/{name}",
+            "Config": {"Labels": {"com.docker.compose.project": project} if project else {}},
+            "Mounts": [{"Type": "volume", "Name": v, "Destination": "/d"} for v in volumes]}
+
+
+def test_leftovers_asks_docker_for_the_containers_only(paths, monkeypatch) -> None:
+    """A deleted project's containers and its soak-only volumes go, each
+    journalled as it goes; what the daemon is asked is its containers: two
+    processes, not a whole inventory."""
+    docs = [_doc("shop-app-1", "shop", "shop_v"), _doc("boxmunge-caddy", "caddy"),
+            _doc("gone-web-1", "gone", "soak_v", "old_v"), _doc("stray", "")]
+    calls: list[list[str]] = []
+
+    def run(cmd, capture=False, timeout=None):
+        calls.append(cmd)
+
+        class R:
+            stdout = {"ps": "id-1 id-2 id-3 id-4\n",
+                      "container": json.dumps(docs)}.get(cmd[1], "")
+        return R()
+
+    monkeypatch.setattr(rb, "_run", run)
+    monkeypatch.setattr(inv_mod, "_run", run)
+    monkeypatch.setattr(inv_mod, "docker_info", lambda: calls.append(["docker", "info"]) or {})
+    monkeypatch.setattr(rb, "load_registered_projects", lambda p: {"shop"})
+    j = Journal(ROLLBACK, "rb-switched", S, items={
+        "rb-volume:soak_v": "soak-restored", "rb-volume:old_v": "restored",
+        "rb-volume:shop_v": "soak-restored"})
+    before, saved = dict(j.items), []
+    _LEFTOVERS(paths, j, lambda: saved.append(len(calls)))
+    assert calls == [
+        ["docker", "ps", "-aq", "--no-trunc"],
+        ["docker", "container", "inspect", "id-1", "id-2", "id-3", "id-4"],
+        ["docker", "rm", "-f", "id-gone-web-1"],
+        ["docker", "volume", "rm", "soak_v"],
+        ["docker", "rm", "-f", "id-stray"]]
+    assert saved == [3, 4, 5]  # each removal is journalled before the next
+    assert {k: v for k, v in j.items.items() if k not in before} == {
+        "rb-removed:gone-web-1": "removed (compose project gone)",
+        "rb-removed:volume:soak_v": "removed",
+        "rb-removed:stray": "removed (compose project -)"}
+
+
+def test_leftovers_with_no_container_asks_once(paths, monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def run(cmd, capture=False, timeout=None):
+        calls.append(cmd)
+
+        class R:
+            stdout = ""
+        return R()
+
+    monkeypatch.setattr(rb, "_run", run)
+    monkeypatch.setattr(inv_mod, "_run", run)
+    monkeypatch.setattr(rb, "load_registered_projects", lambda p: {"shop"})
+    _LEFTOVERS(paths, Journal(ROLLBACK, "rb-switched", S), lambda: pytest.fail("nothing to save"))
+    assert calls == [["docker", "ps", "-aq", "--no-trunc"]]

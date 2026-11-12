@@ -219,32 +219,10 @@ staged release's own in `.releases/staged/release/`.
 
 The staged release lives in `.releases/staged/`, so the project directory stays production's and
 production starts as usual during a stage (upgrade restarts, container updates, `recover`,
-`resume`, `security resume`, `restore`). A release staged by boxmunge 0.10.1 is different: it put
-the staged release's files in the project directory. For such a project `stage`, `unstage`,
-`promote`, `prod-deploy`, `rollback`, `restore`, `resume`, `recover`, `pause`, `data adopt` and
-`data chown` refuse directly, naming `boxmunge-server legacy-stage <project>`; background starts (upgrade
-restarts, container updates) and `security resume` are refused with a "start refused" alert (see
-Troubleshooting). If boxmunge cannot tell whether such a stage is on disk (for example `state/`
-cannot be read), it refuses the same way and says so; the health check then runs no smoke test
-and reports a warning, a backup is skipped with an alert, a due CVE quarantine is not taken (the
-scan reports why), and an upgrade leaves the project as it is with a high-priority alert. Fix the
-cause (usually permissions) and retry; a project the upgrade left this way keeps its previous
-configs until you deploy, resume or recover it. Its
-running containers are left as they are. How to resolve it: "Upgrading from 0.10.1 with a
-release staged".
-Until it is resolved:
-
-- the health check runs no smoke test and takes no critical action for it, reports it as
-  `legacy-stage`, and alerts (high priority) at most once a day;
-- backups continue with the manifest of the release the containers run, told from the evidence
-  `legacy-stage` prints; if that evidence cannot be read (Docker unavailable, an unreadable
-  reflog or `.releases/prestage/`, a commit that does not resolve), the backup is skipped with
-  an alert naming the cause (a never-deployed git project's is skipped without one: it has no
-  data). For a git project the dump still runs through the project's
-  `compose.yml`, which is the staged checkout's: if the staged release renamed the backup
-  service, the backup fails with an error until the stage is resolved;
-- a CVE quarantine is held, not taken (it would stop production), with a high-priority alert
-  naming the finding. Scans and their reports run as usual.
+`resume`, `security resume`, `restore`). A release staged by boxmunge 0.10.1 or earlier is
+different: it put the staged release's files in the project directory. This release does not
+handle such a stage, and its upgrade refuses until each one is resolved on 0.11.6 (see
+"Upgrading with a release staged by 0.10.1 or earlier").
 
 A bind mount, config or secret file in a data directory (any directory a release has mounted
 read-write) or another server-owned entry (`data/`, `secrets.env`) points staging at the entry's
@@ -633,9 +611,11 @@ logs --boxmunge
 
 The operational log records every boxmunge action with timestamp, level, project, and message. It is the first place to check when something happened unexpectedly.
 
-It lives in `/opt/boxmunge/logs/boxmunge.log`. The first write of each UTC day moves the previous day's file to `boxmunge.log.YYYY-MM-DD`; 90 days of archives are kept. `log` and the health check's 24-hour error count read the archives their window or `--tail` reaches into (`logs --boxmunge` prints the last 100 lines), so nothing drops out at midnight. Writers take `logs/.boxmunge.log.lock`; if it stays held for 5 seconds the entry is dropped with an error on stderr naming the lock, rather than hanging the command. `health` warns (`operational-log`) if the active file's first line is not a log entry, which stops all logging until the file is moved aside.
+It lives in `/opt/boxmunge/logs/boxmunge.log`. The first write of each UTC day moves the previous day's file to `boxmunge.log.YYYY-MM-DD`; 90 days of archives are kept. `log`, the MCP `log` tool, the action API's `oplog.query` and the health check's 24-hour error count share one reader. It reads the archives their window or `--tail` reaches into, newest first, and stops once `--tail` entries match (`logs --boxmunge` prints the last 100 lines), so nothing drops out at midnight. Writers take `logs/.boxmunge.log.lock`; if it stays held for 5 seconds the entry is dropped with an error on stderr naming the lock, rather than hanging the command. `health` warns (`operational-log`) if the active file's first line is not a log entry, which stops all logging until the file is moved aside.
 
-A line in a log file that is not a JSON entry (torn by a crash, or hand-edited) is never skipped silently. `log` prints every entry it can read, then a `WARNING: <file>:<line>: ...` on stderr for each torn line, and exits 1, so `--json` output stays parseable and scripts still notice. The MCP `log` tool returns the same warnings and fails, the action API's `oplog.query` fails naming the line, and the health check's `recent-errors` warns, since a torn line may have been an error. Repair or delete the line named.
+A line in a log file that is not a JSON entry (torn by a crash, hand-edited, or holding bytes that are not UTF-8) is never skipped silently. `log` prints every entry it can read, then a `WARNING: <file>:<line>: ...` on stderr for each torn line, and exits 1, so `--json` output stays parseable and scripts still notice. The MCP `log` tool returns the same warnings and fails, the action API's `oplog.query` fails naming the line, and the health check's `recent-errors` warns, since a torn line may have been an error. Repair or delete the line named.
+
+A log file or archive that is a symlink, a FIFO or a file with a second hard link is not read: the query fails with an error naming it, as it does for one it has no permission to read. `logs/` is writable by deploy, and boxmunge never writes its log through such a name. Remove it and re-run.
 
 ### Caddy access log
 
@@ -653,17 +633,23 @@ scanner's Caddy line reaches a scenario. Check it with `cscli metrics` (source
 `docker:boxmunge-caddy`). `health` (`caddy`) reports an error for a `boxmunge-caddy` from any other
 compose project.
 
-A tmpfs at `/var/log/caddy` (up to 320 MB, room for the old configs' own rotation), inside the
-container only, lets a rollback to an earlier release (whose site configs write there) still start
-Caddy. Nothing reads it, so CrowdSec sees no HTTP traffic until the box is upgraded again; the
-rollback's log and alert say so.
+Caddy's container has no writable log path: its root filesystem is read-only and nothing is
+mounted at `/var/log/caddy`. A `caddy.override.conf` or a hand-placed file in `caddy/sites/` that
+writes a log file there stops Caddy from loading its config. Use the log block boxmunge generates
+(stdout) instead.
 
-Earlier releases wrote `/opt/boxmunge/caddy/logs/access.log`. The upgrade rewrites the
-generated log block in `caddy/sites/`, removes `caddy/logs` and CrowdSec's old file entry, and stops
-if a `caddy.override.conf` or a hand-placed file in `caddy/sites/` still mentions `/var/log/caddy`:
-Caddy no longer mounts it, so that config would stop Caddy from starting. Replace its log block
-with the one boxmunge generates, clear the version from the blocklist (`boxmunge-upgrade
-clear-blocklist <version>`) and upgrade again.
+Releases 0.11.0 to 0.11.6 mounted a tmpfs there, so such a file worked on them. An install or
+upgrade to 0.11.7 or later looks for `/var/log/caddy` in `caddy/sites/*.conf`, in the site files
+waiting in `caddy/.site-journal/` and in every `projects/*/caddy.override.conf`, before it changes
+anything. If one names it, the install stops and lists the files, and the box stays on its
+release with its sites up. In each file, remove the log block or make it `output stdout`. An
+upgrade that stopped this way blocklisted the release it was installing, so clear that and
+upgrade again:
+
+```
+sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist <version>
+sudo /opt/boxmunge/bin/boxmunge-upgrade target <version>
+```
 
 ---
 
@@ -1036,7 +1022,7 @@ again.
 Every command that changes a project holds that project's lock while it works: `prod-deploy`,
 `stage`, `promote`, `unstage`, `rollback`, `restore`, `backup`, `pause`, `resume`, `recover`,
 `project-delete`, `data adopt`, `data chown`, `prod-deploy --abandon`, `security resume`, and, run
-as root, `legacy-stage`, `install-txn --drop` and `project-forget`, the daily `container-update`
+as root, `install-txn --drop` and `project-forget`, the daily `container-update`
 (for the whole backup, pull, recreate, and rollback sequence), the CVE scan, the platform upgrade
 (each project's manifest migration and its restart), and the 5-minute health check. Only one of them
 runs against a project at a time.
@@ -1279,13 +1265,6 @@ containers are left alone, and a high-priority alert names the reason. The
 alert for one project and reason repeats at most once a day (so a timer
 does not page every run); the refusal is logged every time:
 
-- **"has a release staged by boxmunge 0.10.1"** — the project directory
-  may hold that stage's files, so production is not recreated from them
-  (upgrade restarts, container updates and `security resume` wait with
-  this alert; `recover`, `resume`, `restore`, `data adopt` and `data chown`
-  refuse on the terminal without one). Running containers keep running.
-  Resolve it with `boxmunge-server legacy-stage <project>`; the next run
-  picks it up. This alert does not mean tampering.
 - **"an install of <ref> ... is open at phase <phase>"** — a deploy or
   rollback stopped part-way, so the project directory may hold a
   half-installed release. The alert names the options for that phase; see
@@ -1667,7 +1646,7 @@ Everything else warns:
   `project-containers` or `config-drift` with the cause and the fix, and the rest of the report
   still runs;
 - a probe that does not answer in time (`docker info`, `docker inspect`, `ufw status`, `sshd -T`,
-  `docker compose ps`) warns, naming the command: a busy host is not a broken platform. So does
+  `docker ps`) warns, naming the command: a busy host is not a broken platform. So does
   `ufw status` failing (often a held xtables lock), since it says nothing about the firewall;
 - any other exception from a check (bad data it did not expect, say) warns with the exception and
   is logged (`log --component health`) instead of crashing the report.
@@ -1773,7 +1752,7 @@ afresh.
 From the moment the downtime starts until the box runs again, `/opt/boxmunge/userns-migrating`
 exists, and every command that could change a project (deploy, stage, unstage, promote, rollback,
 restore, pause and resume, recover, security resume and scan, backups, container-update,
-project-delete, data adopt and chown, legacy-stage, self-test) refuses, naming the command that finishes the migration; so do the
+project-delete, data adopt and chown, self-test) refuses, naming the command that finishes the migration; so do the
 timers' commands after a reboot. Every step is journalled in the root-only
 `/opt/boxmunge/upgrade-root/userns-migration.json`. After any failure, kill or power cut, run the
 same command again to resume, or `userns-rollback` to put the box back. `docker-userns` reports a
@@ -1880,8 +1859,10 @@ self-test
 
 ## Upgrading the Platform
 
-A box still on 0.9 or 0.10 cannot get here by `upgrade` alone: follow
-[UPGRADING.md](UPGRADING.md), "Upgrading from 0.9 or 0.10".
+An upgrade starts from 0.11.0 or later. From 0.11.7 on, a release refuses to be installed over
+anything older: the upgrade stops at its pre-flight with the box unchanged, and names the way
+through, `sudo /opt/boxmunge/bin/boxmunge-upgrade target 0.11.6`. For a box still on 0.9 or
+0.10, follow [UPGRADING.md](UPGRADING.md), "Upgrading from 0.9 or 0.10".
 
 Apply platform updates:
 
@@ -2041,12 +2022,12 @@ How an upgrade is applied and undone:
    --ref <its deployed commit>`) builds and starts it. After an upgrade from 0.10 that is a
    `build:` service that had no container, running or stopped, to take its image from, such
    as a profiled one that only a restore starts, by name.
-   Three kinds of project are left exactly as they are (not migrated, regenerated or
+   Two kinds of project are left exactly as they are (not migrated, regenerated or
    restarted), reported as `LEFT AS IS` or `Skipped (busy)`, alerted, and do not fail the
-   upgrade: one with a release staged by boxmunge 0.10.1 (one high-priority alert per project;
-   resolve it with `boxmunge-server legacy-stage <project>`; the dry run names it too), one
-   with an open install, and one busy with another operation (it keeps its previous configs
-   until its next deploy, resume or recover). A bundle project's manifest
+   upgrade: one with an open install, and one busy with another operation (it keeps its
+   previous configs until its next deploy, resume or recover). A project that holds a
+   release staged by boxmunge 0.10.1 or earlier is not left as is: the upgrade refuses
+   before it changes anything (see "Upgrading with a release staged by 0.10.1 or earlier"). A bundle project's manifest
    is rewritten at the new schema. A git project's is not: its `manifest.yml` links into
    `repo/`, so it is migrated in memory and you are alerted once to update it in the
    repository (see "Deploying a New Project (Git)"). A failure in any of these
@@ -2218,56 +2199,71 @@ Set it back to `true` to discover releases again. One exception: if this box rol
 a release that has the setting to one that predates it (0.11.4 or older), the older release's
 code reports that rollback once, because it does not know the setting.
 
-## Upgrading from 0.10.1 with a release staged
+## Upgrading with a release staged by 0.10.1 or earlier
 
-Unstage before upgrading. If a project still has a release staged by 0.10.1,
-the upgrade leaves it exactly as it is: the dry run says "<p>: a release
-staged by boxmunge 0.10.1 (<kind>) will be left as is; after the upgrade,
-resolve it with boxmunge-server legacy-stage <p>", the apply alerts once,
-and the health check alerts again at most once a day until it is resolved. The project keeps running its current containers
-and is backed up; starts, deploys and pause are refused, quarantine is held,
-and health smoke checks are suspended.
+boxmunge 0.10.1 and earlier staged a release into the project directory, over or beside
+production's files. Releases 0.11.0 to 0.11.6 leave such a project as it is and resolve it with
+their `legacy-stage` command. This release has no such command, and its upgrade restarts every
+project, so it must never start one whose directory holds staged files. A box on 0.11.x that
+still carries such a stage is therefore refused by the upgrade's dry run, before any project is
+touched:
 
-Run `boxmunge-server legacy-stage <p>` to see what production runs (this works
-during probation too). Once probation has ended, run `--discard` (put production's release back; with
-`--confirm-recreated` if production was already started from the staged files)
-or `--keep-staged` (treat the staged release as promoted). If it is
-interrupted, run the same command again.
+```
+ERROR: 1 project (myapp) holds a release that boxmunge 0.10.1 or earlier staged over production's files, and it is not resolved. An upgrade restarts every project, and this release neither starts a project from staged files nor has the legacy-stage command that resolves them. On this box, on the release it runs now (boxmunge 0.11.6):
+  - myapp: a release staged by boxmunge 0.10.1 is unresolved (bundle); run `boxmunge-server legacy-stage myapp` and take one of the choices it shows
+Then retry the upgrade.
+```
 
-`legacy-stage` is operator-only: run it as root (`sudo boxmunge-server legacy-stage <p>`); the
-deploy shell and MCP do not offer it. It takes the project's lock (if the project is busy, try
-again). `--discard` and `--keep-staged` refuse while a platform rollback is still possible:
-during probation (it says when probation ends) or while an interrupted upgrade or rollback is
-pending. They also refuse while a platform upgrade is running ("a platform upgrade is in
-progress; run it again after it finishes"): from its stash to its swap there is no probation yet,
-but a rollback would still restore that stash. A `probation.json` it cannot read refuses too,
-naming the file to fix or remove. With no flag it works in all of these cases; except during an
-upgrade it adds "Not available yet: <why>".
-For a git project it runs git as the deploy user, so `repo/` must be deploy's: one cloned with
-`sudo` is refused with the fix (`chown -R deploy:deploy <p>/repo`, then retry).
+The box keeps running the release it is on. The refusal is also logged as an error (`log
+--component upgrade`) and sent as one priority-1 Pushover alert that names the release and the
+projects, because an auto-update's dry run has nobody watching it. Each line names one project
+and the command the release the box still runs accepts for it:
 
-- With no flag it prints the evidence and the choices it allows, and changes nothing. The
-  evidence is when the stage was made, the deploy state's ref, the staged ref, production's
-  release, and whether production's containers are `untouched` (all created before the stage)
-  or `recreated` (started from the staged files: a failed 0.10.1 promote, or a recreate during
-  the stage). A git stage that changed no code (no `--ref`, or the deployed commit) is
-  `untouched` without that time ("not needed: the stage changed no code"), so `repo/`'s reflog
-  is not read. A `leftover` (a 0.10.1 promote whose unstage did not finish) has no evidence and
-  allows only `--discard`.
-- `--discard` throws the staged release away, puts production's release back and recreates
-  production from it on this release's overlay. For `untouched` and `leftover`, production keeps
-  the release it runs. For `recreated` it also needs `--confirm-recreated`: discarding the staged
-  files changes what runs, and data the staged code wrote stays (it names the newest pre-deploy
-  snapshot for a manual `restore`).
-- `--keep-staged` treats the staged release as promoted. For `untouched` it first takes a
-  pre-deploy snapshot with production's manifest; for `recreated`, `rollback` uses the newest
-  pre-deploy snapshot taken after the stage; with none, `rollback` refuses ("no pre-deploy data
-  snapshot was taken when that release was replaced ...").
+- **`a release staged by ... is unresolved (<kind>)`**: run `sudo boxmunge-server legacy-stage
+  <project>`, which shows what production runs and the choices it allows (`--discard`,
+  `--keep-staged`), then run it again with the one you choose. `<kind>` is `bundle`, `git`,
+  `leftover` (a 0.10.1 promote whose unstage did not finish) or `pre0101` (a stage made by a
+  release before 0.10.1).
+- **`the resolution ... was started with --<choice> and is not finished`**: run the command
+  it names, `sudo boxmunge-server legacy-stage <project> --<choice>`, again.
+- **`its directory holds the files of a stage that legacy-stage discarded, and no deploy has
+  replaced them`**: `--discard` of a stage made before 0.10.1 stops staging but cannot put
+  production's files back. Upload the bundle of the release production should run, then run
+  `prod-deploy <project>`.
+- **`its record says a resolution was started with --keep-staged, which legacy-stage does not
+  offer for a <kind> stage`**: the project's entry in `state/legacy-stages.json` was edited by
+  hand, and no `legacy-stage` command finishes it. Remove that project's entry from the file
+  the line names, then run `sudo boxmunge-server legacy-stage <project>`: it shows the choices
+  for the stage, or says the project has none.
 
-The choice is recorded first, and a rerun must name the same one. The command then stops staging,
-removes the staging site, puts the code in place, cleans up the staging files, drops the stage
-record (last), and finishes what the upgrade skipped: manifest migration, config regeneration and
-a start of production. It alerts once the stage is resolved. It never touches the stash.
+On a box below 0.11.6 the refusal says to upgrade to 0.11.6 first (`sudo
+/opt/boxmunge/bin/boxmunge-upgrade target 0.11.6`) and to resolve the stage there: before
+0.11.6, `legacy-stage --discard` starts production from the files of a stage made before
+0.10.1. On 0.11.6, a `legacy-stage` choice waits for that upgrade's probation to end (six
+hours). If the box has no record of the release it runs, the refusal says so instead:
+`boxmunge-server version` shows the release, and the commands it lists are the ones 0.11.6
+accepts. That release's own OPERATIONS.md (`/opt/boxmunge/docs/OPERATIONS.md` on the box)
+describes `legacy-stage` in full.
+
+A failed dry run blocklists the release on the box, and the refusal ends by saying so. Once
+every project it named is resolved, clear the blocklist and retry:
+
+```
+sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist <version>
+```
+
+then run the upgrade again.
+
+`install.sh` run by hand on such a box (`sudo bash install.sh` from an extracted bundle, with no
+upgrade shim) is refused the same way, before it changes anything: it prints the same lines,
+ending `Then run the install again.`, exits 1, and sends no alert and blocklists nothing. If it
+cannot run the check, it stops with an error that says so, and installs nothing.
+
+If the upgrade cannot tell (it cannot read `state/legacy-stages.json`, `legacy-stage`'s record;
+a project's entry there records a choice that is not `discard` or `keep-staged`; or it cannot
+examine a project directory, for example because `.releases` or `state/staging` is a file), it
+refuses and alerts the same way with `Cannot tell which projects hold a release ...`, naming
+the error. Repair what it names, then clear the blocklist and retry.
 
 An install left open by an interrupted deploy (see "An interrupted or failed install") is also
 left as is by the upgrade. A record that no longer matches the files, after a platform rollback to
@@ -2386,17 +2382,9 @@ The server's `mcp` package is part of every install. `install.sh` and every plat
 whose bundle lacks that file, or whose MCP install fails, stops at pre-flight with the current
 release still live, like any other dependency failure.
 
-An upgrade is run by the box's current upgrade shim, which installs only the requirements files
-it knows; shims up to 0.10.1 do not know `requirements-mcp.txt`. From 0.11.3 on, the new release's
-own `install.sh`, which shims from 0.7.0 run before the venv swap, installs it into the new
-environment. A shim up to 0.10.0 runs `install.sh` without `--upgrade-shim`; `install.sh`
-recognises it by the upgrade lock it holds and still leaves the previous release, the rollback
-target, alone. If pip fails there (a network blip, a full disk), on the hop from 0.10.1 or from an
-older shim alike, `install.sh` exits 75 and the old shim blocklists the release as
-`system_upgrade_failed: install_sh_exit_75`, with the previous release still live. Fix the cause, then run
-`sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.3` (for the release concerned) and
-`upgrade` again. A box upgraded to 0.11.0, 0.11.1 or 0.11.2 by an older shim, or to any release by
-a 0.6.x shim (which never runs `install.sh`), comes up without MCP.
+A box upgraded to 0.11.0, 0.11.1 or 0.11.2 from 0.10.1 or earlier, or to any 0.11 release from
+0.6.x, came up without MCP (the upgrade shim of those older releases did not install
+`requirements-mcp.txt`), and stays without it until it is repaired.
 
 If the package is missing, `mcp-serve` exits 1 and `doctor` fails its "MCP package installed"
 check, both with the repair: `upgrade --repair-deps` from the deploy shell, or as `supervisor`:

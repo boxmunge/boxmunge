@@ -79,7 +79,5 @@ rm -r "$BUILT_DIR"
 
 grep -q 'boxmunge-upgrade.d/"\*' "$REPO_DIR/install.sh" && fail "install.sh still installs shim libraries" \
     || pass "install.sh installs the shim as one file"
-grep -q 'rm -rf "${BOXMUNGE_ROOT}/bin/boxmunge-upgrade.d"' "$REPO_DIR/install.sh" \
-    && pass "install.sh removes a leftover library directory" || fail "install.sh leaves bin/boxmunge-upgrade.d"
 
 finish

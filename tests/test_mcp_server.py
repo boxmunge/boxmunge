@@ -1,59 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for MCP server utilities — stdout capture, result formatting, and tool registrations."""
+"""Tests for MCP server utilities — result formatting and tool registrations."""
 
 from unittest.mock import patch
-
-from boxmunge.mcp_tools import capture_tool_call
-
-
-class TestCaptureToolCall:
-    def test_captures_stdout(self) -> None:
-        def my_func() -> int:
-            print("hello")
-            print("world")
-            return 0
-
-        result = capture_tool_call(my_func)
-        assert result["success"] is True
-        assert result["exit_code"] == 0
-        assert result["messages"] == ["hello", "world"]
-        assert result["data"] == {}
-
-    def test_failure_exit_code(self) -> None:
-        def my_func() -> int:
-            print("something failed")
-            return 1
-
-        result = capture_tool_call(my_func)
-        assert result["success"] is False
-        assert result["exit_code"] == 1
-        assert result["messages"] == ["something failed"]
-
-    def test_exception_returns_failure(self) -> None:
-        def my_func() -> int:
-            raise RuntimeError("boom")
-
-        result = capture_tool_call(my_func)
-        assert result["success"] is False
-        assert result["exit_code"] == 1
-        assert any("boom" in m for m in result["messages"])
-
-    def test_with_data(self) -> None:
-        def my_func() -> int:
-            print("done")
-            return 0
-
-        result = capture_tool_call(my_func, data={"count": 42})
-        assert result["data"] == {"count": 42}
-        assert result["success"] is True
-
-    def test_empty_stdout(self) -> None:
-        def my_func() -> int:
-            return 0
-
-        result = capture_tool_call(my_func)
-        assert result["messages"] == []
-        assert result["success"] is True
 
 
 class TestToolRegistration:

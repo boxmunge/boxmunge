@@ -76,7 +76,7 @@ def test_apply_does_not_rebuild_or_rerun_refused_project(
 
     assert [c.kwargs["project_name"] for c in up.call_args_list] == ["good"]
     assert paths.project_compose_override("bad").read_text() == OLD_OVERLAY
-    assert read_installed_version(paths) != "0.2.0+abc1234"
+    assert read_installed_version(paths) != "0.11.0+abc1234"
 
     out = capsys.readouterr().out
     assert "REFUSED" in out and "bad" in out and "privileged" in out

@@ -29,9 +29,8 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge import (
-    bind_mounts, bind_sources, compose_up_steps, data_dirs, fs_nofollow, legacy_stage,
-    legacy_stage_ops, overlay_users, pause, release, release_txn, run_as, staged_release,
-    upgrade_state, user_drift,
+    bind_mounts, bind_sources, compose_up_steps, data_dirs, fs_nofollow, overlay_users, pause,
+    release, release_txn, run_as, staged_release, unresolved_stage, upgrade_state, user_drift,
 )
 from boxmunge.bind_sources import read_record
 from boxmunge.blocked_update import read_blocked_state
@@ -187,6 +186,8 @@ def _outcome(fn: Callable[[], Any], fifo: Path | None = None, seconds: float = 5
     def run() -> None:
         try:
             out["v"] = ("value", fn())
+        except (AttributeError, NameError) as e:  # the row names what is not there
+            out["v"] = ("broken", repr(e))
         except Exception as e:  # noqa: BLE001 - the outcome is compared
             out["v"] = ("raised", type(e).__name__)
     worker = threading.Thread(target=run, daemon=True)
@@ -197,6 +198,8 @@ def _outcome(fn: Callable[[], Any], fifo: Path | None = None, seconds: float = 5
         os.close(os.open(fifo, os.O_RDWR | os.O_NONBLOCK))
         worker.join(seconds)
         pytest.fail(f"the reader blocked on the FIFO at {fifo}")
+    if out["v"][0] == "broken":
+        pytest.fail(f"the call is broken, which is not a reader's refusal: {out['v'][1]}")
     return out["v"]
 
 
@@ -246,7 +249,7 @@ def test_a_dangling_link_at_the_name_is_not_read_as_no_record(paths, tmp_path, r
 DANGLING_ONLY: list[tuple[str, Callable[[BoxPaths], Path], Callable[[BoxPaths], Any]]] = [
     ("install.json", lambda p: release_txn.txn_path(p, P),
      lambda p: release_txn.load_txn(p, P)),
-    ("legacy-stages.json", legacy_stage.records_path, lambda p: legacy_stage.get_record(p, P)),
+    ("legacy-stages.json", lambda p: p.state / "legacy-stages.json", unresolved_stage._records),
     ("slot meta.json", lambda p: staged_release.slot_dir(p, P) / "meta.json",
      lambda p: staged_release.load_slot(p, P)),
     ("data dirs record", lambda p: data_dirs.record_path(p.project_dir(P)),
@@ -262,9 +265,8 @@ DANGLING_ONLY: list[tuple[str, Callable[[BoxPaths], Path], Callable[[BoxPaths], 
     ("overlay build names", lambda p: p.project_compose_override(P),
      lambda p: compose_up_steps.restore_build_names(p, P, P, p.project_compose_override(P), "t")),
     ("compose binds", lambda p: p.project_compose(P),
-     lambda p: bind_mounts._entries(p.project_compose(P), nofollow=True)),
-    ("prestage meta.json", lambda p: p.project_releases(P) / "prestage" / "meta.json",
-     lambda p: legacy_stage_ops._prestage_ref(p, P)),
+     lambda p: bind_mounts.bind_mounted_dirs(p.project_compose(P), p.project_dir(P),
+                                             nofollow=True)),
 ]
 
 

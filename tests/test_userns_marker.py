@@ -116,16 +116,12 @@ def test_data_adopt_and_chown_refuse(migrating) -> None:
         chown_locked(migrating, "shop", "db", (70, 70))
 
 
-def test_legacy_stage_resolution_refuses(migrating, capsys) -> None:
-    from boxmunge.commands.legacy_stage_cmd import legacy_stage_locked
-    assert legacy_stage_locked(migrating, "shop", "discard", False) == 1 and _refused(capsys)
-
-
 def test_after_a_reboot_the_timers_entry_points_leave_the_box_alone(migrating, capsys,
                                                                     monkeypatch) -> None:
     """A reboot during the downtime: the marker is still there, so whatever
     timer runs touches no project."""
     from boxmunge.commands import check as check_mod
+    from boxmunge.commands.check_all import run_check_all
     from boxmunge.commands.backup_cmd import run_backup_all
     from boxmunge.commands.security_actions import cmd_security_scan
     from boxmunge.project_registry import add_project
@@ -138,4 +134,4 @@ def test_after_a_reboot_the_timers_entry_points_leave_the_box_alone(migrating, c
     monkeypatch.setattr(check_mod, "check_with_reason", lambda *a, **kw: pytest.fail("checked"))
     monkeypatch.setattr("boxmunge.health_checks.userns.alert_docker_userns",
                         lambda paths: type("C", (), {"status": "warn"})())
-    check_mod.run_check_all(migrating, read_only=False)
+    run_check_all(migrating, read_only=False)
