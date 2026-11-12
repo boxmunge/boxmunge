@@ -168,6 +168,23 @@ def test_one_decision_names_why_a_project_is_left(paths) -> None:
     assert "Cannot read" in apply_projects(paths)[2].install["myapp"]
 
 
+def test_an_open_install_with_an_unreadable_pause_record_is_left_as_is(paths, capsys) -> None:
+    """Whether the pause was handed on cannot be told, so rollback is not
+    offered; the dry run and the apply still leave the project as is and
+    report it, instead of failing on the record."""
+    from boxmunge.release_txn import rollback_refused
+    _deployed(paths)
+    txn = _open_install(paths)
+    paths.project_paused_state("myapp").write_text("{not json")
+    assert rollback_refused(paths, "myapp") is True
+    assert _run_dry(paths) == 0
+    assert (f"  myapp: an install (myapp-x, {txn.phase}) is open; the project will be "
+            f"left as is\n") in capsys.readouterr().out
+    _m, regen, excluded = apply_projects(paths)
+    assert excluded.install["myapp"].startswith("an install of myapp-x (bundle) is open")
+    assert "rollback myapp" not in excluded.install["myapp"] and regen.processed == []
+
+
 def test_no_migrations_line_says_left_projects_are_not_migrated(paths, capsys) -> None:
     _deployed(paths)
     _open_install(paths)

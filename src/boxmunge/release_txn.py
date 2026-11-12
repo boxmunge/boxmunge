@@ -363,10 +363,18 @@ def start_refusal(paths: BoxPaths, project: str, txn: InstallTxn, stale: str | N
 def rollback_refused(paths: BoxPaths, project: str) -> bool:
     """For the ways out an install offers: a quarantine refuses rollback,
     and so does a pause, unless it was handed to a deploy or rollback
-    (`resume --no-start`)."""
+    (`resume --no-start`). An unreadable pause record refuses it too: whether
+    the pause was handed on cannot be told, and the message that offers the
+    ways out (the upgrade's report of a project it leaves as is, say) must
+    not fail on it."""
     # cve.quarantine starts containers through compose_guard, which imports
     # this module: imported here, not at module load.
     from boxmunge.cve.quarantine import is_quarantined
     from boxmunge.pause import awaiting_deploy, is_paused
-    return is_quarantined(project, paths) or (
-        is_paused(project, paths) and not awaiting_deploy(project, paths))
+    from boxmunge.state import StateError
+    if is_quarantined(project, paths):
+        return True
+    try:
+        return is_paused(project, paths) and not awaiting_deploy(project, paths)
+    except StateError:
+        return True
