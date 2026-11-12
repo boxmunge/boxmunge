@@ -330,6 +330,18 @@ deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmun
   version that is blocklisted on this box and any version below the installed
   one (`config/version`, which deploy cannot write). Reinstalling the installed
   version is allowed.
+- An upgrade that crosses a breaking release, by `auto`, `target` or the
+  auto-update timer's `run`, must first pass the target's own readiness check.
+  Whether it crosses one is read from the target's `upgrade-notes.json`, which
+  must have its own line in the release's cosign-signed `SHA256SUMS`, never
+  from the unsigned discovery answer. The target's prerequisite scripts run
+  before its venv is built, and its `upgrade-readiness --json` runs, as deploy
+  and confined like `check` below, against the standby it has built. A box
+  that is not ready is refused before anything changes: the standby is
+  removed, and nothing is blocklisted or reported. Security and break-fix
+  releases are non-breaking, so they install ungated. After any upgrade, the
+  new release's readiness check lists each project's to-dos in one
+  low-priority alert. The operator's root-only `force-target` skips the gate.
 - `repair-deps` takes no argument. It installs the hash-pinned dependencies of
   the installed release (`config/version` again) into the live venv, from that
   release's bundle, verified like an upgrade's; it refuses if the live venv
@@ -373,8 +385,9 @@ blocklist and the downgrade floor. sudo matches the whole argument string, so
 same downgrade floor and skips blocklisted versions.
 
 The rule text lives in the shim (`boxmunge-upgrade install-sudoers`). install.sh
-calls it, and so does every upgrade before it installs anything, after checking
-the new file with `visudo -c`. A box carrying an older or wider rule is tightened
+calls it, and so does every upgrade, twice: the running shim before it installs
+anything, and the new shim once the upgrade has installed it, each checking the
+new file with `visudo -c`. A box carrying an older or wider rule is tightened
 on its next upgrade, and a hand-edited rule is put back.
 
 ## Explicitly Out of Scope

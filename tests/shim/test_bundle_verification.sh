@@ -64,6 +64,7 @@ release() {
         missing_entry) echo "${good%% *}  boxmunge-install.sh" ;;
         duplicate_entry) printf '%s\n%s  %s\n' "$good" "$(printf 'f%.0s' {1..64})" "$BUNDLE" ;;
     esac > "$RELEASE/SHA256SUMS"
+    release_notes "$RELEASE" 1.5.0
     touch "$RELEASE/SHA256SUMS.sig" "$RELEASE/SHA256SUMS.cert"
 }
 

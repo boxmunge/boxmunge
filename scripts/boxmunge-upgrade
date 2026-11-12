@@ -28,10 +28,10 @@
 #   userns-commit              operator only: delete the old root after the soak
 #
 # In the source tree the functions live in boxmunge-upgrade.d/ (state, slots,
-# probation, health, release, system, userns, readiness, check). The release
-# build (scripts/build-shim.py) inlines them, so the shim a box runs is this
-# one self-contained file: whatever installs it (install.sh, or an older
-# release's shim self-updating) copies only this file.
+# probation, health, release, system, userns, readiness, check, gate). The
+# release build (scripts/build-shim.py) inlines them, so the shim a box runs
+# is this one self-contained file: whatever installs it (install.sh, or an
+# older release's shim self-updating) copies only this file.
 #
 # Cross-version contract: the crash-safety markers (upgrade-inflight,
 # rollback-inflight; see slots.sh) may be left by this shim and found by a
@@ -130,7 +130,7 @@ die_logged() {
 SHIM_LIB_DIR="$(dirname "$SHIM_PATH")/boxmunge-upgrade.d"
 [[ -d "$SHIM_LIB_DIR" ]] \
     || die "This is the unbuilt source shim and $SHIM_LIB_DIR is missing; install a release bundle, whose shim is built"
-for lib in state slots probation health release system userns readiness check; do
+for lib in state slots probation health release system userns readiness check gate; do
     # shellcheck source=/dev/null
     source "$SHIM_LIB_DIR/$lib.sh"
 done
@@ -226,6 +226,8 @@ upgrade_to() {
         preflight_fail "$version" "$from_version" "preflight_failed: no_pinned_requirements" \
             "Bundle has no hash-pinned $missing; refusing an unpinned install"
     fi
+    # Crossing a breaking release: the release's prerequisites, now (gate.sh).
+    gate_prepare "$version" "$mode" "$tmp_download" "$from_version"
     install_pinned_deps "$bundle" "$standby" || dependency_install_failed "$version" "$from_version"
     pip_failures "$version" 0
     "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --no-cache-dir --no-deps --no-build-isolation "$bundle" \
@@ -258,6 +260,7 @@ upgrade_to() {
             "Pre-flight FAILED: dry-run upgrade"
 
     log "Pre-flight passed"
+    gate_readiness "$version" "$standby"
 
     # 3. STASH (using active/trusted venv)
     log "Creating platform stash..."
@@ -282,6 +285,9 @@ upgrade_to() {
 
     # 3b. Self-update the upgrade shim and its libraries (see self_update_shim).
     self_update_shim "$tmp_download/boxmunge"
+    # deploy's sudo rule as the new shim writes it (the early one was this shim's).
+    "$BIN_DIR/boxmunge-upgrade" install-sudoers || preflight_fail "$version" "$from_version" \
+        "preflight_failed: install_sudoers" "The new shim could not write deploy's sudo rule"
 
     # 3c. System upgrade: re-run the bundle's install.sh if it changed (see
     # system_upgrade).
@@ -335,6 +341,7 @@ write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT']
     rm -f "$(inflight_marker "$ACTIVE_SLOT")"
     refresh_docs_for_slot "$ACTIVE_SLOT"
 
+    post_install_todo "$version"
     local alert
     alert="$(applied_alert "$version" "$mode" "$class")"
     send_notification "${alert%%$'\t'*}" "${alert#*$'\t'}"
