@@ -305,10 +305,14 @@ Usage: boxmunge upgrade-readiness [--json]
 
 Check this box and every project against the rules of the release this code
 is: what blocks an upgrade to it, and what each project's next deploy needs,
-each with its fix. Changes and locks nothing. Exit 0 pass, 1 blocked.
+each with its fix. Exit 0 pass, 1 blocked.
   --json  One JSON object, the stable contract the upgrade check reads
-Operator-only: run it as root, as boxmunge-server. From the deploy shell, use
-upgrade-check, which runs the target release's own copy of this check.""",
+It takes no lock and changes nothing, but run unconfined, resolving a
+project's compose.yml may briefly create, then remove, an empty placeholder
+for an env file the file names and the project lacks.
+Not in the deploy shell: there, upgrade-check runs the target release's own
+copy as the deploy user, confined so it can write nothing. By hand, run it as
+boxmunge-server (as root, or as the deploy user).""",
     "userns": """\
 Usage: boxmunge userns {check|migrate|rollback|commit}
        (on the server: boxmunge-server userns ..., as the shim runs it)

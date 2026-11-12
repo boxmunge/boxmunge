@@ -4,7 +4,7 @@
 The upgrade check (the root shim's `check` verb, which deploy reaches as
 `upgrade-check`) runs the *target* release's copy of this command, as deploy
 and confined, against the live box. An operator can run the installed
-release's copy by hand. It writes nothing (boxmunge.readiness).
+release's copy by hand (boxmunge.readiness says what it may touch then).
 
 Exit 0 pass, 1 blocked, 2 usage error. With --json, stdout is exactly one
 contract-1 object (boxmunge.readiness_contract): whatever the rules print on

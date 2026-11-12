@@ -7,7 +7,10 @@ rules and returns a readiness_contract.Readiness. The upgrade check runs the
 
 - It writes, logs and locks nothing: the log file is left alone (entries go
   to stderr), and no project lock is taken; a project mid-deploy is reported
-  as left as is, which is what the apply does with it.
+  as left as is, which is what the apply does with it. (Run unconfined by
+  hand, compose_resolve may create and remove an empty placeholder for an
+  env file a compose.yml names and the project lacks: shared validation
+  code, which the confinement stops.)
 - It asks Docker only to inspect: `compose config`, `compose version`,
   `image inspect` and the dry run's renders. Never create, pull or build.
 - It is never laxer than `upgrade --dry-run`: the floor and the dry run are
