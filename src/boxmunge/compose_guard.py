@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 
 from boxmunge import bind_sources, chown_hold, checked_start, compose_references
 from boxmunge import compose_resolve
-from boxmunge import docker_containers, start_alerts
+from boxmunge import docker_containers, host_config_alert, start_alerts
 from boxmunge import compose_up_steps as up_steps
 from boxmunge.bind_sources import BindSourceError
 from boxmunge.checked_start import CheckedStart
@@ -206,6 +206,7 @@ def check_start(
 
     Raises ComposeRefused.
     """
+    host_config_alert.report_at_start(paths, component)
     if staging:
         if compose_files is not None or txn is not None or earlier is not None:
             raise ValueError("a staging start runs the slot's own files and no install "
@@ -402,6 +403,7 @@ def check_containers_start(paths: BoxPaths, project_name: str, names: list[str],
     to start (`names`) must run as the users record says. Raises
     ComposeRefused, also while an install transaction is open (no install
     resumes by restarting stopped containers), as check_start does."""
+    host_config_alert.report_at_start(paths, component)
     _refuse_if_install_open(paths, project_name, component, None)
     project_dir = paths.project_dir(project_name)
     try:

@@ -33,7 +33,9 @@ def cmd_discover_update(args: list[str]) -> None:
     mode = "latest"
     if parsed.has("--auto"):
         try:
-            mode = auto_update_mode(load_config(paths))
+            # Lenient, as in auto-update: the shim's discovery must not
+            # stop over another setting's value.
+            mode = auto_update_mode(load_config(paths, lenient_values=True))
         except ConfigError as e:
             print(json.dumps({"action": "error",
                               "message": f"Cannot read auto-update policy: {e}"}))

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""How often a refused start alerts (compose_guard)."""
+"""How often an alert raised at a start repeats: a refused start
+(compose_guard), and the host config's refused values (host_config_alert)."""
 from __future__ import annotations
 
 import hashlib

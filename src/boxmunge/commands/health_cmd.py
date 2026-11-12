@@ -316,7 +316,10 @@ def _ssh_port(paths: BoxPaths) -> int:
     from boxmunge.config import ConfigError, load_config
     from boxmunge.log import log_warning
     try:
-        return load_config(paths).get("ssh_port", 922)
+        # The upgrade shim judges a release by this report, so a value the
+        # release newly refuses in another setting (host_config_alert reports
+        # it) must not move the firewall check to the default port.
+        return load_config(paths, lenient_values=True).get("ssh_port", 922)
     except ConfigError as e:
         log_warning("health", f"could not load config, defaulting ssh_port=922: {e}", paths)
         return 922

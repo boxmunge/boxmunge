@@ -21,7 +21,8 @@ and blocklisting identically for every class. Run by a systemd timer every
 import os
 import sys
 
-from boxmunge.config import ConfigError, load_config, version_check_enabled
+from boxmunge.config import ConfigError, version_check_enabled
+from boxmunge.host_config_alert import load_lenient
 from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.paths import BoxPaths
 
@@ -45,7 +46,9 @@ def run_auto_update(paths: BoxPaths) -> int:
     # the shim and never returns.
     record_os_updates(paths, inspect_os_updates())
     try:
-        config = load_config(paths)
+        # Lenient about the settings this does not read, which it warns of
+        # and alerts: a box must not stop upgrading over one of them.
+        config = load_lenient(paths, "auto-update")
     except ConfigError as e:
         print(f"ERROR: Cannot read auto-update policy: {e}", file=sys.stderr)
         log_error("auto-update", f"Cannot read auto-update policy: {e}", paths)

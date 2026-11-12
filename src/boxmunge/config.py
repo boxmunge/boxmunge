@@ -5,6 +5,7 @@ from typing import Any
 
 import yaml
 
+from boxmunge.config_values import value_problems
 from boxmunge.paths import BoxPaths
 
 
@@ -52,12 +53,32 @@ def _deep_merge(defaults: dict, overrides: dict) -> dict:
     return result
 
 
-def load_config(paths: BoxPaths) -> dict[str, Any]:
-    """Load boxmunge.yml, apply defaults, and validate required fields.
+def load_config(paths: BoxPaths, *, lenient_values: bool = False) -> dict[str, Any]:
+    """Load boxmunge.yml, apply defaults, and validate every setting.
 
     Raises ConfigError, naming the file, if it is missing, unreadable, not
-    valid YAML, not a mapping, or required fields are absent.
+    valid YAML, not a mapping, required fields are absent, or a setting is
+    not what it must be (config_values), naming each such setting.
+
+    `lenient_values` is for what must keep working on a box that is already
+    running: discovering a platform upgrade, the health report the upgrade
+    is judged by, and sending an alert (which the upgrade, every start and
+    a rollback do). Those must not stop over a value the box has always
+    been allowed to carry, so the checks in config_values (added in 0.11.9)
+    are not errors there and the value is returned as written;
+    host_config_alert reports them on those paths. The checks older than
+    that stay errors.
     """
+    config, problems = read_config(paths)
+    if problems and not lenient_values:
+        raise ConfigError("; ".join(problems))
+    return config
+
+
+def read_config(paths: BoxPaths) -> tuple[dict[str, Any], list[str]]:
+    """The config with defaults applied, and the settings config_values
+    refuses (see load_config, which raises on them unless lenient). Raises
+    ConfigError for everything else load_config does."""
     config_file = paths.config_file
     if not config_file.exists():
         raise ConfigError(f"Config file not found: {config_file}")
@@ -82,7 +103,7 @@ def load_config(paths: BoxPaths) -> dict[str, Any]:
 
     for name, (key, example) in BOOLEAN_BLOCKS.items():
         _validate_boolean_block(config, name, key, example, config_file)
-    return config
+    return config, value_problems(config, config_file)
 
 
 def _validate_boolean_block(config: dict[str, Any], name: str, key: str, example: str,

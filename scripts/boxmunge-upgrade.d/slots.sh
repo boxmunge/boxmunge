@@ -90,15 +90,20 @@ report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.envir
 
 # notify_via <python> <title> <message> [priority]: send a Pushover alert
 # through that venv's python. Returns 0 when sent, 3 when Pushover is not
-# configured, anything else when it could not be sent.
+# configured, anything else when it could not be sent. The config is loaded
+# leniently (load_config's lenient_values): an upgrade's alert must be sent
+# whatever value another setting holds.
 notify_via() {
     local python="$1" title="$2" message="$3" priority="${4:-0}"
     BM_TITLE="$title" BM_MESSAGE="$message" BM_PRIORITY="$priority" "$python" -c "
-import os, sys
+import inspect, os, sys
 from boxmunge.config import load_config
 from boxmunge.pushover import send_notification
 from boxmunge.paths import BoxPaths
-config = load_config(BoxPaths())
+# A venv older than 0.11.9 has no lenient_values, and checks no values to
+# be lenient about (the probe goes when the upgrade floor reaches 0.11.9).
+lenient = {'lenient_values': True} if 'lenient_values' in inspect.signature(load_config).parameters else {}
+config = load_config(BoxPaths(), **lenient)
 po = config.get('pushover', {})
 if not (po.get('user_key') and po.get('app_token')):
     sys.exit(3)
