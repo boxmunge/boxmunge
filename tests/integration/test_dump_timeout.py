@@ -61,6 +61,11 @@ def _left_running(project_dir, service: str) -> list[str]:
             if "sleep 300" in line and "cmdline" not in line]
 
 
+def _stop(project_dir, service: str, pid_name: str) -> tuple[str | None, str | None]:
+    return service_exec._stop(service_exec._service_exec(project_dir, PROJECT, service),
+                              pid_name, project_dir)
+
+
 @pytest.fixture(scope="module")
 def project(tmp_path_factory):
     from boxmunge.paths import BoxPaths
@@ -128,7 +133,7 @@ def test_a_command_that_does_not_lead_its_group_is_moved_into_its_own(project, s
         while len(_left_running(project_dir, service)) < 2:
             assert time.monotonic() < deadline, "the nested command never started"
             time.sleep(0.5)
-        group, error = service_exec._stop(project_dir, PROJECT, service, pid_name)
+        group, error = _stop(project_dir, service, pid_name)
         assert error is None and group is not None
         assert _left_running(project_dir, service) == []
     finally:
@@ -139,7 +144,7 @@ def test_a_command_that_does_not_lead_its_group_is_moved_into_its_own(project, s
 @pytest.mark.parametrize("service", SERVICES)
 def test_a_stop_it_cannot_verify_is_reported_as_failed(project, service) -> None:
     _, project_dir = project
-    group, error = service_exec._stop(project_dir, PROJECT, service, "boxmunge-exec-unknown.pid")
+    group, error = _stop(project_dir, service, "boxmunge-exec-unknown.pid")
     assert group is None and error is not None and "no record" in error
     assert "may still be running" in str(ServiceCommandTimeout(3, None, error))
 
@@ -151,5 +156,5 @@ def test_a_pid_record_that_is_not_a_group_id_is_refused(project, record) -> None
     write = _compose(project_dir, "exec", "-T", "debian", "sh", "-c",
                      'printf "%s\\n" "$1" > /dev/shm/"$2"', "w", record, pid_name)
     assert write.returncode == 0, write.stderr
-    group, error = service_exec._stop(project_dir, PROJECT, "debian", pid_name)
+    group, error = _stop(project_dir, "debian", pid_name)
     assert group is None and error is not None, "a bogus record must never be killed"

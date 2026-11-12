@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Run a backup or restore command inside a project service, killably.
+"""Run a command inside a project's container, killably.
 
-Killing the `docker compose exec` client (on a timeout, or when boxmunge is
-itself interrupted) does not stop what it started inside the container. A
-hung pg_dump left running keeps its database locks and blocks the next
-restore, and nightly runs would pile up more of them.
+Killing the `docker exec` client (on a timeout, or when boxmunge is itself
+interrupted) does not stop what it started inside the container. A hung
+pg_dump left running keeps its database locks and blocks the next restore,
+and nightly runs would pile up more of them; a hung smoke script would pile
+up one more copy on every health tick.
+
+A backup or restore command runs in its service (`docker compose exec`,
+run_in_service). A smoke runs in one named container (`docker exec`,
+run_in_container), so every replica is reached and no compose file is read.
 
 So the command runs under a small sh wrapper that leads its own process
 group (`docker exec` makes it a session leader; elsewhere it re-executes
@@ -21,6 +26,7 @@ from __future__ import annotations
 
 import secrets
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -98,27 +104,30 @@ class ServiceCommandTimeout(Exception):
         super().__init__(f"timed out after {timeout}s; {outcome}")
 
 
-def _exec(project_name: str, service: str, argv: list[str],
-          compose_file: Path | None = None, project_dir: Path | None = None) -> list[str]:
-    """`compose_file` names the compose file of the release the containers
-    run when it is not the project dir's (during an open install); paths in
-    it still resolve against the project dir."""
+def _service_exec(project_dir: Path, project_name: str, service: str,
+                  compose_file: Path | None = None) -> list[str]:
+    """The exec into a service, to be followed by the command's argv.
+
+    `compose_file` names the compose file of the release the containers run
+    when it is not the project dir's (during an open install); paths in it
+    still resolve against the project dir."""
     files = (["-f", "compose.yml"] if compose_file is None else
              ["--project-directory", str(project_dir), "-f", str(compose_file)])
-    return ["docker", "compose", *files, "-p", project_name, "exec", "-T", service, *argv]
+    return ["docker", "compose", *files, "-p", project_name, "exec", "-T", service]
 
 
-def _stop(project_dir: Path, project_name: str, service: str,
-          pid_name: str, compose_file: Path | None = None) -> tuple[str | None, str | None]:
-    """Kill the command's process group in the container.
+def _stop(exec_into: list[str], pid_name: str,
+          cwd: Path | None = None) -> tuple[str | None, str | None]:
+    """Kill the command's process group in the container ``exec_into`` reaches.
 
     Returns (group id, None) once the group is verified gone, else
-    (None, why not).
+    (None, why not). The pid file's name is random, so a container that has
+    since been replaced under the same name holds no record and nothing in
+    it is killed.
     """
-    cmd = _exec(project_name, service, ["sh", "-c", _STOP_SCRIPT, "boxmunge-stop", pid_name],
-                compose_file, project_dir)
+    cmd = [*exec_into, "sh", "-c", _STOP_SCRIPT, "boxmunge-stop", pid_name]
     try:
-        result = subprocess.run(cmd, cwd=project_dir, capture_output=True,
+        result = subprocess.run(cmd, cwd=cwd, capture_output=True,
                                 text=True, timeout=_STOP_TIMEOUT, env=docker_env())
     except (subprocess.TimeoutExpired, OSError) as e:
         return None, str(e)
@@ -128,27 +137,42 @@ def _stop(project_dir: Path, project_name: str, service: str,
     return group, None
 
 
-def run_in_service(
-    project_dir: Path, project_name: str, service: str, command: str,
-    *, timeout: float, compose_file: Path | None = None, **run_kwargs: Any,
-) -> subprocess.CompletedProcess:
-    """``sh -c command`` in the service, bounded by ``timeout``.
+def _run(exec_into: list[str], command: str, *, timeout: float,
+         cwd: Path | None = None, **run_kwargs: Any) -> subprocess.CompletedProcess:
+    """``sh -c command`` in the container ``exec_into`` reaches, bounded by
+    ``timeout``.
 
     Raises ServiceCommandTimeout when it overruns, after trying to kill it in
     the container. If boxmunge is interrupted meanwhile, the command is
     killed there too before the interruption propagates.
     """
     pid_name = f"boxmunge-exec-{secrets.token_hex(16)}.pid"
-    cmd = _exec(project_name, service, ["sh", "-c", _WRAPPER, _WRAPPER, pid_name, command],
-                compose_file, project_dir)
+    cmd = [*exec_into, "sh", "-c", _WRAPPER, _WRAPPER, pid_name, command]
     try:
-        return subprocess.run(cmd, cwd=project_dir, timeout=timeout, env=docker_env(),
-                              **run_kwargs)
+        return subprocess.run(cmd, cwd=cwd, timeout=timeout, env=docker_env(), **run_kwargs)
     except subprocess.TimeoutExpired as e:
-        raise ServiceCommandTimeout(
-            timeout, *_stop(project_dir, project_name, service, pid_name, compose_file)) from e
+        raise ServiceCommandTimeout(timeout, *_stop(exec_into, pid_name, cwd)) from e
     except OSError:
         raise  # nothing started
     except BaseException:
-        _stop(project_dir, project_name, service, pid_name, compose_file)
+        _stop(exec_into, pid_name, cwd)
         raise
+
+
+def run_in_service(
+    project_dir: Path, project_name: str, service: str, command: str,
+    *, timeout: float, compose_file: Path | None = None, **run_kwargs: Any,
+) -> subprocess.CompletedProcess:
+    """``sh -c command`` in the service's container, killably (see _run)."""
+    return _run(_service_exec(project_dir, project_name, service, compose_file), command,
+                timeout=timeout, cwd=project_dir, **run_kwargs)
+
+
+def run_in_container(
+    container: str, command: str, *, timeout: float, env: Sequence[str] = (),
+    **run_kwargs: Any,
+) -> subprocess.CompletedProcess:
+    """``sh -c command`` in that one container, killably (see _run), with
+    each ``NAME=value`` of ``env`` added to its environment."""
+    flags = [arg for variable in env for arg in ("-e", variable)]
+    return _run(["docker", "exec", *flags, container], command, timeout=timeout, **run_kwargs)
