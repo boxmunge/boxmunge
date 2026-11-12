@@ -80,9 +80,20 @@ def test_below_floor_text_computed_from_notes() -> None:
     text = render_guide(guide)
     assert guide.below_floor
     assert "0.10.4" in text and "0.12.0" in text and "0.12.3" in text
-    assert "upgrade --target 0.12.3" in text and "upgrade-howto" in text
     assert "0.11" not in text
     assert "Title of" not in text
+
+
+def test_below_floor_leads_to_the_bridges_own_guide_and_check() -> None:
+    """Never straight to an upgrade: a "get ready" request must not upgrade
+    the box, and the bridge has its own notes and check."""
+    guide = compose_guide(notes_bytes("0.12.5", ALL_SECTIONS, floor="0.12.0", bridge="0.12.3",
+                                      no_action=()), "0.12.5", "0.10.4")
+    text = " ".join(render_guide(guide).split())
+    howto = text.index("upgrade-howto --version 0.12.3")
+    assert howto < text.index("upgrade-check --version 0.12.3")
+    assert "upgrade --target" not in text and "force" not in text
+    assert "Once the box runs 0.12.3, run upgrade-howto again." in text
 
 
 def test_render_strips_nonprintable() -> None:

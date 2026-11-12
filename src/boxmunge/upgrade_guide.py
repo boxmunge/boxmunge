@@ -119,11 +119,16 @@ def _next_steps(target: str) -> list[str]:
 
 
 def _below_floor_text(g: Guide) -> str:
+    """The way to the bridge is the usual flow, not an upgrade command: a
+    "get ready" request must not upgrade the box. The bridge is at least
+    the first release with notes, as only a release with upgrade-howto can
+    print this."""
     return (f"This box runs {g.installed}, below the upgrade floor {g.floor}: an upgrade to "
-            f"{g.target} must start from {g.floor} or later. Upgrade by hand to {g.bridge} "
-            f"first (the last release that installs over a box below {g.floor}), following "
-            f"its release notes (from the deploy shell: upgrade --target {g.bridge}); then "
-            f"run upgrade-howto again.")
+            f"{g.target} must start from {g.floor} or later. Get to {g.bridge} first (the "
+            f"last release that installs over a box below {g.floor}): run upgrade-howto "
+            f"--version {g.bridge} and follow that guide, then upgrade-check --version "
+            f"{g.bridge}, and its next steps. Once the box runs {g.bridge}, run upgrade-howto "
+            f"again.")
 
 
 def render_guide(guide: Guide) -> str:
