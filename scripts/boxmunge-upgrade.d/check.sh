@@ -97,9 +97,10 @@ check_refusals() {
     local v="$CHECK_VERSION" state
     semver_lt "$CHECK_INSTALLED" "$v" \
         || check_refused "this box runs $CHECK_INSTALLED, and upgrade-check checks a newer release: run upgrade-howto to see the latest"
-    if semver_lt "$v" "$FIRST_NOTES_RELEASE" || ! semver_lt "$LAST_RELEASE_WITHOUT_MCP_LOCK" "$v"; then
-        check_refused "$v predates the readiness check (releases carry it from $FIRST_NOTES_RELEASE on), so it cannot be checked; upgrade to it from the deploy shell: upgrade --target $v"
-    fi
+    semver_lt "$LAST_RELEASE_WITHOUT_MCP_LOCK" "$v" \
+        || check_refused "$v predates the hash-pinned requirements every install needs, so this box can neither check nor install it; run upgrade-howto to see the latest release"
+    ! semver_lt "$v" "$FIRST_NOTES_RELEASE" \
+        || check_refused "$v predates the readiness check (releases carry it from $FIRST_NOTES_RELEASE on), so it cannot be checked; upgrade to it from the deploy shell: upgrade --target $v"
     ! is_blocklisted "$v" \
         || check_refused "$v is blocklisted on this box (it failed an earlier upgrade). The operator clears it as supervisor (sudo $BIN_DIR/boxmunge-upgrade clear-blocklist $v), then run upgrade-check again"
     check_probation

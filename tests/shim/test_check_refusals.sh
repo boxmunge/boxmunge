@@ -35,7 +35,10 @@ CHECK_TARGET=0.11.7 refused "0.11.7 predates the readiness check (releases carry
     "check: a release before the first with a readiness check is refused, naming upgrade --target"
 echo "0.9.0" > "$BOXMUNGE_ROOT/config/version"
 CHECK_TARGET=0.10.1 run_check 0.10.1
-CHECK_TARGET=0.10.1 refused "predates the readiness check" "check: a release without the hash-pinned MCP requirements is refused"
+CHECK_TARGET=0.10.1 refused "0.10.1 predates the hash-pinned requirements every install needs, so this box can neither check nor install it; run upgrade-howto to see the latest release" \
+    "check: a release without the hash-pinned MCP requirements is refused, naming no command that refuses it"
+[[ "$(field 'd["reasons"][0]')" != *"upgrade --target"* ]] && pass "no upgrade --target for a release target refuses" \
+    || fail "names target: $JSON"
 drop_root
 
 box
