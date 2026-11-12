@@ -1,8 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""What the box knows about its backups, kept across runs.
+"""What the box records about its backups, kept across runs.
+
+How fresh a project's backups are is read from the snapshots on disk
+(backup_standing), which are there whether or not anything here could be
+written. These records hold what no snapshot shows.
 
 state/backup/<project>.json, for each project:
-  snapshot, snapshot_at     the newest snapshot a backup published;
+  snapshot, snapshot_at     the newest snapshot a backup published (the
+                            off-site sync goes by it);
   excused_at                when a scheduled backup last rightly took none
                             (the project was paused, quarantined or
                             mid-migration, or has no backup configured);
@@ -22,27 +27,43 @@ scheduled sync first ran with a remote configured.
 Deploy writes these (backups, the sync) and so does root (check-all's
 alerts, the userns migration's backups), so every change is a
 read-modify-write under one lock. A record a writer cannot read is logged
-and replaced; a reader gets a StateError naming the file. A change that
-cannot be written is logged as an error and never fails the backup that
-made it: the record then goes stale, which the freshness check reports.
+and replaced; a reader gets a StateError naming the file, which covers a
+time no backup could have run at (out of range, or ahead of the clock).
+
+A change that cannot be written never fails the backup that made it, and
+is never kept quiet either: report_unwritten logs it, prints it, and
+alerts, once per scheduled run (reporting_unwritten) or at once.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+import errno
+import os
+import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from boxmunge.backup import AHEAD_SLACK
 from boxmunge.fileutil import exclusive_lock
 from boxmunge.log import log_error
+from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths, InvalidProjectName
 from boxmunge.state import StateError, read_state, write_state
 
 _TIMES = ("snapshot_at", "excused_at", "failing_since", "failed_at", "synced_at",
           "unsynced_since", "expected_since")
 _TEXTS = ("snapshot", "failure")
+_EARLIEST = datetime(2020, 1, 1, tzinfo=timezone.utc)   # no boxmunge backup is older
 CAUSE_LIMIT = 600   # an alert carries the cause; a dump's stderr can be long
+_SHOWN, _SHOWN_LENGTH = 3, 250   # of the unwritten changes, in one alert
+
+Send = Callable[..., bool]   # notify's signature
+# The unwritten changes of the scheduled run in progress; None outside one.
+_unwritten: ContextVar[list[str] | None] = ContextVar("unwritten_backup_state", default=None)
 
 
 @dataclass(frozen=True)
@@ -59,18 +80,31 @@ class Evidence:
     alerted: dict[str, str] = field(default_factory=dict)
 
 
+def _time(raw: Any, key: str, path: Path) -> datetime:
+    """A recorded time, in UTC. Raises StateError for anything else, and for
+    a time no backup could have run at: arithmetic on one overflows, and
+    one ahead of the clock would keep a project fresh until the clock
+    reached it."""
+    try:
+        at = datetime.fromisoformat(raw)
+    except (TypeError, ValueError) as e:
+        raise StateError(f"State file {path}: {key} is not a time ({raw!r})") from e
+    if at.tzinfo is None:
+        raise StateError(f"State file {path}: {key} has no timezone ({raw!r})")
+    try:
+        at = at.astimezone(timezone.utc)
+        possible = _EARLIEST <= at <= datetime.now(timezone.utc) + AHEAD_SLACK
+    except OverflowError:
+        possible = False
+    if not possible:
+        raise StateError(f"State file {path}: {key} is not a time a backup could have "
+                         f"run at ({raw!r}: before 2020, or ahead of the clock)")
+    return at
+
+
 def _parse(record: dict[str, Any], path: Path) -> Evidence:
-    values: dict[str, Any] = {}
-    for key in _TIMES:
-        raw = record.get(key)
-        if raw is None:
-            continue
-        try:
-            values[key] = datetime.fromisoformat(raw)
-        except (TypeError, ValueError) as e:
-            raise StateError(f"State file {path}: {key} is not a time ({raw!r})") from e
-        if values[key].tzinfo is None:
-            raise StateError(f"State file {path}: {key} has no timezone ({raw!r})")
+    values: dict[str, Any] = {
+        key: _time(record[key], key, path) for key in _TIMES if record.get(key) is not None}
     for key in _TEXTS:
         if not isinstance(record.get(key, ""), str):
             raise StateError(f"State file {path}: {key} is not text")
@@ -108,25 +142,93 @@ def deployed_projects(paths: BoxPaths) -> list[str]:
     return names
 
 
+def write_problem(paths: BoxPaths) -> str | None:
+    """Why a record cannot be written now, as far as shows without writing
+    one (`health` never writes); None when nothing shows. The first write
+    makes the directory, so a missing one is no problem. Raises OSError
+    when the directory cannot be examined."""
+    directory = paths.backup_state
+    try:
+        vfs = os.statvfs(directory)
+    except FileNotFoundError:
+        return None
+    if not directory.is_dir():
+        code = errno.ENOTDIR
+    elif vfs.f_flag & os.ST_RDONLY:
+        code = errno.EROFS
+    elif (vfs.f_blocks and not vfs.f_bavail) or (vfs.f_files and not vfs.f_favail):
+        code = errno.ENOSPC
+    elif not os.access(directory, os.W_OK | os.X_OK):
+        code = errno.EACCES
+    else:
+        return None
+    return f"{directory} cannot be written: {os.strerror(code)} ({errno.errorcode[code]})"
+
+
+def report_unwritten(paths: BoxPaths, project: str | None, what: str,
+                     error: Exception) -> None:
+    """A change to the backup state could not be written. Said now, in the
+    log and on stderr, and alerted: when the scheduled run in progress ends
+    (reporting_unwritten), or now when there is none."""
+    message = f"{project + ': not' if project else 'Not'} recorded ({error}): {what}"
+    print(f"  WARN: {message}", file=sys.stderr)
+    log_error("backup", message, paths, project=project)
+    gathered = _unwritten.get()
+    if gathered is None:
+        _alert_unwritten(paths, notify, [message])
+    else:
+        gathered.append(message)
+
+
+def _alert_unwritten(paths: BoxPaths, send: Send, unwritten: list[str]) -> None:
+    lines = [line[:_SHOWN_LENGTH] for line in unwritten[:_SHOWN]]
+    if len(unwritten) > _SHOWN:
+        lines.append(f"... and {len(unwritten) - _SHOWN} more.")
+    lines.append(f"The backups' own results stand. Make {paths.backup_state} writable; "
+                 f"`boxmunge log --component backup` has every line.")
+    send(paths, "Backup state cannot be written", "\n".join(lines), component="backup")
+
+
+@contextmanager
+def reporting_unwritten(paths: BoxPaths, send: Send) -> Iterator[None]:
+    """For a scheduled run: the changes it could not write go out as one
+    alert when it ends, not one each."""
+    gathered: list[str] = []
+    token = _unwritten.set(gathered)
+    try:
+        yield
+    finally:
+        _unwritten.reset(token)
+        if gathered:
+            _alert_unwritten(paths, send, gathered)
+
+
+def _change(paths: BoxPaths, project: str | None,
+            change: Callable[[dict[str, Any]], None]) -> None:
+    """Apply `change` to the project's record (the sync's, for None).
+    Raises OSError when it cannot be written."""
+    path = paths.project_backup_state(project) if project else paths.backup_sync_state
+    with exclusive_lock(paths.backup_state / ".lock"):
+        try:
+            record = read_state(path)
+            _parse(record, path)
+        except StateError as e:
+            log_error("backup", f"{e}; replacing it", paths, project=project)
+            record = {}
+        before = dict(record)
+        change(record)
+        if record != before:
+            write_state(path, record)
+
+
 def _update(paths: BoxPaths, project: str | None, what: str,
             change: Callable[[dict[str, Any]], None]) -> None:
-    """Apply `change` to the project's record (the sync's, for None)."""
+    """_change for a backup or a sync: one that cannot be written (or whose
+    project name names no record) is reported, and the caller carries on."""
     try:
-        path = paths.project_backup_state(project) if project else paths.backup_sync_state
-        with exclusive_lock(paths.backup_state / ".lock"):
-            try:
-                record = read_state(path)
-                _parse(record, path)
-            except StateError as e:
-                log_error("backup", f"{e}; replacing it", paths, project=project)
-                record = {}
-            before = dict(record)
-            change(record)
-            if record != before:
-                write_state(path, record)
+        _change(paths, project, change)
     except (OSError, InvalidProjectName) as e:
-        log_error("backup", f"Cannot record {what} ({e}); backup-freshness and the "
-                  f"backup alerts go by the older record", paths, project=project)
+        report_unwritten(paths, project, what, e)
 
 
 def _now(now: datetime | None) -> str:
@@ -156,22 +258,21 @@ def record_snapshot(paths: BoxPaths, project: str, name: str,
 
 
 def record_excused(paths: BoxPaths, project: str, now: datetime | None = None) -> None:
-    """A scheduled backup rightly took no snapshot. A project that never
-    had a record (no backup configured) gets none."""
+    """A scheduled backup rightly took no snapshot."""
     at = _now(now)
 
     def change(record: dict[str, Any]) -> None:
-        if record:
-            record["excused_at"] = at
-            _clear_failure(record)
-    _update(paths, project, "the excused backup", change)
+        record["excused_at"] = at
+        _clear_failure(record)
+    _update(paths, project, "that tonight's backup was rightly skipped", change)
 
 
 def record_failure(paths: BoxPaths, project: str, cause: str,
                    now: datetime | None = None) -> None:
     """A scheduled backup failed. `failing_since` keeps the first failure's time."""
     at = _now(now)
-    _update(paths, project, "the failed backup", lambda record: _set_failure(record, cause, at))
+    _update(paths, project, f"the failed scheduled backup ({cause})",
+            lambda record: _set_failure(record, cause, at))
 
 
 def record_synced(paths: BoxPaths, projects: list[str], started: datetime,
@@ -181,10 +282,8 @@ def record_synced(paths: BoxPaths, projects: list[str], started: datetime,
     at = _now(now)
 
     def change(record: dict[str, Any]) -> None:
-        if "snapshot_at" not in record:
-            return
         record["synced_at"] = at
-        if datetime.fromisoformat(record["snapshot_at"]) > started:
+        if "snapshot_at" in record and datetime.fromisoformat(record["snapshot_at"]) > started:
             record["unsynced_since"] = record["snapshot_at"]
         else:
             record.pop("unsynced_since", None)
@@ -204,7 +303,8 @@ def record_sync_run(paths: BoxPaths, cause: str | None, now: datetime | None = N
             _clear_failure(record)
         else:
             _set_failure(record, cause, at)
-    _update(paths, None, "the off-site sync", change)
+    _update(paths, None, f"the off-site sync's failure ({cause})" if cause
+            else "the off-site sync", change)
 
 
 def record_sync_not_expected(paths: BoxPaths) -> None:
@@ -216,8 +316,20 @@ def record_sync_not_expected(paths: BoxPaths) -> None:
     _update(paths, None, "the sync with no remote", change)
 
 
-def mark_alerted(paths: BoxPaths, project: str | None, alert: str, ref: str) -> None:
-    """The operator was told of the `alert` condition identified by `ref`."""
+def claim(paths: BoxPaths, project: str | None, alert: str, ref: str) -> None:
+    """Record, before it is sent, that the operator is told of the `alert`
+    condition identified by `ref`. Raises OSError when that cannot be
+    written: the sender then knows it could not say so a second time."""
     def change(record: dict[str, Any]) -> None:
         record["alerted"] = {**record.get("alerted", {}), alert: ref}
-    _update(paths, project, f"the delivered {alert} alert", change)
+    _change(paths, project, change)
+
+
+def withdraw(paths: BoxPaths, project: str | None, alert: str, ref: str) -> None:
+    """The claimed alert was not delivered: the next run tries it again.
+    Raises OSError."""
+    def change(record: dict[str, Any]) -> None:
+        alerted = dict(record.get("alerted", {}))
+        if alerted.pop(alert, None) == ref:
+            record["alerted"] = alerted
+    _change(paths, project, change)

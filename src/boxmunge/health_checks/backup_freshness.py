@@ -1,16 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """Health check: is each project's newest good backup recent?
 
-Warns, from the evidence in state/backup (backup_evidence), when a project:
-- has had no good snapshot for over 26 hours (a night it was rightly not
-  backed up, paused or quarantined, counts as good);
+Warns, from where each project's backups stand (backup_standing), when a
+project:
+- is due a backup and has no snapshot on disk yet, or none taken within 26
+  hours (a night it was rightly not backed up, paused or quarantined,
+  counts as good);
 - failed its last scheduled backup;
-- once backup_remote is set and a scheduled sync has run with it, has a
-  snapshot that has waited over 26 hours for its off-site copy;
-or when the all-projects sync is failing, or a record cannot be read.
+- has snapshots dated ahead of the clock (its old backups are not pruned);
+- with backup_remote set: has snapshots and no successful off-site sync
+  recorded yet, or, once a scheduled sync has run with the remote, a
+  snapshot that has waited over 26 hours for its copy;
+or when the all-projects sync is failing, a record cannot be read, or
+state/backup cannot be written (backup alerts are then held or repeat).
 
-A warning, never an error: a stale backup is not a defect of the release,
-and must not roll back a platform upgrade in probation. The alerts for the
+A warning, never an error: none of these is a defect of the release, and
+none must roll back a platform upgrade in probation. The alerts for the
 same conditions are backup_alerts'.
 """
 from __future__ import annotations
@@ -18,11 +23,9 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from boxmunge.backup_alerts import (
-    WARN_AFTER, awaiting_copy_since, last_good, remote_configured, stamp,
-)
-from boxmunge.backup_evidence import (
-    Evidence, deployed_projects, project_evidence, sync_evidence,
+from boxmunge.backup_evidence import Evidence, deployed_projects, sync_evidence, write_problem
+from boxmunge.backup_standing import (
+    WARN_AFTER, Standing, awaiting_copy_since, remote_configured, stamp, standing,
 )
 from boxmunge.commands.health_cmd import HealthCheck
 from boxmunge.config import ConfigError
@@ -36,6 +39,16 @@ NAME = "backup-freshness"
 
 def _hours(age: timedelta) -> int:
     return int(age.total_seconds() // 3600)
+
+
+def _state_problems(paths: BoxPaths) -> list[str]:
+    try:
+        problem = write_problem(paths)
+    except OSError as e:
+        problem = f"{paths.backup_state} cannot be examined: {e}"
+    if problem is None:
+        return []
+    return [f"{problem}: the five-minute backup alerts are held until it can be"]
 
 
 def _sync(paths: BoxPaths, problems: list[str]) -> Evidence | None:
@@ -55,36 +68,45 @@ def _sync(paths: BoxPaths, problems: list[str]) -> Evidence | None:
     return sync
 
 
-def _project_problems(project: str, e: Evidence, sync: Evidence | None,
-                      now: datetime) -> list[str]:
+def _project_problems(s: Standing, sync: Evidence | None, now: datetime) -> list[str]:
+    project, e = s.project, s.record
     problems = []
-    good = last_good(e)
-    if e.failing_since is not None:
+    if s.unreadable is not None:
+        problems.append(f"{project}: {s.unreadable} (its next backup replaces it)")
+    if s.ahead:
+        problems.append(f"{project}: {s.ahead} snapshot(s) dated ahead of the clock, so its "
+                        f"old backups are not pruned")
+    if s.failing:
         problems.append(f"{project}: scheduled backup failing since "
                         f"{stamp(e.failing_since)}: {e.failure}")
-    if good is not None and now - good > WARN_AFTER:
-        problems.append(f"{project}: no good backup for {_hours(now - good)} h")
-    waiting = awaiting_copy_since(e, sync) if sync is not None else None
-    if waiting is not None and now - waiting > WARN_AFTER:
-        problems.append(f"{project}: no off-site copy for {_hours(now - waiting)} h")
+    if s.due and s.last_good is None:
+        problems.append(f"{project}: no backup yet")
+    elif s.due and now - s.last_good > WARN_AFTER:
+        problems.append(f"{project}: no good backup for {_hours(now - s.last_good)} h")
+    if sync is not None and s.newest is not None:
+        waiting = awaiting_copy_since(e, sync)
+        if e.synced_at is None:
+            problems.append(f"{project}: no successful off-site sync recorded yet")
+        elif waiting is not None and now - waiting > WARN_AFTER:
+            problems.append(f"{project}: no off-site copy for {_hours(now - waiting)} h")
     return problems
 
 
 def check_backup_freshness(paths: BoxPaths, *, now: datetime | None = None) -> HealthCheck:
     now = now or datetime.now(timezone.utc)
-    problems: list[str] = []
+    problems = _state_problems(paths)
     sync = _sync(paths, problems)
-    recorded = 0
+    fresh = 0
     for project in deployed_projects(paths):
         try:
-            e = project_evidence(paths, project)
-        except StateError as err:
-            problems.append(f"{project}: {err} (its next backup replaces it)")
+            s = standing(paths, project, now)
+        except OSError as e:
+            problems.append(f"{project}: its backups cannot be checked: {e}")
             continue
-        recorded += last_good(e) is not None
-        problems.extend(_project_problems(project, e, sync, now))
+        fresh += s.due and s.last_good is not None and now - s.last_good <= WARN_AFTER
+        problems.extend(_project_problems(s, sync, now))
     if problems:
         return HealthCheck(NAME, "warn", "; ".join(problems))
-    if not recorded:
-        return HealthCheck(NAME, "ok", "no backups recorded yet")
-    return HealthCheck(NAME, "ok", f"{recorded} project(s) backed up within 26 h")
+    if not fresh:
+        return HealthCheck(NAME, "ok", "no project is due a backup")
+    return HealthCheck(NAME, "ok", f"{fresh} project(s) backed up within 26 h")

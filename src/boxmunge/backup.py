@@ -16,10 +16,11 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -148,7 +149,16 @@ SNAPSHOT_RETENTION = {
 }
 
 _TIMESTAMP = r"\d{4}-\d{2}-\d{2}T\d{6}"
+_TIMESTAMP_FORMAT = "%Y-%m-%dT%H%M%S"
 _UNIQUE = r"[0-9a-f]{8}"
+# A snapshot named for a time further ahead of the clock than this was
+# taken while the clock ran ahead (or the clock has since stepped back).
+AHEAD_SLACK = timedelta(minutes=10)
+
+
+def utc_now() -> datetime:
+    """The clock every snapshot is named by and judged against."""
+    return datetime.now(timezone.utc)
 
 
 def backup_filename(project_name: str, kind: BackupKind) -> str:
@@ -159,7 +169,7 @@ def backup_filename(project_name: str, kind: BackupKind) -> str:
     second, and a clock that steps back revisits old seconds, so the random
     part is what keeps every snapshot's name its own.
     """
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
+    ts = utc_now().strftime(_TIMESTAMP_FORMAT)
     return f"{project_name}-{ts}-{secrets.token_hex(4)}-{kind.value}.tar.gz.age"
 
 
@@ -192,6 +202,41 @@ def snapshot_kind(path: Path, project_name: str) -> BackupKind | None:
     return parsed[1] if parsed else None
 
 
+def dated_snapshots(backups_dir: Path, project_name: str,
+                    ) -> list[tuple[datetime, BackupKind, Path]]:
+    """The project's published snapshots with the time each is named for,
+    oldest first: what is on disk, whatever any record says.
+
+    backups/ is deploy-writable, so only a regular file counts (lstat: a
+    link is never followed). A name whose timestamp is not a real time
+    says nothing about when, and is left out. No directory: no snapshots.
+    """
+    try:
+        entries = list(backups_dir.iterdir())
+    except FileNotFoundError:
+        return []
+    found = []
+    for entry in entries:
+        parsed = parse_snapshot(entry, project_name)
+        if parsed is None:
+            continue
+        try:
+            at = datetime.strptime(parsed[0], _TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)
+            if not stat.S_ISREG(entry.lstat().st_mode):
+                continue
+        except (ValueError, FileNotFoundError):
+            continue   # no such date; or removed meanwhile (prune)
+        found.append((at, parsed[1], entry))
+    return sorted(found, key=lambda snapshot: (snapshot[0], snapshot[2].name))
+
+
+def dated_ahead(backups_dir: Path, project_name: str) -> list[Path]:
+    """The project's snapshots named for a time ahead of the clock."""
+    now = utc_now()
+    return [path for at, _kind, path in dated_snapshots(backups_dir, project_name)
+            if at - now > AHEAD_SLACK]
+
+
 def publish_new(tmp_path: Path, path: Path) -> None:
     """Give a fully written temp file its final name, durably, replacing nothing.
 
@@ -199,7 +244,8 @@ def publish_new(tmp_path: Path, path: Path) -> None:
     holds it: a stored snapshot is never overwritten, whatever produced the
     name. The temp file must be in path's directory. Its data is synced
     before the link and the directory after it, as durable_rename does.
-    Raises BackupError when path exists (a link at it included).
+    Raises BackupError when path exists (a link at it included), or the
+    filesystem refuses the link: the cause is named, and nothing is stored.
     """
     fd = open_regular_nofollow(tmp_path, os.O_RDONLY)
     try:
@@ -212,6 +258,11 @@ def publish_new(tmp_path: Path, path: Path) -> None:
         raise BackupError(
             f"{path} already exists; a stored snapshot is never overwritten. "
             f"Run the backup again: every snapshot gets a new name."
+        ) from e
+    except OSError as e:
+        raise BackupError(
+            f"Cannot give the snapshot its name {path}: {e}. Nothing was stored. "
+            f"Fix the cause, then run the backup again."
         ) from e
     tmp_path.unlink()
     fsync_dir(path.parent)

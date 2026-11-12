@@ -15,7 +15,9 @@ from boxmunge.backup import (
 )
 from boxmunge.backup_alerts import deliver
 from boxmunge.backup_dump import execute_dump, remove_stale_dumps
-from boxmunge.backup_evidence import record_excused, record_failure, record_snapshot
+from boxmunge.backup_evidence import (
+    record_excused, record_failure, record_snapshot, reporting_unwritten,
+)
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.lifecycle import BlockReason, is_blocked
@@ -268,9 +270,9 @@ def _run_backup_inner(
     published = paths.project_backups(project_name) / fname
     try:
         _backup.encrypt_file(raw_path, published, paths)
-    except (BackupError, FileNotFoundError) as e:
-        log_error("backup", f"Backup encrypt failed: {e}", paths, project=project_name)
-        return _failed(f"Encryption failed: {e}")
+    except (BackupError, OSError) as e:   # the key is gone, age failed, no room, no link
+        log_error("backup", f"Backup not stored: {e}", paths, project=project_name)
+        return _failed(f"Snapshot not stored: {e}")
     finally:
         raw_path.unlink(missing_ok=True)
     record_snapshot(paths, project_name, fname)
@@ -351,6 +353,11 @@ def run_backup_all(paths: BoxPaths) -> int:
     lock is still held after retries, the project is reported as locked-skipped
     via Pushover and the run exits with status 1 so the operator has visibility.
     """
+    with reporting_unwritten(paths, notify):
+        return _backup_all(paths)
+
+
+def _backup_all(paths: BoxPaths) -> int:
     projects_dir = paths.projects
     if not projects_dir.exists():
         print("No projects directory.")

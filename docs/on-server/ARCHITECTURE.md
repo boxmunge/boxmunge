@@ -262,7 +262,7 @@ Operational state is stored as JSON files under `/opt/boxmunge/state/`:
 
 - `state/health/<project>.json` -- last check time, status, consecutive failure count, alert state, failure reason
 - `state/deploy/<project>.json` -- current ref (the bundle name, e.g. `myapp-2026-10-13T101500123456`, or the git commit), deploy timestamp, pre-deploy snapshot filename, recent history, a `data chown` snapshot pending for the next deploy, and the restart policies `data chown` holds at "no" until boxmunge starts the service again
-- `state/backup/<project>.json`, `state/backup-sync.json` -- the newest good snapshot, the last off-site copy, a continuing backup or sync failure and its cause, and which of those the operator was alerted to
+- `state/backup/<project>.json`, `state/backup-sync.json` -- what the snapshots on disk do not show: a continuing backup or sync failure and its cause, a night a project was rightly skipped, the last off-site copy, and which alerts the operator was sent (freshness itself is read from the snapshot names in `backups/`)
 - `<project>/.releases/staged/meta.json` -- the staged release (id, ref, state); there is none while nothing is staged
 
 All state writes are atomic: the new content is written to a temporary file in the same directory, then renamed into place with `os.rename()`. This prevents partial reads if a check or deploy runs concurrently.

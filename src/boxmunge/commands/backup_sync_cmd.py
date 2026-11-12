@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from boxmunge.backup_alerts import deliver
 from boxmunge.backup_evidence import (
     deployed_projects, record_sync_not_expected, record_sync_run, record_synced,
+    reporting_unwritten,
 )
 from boxmunge.config import ConfigError, load_config
 from boxmunge.log import log_error, log_operation
@@ -26,6 +27,11 @@ def run_backup_sync(paths: BoxPaths, project_name: str | None = None) -> int:
     and a failure alerts (backup_alerts). A one-project sync records only
     that project's copy.
     """
+    with reporting_unwritten(paths, notify):
+        return _sync(paths, project_name)
+
+
+def _sync(paths: BoxPaths, project_name: str | None) -> int:
     try:
         config = load_config(paths)
     except ConfigError as e:

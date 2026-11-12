@@ -20,7 +20,9 @@ from boxmunge.backup_evidence import (
 from boxmunge.commands import backup_sync_cmd
 from boxmunge.commands.backup_sync_cmd import run_backup_sync
 from boxmunge.health_checks.backup_freshness import check_backup_freshness
-from tests.backup_alert_helpers import CONFIG, REMOTE, Alerts, backed_up_project, snapshot_name
+from tests.backup_alert_helpers import (
+    CONFIG, REMOTE, Alerts, backed_up_at, backed_up_project, snapshot_name,
+)
 
 P = "shop"
 T0 = datetime(2026, 11, 1, 2, 0, tzinfo=timezone.utc)
@@ -55,8 +57,8 @@ def _two_snapshots_after_a_sync(paths) -> None:
     """The scheduled sync ran, then two nights' snapshots were published:
     the first still waits for its copy, and the newest is recent."""
     record_sync_run(paths, None, now=T0 - timedelta(hours=1))
-    record_snapshot(paths, P, FIRST, now=T0)
-    record_snapshot(paths, P, SECOND, now=T0 + timedelta(hours=48))
+    backed_up_at(paths, P, T0)
+    backed_up_at(paths, P, T0 + timedelta(hours=48))
 
 
 def test_a_failed_nightly_sync_alerts_once_with_the_cause(box, system_container) -> None:
@@ -86,8 +88,10 @@ def test_a_sync_alert_that_was_not_delivered_is_tried_again(box, system_containe
 def test_a_good_sync_ends_the_failure_and_a_later_one_alerts_again(
         box, system_container) -> None:
     alerts = Alerts()
+    backed_up_at(box, P, datetime.now(timezone.utc) - timedelta(hours=1))
     system_container.handler = _rclone_fails
     _sync(box, alerts)
+    assert "shop: no successful off-site sync recorded yet" in check_backup_freshness(box).detail
     system_container.handler = _ok
     assert _sync(box, alerts) == 0
     good = sync_evidence(box)

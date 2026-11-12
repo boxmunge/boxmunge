@@ -33,16 +33,6 @@ MANIFEST = {"project": P, "services": {"db": {}},
 STEPPED_BACK = datetime(2026, 6, 1, tzinfo=timezone.utc)
 
 
-class _Clock:
-    """Stands in for backup.datetime: every now() is the same moment."""
-
-    def __init__(self, moment: datetime) -> None:
-        self.moment = moment
-
-    def now(self, tz=None) -> datetime:
-        return self.moment
-
-
 @pytest.fixture
 def project(paths, system_container) -> Path:
     """A project whose dumps hold the payload the test names; age copies."""
@@ -61,14 +51,15 @@ def project(paths, system_container) -> Path:
     return bdir
 
 
-def _snapshot(paths, payload: bytes, kind=BackupKind.PREDEPLOY) -> tuple[int, str | None]:
+def _snapshot(paths, payload: bytes, kind=BackupKind.PREDEPLOY,
+              manifest=MANIFEST) -> tuple[int, str | None]:
     def dump(paths_, project, *a, **k) -> Path:
         raw = paths_.project_backups(project) / ".dump-test"
         raw.write_bytes(payload)
         return raw
 
     with patch.object(backup_cmd, "execute_dump", dump):
-        return take_snapshot(P, paths, kind, MANIFEST)
+        return take_snapshot(P, paths, kind, manifest)
 
 
 def _leftovers(bdir: Path) -> list[str]:
@@ -76,7 +67,7 @@ def _leftovers(bdir: Path) -> list[str]:
 
 
 def test_two_backups_in_one_second_are_two_snapshots(paths, project, monkeypatch) -> None:
-    monkeypatch.setattr(backup, "datetime", _Clock(STEPPED_BACK))
+    monkeypatch.setattr(backup, "utc_now", lambda: STEPPED_BACK)
     rc, first = _snapshot(paths, b"first")
     assert rc == 0 and first is not None
     # A rollback is now paired with the first one.
@@ -125,14 +116,42 @@ def test_after_the_clock_steps_back_the_snapshot_is_new_named_and_kept(
     for name in stored:
         (project / name).write_bytes(b"original " + name.encode())
     write_state(paths.project_deploy_state(P), {"pre_deploy_snapshot": stored[0]})
-    monkeypatch.setattr(backup, "datetime", _Clock(STEPPED_BACK))
+    monkeypatch.setattr(backup, "utc_now", lambda: STEPPED_BACK)
 
     rc, name = _snapshot(paths, b"after the step back")
 
     assert rc == 0 and name is not None and name not in stored
     assert (project / name).read_bytes() == b"after the step back"
     assert (project / stored[0]).read_bytes() == b"original " + stored[0].encode()
-    assert name in {p.name for p in list_snapshots(paths, P)}
+    assert {p.name for p in list_snapshots(paths, P)} == {*stored, name}
+
+
+def test_while_snapshots_are_dated_ahead_of_the_clock_nothing_is_pruned(
+        paths, project, monkeypatch, capsys) -> None:
+    """Three nightlies taken while the clock ran a month ahead fill
+    retention. Back on the right date, each night's snapshot sorted as the
+    oldest: it was pruned the night after, and the three stale ones stayed."""
+    keep_three = {**MANIFEST, "backup": {**MANIFEST["backup"], "retention": 3}}
+    ahead = [f"{P}-2026-12-0{day}T020000-nightly.tar.gz.age" for day in (1, 2, 3)]
+    for name in ahead:
+        (project / name).write_bytes(b"taken while the clock ran ahead")
+    taken = []
+    for day in (10, 11, 12):
+        monkeypatch.setattr(
+            backup, "utc_now", lambda day=day: datetime(2026, 11, day, 2, tzinfo=timezone.utc))
+        rc, name = _snapshot(paths, b"night %d" % day, BackupKind.NIGHTLY, keep_three)
+        assert rc == 0
+        taken.append(name)
+    assert {p.name for p in list_snapshots(paths, P)} == {*ahead, *taken}
+    warned = capsys.readouterr().err
+    assert "Not pruning old nightly backups of demo" in warned
+    assert f"3 snapshot(s) are dated ahead of the clock (the latest: {ahead[2]})" in warned
+
+    # The clock passes them: the names are in the order taken again.
+    monkeypatch.setattr(backup, "utc_now", lambda: datetime(2026, 12, 4, 2, tzinfo=timezone.utc))
+    rc, newest = _snapshot(paths, b"december", BackupKind.NIGHTLY, keep_three)
+    assert rc == 0
+    assert {p.name for p in list_snapshots(paths, P)} == {ahead[1], ahead[2], newest}
 
 
 def test_snapshots_named_the_older_ways_still_parse_and_prune(paths, project) -> None:

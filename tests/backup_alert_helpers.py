@@ -1,8 +1,11 @@
 """Shared by the backup alert, sync alert and backup-freshness tests."""
 from __future__ import annotations
 
+import errno
+from datetime import datetime
 from pathlib import Path
 
+from boxmunge.backup_evidence import record_snapshot
 from boxmunge.paths import BoxPaths
 
 MANIFEST = """\
@@ -41,6 +44,25 @@ def backed_up_project(paths: BoxPaths, name: str, backup: str = "db-dump") -> Pa
     paths.backup_key.parent.mkdir(parents=True, exist_ok=True)
     paths.backup_key.write_text("# public key: age1test\nAGE-SECRET-KEY-1TEST\n")
     return pdir
+
+
+def stored_snapshot(paths: BoxPaths, project: str, at: datetime) -> str:
+    """A snapshot on disk named for `at`, as an earlier backup left it."""
+    name = snapshot_name(project, at.strftime("%Y-%m-%dT%H%M%S"))
+    (paths.project_backups(project) / name).write_bytes(b"sealed")
+    return name
+
+
+def backed_up_at(paths: BoxPaths, project: str, at: datetime) -> str:
+    """What a good backup at `at` leaves: the snapshot on disk, and its record."""
+    name = stored_snapshot(paths, project, at)
+    record_snapshot(paths, project, name, now=at)
+    return name
+
+
+def no_space(*a, **k):
+    """Stands in for backup_evidence.write_state on a full disk."""
+    raise OSError(errno.ENOSPC, "No space left on device")
 
 
 class Alerts:
