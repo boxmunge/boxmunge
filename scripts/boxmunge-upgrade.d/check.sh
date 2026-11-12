@@ -323,7 +323,7 @@ cmd_guide() {
         22:404) die "Release $version publishes no upgrade-notes.json (GitHub answered 404)" ;;
         22:*) die "GitHub refused the download of upgrade-notes.json of $version (HTTP $(printable "$status")); retry later" ;;
         63:*) die "upgrade-notes.json of $version is over $NOTES_MAX_BYTES bytes; refusing it" ;;
-        *) die "Failed to download upgrade-notes.json of $version (curl exit $rc); retry later" ;;
+        *) die "Failed to download upgrade-notes.json of $version (the download failed, exit $rc); retry later" ;;
     esac
     size="$(wc -c < "$notes" | tr -d ' ')"
     [[ "$size" -le "$NOTES_MAX_BYTES" ]] || die "upgrade-notes.json of $version is $size bytes, over $NOTES_MAX_BYTES; refusing it"
