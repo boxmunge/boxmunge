@@ -18,9 +18,8 @@ from boxmunge.commands.confirm import confirm
 from boxmunge.built_images import remove_built_images
 from boxmunge import docker_containers
 from boxmunge.data_helper import container_owned_dirs, empty_under
-from boxmunge.docker import DockerError, caddy_reload, compose_down, staging_compose_project
+from boxmunge.docker import DockerError, caddy_reload, compose_down
 from boxmunge.fileutil import LockError, project_lock
-from boxmunge.legacy_stage import legacy_staging_compose, legacy_staging_state
 from boxmunge.lifecycle import migration_refusal
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.paths import BoxPaths
@@ -47,7 +46,6 @@ def project_state_files(paths: BoxPaths, name: str) -> list[Path]:
         paths.project_paused_state(name),
         paths.project_quarantine_state(name),
         paths.project_scan_state(name),
-        legacy_staging_state(paths, name),
         paths.container_update_target_state(name),
         *(alert_state(paths, name, kind) for kind in ALERT_KINDS),
     ]
@@ -120,18 +118,11 @@ def _teardown(project_name: str, paths: BoxPaths) -> list[str]:
 
 def _staging_down(project_name: str, paths: BoxPaths) -> None:
     """compose down staging, from the slot (a link planted in its place is
-    refused, never followed), or from the project dir for a stage left by
-    boxmunge 0.10.1. Raises DockerError or OSError."""
+    refused, never followed). Raises DockerError or OSError."""
     if has_slot(paths, project_name):
         refuse_planted(paths, project_name)
         target = staging_target(paths, project_name)
         compose_down(target.cwd, remove_orphans=True, **target.kwargs())
-        return
-    project_dir = paths.project_dir(project_name)
-    legacy = legacy_staging_compose(project_dir)
-    if legacy is not None:
-        compose_down(project_dir, compose_files=legacy,
-                     project_name=staging_compose_project(project_name), remove_orphans=True)
 
 
 class ContainersLeft(Exception):

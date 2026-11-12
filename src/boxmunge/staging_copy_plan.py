@@ -26,9 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from boxmunge.bind_mounts import project_relative
 from boxmunge.bundle import BOXMUNGE_ENTRIES
-from boxmunge.compose_mounts import is_bind_entry, volume_source
+from boxmunge.compose_mounts import bind_entries, is_bind_entry, project_rel, volume_source
 
 
 class StagingDataError(Exception):
@@ -85,7 +84,7 @@ def stores(model: dict[str, Any], compose_project: str, project_dir: Path,
     files: dict[tuple[str, str], Store] = {}
 
     def bind(source: str, into: dict[tuple[str, str], Store]) -> None:
-        rel = project_relative(source, project_dir)
+        rel = project_rel(source, project_dir)
         if rel is None or rel == ".":
             return
         top, _, rest = rel.partition(os.sep)
@@ -98,19 +97,16 @@ def stores(model: dict[str, Any], compose_project: str, project_dir: Path,
         key = "./" + "/".join(p for p in (top, rest) if p)
         into[("bind", key)] = Store("bind", key, os.path.normpath(project_dir / rel))
 
+    for entry in bind_entries(model, project_dir):
+        bind(entry.source, found if entry.section == "services" else files)
     for svc in (model.get("services") or {}).values():
         for entry in (svc.get("volumes") or []) if isinstance(svc, dict) else []:
             if is_bind_entry(entry):
-                bind(volume_source(entry), found)
                 continue
             key = entry.get("source") if isinstance(entry, dict) else volume_source(entry)
             if key:  # anonymous volumes belong to their container
                 found[("volume", key)] = Store(
                     "volume", key, _volume_name(model, key, compose_project))
-    for section in ("configs", "secrets"):
-        for decl in (model.get(section) or {}).values():
-            if isinstance(decl, dict) and isinstance(decl.get("file"), str):
-                bind(decl["file"], files)
     # A config or secret file is its own store even inside a copied
     # directory: Compose needs it in place before staging's containers exist.
     kept = _outermost(list(found.values()))

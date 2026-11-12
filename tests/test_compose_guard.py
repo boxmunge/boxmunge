@@ -194,8 +194,9 @@ def test_a_start_names_the_images_its_build_services_run_first(box, monkeypatch)
     overlay = {"services": {"web": {"image": "boxmunge.invalid/shop/web"}}}
     assert _named_at_start(box, monkeypatch, overlay) == [(NAME, ["web"], 0)]
     paths = box[0]
-    assert "named the images shop's containers run: boxmunge.invalid/shop/web" in \
-        paths.log_file.read_text()
+    log = paths.log_file.read_text()
+    assert "named the images shop's containers run: shop's web image, built on this box" in log
+    assert '"images": ["boxmunge.invalid/shop/web"]' in log
 
 
 @pytest.mark.parametrize("overlay", [None, {"services": {"web": {"read_only": True}}}],

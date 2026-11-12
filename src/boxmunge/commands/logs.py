@@ -9,9 +9,8 @@ import subprocess
 import sys
 
 from boxmunge.docker import (
-    DockerError, compose_logs, compose_logs_capture, staging_compose_project,
+    DockerError, compose_logs, compose_logs_capture,
 )
-from boxmunge.legacy_stage import legacy_staging_compose
 from boxmunge.paths import (
     STAGING_SUFFIX, BoxPaths, InvalidProjectName, validate_project_name,
 )
@@ -108,17 +107,12 @@ def _production_target(paths: BoxPaths, project: str) -> ComposeTarget:
 
 
 def _staging_target(paths: BoxPaths, project: str) -> ComposeTarget:
-    """Staging's compose project as it runs: from the slot, or from the
-    project dir for a stage left by boxmunge 0.10.1. Raises OSError for a
-    link planted where the slot belongs, NothingStaged when there is none."""
+    """Staging's compose project as it runs, from the slot. Raises OSError
+    for a link planted where the slot belongs, NothingStaged when there is
+    none."""
     if has_slot(paths, project):
         refuse_planted(paths, project)
         return staging_target(paths, project)
-    project_dir = paths.project_dir(project)
-    legacy = legacy_staging_compose(project_dir)
-    if legacy is not None:
-        return ComposeTarget(cwd=project_dir, project_name=staging_compose_project(project),
-                             files=legacy)
     raise NothingStaged(f"'{project}' has no staged release. Stage one with "
                         f"'stage {project}', or read production's logs with "
                         f"'logs {project}'.")

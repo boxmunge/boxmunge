@@ -16,6 +16,7 @@ from typing import Any
 
 from boxmunge import docker_containers
 from boxmunge.commands.health_state import is_monitor_stopped
+from boxmunge.compose_images import describe_image
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.cve import hardening
 from boxmunge.cve.hardening import (
@@ -310,7 +311,7 @@ def identify_startup_images(
             image = docker_containers.local_image(ref)
             if image is None:
                 inventory.unidentified[service] = (
-                    f"the image `compose up` would start ({ref}) is not in the "
+                    f"the image `compose up` would start ({describe_image(ref)}) is not in the "
                     f"local image store; pull or build it, then scan again"
                 )
             else:

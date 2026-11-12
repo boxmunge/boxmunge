@@ -15,7 +15,7 @@ from boxmunge.docker import DockerError
 from boxmunge.version import read_installed_version
 from tests.test_commands.test_upgrade_dry_run_and_pause import _pause, _project, _setup
 
-OLD = "0.2.0+abc1234"
+OLD = "0.11.0+abc1234"
 
 
 @pytest.fixture

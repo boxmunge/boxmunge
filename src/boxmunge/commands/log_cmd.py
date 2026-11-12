@@ -2,12 +2,14 @@
 """boxmunge log — query structured operational logs with filtering."""
 
 import json
+import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from boxmunge.fs_nofollow import open_regular_nofollow
 from boxmunge.log_rotation import log_files
 from boxmunge.paths import BoxPaths
 
@@ -22,25 +24,39 @@ class LogRead:
     torn: list[str] = field(default_factory=list)
 
 
-def parse_log_file(path: Path) -> LogRead:
-    """Parse a JSON-lines log file; a missing file has no entries."""
+def parse_log_file(path: Path, required_keys: frozenset[str] = frozenset()) -> LogRead:
+    """Parse a JSON-lines log file. A missing file has no entries: an
+    archive pruned since it was listed, or no log yet.
+
+    logs/ is deploy-writable and root reads here too, so the file is opened
+    as its writer opens it: a symlink (dangling or not), a FIFO or a file
+    with a second hard link is refused with an OSError naming it. A line is
+    torn unless it is a JSON object holding ``required_keys``; bytes that
+    are not UTF-8 make their line torn too.
+    """
     read = LogRead()
-    if not path.exists():
+    try:
+        fd = open_regular_nofollow(path, os.O_RDONLY)
+    except FileNotFoundError:
         return read
-    with path.open() as f:
-        for lineno, line in enumerate(f, start=1):
-            line = line.strip()
-            if not line:
+    with os.fdopen(fd, "rb") as f:
+        for lineno, raw in enumerate(f, start=1):
+            if not raw.strip():
                 continue
             try:
-                entry = json.loads(line)
+                entry = json.loads(raw.decode("utf-8"))
             except (ValueError, RecursionError):
                 entry = None
-            if isinstance(entry, dict):
-                read.entries.append(entry)
+            if not isinstance(entry, dict):
+                what = "not a JSON log entry"
+            elif not required_keys <= entry.keys():
+                what = f"a log entry without {', '.join(sorted(required_keys - entry.keys()))}"
             else:
-                read.torn.append(f"{path}:{lineno}: not a JSON log entry (repair or remove "
-                                 f"that line): {line[:200]}")
+                read.entries.append(entry)
+                continue
+            line = raw.decode("utf-8", "replace").strip()
+            read.torn.append(f"{path}:{lineno}: {what} (repair or remove that line): "
+                             f"{line[:200]}")
     return read
 
 
@@ -97,19 +113,23 @@ def query_log(
     level: str | None = None,
     since: str | None = None,
     tail: int | None = None,
+    required_keys: frozenset[str] = frozenset(),
 ) -> LogRead:
-    """Filtered entries across the active log and the archives the query
-    needs, with every torn line in the files it read.
+    """The one reader of the operational log (`log`, health, the MCP log
+    tool, the API's oplog.query): filtered entries, oldest first, across the
+    active log and the archives the query needs, with every torn line in the
+    files it read.
 
-    A ``since`` window reads every archive it reaches back into. Without one,
-    files are read newest first only until ``tail`` entries match.
+    Files are read newest first: all of those a ``since`` window reaches
+    back into, or every one without it, stopping early once ``tail``
+    entries match. A file that cannot be read raises OSError.
     """
     cutoff = parse_since(since) if since else None
     chunks: list[list[dict[str, Any]]] = []
     torn: list[list[str]] = []
     matched = 0
     for path in reversed(log_files(paths.log_file, cutoff)):
-        read = parse_log_file(path)
+        read = parse_log_file(path, required_keys)
         chunk = filter_log_entries(read.entries, project=project,
                                    component=component, level=level, since=since)
         chunks.append(chunk)

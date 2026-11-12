@@ -82,7 +82,7 @@ def test_refuses_inside_the_soak_and_when_unhealthy(paths, tmp_path, monkeypatch
 def test_refuses_when_the_daemon_is_not_the_journalled_one(paths, tmp_path, monkeypatch) -> None:
     _journal(paths, tmp_path, {"driver_type": "", "store_root": str(tmp_path), "size": 0})
     monkeypatch.setattr(cm.uo, "remap_offset", lambda paths: 0)
-    with pytest.raises(cm.MigrationError, match="not remapped as the journal says"):
+    with pytest.raises(cm.MigrationError, match=f"not remapped at offset {S} as the journal says"):
         cm.commit(paths, now=SOAKED)
 
 
@@ -102,7 +102,7 @@ def test_graph_driver_store_is_removed_and_verified(paths, tmp_path, monkeypatch
     for sub in ("containers", "volumes", "image"):
         (tmp_path / sub).mkdir()
     (tmp_path / f"{S}.{S}").mkdir()  # the remapped root stays
-    size = cm._old_store_size({"driver_type": ""}, tmp_path)
+    size = cm.store_size({"driver_type": ""}, tmp_path)
     _journal(paths, tmp_path, {"driver_type": "", "store_root": str(tmp_path / "overlay2"),
                                "size": size})
     cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
@@ -267,7 +267,7 @@ def test_dockerds_own_old_containerd_root_is_removed(paths, tmp_path, monkeypatc
     (store / "io.containerd.content.v1.content" / "blob").write_bytes(b"x" * 100000)
     (tmp_path / f"{S}.{S}" / "containerd" / "daemon").mkdir(parents=True)
     _live(monkeypatch, MANAGED)
-    _journal(paths, tmp_path, _c8d(store, MANAGED, size=cm._old_store_size(
+    _journal(paths, tmp_path, _c8d(store, MANAGED, size=cm.store_size(
         {"driver_type": cm.CONTAINERD_STORE, "store_root": str(store)}, tmp_path)))
     assert cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img").phase == "committed"
     assert not store.exists() and (tmp_path / f"{S}.{S}" / "containerd" / "daemon").is_dir()
@@ -347,6 +347,27 @@ def test_the_prior_store_is_the_containerd_the_daemon_reports(tmp_path, address,
     prior = prior_store(inv)
     assert prior["managed"] is managed and prior["store_root"] == root.format(docker=tmp_path)
     assert prior["containerd"] == {"address": address, "namespace": "moby"}
+
+
+def test_commit_measures_the_old_store_as_phase_0_recorded_it(tmp_path) -> None:
+    """One measure: what commit must free is what phase 0 journalled."""
+    from boxmunge.userns.preflight_checks import dir_size
+    from boxmunge.userns.switch import prior_store
+    for sub in ("overlay2/layer", "image", "volumes/v/_data"):
+        (tmp_path / sub).mkdir(parents=True)
+        (tmp_path / sub / "f").write_bytes(b"x" * 50000)
+    graph = prior_store(Inventory("overlay2", "", str(tmp_path), "29.9.0"))
+    assert graph == {"driver": "overlay2", "driver_type": "",
+                     "store_root": str(tmp_path / "overlay2"),
+                     "size": cm.store_size(graph, tmp_path)}
+    assert graph["size"] == dir_size(tmp_path / "overlay2") + dir_size(tmp_path / "image") > 0
+    (tmp_path / "containerd" / "daemon" / "blobs").mkdir(parents=True)
+    (tmp_path / "containerd" / "daemon" / "blobs" / "b").write_bytes(b"x" * 50000)
+    c8d = prior_store(Inventory("overlayfs", cm.CONTAINERD_STORE, str(tmp_path), "29.9.0",
+                                containerd_address=MANAGED, containerd_namespace="moby"))
+    assert list(c8d) == ["driver", "driver_type", "store_root", "containerd", "managed", "size"]
+    assert c8d["size"] == cm.store_size(c8d, tmp_path) == dir_size(
+        tmp_path / "containerd" / "daemon") > 0
 
 
 def test_a_containerd_the_migration_does_not_know_has_no_prior_store(tmp_path) -> None:

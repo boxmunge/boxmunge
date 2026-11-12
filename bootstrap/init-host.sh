@@ -328,8 +328,7 @@ install -d -m 755 -o root -g "${DEPLOY_USER}" "${BOXMUNGE_ROOT}/caddy/maintenanc
 
 install -d -m 755 -o root -g root \
     "${BOXMUNGE_ROOT}/templates" \
-    "${BOXMUNGE_ROOT}/templates/project" \
-    "${BOXMUNGE_ROOT}/docs"
+    "${BOXMUNGE_ROOT}/templates/project"
 
 install -d -m 755 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" \
     "${BOXMUNGE_ROOT}/projects" \

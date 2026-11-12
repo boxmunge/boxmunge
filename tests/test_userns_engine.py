@@ -138,7 +138,7 @@ def test_rerun_after_applied_refuses(paths, box) -> None:
 
 def test_a_rollback_in_progress_blocks_the_migration(paths, box) -> None:
     save_journal(paths, Journal(ROLLBACK, "rb-saved", S))
-    with pytest.raises(en.MigrationError, match="finish it with userns-rollback"):
+    with pytest.raises(en.MigrationError, match="finish it: userns-rollback"):
         _migrate(paths)
 
 
@@ -278,9 +278,10 @@ def test_rebuild_resumes_a_volume_part_way(paths, monkeypatch, tmp_path) -> None
     monkeypatch.setattr(en, "load_all", lambda *a: events.append("load"))
     monkeypatch.setattr(en, "recreate", lambda v: (events.append("create"),
                                                    new.mkdir(parents=True, exist_ok=True)))
-    monkeypatch.setattr(en, "scan_tree", lambda *a: type("S", (), {"setid": {"x": 0o4755}})())
+    monkeypatch.setattr(en, "scan_tree",
+                        lambda *a, **kw: type("S", (), {"setid": {"x": 0o4755}})())
     shifted = []
-    monkeypatch.setattr(en, "shift_tree", lambda tree, s, d, setid, resumed: shifted.append(
+    monkeypatch.setattr(en, "shift_tree", lambda tree, s, d, setid, resumed, scan: shifted.append(
         (tree, setid)) or ShiftReport())
     monkeypatch.setattr(en, "set_caddyfile_mode", lambda paths, mode: events.append(oct(mode)))
     inv = Inventory("overlay2", "", str(root), "29.9.0", images=[ImageEntry("sha256:a", ["a:1"], 1, True)],
@@ -434,7 +435,7 @@ def test_an_inverse_shift_journals_what_it_left_alone(monkeypatch, tmp_path) -> 
     inverse to give them): the rollback says so instead of dropping it."""
     from boxmunge.userns.shift import Direction, Scan
     left = [f"f{i} (300000:300000)" for i in range(7)]
-    monkeypatch.setattr(en, "scan_tree", lambda tree, s, d: Scan([], 0))
+    monkeypatch.setattr(en, "scan_tree", lambda tree, s, d, resumed: Scan([], 0))
     monkeypatch.setattr(en, "shift_tree", lambda *a, **kw: ShiftReport(7, 0, list(left)))
     j = Journal(ROLLBACK, "rb-quiesced", S)
     saved = []
@@ -448,8 +449,49 @@ def test_an_inverse_shift_journals_what_it_left_alone(monkeypatch, tmp_path) -> 
 
 def test_a_shift_that_left_nothing_alone_journals_nothing(monkeypatch, tmp_path) -> None:
     from boxmunge.userns.shift import Direction, Scan
-    monkeypatch.setattr(en, "scan_tree", lambda tree, s, d: Scan([], 0))
+    monkeypatch.setattr(en, "scan_tree", lambda tree, s, d, resumed: Scan([], 0))
     monkeypatch.setattr(en, "shift_tree", lambda *a, **kw: ShiftReport(3, 3, []))
     j = Journal(ROLLBACK, "rb-quiesced", S, items={f"left:rb:{tmp_path}": "from a run before"})
     en.shift_journalled(j, tmp_path, Direction.INVERSE, lambda: None, f"rb:{tmp_path}")
     assert not any(k.startswith("left:") for k in j.items)
+
+
+def test_a_journalled_shift_walks_the_tree_twice(monkeypatch, tmp_path) -> None:
+    """One scan (the refusals and the setuid list) and one shift: the scan
+    that fills the journal is the one the shift refuses on."""
+    from boxmunge.userns import shift
+    from boxmunge.userns.shift import Direction
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "f").write_text("x")
+    walks = []
+    real_walk = shift.walk
+    monkeypatch.setattr(shift, "walk", lambda root, visit: (walks.append(root),
+                                                           real_walk(root, visit))[1])
+    # The scan's Linux-only probes; an inverse shift of the caller's own files chowns nothing.
+    monkeypatch.setattr(shift, "mount_points_under", lambda root: [])
+    monkeypatch.setattr(shift, "_xattrs", lambda fd: [])
+    monkeypatch.setattr(shift, "_flags", lambda fd: 0)
+    j = Journal(ROLLBACK, "rb-quiesced", S)
+    saved = []
+    en.shift_journalled(j, tmp_path, Direction.INVERSE, lambda: saved.append(dict(j.setid)),
+                        f"rb:{tmp_path}")
+    assert walks == [tmp_path, tmp_path]
+    assert saved == [{f"rb:{tmp_path}": {}}]  # journalled once, before the shift
+
+
+def test_a_refused_shift_journals_its_list_first_and_walks_no_further(monkeypatch,
+                                                                      tmp_path) -> None:
+    """The scan handed to the shift is the one it refuses on, before any
+    change; the tree's list is in the journal by then, as it was when the
+    shift scanned for itself."""
+    from boxmunge.userns import shift
+    from boxmunge.userns.shift import Direction, Scan, ShiftRefused
+    monkeypatch.setattr(en, "scan_tree", lambda tree, s, d, resumed: Scan(
+        ["dev: device node"], 2, {"suid": 0o4755}))
+    monkeypatch.setattr(shift, "walk", lambda root, visit: pytest.fail("walked a refused tree"))
+    j = Journal(FORWARD, "switched", S)
+    saved = []
+    with pytest.raises(ShiftRefused, match="dev: device node"):
+        en.shift_journalled(j, tmp_path, Direction.FORWARD, lambda: saved.append(dict(j.setid)),
+                            str(tmp_path))
+    assert saved == [{str(tmp_path): {"suid": 0o4755}}]

@@ -34,6 +34,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from boxmunge import docker_containers
+from boxmunge.caddy_journal import MAX_SITE_BYTES
 from boxmunge.commands.deploy_images import candidate_name
 from boxmunge.commands.kev_acceptance import accept_at_gate, gate_exits
 from boxmunge.commands.kev_withdrawal import gate_hold
@@ -42,7 +43,7 @@ from boxmunge.commands.security_scan_inputs import (
     ProjectHardening, ProjectMeta, ProjectScanError, ScanTarget, hardening_profile,
     load_all_suppressions, project_meta,
 )
-from boxmunge.compose_images import built_image_name
+from boxmunge.compose_images import built_image_name, describe_image
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.lift_rule import ACCEPT_FLAG, KevLiftCheck, check_kev_for_lift
@@ -52,6 +53,7 @@ from boxmunge.cve.quarantine import (
     QuarantineError, checked_quarantine_record, is_quarantined, lift_quarantine,
     read_quarantine_state, reassert_quarantine,
 )
+from boxmunge.fs_nofollow import read_text_nofollow
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
 from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
@@ -206,7 +208,7 @@ def _finding_lines(scan: ProjectScan, services: dict[str, list[str]],
             lines.setdefault(key, (
                 f"{f.finding.cve_id} ({f.effective_severity.value}{kev}) in "
                 f"{f.finding.package} {f.finding.installed_version}, service {service} "
-                f"(image {decision.image_ref}): {_fix_advice(f)}"))
+                f"({describe_image(decision.image_ref)}): {_fix_advice(f)}"))
     return list(lines.values())
 
 
@@ -219,8 +221,8 @@ def _upcoming_lines(scan: ProjectScan, services: dict[str, list[str]]) -> list[s
             if f.hardening_would_quarantine:
                 lines.setdefault((f.finding.cve_id, f.finding.package, decision.image_ref), (
                     f"{f.finding.cve_id} ({f.effective_severity.value}) in {f.finding.package} "
-                    f"{f.finding.installed_version}, service {service} (image "
-                    f"{decision.image_ref})"))
+                    f"{f.finding.installed_version}, service {service} "
+                    f"({describe_image(decision.image_ref)})"))
     return list(lines.values())
 
 
@@ -462,11 +464,13 @@ def lift_after_deploy(paths: BoxPaths, project: str, ref: str, clearance: Cleara
     try:
         policies = _release_policies(paths, project,
                                      _verify_running(paths, clearance, component))
-        site = paths.project_caddy_site(project).read_text()
+        site = read_text_nofollow(paths.project_caddy_site(project),
+                                  limit=MAX_SITE_BYTES)
         lift_quarantine(project, paths, project_caddy_site_content=site,
                         compose_files=["compose.yml", "compose.boxmunge.yml"],
                         restore=policies, txn=txn, component=component, after_start=recheck)
-    except (QuarantineError, DockerError, ComposeResolveError, OSError) as e:
+    except (QuarantineError, DockerError, ComposeResolveError, OSError,
+            UnicodeDecodeError) as e:
         print(f"ERROR: {ref} is deployed, but lifting the quarantine ({clearance.cve_id}) "
               f"failed: {e}. The quarantine stays in place and the next scan re-asserts it; "
               f"run `boxmunge security resume {project}` once the cause is fixed.",

@@ -64,7 +64,7 @@ class _Smoke:
 
 
 def _tick(paths: BoxPaths, smoke: _Smoke, down, push) -> int:
-    from boxmunge.commands.check import run_check_all
+    from boxmunge.commands.check_all import run_check_all
     with patch("boxmunge.commands.check.subprocess.run", smoke), \
          patch("boxmunge.commands.health_state.compose_down", down), \
          patch("boxmunge.notify.send_notification", push):
@@ -141,7 +141,7 @@ class TestStickyCriticalStop:
 
     def test_read_only_check_all_reports_stop_without_writing(self, paths):
         from unittest.mock import MagicMock
-        from boxmunge.commands.check import run_check_all
+        from boxmunge.commands.check_all import run_check_all
         _tick(paths, _Smoke((2, "db unreachable")), MagicMock(), MagicMock(return_value=True))
         before = paths.project_health_state(NAME).read_text()
         smoke = _Smoke((1, NO_CONTAINER))

@@ -2,13 +2,13 @@
 """The upgrade apply, per project, under that project's lock.
 
 The lock is taken without waiting, and the checks below are made under it.
-Excluded, and reported, rather than touched: a project with a stage left by
-0.10.1 (D9: it is left exactly as it is, so a rollback finds 0.10.1's own
-state), one with an open install transaction (the core that finishes or
-abandons it migrates what it keeps), one whose pause or quarantine record
-cannot be read (whether it is meant to be offline cannot be told), and one
-whose lock is held (it keeps its old configs until its next deploy, resume
-or recover). Excluded projects do not fail the upgrade.
+Excluded, and reported, rather than touched: a project with an open install
+transaction (the core that finishes or abandons it migrates what it keeps),
+one whose pause or quarantine record cannot be read (whether it is meant to
+be offline cannot be told), and one whose lock is held (it keeps its old
+configs until its next deploy, resume or recover). Excluded projects do not
+fail the upgrade. A stage left by 0.10.1 or earlier fails it before any
+project is touched (refuse_unresolved_stages).
 """
 from __future__ import annotations
 
@@ -22,20 +22,17 @@ from boxmunge import bind_sources
 from boxmunge.commands.upgrade_offline import UnreadableRecord
 from boxmunge.commands.upgrade_steps import (
     ManifestMigration, Regeneration, _links_into_repository, _migrated, _project_dirs,
-    _regenerate_project, exclusion, install_exclusion_text, require_manifest,
+    _regenerate_project, exclusion, install_exclusion_text, refuse_unresolved_stages,
+    require_manifest,
 )
 from boxmunge.compose_guard import ComposeRefused, check_kept_files
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.git_layout import alert_old_schema, alert_unlinked, relink_advice
-from boxmunge.legacy_stage import (
-    LegacyStage, alert_legacy, cannot_tell_left_as_is, records_path, staged_by,
-)
 from boxmunge.log import log_error, log_warning
 from boxmunge.manifest import load_manifest, load_manifest_as_written, write_manifest
 from boxmunge.migration import MigrationError
 from boxmunge.notify import notify
 from boxmunge.release_txn import InstallTxn
-from boxmunge.state import StateError
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -44,22 +41,17 @@ if TYPE_CHECKING:
 @dataclass
 class Exclusions:
     """Projects the apply left exactly as they are."""
-    legacy: dict[str, str] = field(default_factory=dict)    # name -> legacy kind
     install: dict[str, str] = field(default_factory=dict)   # name -> why
     busy: list[str] = field(default_factory=list)
-    # name -> why it cannot be told whether a 0.10.1 stage is on disk
-    undetermined: dict[str, str] = field(default_factory=dict)
     # name -> its pause or quarantine record that cannot be read, and the fix
     unreadable: dict[str, str] = field(default_factory=dict)
 
     def names(self) -> set[str]:
-        return (set(self.legacy) | set(self.install) | set(self.busy)
-                | set(self.undetermined) | set(self.unreadable))
+        return set(self.install) | set(self.busy) | set(self.unreadable)
 
     def by_cause(self) -> dict[str, list[str]]:
         """The excluded names by why, for the upgrade's log entry."""
-        return {"legacy_stage": sorted(self.legacy), "undetermined": sorted(self.undetermined),
-                "open_install": sorted(self.install), "busy": sorted(self.busy),
+        return {"open_install": sorted(self.install), "busy": sorted(self.busy),
                 "unreadable_record": sorted(self.unreadable)}
 
 
@@ -118,17 +110,15 @@ def apply_projects(paths: BoxPaths) -> tuple[ManifestMigration, Regeneration, Ex
     (ManifestError, MigrationError, UpgradeGateError) where the upgrade
     cannot succeed; the shim then rolls back."""
     migration, regen, excluded = ManifestMigration(), Regeneration(), Exclusions()
-    for project_dir in _project_dirs(paths):
+    project_dirs = list(_project_dirs(paths))
+    refuse_unresolved_stages(paths, [project_dir.name for project_dir in project_dirs])
+    for project_dir in project_dirs:
         name = project_dir.name
         try:
             with project_lock(name, paths):
                 why = exclusion(paths, name)
                 if why is None:
                     _apply_locked(paths, project_dir, migration, regen)
-                elif isinstance(why, LegacyStage):
-                    excluded.legacy[name] = why.kind
-                elif isinstance(why, OSError):
-                    excluded.undetermined[name] = cannot_tell_left_as_is(name, why)
                 elif isinstance(why, InstallTxn):
                     excluded.install[name] = install_exclusion_text(paths, name, why)
                 elif isinstance(why, UnreadableRecord):
@@ -140,39 +130,20 @@ def apply_projects(paths: BoxPaths) -> tuple[ManifestMigration, Regeneration, Ex
             log_warning("upgrade", f"Skipped {name}: held by another operation; it keeps its "
                         f"current configs until its next deploy, resume or recover",
                         paths, project=name)
-    for name, why in {**excluded.install, **excluded.undetermined,
-                      **excluded.unreadable}.items():
+    for name, why in {**excluded.install, **excluded.unreadable}.items():
         log_warning("upgrade", f"Left {name} as it is (not migrated, regenerated or "
                     f"restarted): {why}", paths, project=name)
     return migration, regen, excluded
 
 
 def notify_exclusions(paths: BoxPaths, excluded: Exclusions) -> None:
-    """A priority-1 alert per legacy project (deduplicated by
-    state/legacy-stages.json), and one summary each for open installs and
-    busy projects. Sent with no project lock held. A legacy alert whose
-    dedupe record cannot be read or written is logged and printed instead:
-    the project was still left as is, so it must not fail the upgrade."""
-    for name, kind in sorted(excluded.legacy.items()):
-        try:
-            alert_legacy(paths, name, LegacyStage(kind))
-        except (StateError, OSError) as e:
-            message = (f"Could not alert that {name} has a release staged by {staged_by(kind)} "
-                       f"(the dedupe record {records_path(paths)}: {type(e).__name__}: {e}); "
-                       f"fix or remove that file. The project was left as is; resolve it with "
-                       f"boxmunge-server legacy-stage {name}")
-            log_error("upgrade", message, paths, project=name)
-            print(f"  WARNING: {message}", file=sys.stderr)
+    """One summary each for open installs, unreadable records and busy
+    projects. Sent with no project lock held."""
     if excluded.install:
         lines = "\n".join(f"- {n}: {why}" for n, why in sorted(excluded.install.items()))
         _summary(paths, "upgrade: projects with an open install left as they are",
                  f"The upgrade did not migrate, regenerate or restart these projects:\n{lines}",
                  priority=1)
-    if excluded.undetermined:
-        lines = "\n".join(f"- {n}: {why}" for n, why in sorted(excluded.undetermined.items()))
-        _summary(paths, "upgrade: projects that may hold a 0.10.1 stage left as they are",
-                 f"The upgrade did not migrate, regenerate or restart these projects:\n"
-                 f"{lines}", priority=1)
     if excluded.unreadable:
         lines = "\n".join(f"- {n}: {why}" for n, why in sorted(excluded.unreadable.items()))
         _summary(paths, "upgrade: projects whose pause or quarantine record cannot be read "

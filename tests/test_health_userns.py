@@ -94,14 +94,14 @@ def test_warning_does_not_alert(paths, monkeypatch) -> None:
 def test_health_and_doctor_include_the_check() -> None:
     import inspect
 
-    from boxmunge.commands import check, doctor, health_cmd
+    from boxmunge.commands import check_all, doctor, health_cmd
     assert "check_docker_userns" in inspect.getsource(health_cmd._checks)
     assert "check_docker_userns" in inspect.getsource(doctor.run_doctor)
-    assert "alert_docker_userns" in inspect.getsource(check.run_check_all)
+    assert "alert_docker_userns" in inspect.getsource(check_all.run_check_all)
 
 
 def test_check_all_exits_critical_on_an_error_even_without_projects(paths, monkeypatch) -> None:
-    from boxmunge.commands.check import run_check_all
+    from boxmunge.commands.check_all import run_check_all
     remap_box(paths, monkeypatch)
     monkeypatch.setattr(offset, "docker_info", lambda: {**remapped_info(), "SecurityOptions": []})
     monkeypatch.setattr(hc, "notify", lambda *a, **kw: True)

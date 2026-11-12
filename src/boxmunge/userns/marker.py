@@ -12,7 +12,7 @@ which only root can write, and every user can read.
 
 What refuses: deploy, stage, unstage, promote, rollback, restore, pause,
 resume, recover, security resume and scan, backups, container-update,
-project-delete, data adopt and chown, legacy-stage, self-test; the
+project-delete, data adopt and chown, self-test; the
 timers' entry points (check-all, backup-all) skip the project.
 """
 from __future__ import annotations

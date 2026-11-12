@@ -38,33 +38,53 @@ of them can be installed without crossing a breaking release.
 
 ## Which release to upgrade to
 
-From 0.11.7 on, an upgrade from a release older than 0.11.0 is refused, so you go through
-**0.11.6**, the bridge release. Until 0.11.6 is published, 0.11.5 is the newest you can use.
-Check <https://github.com/boxmunge/boxmunge/releases/tag/v0.11.6>: if that page exists, 0.11.6
-is out.
+Upgrade to **0.11.6**, the bridge release. From 0.11.7 on, a release refuses to be installed
+over anything older than 0.11.0, so a 0.9 or 0.10 box goes to 0.11.6 first.
 
 | Your box | Upgrade to |
 |---|---|
-| 0.9.2 to 0.10.1 | 0.11.6 if it is out, otherwise 0.11.5 |
-| 0.7.0 to 0.9.1 | 0.11.6 only. Wait for it if it is not out yet |
+| 0.7.0 to 0.10.1 | 0.11.6 |
 | older than 0.7.0 | ask for help first (see the end of this page) |
 | 0.11.0 or later | this page is not for you: run `upgrade` |
 
-Never target a release after 0.11.6 from 0.9 or 0.10. Once you are on 0.11.5 or 0.11.6,
-`upgrade` (or auto-update) takes you the rest of the way.
+Once you are on 0.11.6, `upgrade` (or auto-update) takes you the rest of the way.
 
-**0.7.0 to 0.9.1:** the upgrader those releases installed checks every new release in a way
-that 0.9.1 and everything after it fail. Upgrading to 0.11.5 stops straight away with:
+**0.7.0 to 0.9.1:** 0.11.6 is also the only 0.11 release you can install. The upgrader those
+releases installed checks every new release in a way that 0.9.1 to 0.11.5 fail
+(`Pre-flight FAILED: import test`). 0.11.6 passes that check.
+
+### If you targeted 0.11.7 or later
+
+The new release refuses before anything on the box changes. What it prints depends on the
+release you are on (these lines are from the test that runs each old upgrader against 0.11.7;
+the rehearsal did not cover them). On 0.9.2 to 0.10.1:
 
 ```
-AttributeError: module 'boxmunge' has no attribute '__version__'
+  ERROR: boxmunge 0.11.7 cannot be installed over 0.10.1: an upgrade must start from 0.11.0 or later. Upgrade to 0.11.6 first: sudo /opt/boxmunge/bin/boxmunge-upgrade target 0.11.6
+  This box stays on 0.10.1. The upgrader blocklists 0.11.7 on this box after this refusal; that does not stop the upgrade to 0.11.6. Once the box runs 0.11.6, clear it before upgrading further: sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.7
+... boxmunge-upgrade: Pre-flight FAILED: dry-run upgrade
+```
+
+On 0.7.0 to 0.9.1:
+
+```
+Traceback (most recent call last):
+  ...
+AttributeError: module 'boxmunge' has no attribute '__version__'. Only the upgrader of a release before 0.9.2 reads it, and boxmunge 0.11.7 cannot be installed over one: an upgrade must start from 0.11.0 or later. Upgrade to 0.11.6 first: sudo /opt/boxmunge/bin/boxmunge-upgrade target 0.11.6
+  The upgrader blocklists 0.11.7 on this box after this refusal; that does not stop the upgrade to 0.11.6. Once the box runs 0.11.6, clear it before upgrading further: sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.7
 ... boxmunge-upgrade: Pre-flight FAILED: import test
 ```
 
-Nothing changes, but 0.11.5 is then blocklisted on the box. 0.11.6 passes that check. If
-you already tried, that's harmless: target 0.11.6 when it is out.
+Your box stays on its release, with its own upgrader, and your projects are not touched. The
+release you targeted is now blocklisted on the box. That does not stop 0.11.6: carry on with
+this page and target 0.11.6. Once the box runs 0.11.6, clear the entry (with the release
+you targeted in place of 0.11.7), or the box will keep skipping that release:
 
-In the rest of this page, `0.11.x` means the release you picked.
+```
+sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist 0.11.7
+```
+
+In the rest of this page, `0.11.x` means 0.11.6.
 
 ## Before you upgrade
 
@@ -301,7 +321,9 @@ deploy> log --tail 60
   sudo boxmunge-server legacy-stage myapp --discard  # drop the staged release, keep production's
   ```
 
-  `--keep-staged` is the other choice: it treats the staged release as promoted.
+  `--keep-staged` is the other choice: it treats the staged release as promoted. Resolve it
+  on 0.11.6, before you upgrade any further: later releases have no `legacy-stage` (see
+  "Keep going").
 - **`LEFT AS IS: ... (leftover)` on a box that was on 0.9 or 0.10.0.** This is a stage from
   one of those releases, and 0.11.5's `legacy-stage` misreads it. It says production runs
   "the release a 0.10.1 promote installed" and offers only `--discard`. But `--discard`
@@ -314,8 +336,9 @@ deploy> log --tail 60
   `a release staged by a boxmunge release before 0.10.1 (pre0101)`. There, `--discard` stops
   staging and starts nothing. Production keeps running its release, but every start of the
   project is refused until you upload production's bundle and `prod-deploy myapp`.
-- **`named the images myapp's containers run: boxmunge.invalid/myapp/web`.** Informational:
-  0.11 renames the images it builds.
+- **`named the images myapp's containers run: myapp's web image, built on this box`.**
+  Informational: 0.11 renames the images it builds (to `boxmunge.invalid/myapp/web`; the
+  entry's detail lists the names).
 
 ### Probation
 
@@ -376,6 +399,15 @@ Once every project has been deployed and probation is over, take a fresh backup 
 
 You are now on 0.11. `upgrade` installs the newest release when you choose to, and
 auto-update installs security and break-fix releases by itself.
+
+**A project the upgrade `LEFT AS IS` because of a staged release must be resolved on 0.11.6
+before the box goes any further.** From 0.11.7 on there is no `legacy-stage` command, and the
+upgrade refuses while a project still holds such a stage, or holds the files of one that
+`--discard` dropped and no `prod-deploy` has replaced. The refusal names each project and the
+command 0.11.6 accepts for it (on 0.11.5 it tells you to upgrade to 0.11.6 first), and is
+sent as a priority-1 alert. No project is touched, but the release that refused is now
+blocklisted on your box: once every project it named is resolved, run the `clear-blocklist`
+command the refusal prints, then upgrade again.
 
 ## If the upgrade stops
 

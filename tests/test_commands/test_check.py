@@ -353,11 +353,11 @@ class TestCheckAllReadOnly:
         self, paths: BoxPaths, monkeypatch,
     ) -> None:
         from unittest.mock import patch
-        from boxmunge.commands.check import run_check_all
+        from boxmunge.commands.check_all import run_check_all
 
         self._write_project(paths, "myapp", self._minimal_manifest())
 
-        with patch("boxmunge.commands.check.update_health_state") as mock_update:
+        with patch("boxmunge.commands.check_all.update_health_state") as mock_update:
             run_check_all(paths, read_only=False)
 
         assert mock_update.called, (
@@ -369,11 +369,11 @@ class TestCheckAllReadOnly:
         self, paths: BoxPaths,
     ) -> None:
         from unittest.mock import patch
-        from boxmunge.commands.check import run_check_all
+        from boxmunge.commands.check_all import run_check_all
 
         self._write_project(paths, "myapp", self._minimal_manifest())
 
-        with patch("boxmunge.commands.check.update_health_state") as mock_update:
+        with patch("boxmunge.commands.check_all.update_health_state") as mock_update:
             run_check_all(paths, read_only=True)
 
         assert not mock_update.called, (
@@ -388,7 +388,7 @@ class TestCheckAllReadOnly:
         per the existing convention so callers (operators, CI) can branch
         on success/failure."""
         from boxmunge.commands import check as check_mod
-        from boxmunge.commands.check import run_check_all
+        from boxmunge.commands.check_all import run_check_all
 
         # Two projects, one healthy (returns 0) and one critical (returns 2).
         m1 = self._minimal_manifest()
@@ -399,8 +399,7 @@ class TestCheckAllReadOnly:
         self._write_project(paths, "badapp", m2)
 
         # Stub the check so we don't depend on real smoke execution.
-        def _fake_run_check(name: str, paths: BoxPaths, verbose: bool = True,
-                            periodic: bool = False) -> tuple:
+        def _fake_run_check(name: str, paths: BoxPaths, verbose: bool = True, **_) -> tuple:
             return (2, "down") if name == "badapp" else (0, "")
 
         monkeypatch.setattr(check_mod, "check_with_reason", _fake_run_check)
@@ -436,7 +435,7 @@ class TestCheckAllSkipsQuarantined:
     ) -> None:
         from unittest.mock import patch
         from boxmunge.commands import check as check_mod
-        from boxmunge.commands.check import run_check_all
+        from boxmunge.commands.check_all import run_check_all
 
         self._write_project(paths, "myapp")
         # Quarantine.
@@ -446,14 +445,13 @@ class TestCheckAllSkipsQuarantined:
         paths.project_quarantine_state("myapp").write_text("{}")
 
         run_calls: list[str] = []
-        def _fake_run_check(name: str, paths: BoxPaths, verbose: bool = True,
-                            periodic: bool = False) -> tuple:
+        def _fake_run_check(name: str, paths: BoxPaths, verbose: bool = True, **_) -> tuple:
             run_calls.append(name)
             return 0, ""
 
         monkeypatch.setattr(check_mod, "check_with_reason", _fake_run_check)
 
-        with patch("boxmunge.commands.check.update_health_state") as mock_update:
+        with patch("boxmunge.commands.check_all.update_health_state") as mock_update:
             rc = run_check_all(paths, read_only=False)
 
         # The check MUST NOT have run for the quarantined project.
@@ -469,7 +467,7 @@ class TestCheckAllSkipsQuarantined:
     ) -> None:
         from unittest.mock import patch
         from boxmunge.commands import check as check_mod
-        from boxmunge.commands.check import run_check_all
+        from boxmunge.commands.check_all import run_check_all
 
         self._write_project(paths, "myapp")
         paths.project_quarantine_state("myapp").parent.mkdir(
@@ -482,7 +480,7 @@ class TestCheckAllSkipsQuarantined:
             lambda *a, **kw: (0, ""),
         )
 
-        with patch("boxmunge.commands.check.log_operation") as mock_log:
+        with patch("boxmunge.commands.check_all.log_operation") as mock_log:
             run_check_all(paths, read_only=False)
 
         skip_logs = [
@@ -521,7 +519,7 @@ class TestCheckAllSkipsLockedProject:
     def test_locked_project_not_checked(self, paths: BoxPaths, monkeypatch) -> None:
         from unittest.mock import patch
         from boxmunge.commands import check as check_mod
-        from boxmunge.commands.check import run_check_all
+        from boxmunge.commands.check_all import run_check_all
         from boxmunge.fileutil import project_lock
 
         self._write_project(paths, "myapp")
@@ -534,7 +532,7 @@ class TestCheckAllSkipsLockedProject:
 
         # Simulate a concurrent lifecycle op holding the lock.
         with project_lock("myapp", paths):
-            with patch("boxmunge.commands.check.update_health_state") as mock_update:
+            with patch("boxmunge.commands.check_all.update_health_state") as mock_update:
                 rc = run_check_all(paths, read_only=False)
 
         # No smoke run, no health-state mutation (so no compose_down) while
@@ -547,14 +545,14 @@ class TestCheckAllSkipsLockedProject:
     def test_locked_skip_is_logged(self, paths: BoxPaths, monkeypatch) -> None:
         from unittest.mock import patch
         from boxmunge.commands import check as check_mod
-        from boxmunge.commands.check import run_check_all
+        from boxmunge.commands.check_all import run_check_all
         from boxmunge.fileutil import project_lock
 
         self._write_project(paths, "myapp")
         monkeypatch.setattr(check_mod, "check_with_reason", lambda *a, **kw: (0, ""))
 
         with project_lock("myapp", paths):
-            with patch("boxmunge.commands.check.log_operation") as mock_log:
+            with patch("boxmunge.commands.check_all.log_operation") as mock_log:
                 run_check_all(paths, read_only=False)
 
         skip_logs = [
@@ -569,12 +567,12 @@ class TestCheckAllSkipsLockedProject:
         """Sanity: with no lock held, the normal mutator path still runs."""
         from unittest.mock import patch
         from boxmunge.commands import check as check_mod
-        from boxmunge.commands.check import run_check_all
+        from boxmunge.commands.check_all import run_check_all
 
         self._write_project(paths, "myapp")
         monkeypatch.setattr(check_mod, "check_with_reason", lambda *a, **kw: (0, ""))
 
-        with patch("boxmunge.commands.check.update_health_state") as mock_update:
+        with patch("boxmunge.commands.check_all.update_health_state") as mock_update:
             run_check_all(paths, read_only=False)
 
         mock_update.assert_called_once()

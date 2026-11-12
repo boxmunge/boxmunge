@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 from boxmunge.commands import check as check_mod
-from boxmunge.commands.check import run_check_all
+from boxmunge.commands.check_all import run_check_all
 from boxmunge.health_checks.projects import (
     check_config_drift,
     check_lifecycle_blocked,
@@ -116,9 +116,9 @@ class TestCheckAllIsolation:
         checked: list[str] = []
         real = check_mod.check_with_reason
 
-        def _spy(name, paths, verbose=True, periodic=False):
+        def _spy(name, paths, verbose=True, **kw):
             checked.append(name)
-            return real(name, paths, verbose)
+            return real(name, paths, verbose, **kw)
 
         monkeypatch.setattr(check_mod, "check_with_reason", _spy)
         _corrupt(fleet.project_quarantine_state("aaa"))
@@ -202,20 +202,15 @@ class TestHealthIsolation:
         assert "aaa" in check.detail
 
     def test_project_containers_reports_corrupt_state(
-        self, fleet: BoxPaths, monkeypatch,
+        self, fleet: BoxPaths, fake_containers,
     ) -> None:
-        import subprocess
-
-        def _fake_run(cmd, **kwargs):
-            return subprocess.CompletedProcess(cmd, 0, stdout="[{}]", stderr="")
-
-        monkeypatch.setattr(
-            "boxmunge.health_checks.projects.subprocess.run", _fake_run,
-        )
+        for name in ("bbb", "ccc"):
+            fake_containers.run(name, "web", "sha256:" + "1" * 64)
         _corrupt(fleet.project_quarantine_state("aaa"))
         check = check_project_containers(fleet)
         assert check.status == "warn"
         assert "aaa" in check.detail
+        assert "no running containers" not in check.detail
 
 
 # ---------- validate / TUI ----------

@@ -84,6 +84,7 @@ class _ReferenceWalk:
     def __init__(self, roots: tuple[Path, ...]) -> None:
         self.roots = roots
         self.problems: list[str] = []
+        self.outside: list[str] = []  # those of the problems that depend on the roots
         self.files: list[Path] = []
         self.documents: dict[Path, dict[str, Any]] = {}  # each compose file, parsed once
         self.project_files: list[Path] = []  # the top file and its includes
@@ -115,11 +116,12 @@ class _ReferenceWalk:
             return False
         if outside:
             norm, _ = host_path_forms(ref, base)
-            self.problems.append(
+            self.outside.append(
                 f"{what} {ref!r} resolves to {norm}, outside the project "
                 f"directory. Keep every compose, extends, include, env_file and "
                 f"label_file path inside the project."
             )
+            self.problems.append(self.outside[-1])
             return False
         if read:
             self.files.append(Path(host_path_forms(ref, base)[0]))
@@ -226,30 +228,47 @@ class _ReferenceWalk:
                 self._confined(f"{what}: label_file", ref, base)
 
 
+def walk_sources(
+    compose_path: Path, roots: tuple[Path, ...], *, base: Path | None = None,
+    parsed: dict[str, Any] | None = None,
+) -> tuple[list[str], list[Path], ComposeSources]:
+    """One walk from ``compose_path``: (every include/extends/env_file/
+    label_file reference that leaves the project or the include subset,
+    every file the compose file makes Compose read, the compose files as
+    the walk parsed them). ``base`` is the project directory Compose
+    resolves the file from, when that is not the file's own directory;
+    ``parsed`` is ``compose_path`` itself, where the caller has parsed it."""
+    walk = _ReferenceWalk(roots)
+    if parsed is not None:
+        walk.documents[compose_path] = parsed
+    walk.visit(compose_path, base)
+    return walk.problems, walk.files, ComposeSources(
+        walk.documents, walk.project_files, walk.extends, tuple(walk.outside))
+
+
 def walk_references(
     compose_path: Path, roots: tuple[Path, ...], *, base: Path | None = None,
 ) -> tuple[list[str], list[Path]]:
-    """Return (every include/extends/env_file/label_file reference that
-    leaves the project or the include subset, every file the compose file
-    makes Compose read). ``base`` is the project directory Compose resolves
-    the file from, when that is not the file's own directory."""
-    walk = _ReferenceWalk(roots)
-    walk.visit(compose_path, base)
-    return walk.problems, walk.files
+    """walk_sources' problems and files."""
+    problems, files, _ = walk_sources(compose_path, roots, base=base)
+    return problems, files
 
 
 @dataclass(frozen=True)
 class ComposeSources:
     """The compose files Compose reads for a project, as the walk parsed
-    them: ``documents`` holds every one (top file, includes, extends files),
-    ``project_files`` those whose services the project has (the top file
-    and its includes), ``extends`` each service's `extends` parent."""
+    them: ``documents`` holds every one it could parse (top file, includes,
+    extends files), ``project_files`` those whose services the project has
+    (the top file and its includes), ``extends`` each service's `extends`
+    parent, ``outside`` those of the walk's problems that are a path outside
+    its roots (a walk with other roots may not have them)."""
     documents: dict[Path, dict[str, Any]]
     project_files: list[Path]
     extends: dict[tuple[Path, str], tuple[Path, str]]
+    outside: tuple[str, ...]
 
     def services(self, path: Path) -> dict[str, Any]:
-        services = self.documents[path].get("services")
+        services = self.documents.get(path, {}).get("services")
         return services if isinstance(services, dict) else {}
 
 
@@ -258,8 +277,7 @@ def compose_sources(compose_path: Path, roots: tuple[Path, ...]) -> ComposeSourc
     once, as walk_references follows them. Raises ValueError for references
     the walk refuses (validation has refused them already, so this is a
     broken assumption)."""
-    walk = _ReferenceWalk(roots)
-    walk.visit(compose_path)
-    if walk.problems:
-        raise ValueError(f"{compose_path}: {walk.problems[0]}")
-    return ComposeSources(walk.documents, walk.project_files, walk.extends)
+    problems, _, sources = walk_sources(compose_path, roots)
+    if problems:
+        raise ValueError(f"{compose_path}: {problems[0]}")
+    return sources

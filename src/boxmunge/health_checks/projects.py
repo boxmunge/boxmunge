@@ -15,12 +15,12 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from boxmunge import compose_inventory
 from boxmunge.commands.health_cmd import HealthCheck, timeout_detail
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.config import ConfigError
 from boxmunge.cve.quarantine import QuarantineError, is_quarantined, read_quarantine_state
-from boxmunge.docker import compose_command
-from boxmunge.docker_run import docker_env
+from boxmunge.docker_run import DockerError
 from boxmunge.fleet import PROJECT_INPUT_ERRORS
 from boxmunge.lifecycle import is_blocked
 from boxmunge.manifest import ManifestError
@@ -70,34 +70,32 @@ def check_project_containers(paths: BoxPaths) -> HealthCheck:
     """
     if not paths.projects.exists() or not (dirs := _project_dirs(paths)):
         return HealthCheck("project-containers", "ok", "No projects deployed")
-    down: list[str] = []
     unchecked: list[str] = []
-    blocked_count = 0
+    expected: list[str] = []
     for name in (d.name for d in dirs):
         try:
-            if is_blocked(name, paths) or is_monitor_stopped(name, paths):
-                blocked_count += 1
-                continue
-            files = ["compose.yml"]
-            if paths.project_compose_override(name).exists():
-                files.append("compose.boxmunge.yml")
+            if not (is_blocked(name, paths) or is_monitor_stopped(name, paths)):
+                expected.append(name)
         except PROJECT_INPUT_ERRORS as e:
             unchecked.append(unreadable(paths, name, e))
-            continue
+    blocked_count = len(dirs) - len(expected) - len(unchecked)
+    down: list[str] = []
+    if expected:
         try:
-            result = subprocess.run(
-                [*compose_command(name, files), "ps", "--format", "json"],
-                cwd=paths.project_dir(name), capture_output=True, text=True,
-                check=False, timeout=10, env=docker_env(),
-            )
-        except subprocess.TimeoutExpired as e:
-            unchecked.append(f"{name}: {timeout_detail(e)}")
-            continue
-        except FileNotFoundError as e:  # no docker CLI: the `docker` check says so too
-            unchecked.append(f"{name}: cannot run docker compose ({e})")
-            continue
-        if result.returncode != 0 or not result.stdout.strip():
-            down.append(name)
+            # One listing for every project; the `docker` check reports a missing CLI too.
+            running = compose_inventory.running_inventory(timeout=10)
+        except (DockerError, OSError) as e:
+            why = (timeout_detail(e.__cause__) if isinstance(e.__cause__, subprocess.TimeoutExpired)
+                   else f"cannot list the running containers ({e}); run `health` again, "
+                        f"and `doctor` if it repeats")
+            return HealthCheck("project-containers", "warn",
+                               f"Could not check: {'; '.join([why, *unchecked])}")
+        for name in expected:
+            try:
+                if not running.is_running(name):
+                    down.append(name)
+            except DockerError as e:
+                unchecked.append(f"{name}: {e}")
     parts = []
     if down:
         parts.append(f"Projects with no running containers: {', '.join(down)}")

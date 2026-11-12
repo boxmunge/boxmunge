@@ -124,7 +124,7 @@ The restricted shell does not allow:
 - Running commands as root (`sudo`)
 - Accessing documentation files directly (use `agent-help <topic>` instead)
 - Any command that is not a boxmunge subcommand
-- The operator-only commands and forms: `container-update`, `install-txn`, `legacy-stage`,
+- The operator-only commands and forms: `container-update`, `install-txn`,
   host-scope suppressions (`security suppress --host`, `security unsuppress --host`) and
   `security scan --apply-held`
 

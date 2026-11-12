@@ -2,7 +2,7 @@
 """upgrade-state/ is root:deploy 0770, so deploy can plant a link or a FIFO
 at any name in it. Every root open there (upgrade.lock, probation.json,
 blocklist.json) refuses both without blocking, naming the file and saying
-to remove it, and legacy-stage's probation guard stays fail-closed."""
+to remove it."""
 from __future__ import annotations
 
 import os
@@ -11,8 +11,6 @@ from pathlib import Path
 import pytest
 
 from boxmunge.commands.auto_update_cmd import run_auto_update
-from boxmunge.commands.legacy_stage_cmd import run_legacy_stage
-from boxmunge.legacy_stage_ops import platform_rollback_possible
 from boxmunge.upgrade_state import (
     UpgradeStateError, add_to_blocklist, is_blocklisted, read_probation, upgrade_lock,
     write_probation,
@@ -40,10 +38,9 @@ def _lock(paths) -> None:
         pass
 
 
-@pytest.mark.parametrize("which", ["upgrade_lock", "legacy_upgrade_lock"])
 @pytest.mark.parametrize("kind", KINDS)
-def test_upgrade_lock_refuses_a_planted_file(paths, tmp_path, kind, which) -> None:
-    lock = getattr(paths, which)
+def test_upgrade_lock_refuses_a_planted_file(paths, tmp_path, kind) -> None:
+    lock = paths.upgrade_lock
     planted = _plant(lock, kind, tmp_path)
     with pytest.raises(UpgradeStateError, match=f"{lock}.*Remove it"):
         _within(lambda: _lock(paths), planted if kind == "fifo" else lock)
@@ -83,21 +80,6 @@ def test_writing_probation_replaces_a_planted_file_without_opening_it(
     assert read_probation(paths)["version"] == "1.2.3"
     if kind == "link":
         assert planted.read_text() == "{}"
-
-
-@pytest.mark.parametrize("kind", KINDS)
-def test_the_legacy_stage_probation_guard_fails_closed(paths, tmp_path, kind) -> None:
-    planted = _plant(paths.probation, kind, tmp_path)
-    why = _within(lambda: platform_rollback_possible(paths), planted)
-    assert isinstance(why, str) and "cannot tell whether a platform rollback is possible" in why
-    assert f"fix or remove {paths.probation}" in why
-
-
-def test_legacy_stage_reports_a_planted_lock(paths, tmp_path, capsys) -> None:
-    fifo = _plant(paths.upgrade_lock, "fifo", tmp_path)
-    assert _within(lambda: run_legacy_stage(paths, "myapp", "discard", False), fifo) == 1
-    err = capsys.readouterr().err
-    assert f"ERROR: {paths.upgrade_lock}" in err and "Remove it" in err
 
 
 def test_auto_update_reports_a_planted_lock(paths, tmp_path, capsys, monkeypatch) -> None:
@@ -141,12 +123,11 @@ def test_discovery_reports_a_planted_blocklist_as_an_error_action(
     assert str(paths.blocklist) in out["message"] and "Remove it" in out["message"]
 
 
-@pytest.mark.parametrize("which", ["upgrade_lock", "legacy_upgrade_lock"])
-def test_upgrade_lock_refuses_a_lock_file_of_another_user(paths, monkeypatch, which) -> None:
-    """Deploy can unlink root's legacy lock and hold a flock on its own file
-    at the name: every taker would then wait on deploy, silently. A lock file
-    the taker does not own is refused, naming it."""
-    lock = getattr(paths, which)
+def test_upgrade_lock_refuses_a_lock_file_of_another_user(paths, monkeypatch) -> None:
+    """Whoever owns the file at the lock's name can hold a flock on it: every
+    taker would then wait on them, silently. A lock file the taker does not
+    own is refused, naming it."""
+    lock = paths.upgrade_lock
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.touch()
     foreign = os.stat(lock)
@@ -161,13 +142,3 @@ def test_upgrade_lock_refuses_a_lock_file_of_another_user(paths, monkeypatch, wh
     monkeypatch.setattr(os, "fstat", fstat)
     with pytest.raises(UpgradeStateError, match=f"{lock} is owned by uid {foreign.st_uid + 1}.*Remove it"):
         _lock(paths)
-
-
-def test_upgrade_lock_makes_a_0644_legacy_lock_0600(paths) -> None:
-    """Shims up to 0.10.1 created the legacy lock 0644: deploy could open it
-    read-only and hold a flock on it. Taking the locks closes it to others."""
-    paths.legacy_upgrade_lock.parent.mkdir(parents=True, exist_ok=True)
-    paths.legacy_upgrade_lock.touch()
-    os.chmod(paths.legacy_upgrade_lock, 0o644)
-    _lock(paths)
-    assert os.stat(paths.legacy_upgrade_lock).st_mode & 0o777 == 0o600

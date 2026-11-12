@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from boxmunge.compose_images import built_image_name, image_problems, image_warnings
+from boxmunge.compose_images import (
+    built_image_name, describe_image, image_phrase, image_problems, image_warnings,
+)
 
 OWN = "boxmunge.invalid/myapp/web"
 
@@ -186,3 +188,44 @@ def test_a_dockerfile_whose_directory_is_swapped_for_a_link_is_refused(
     monkeypatch.setattr(compose_images.os.path, "realpath", swapped)
     [problem] = _problems({"build": {"context": "."}}, real / "ctx" / "Dockerfile")
     assert "not a regular file" in problem
+
+
+DIGEST = "ba6a88c5" + "0" * 56
+
+
+@pytest.mark.parametrize("ref, text", [
+    (OWN, "myapp's web image, built on this box"),
+    (f"{OWN}:latest", "myapp's web image, built on this box"),
+    (f"{OWN}@sha256:{DIGEST}",
+     "myapp's web image, built on this box (digest ba6a88c50000)"),
+    (f"{OWN}:boxmunge-candidate@sha256:{DIGEST}",
+     "myapp's web image, built on this box (tag boxmunge-candidate, digest ba6a88c50000)"),
+    ("boxmunge.invalid/myapp-staging/web",
+     "myapp's web image, built on this box for staging"),
+    (f"boxmunge.invalid/myapp-staging/web@sha256:{DIGEST}",
+     "myapp's web image, built on this box for staging (digest ba6a88c50000)"),
+])
+def test_describe_image_reads_a_built_image_as_the_projects_own(ref: str, text: str) -> None:
+    assert describe_image(ref) == text
+
+
+@pytest.mark.parametrize("ref", [
+    "nginx:1.25", f"ghcr.io/org/app@sha256:{DIGEST}", "postgres",
+    # Not exactly the built shape: a different host, a port, a case, a
+    # missing or extra path component, a bad digest, a trailing space.
+    "boxmunge.invalid/web", "boxmunge.invalid/myapp/web/extra",
+    "boxmunge.invalid:443/myapp/web", "BOXMUNGE.INVALID/myapp/web",
+    "boxmunge.invalid/MyApp/web", "boxmunge.invalid//web", "boxmunge.invalid/myapp/",
+    "boxmunge.invalid/myapp/web@sha256:abc", f"{OWN}@sha256:{DIGEST} ", f" {OWN}",
+    f"boxmunge.invalid/myapp/web@md5:{DIGEST}", "",
+])
+def test_describe_image_returns_anything_else_unchanged(ref: str) -> None:
+    assert describe_image(ref) == ref
+
+
+def test_image_phrase_prefixes_a_registry_image_and_describes_a_built_one() -> None:
+    assert image_phrase("nginx:1.25") == "image nginx:1.25"
+    assert image_phrase(f"ghcr.io/org/app@sha256:{DIGEST}") == (
+        f"image ghcr.io/org/app@sha256:{DIGEST}")
+    assert image_phrase(f"{OWN}@sha256:{DIGEST}") == (
+        "myapp's web image, built on this box (digest ba6a88c50000)")

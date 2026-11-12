@@ -26,7 +26,7 @@ from boxmunge.fs_nofollow import open_regular_nofollow
 from boxmunge.log import log_error
 from boxmunge.notify import notify
 from boxmunge.userns import offset
-from boxmunge.userns.journal import FORWARD, JournalError, load_journal
+from boxmunge.userns.journal import JournalError, State, finish_hint, load_journal, state
 from boxmunge.userns.offset import RemapError, remap_offset
 
 if TYPE_CHECKING:
@@ -54,15 +54,15 @@ def _journal_check(paths: BoxPaths, now: datetime) -> HealthCheck | None:
         j = load_journal(paths)
     except JournalError as e:
         return HealthCheck(NAME, "error", str(e))
-    if j is None or j.phase in ("committed", "rolled-back"):
+    at = state(j)
+    if at in (State.NONE, State.COMMITTED, State.ROLLED_BACK):
         return None
     if _lock_held(paths):  # the migration holds upgrade.lock: it is running, not stopped
         return HealthCheck(NAME, "warn", f"{RUNNING}: the userns {j.direction} is at "
                            f"{j.phase}; projects are on the maintenance page until it ends")
-    if j.direction == FORWARD and j.phase == "applied" and "commit-before" in j.items:
-        return HealthCheck(NAME, "error", f"a userns-commit stopped part-way, after it began "
-                           f"deleting the old root; finish it: {_SHIM} userns-commit")
-    if j.direction == FORWARD and j.phase == "applied":
+    if at is State.COMMITTING:
+        return HealthCheck(NAME, "error", finish_hint(j, f"{_SHIM} "))
+    if at is State.APPLIED:
         applied = datetime.fromisoformat(str(j.applied_at))
         if now - applied > _REMINDER_AFTER:
             return HealthCheck(NAME, "warn", f"{REMINDER}: the userns migration was applied on "
@@ -70,7 +70,7 @@ def _journal_check(paths: BoxPaths, now: datetime) -> HealthCheck | None:
                                f"it back ({_SHIM} userns-rollback)")
         return None
     finish = (f"Resume: {_SHIM} userns-migrate, or roll back: {_SHIM} userns-rollback"
-              if j.direction == FORWARD else f"Finish it: {_SHIM} userns-rollback")
+              if at is State.MIGRATING else f"Finish it: {_SHIM} userns-rollback")
     return HealthCheck(NAME, "error",
                        f"the userns {j.direction} migration was interrupted at {j.phase}"
                        + (f" ({j.failed})" if j.failed else "") + f". {finish}")

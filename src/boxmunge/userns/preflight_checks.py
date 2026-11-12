@@ -12,12 +12,13 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from boxmunge.compose_images import image_phrase
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.paths import BoxPaths
 from boxmunge.userns.daemon_config import (
     DEFAULT_DATA_ROOT, DEFAULT_NAMESPACE, MANAGED_CONTAINERD, SYSTEM_CONTAINERD,
 )
-from boxmunge.userns.inventory import CONTAINERD_STORE, Inventory, outermost
+from boxmunge.userns.inventory import CONTAINERD_STORE, ImageEntry, Inventory, outermost
 from boxmunge.userns.layers import LayerScanError, image_high_ids
 from boxmunge.userns.shift import Direction, scan_tree
 from boxmunge.userns.walk import closed_to_other
@@ -150,6 +151,12 @@ def volumes(inv: Inventory, r: Report, *, forward: bool) -> None:
                 f"docker volume rm {v.name}")
 
 
+def _names(img: ImageEntry) -> str:
+    """An image's tags (or, untagged, its digest references) as the
+    operator reads them: `image <ref>`, or a built image's description."""
+    return ", ".join(image_phrase(ref) for ref in (img.tags or img.refs))
+
+
 def images(inv: Inventory, r: Report) -> None:
     loose = [img.id[7:19] for img in inv.images if not img.carried]
     if loose:
@@ -166,11 +173,10 @@ def images(inv: Inventory, r: Report) -> None:
         try:
             high = image_high_ids(img.id)
         except LayerScanError as e:
-            r.refusals.append(f"image {', '.join(img.tags or img.refs)}: {e}")
+            r.refusals.append(f"{_names(img)}: {e}")
             continue
         if high:
-            r.refusals.append(f"image {', '.join(img.tags or img.refs)} has files owned by ids "
-                              f"above 65535 "
+            r.refusals.append(f"{_names(img)} has files owned by ids above 65535 "
                               f"({', '.join(high[:5])}), which a remapped daemon cannot load. "
                               f"Rebuild or replace it and redeploy")
 

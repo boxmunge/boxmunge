@@ -28,7 +28,6 @@
  "tests/integration/test_git_staging.py": 18.3,
  "tests/integration/test_hook_as_deploy.py": 3.3,
  "tests/integration/test_image_identity.py": 23.8,
- "tests/integration/test_legacy_upgrade.py": 237.5,
  "tests/integration/test_mcp_integration.py": 3.8,
  "tests/integration/test_nonroot_deploy.py": 47.7,
  "tests/integration/test_overlay_mounts.py": 0.1,

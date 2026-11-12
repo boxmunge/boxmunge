@@ -122,13 +122,13 @@ active_venv() { echo "$BOXMUNGE_ROOT/env-$ACTIVE_SLOT"; }
 # lock exits 0 (the health timer retries on its next fire); otherwise it dies.
 #
 # upgrade.lock is in root-only upgrade-root/, so deploy cannot replace it to
-# let a second upgrade run. Shims up to 0.10.1 lock upgrade-state/upgrade.lock
-# (LEGACY_LOCK_FILE) instead: the one that installs this shim keeps running,
-# holding only that, until its upgrade ends, and a 0.10.1 venv that upgrade
-# rolls back to locks only that too. So this shim locks both, the root-only
-# one first; the legacy lock matters only against those. It goes once no box
-# can run a 0.10.1 shim or venv: when a release's pre-flight refuses to be
-# installed over 0.10.1 or earlier.
+# let a second upgrade run. Every shim and release an upgrade can start from
+# (0.11.0 on) excludes the others on it. This shim also takes
+# upgrade-state/upgrade.lock (LEGACY_LOCK_FILE), which shims up to 0.10.1
+# locked instead, for one reason: `userns migrate|rollback|commit` of a
+# 0.11.0 to 0.11.6 release refuses to run unless fd 8 holds it, and after a
+# rollback this shim drives such a release. It goes when the upgrade floor
+# reaches 0.11.7.
 #
 # Deploy can plant anything at the legacy lock, and swap it between any check
 # and the open. Every bash redirection follows a link, and the writing ones

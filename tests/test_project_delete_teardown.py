@@ -7,6 +7,7 @@ quarantined.
 """
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -17,8 +18,8 @@ from boxmunge.docker import DockerError
 from boxmunge.lifecycle import is_blocked
 from boxmunge.paths import BoxPaths
 from boxmunge.project_alerts import alert_state
-from boxmunge.legacy_stage import legacy_staging_state
 from boxmunge.project_registry import add_project, is_registered
+from boxmunge.staged_release import slot_dir
 from boxmunge.state import write_state
 
 NAME = "myapp"
@@ -31,7 +32,6 @@ def _state_files(paths: BoxPaths) -> list[Path]:
         paths.project_paused_state(NAME),
         paths.project_quarantine_state(NAME),
         paths.project_scan_state(NAME),
-        legacy_staging_state(paths, NAME),
         paths.container_update_target_state(NAME),
         alert_state(paths, NAME, "manifest-schema"),
         alert_state(paths, NAME, "git-layout"),
@@ -52,7 +52,7 @@ def box(paths: BoxPaths) -> BoxPaths:
     }))
     (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx\n")
     (pdir / "compose.boxmunge.yml").write_text("services: {}\n")
-    (pdir / "compose.boxmunge-staging.yml").write_text("services: {}\n")
+    (slot_dir(paths, NAME) / "release").mkdir(parents=True)   # a release is staged
     for f in _state_files(paths):
         if f.suffix == ".conf":
             f.parent.mkdir(parents=True, exist_ok=True)
@@ -73,7 +73,7 @@ def _delete(paths: BoxPaths, down, reload_=None, **kw) -> int:
 class TestTeardownFailure:
     @pytest.mark.parametrize("failing", ["prod", "staging"])
     def test_failed_teardown_deletes_nothing(self, box, failing, capsys):
-        def down(project_dir, compose_files=None, project_name=None, remove_orphans=False):
+        def down(project_dir, compose_files=None, project_name=None, remove_orphans=False, **_):
             is_staging = project_name == f"{NAME}-staging"
             if (failing == "staging") == is_staging:
                 raise DockerError("daemon unreachable")
@@ -194,8 +194,9 @@ def test_a_retry_without_compose_files_is_refused_while_containers_exist(
         box, monkeypatch, capsys, fake_containers):
     """A retry after a partial forced delete runs no teardown at all."""
     _no_helper(monkeypatch)
-    for f in ("compose.yml", "compose.boxmunge.yml", "compose.boxmunge-staging.yml"):
+    for f in ("compose.yml", "compose.boxmunge.yml"):
         (box.project_dir(NAME) / f).unlink()
+    shutil.rmtree(slot_dir(box, NAME))
     fake_containers.run(f"{NAME}-staging", "db", "sha256:x", running=False)
     down = MagicMock()
     _refused(box, capsys, _delete(box, down), "myapp-staging-db-1")

@@ -40,7 +40,6 @@ GUARDED = "renders nothing: refused while the overlay or containers are stale"
 LIFTS = "renders nothing itself: every caller renders first or is a deploy"
 CALLERS = {
     ("commands/deploy.py", "_start"): DEPLOYS,
-    ("legacy_stage_ops.py", "finish_apply"): DEPLOYS,
     ("staging_bringup.py", "_prepare_storage"): DEPLOYS,
     ("staging_bringup.py", "bring_up_staging"): DEPLOYS,
     ("commands/resume_cmd.py", "resume_locked"): RENDERS,

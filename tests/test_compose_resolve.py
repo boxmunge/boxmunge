@@ -171,7 +171,8 @@ def test_references_inside_project_accepted(paths: BoxPaths) -> None:
 # ---------------------------------------------------------------------------
 
 def test_overlay_reads_services_from_resolved_model(paths: BoxPaths, monkeypatch) -> None:
-    compose = _project(paths, {"compose.yml": {"include": ["parts/db.yml"], "services": {}}})
+    compose = _project(paths, {"compose.yml": {"include": ["parts/db.yml"], "services": {}},
+                               "parts/db.yml": {"services": {"db": {"image": "postgres"}}}})
     resolved = _resolved_service()
     resolved["services"]["db"] = {"image": "postgres"}
     _resolved_as(monkeypatch, resolved)
@@ -211,3 +212,120 @@ def test_quoted_yaml_keyword_service_name_accepted(paths: BoxPaths) -> None:
     compose = project_dir / "compose.yml"
     compose.write_text("services:\n  'on':\n    image: nginx\n")
     _validate(compose, paths)
+
+
+# ---------------------------------------------------------------------------
+# One walk reads the files as written; resolution works from what it parsed
+# ---------------------------------------------------------------------------
+
+def _yaml_reads(monkeypatch) -> list[str]:
+    """The first line of every document boxmunge (not a test double) parses."""
+    import sys
+    reads: list[str] = []
+    real = yaml.safe_load
+
+    def counted(stream):
+        if sys._getframe(1).f_globals.get("__name__", "").startswith("boxmunge"):
+            reads.append(str(stream).splitlines()[0] if str(stream).strip() else "")
+        return real(stream)
+
+    monkeypatch.setattr(yaml, "safe_load", counted)
+    return reads
+
+
+_INCLUDING = {
+    "compose.yml": "# top\ninclude: [parts/db.yml]\nservices:\n  web:\n"
+                   "    extends: {file: base.yml, service: app}\n    read_only: false\n",
+    "parts/db.yml": "# db\nservices:\n  db:\n    image: postgres\n",
+    "base.yml": "# base\nservices:\n  app:\n    image: nginx\n",
+}
+
+
+def _including_model() -> dict:
+    resolved = _resolved_service()
+    resolved["services"]["db"] = {"image": "postgres"}
+    return resolved
+
+
+def test_validation_parses_each_compose_file_once(paths: BoxPaths, monkeypatch) -> None:
+    """The top file was parsed five times a validation: for the top-level
+    checks, the reference walk, the env file stand-ins, the service names
+    the model must have, and `read_only`."""
+    compose = _project(paths, _INCLUDING)
+    _resolved_as(monkeypatch, _including_model())
+    reads = _yaml_reads(monkeypatch)
+    _validate(compose, paths)
+    assert sorted(reads) == ["# base", "# db", "# top"]
+
+
+def test_the_overlays_model_parses_each_compose_file_once(paths: BoxPaths, monkeypatch) -> None:
+    compose = _project(paths, _INCLUDING)
+    _resolved_as(monkeypatch, _including_model())
+    reads = _yaml_reads(monkeypatch)
+    model = load_user_compose(compose, "myapp")
+    assert sorted(reads) == ["# base", "# db", "# top"]
+    assert model["services"]["web"]["read_only"] is False
+
+
+def test_an_included_files_service_missing_from_the_model_fails_closed(
+        paths: BoxPaths, monkeypatch) -> None:
+    compose = _project(paths, _INCLUDING)
+    _resolved_as(monkeypatch, _resolved_service())
+    with pytest.raises(ComposeSecurityError, match="left out service.s. db"):
+        _validate(compose, paths)
+    with pytest.raises(ComposeError, match="left out service.s. db"):
+        load_user_compose(compose, "myapp")
+
+
+def test_a_file_boxmunge_cannot_parse_is_not_resolved_blind(paths: BoxPaths, monkeypatch) -> None:
+    """Compose resolved it, boxmunge's reader cannot say what it declares:
+    the services the model must have, and `read_only: false`, are unknown."""
+    compose = _project(paths, {"compose.yml": "services: [\n"})
+    _resolved_as(monkeypatch, _resolved_service())
+    with pytest.raises(ComposeError, match="as written"):
+        load_user_compose(compose, "myapp")
+
+
+@pytest.mark.parametrize("files, refusal", [
+    ({"compose.yml": "include: [a/one.yml]\nservices:\n  web:\n    image: nginx\n",
+      "a/one.yml": "include: [two.yml]\n", "a/two.yml": "include: [three.yml]\n",
+      "a/three.yml": "services:\n  deep:\n    image: x\n"}, "nests includes deeper"),
+    ({"compose.yml": "include:\n  - path: parts/db.yml\n    project_directory: parts\n"
+                     "services:\n  web:\n    image: nginx\n",
+      "parts/db.yml": "services:\n  db:\n    image: postgres\n"},
+     "entry sets project_directory"),
+    ({"compose.yml": "include: [parts/db.yml]\nservices:\n  web:\n    image: nginx\n",
+      "parts/db.yml": "services: [\n"}, "db.yml: cannot parse"),
+])
+def test_a_walk_that_stopped_short_is_not_resolved_on_fewer_files(
+        paths: BoxPaths, monkeypatch, files, refusal) -> None:
+    """Validation refuses each of these first. Were one to reach the
+    overlay's resolve, the walk has not read every file Compose did, so the
+    services it counted are not all the model must have: its refusal is
+    raised, not dropped."""
+    compose = _project(paths, files)
+    _resolved_as(monkeypatch, _resolved_service())
+    with pytest.raises(ComposeError, match=refusal):
+        load_user_compose(compose, "myapp")
+
+
+@pytest.mark.parametrize("named", [
+    "services:\n  web:\n    image: nginx\n    env_file: {live}/shared.env\n",
+    "include: [{live}/inc.yml]\nservices:\n  web:\n    image: nginx\n",
+], ids=["env_file", "include"])
+def test_a_release_elsewhere_may_name_a_file_in_the_project_directory(
+        paths: BoxPaths, tmp_path, monkeypatch, named) -> None:
+    """Validation walks a release that is not installed yet (a bundle being
+    diffed, a slot) with the project directory as a second root, so it
+    accepts an absolute path into it. The resolve walks the release alone:
+    that path is validation's to judge, not a walk that stopped short."""
+    live = paths.project_dir("myapp")
+    _project(paths, {"shared.env": "A=1\n", "inc.yml": {"services": {"db": {"image": "x"}}}})
+    release = tmp_path / "release"
+    release.mkdir()
+    (release / "compose.yml").write_text(named.format(live=live))
+    resolved = _resolved_service()
+    resolved["services"]["db"] = {"image": "x"}
+    _resolved_as(monkeypatch, resolved)
+    _validate(release / "compose.yml", paths)
+    assert "web" in load_user_compose(release / "compose.yml", "myapp")["services"]

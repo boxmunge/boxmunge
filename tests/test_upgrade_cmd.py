@@ -33,6 +33,7 @@ def paths_stub(tmp_path, monkeypatch):
     paths.state = tmp_path / "state"
     paths.state.mkdir()
     paths.deploy_state = paths.state / "deploy"  # the bind record migrate_one renews
+    paths.version_file = tmp_path / "version"   # the apply reads which release the box runs
     return paths
 
 

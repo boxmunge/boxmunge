@@ -12,7 +12,8 @@ from boxmunge.commands.inbox_cmd import cmd_inbox
 from boxmunge.commands.console import cmd_console
 from boxmunge.commands.backup_cmd import cmd_backup, cmd_backup_all, cmd_backup_sync
 from boxmunge.commands.caddy_status import cmd_caddy_status
-from boxmunge.commands.check import cmd_check, cmd_check_all
+from boxmunge.commands.check import cmd_check
+from boxmunge.commands.check_all import cmd_check_all
 from boxmunge.commands.deploy import cmd_deploy
 from boxmunge.commands.doctor import cmd_doctor
 from boxmunge.commands.help import cmd_help, cmd_agent_help, cmd_init_host
@@ -48,7 +49,6 @@ from boxmunge.commands.project_cmd import cmd_project_add, cmd_project_list
 from boxmunge.commands.handshake_cmd import cmd_handshake
 from boxmunge.commands.stash_cmd import cmd_stash
 from boxmunge.commands.install_txn_cmd import cmd_install_txn
-from boxmunge.commands.legacy_stage_cmd import cmd_legacy_stage
 from boxmunge.commands.staging_teardown_cmd import cmd_staging_teardown_all
 from boxmunge.commands.userns_cmd import cmd_userns
 from boxmunge.commands.version_cmd import cmd_version
@@ -102,7 +102,6 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "handshake": cmd_handshake,
     "stash": cmd_stash,
     "install-txn": cmd_install_txn,
-    "legacy-stage": cmd_legacy_stage,
     "staging-teardown-all": cmd_staging_teardown_all,
     "userns": cmd_userns,
     "version": cmd_version,
@@ -117,7 +116,7 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
 # I/O threads, so they would only stop on SIGKILL.
 UNWIND_ON_SIGTERM = frozenset({
     "prod-deploy", "stage", "promote", "unstage", "rollback", "project-delete", "data",
-    "add-git-project", "pause", "resume", "recover", "legacy-stage", "staging-teardown-all",
+    "add-git-project", "pause", "resume", "recover", "staging-teardown-all",
     "backup", "backup-all", "restore", "test-restore", "self-test",
     "check-all", "security", "container-update", "upgrade", "auto-update", "userns",
 })

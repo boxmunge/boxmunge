@@ -8,11 +8,6 @@ running release is the kept one (a git project's: the replaced commit);
 at switching (only after a crash) it is ambiguous, and while a rollback
 is open the data is being restored, so both skip. A manifest or install record that cannot be read is an error
 (ManifestError, ReleaseStateError), never a skip.
-
-A stage left by boxmunge 0.10.1 comes first: its evidence says which
-release the containers run. Only evidence that cannot be read (Docker,
-the reflog, the prestage, a ref) skips, with an alert naming the cause; a
-never-deployed git project skips without one (it has no data).
 """
 from __future__ import annotations
 
@@ -21,9 +16,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from boxmunge.git_slot import GitRefError, manifest_at, resolve_recorded_ref
-from boxmunge.legacy_stage import (
-    EvidenceError, LegacyStage, cannot_tell, evidence, legacy_stage, real_dir_problem,
-)
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.release import previous_dir
 from boxmunge.release_txn import CODE_RESTORED, load_txn, options_text
@@ -43,12 +35,6 @@ class BackupSource:
 
 def backup_source(paths: BoxPaths, project: str) -> BackupSource:
     """Raises ManifestError or ReleaseStateError when it cannot tell."""
-    try:
-        stage = legacy_stage(paths, project)
-    except OSError as e:
-        return BackupSource(None, alert=True, skip=cannot_tell(project, e))
-    if stage is not None:
-        return _legacy(paths, project, stage)
     txn = load_txn(paths, project)
     if txn is None or txn.source != "rollback" and txn.phase in ("committed", CODE_RESTORED):
         return BackupSource(load_manifest(paths.project_manifest(project)))
@@ -76,49 +62,3 @@ def backup_source(paths: BoxPaths, project: str) -> BackupSource:
     kept = previous_dir(paths, project)
     return BackupSource(load_manifest(kept / "manifest.yml"),
                         compose_file=kept / "compose.yml")
-
-
-def _legacy(paths: BoxPaths, project: str, stage: LegacyStage) -> BackupSource:
-    """The manifest matching the containers a 0.10.1 stage left running."""
-    pdir = paths.project_dir(project)
-    if stage.kind in ("leftover", "pre0101"):
-        # leftover: a promote whose unstage failed: production runs the
-        # promoted release. pre0101: the project dir holds the staged
-        # release's files and no copy of production's is on the box; the
-        # release that made the stage backed up from these files too, and a
-        # backup service the staged release renamed fails the dump noisily.
-        return BackupSource(load_manifest(pdir / "manifest.yml"))
-    try:
-        ev = evidence(paths, project, stage)
-        running = (_running_commit(pdir / "repo", ev.current_ref)
-                   if stage.kind == "git" and ev.classification == "untouched"
-                   and ev.current_ref is not None else None)
-        kept = pdir / ".releases" / "prestage" / "release"
-        problem = (real_dir_problem(kept)
-                   if stage.kind == "bundle" and ev.classification == "untouched" else None)
-        if problem:
-            raise EvidenceError(problem)
-    except EvidenceError as e:
-        return BackupSource(None, alert=True, skip=(
-            f"a release staged by boxmunge 0.10.1 is in place and which release production "
-            f"runs cannot be told: {e}"))
-    if ev.classification == "recreated":
-        # Production was started from the staged files in the project dir.
-        return BackupSource(load_manifest(pdir / "manifest.yml"))
-    if stage.kind == "git" and ev.classification == "untouched" and ev.current_ref is None:
-        return BackupSource(None, skip=(
-            "it was never deployed (a 0.10.1 stage of its clone): production has no data"))
-    if running is not None:
-        # The dump still execs through the project dir's compose.yml, which
-        # follows repo/'s staged checkout: if the staged release renamed the
-        # backup service, the dump fails (noisily) rather than reaching the
-        # wrong container. Resolving the stage is the fix, not a rewrite here.
-        return BackupSource(manifest_at(pdir / "repo", running))
-    return BackupSource(load_manifest(kept / "manifest.yml"), compose_file=kept / "compose.yml")
-
-
-def _running_commit(repo: Path, current_ref: str | None) -> str:
-    try:
-        return resolve_recorded_ref(repo, current_ref or "")
-    except GitRefError as e:
-        raise EvidenceError(f"cannot resolve the deployed commit: {e}") from e

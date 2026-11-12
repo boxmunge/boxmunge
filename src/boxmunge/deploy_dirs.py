@@ -8,6 +8,8 @@ afterwards (a manual `security scan` died with EACCES in state/scans).
 `prepare_deploy_dirs` (run by the upgrade) creates what is missing and
 re-owns what root made; `unwritable_by_deploy` (doctor) reports what is
 still out of deploy's reach.
+The re-owning first shipped in 0.11.1, so it stays
+until the upgrade floor reaches that.
 
 Deliberately absent, because only root writes there: state/container-updates
 (boxmunge container-update, a root timer, is not in the deploy shell) and
@@ -32,10 +34,10 @@ if TYPE_CHECKING:
 
 # Under state/. health and deploy: per-project health and deploy records
 # (written by the root health timer as well as deploy-run commands); scans:
-# CVE scan results; kev: the CISA catalog cache; staging: records of a
-# release staged by 0.10.1; start-refused and project-alerts: alert
-# throttles; secrets-locks: writer locks for secrets files.
-STATE_DIRS = ("health", "deploy", "scans", "kev", "staging",
+# CVE scan results; kev: the CISA catalog cache; start-refused and
+# project-alerts: alert throttles; secrets-locks: writer locks for secrets
+# files.
+STATE_DIRS = ("health", "deploy", "scans", "kev",
               "start-refused", "project-alerts", "secrets-locks")
 # Under projects/<name>/: `security suppress` writes suppressions.yml here.
 PROJECT_DIRS = ("security",)

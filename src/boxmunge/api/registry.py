@@ -3,8 +3,11 @@
 
 An Action is defined once, here or in api/actions/, with typed parameter
 and result schemas, a tier, the locks it needs, and whether it runs as a
-job. The CLI, the deploy shell's allowlist, the MCP tool list and the API
-daemon's catalog are all derived from the registry.
+job. Only the API daemon's catalog (GET /v1/actions) is derived from the
+registry today: the CLI's command table, the deploy shell's allowlist and
+the MCP tool list are still kept by hand. An Action's `cli` and `mcp`
+fields are there for deriving those three, and nothing in src/ reads them
+yet.
 
 A handler is a plain function (params, ctx) -> dict. It never prints and
 never calls sys.exit; it raises ActionError to refuse or fail.

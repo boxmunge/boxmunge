@@ -15,7 +15,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from boxmunge.commands.check import PERIODIC_ENV, run_check, run_check_all
+from boxmunge.commands.check import PERIODIC_ENV, run_check
+from boxmunge.commands.check_all import run_check_all
 from boxmunge.paths import BoxPaths
 from tests.deploy_helpers import mark_deployed
 
