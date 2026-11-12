@@ -49,6 +49,7 @@ systemd/                 timers: backup, backup-sync, health, cve-scan, containe
 canary/                  the project self-test deploys to prove the pipeline works
 docs/on-server/          operator and agent docs, shipped to the box and served by agent-help
 services/version-check/  the public update-discovery service (itself deployed as a boxmunge project)
+upgrade-notes/           what each release asks of projects and boxes (see "Upgrade notes")
 tests/                   server tests; tests/integration/ uses real Docker; tests/vm/ boots a VM
 ```
 
@@ -194,7 +195,7 @@ runtime lock also pins (click, idna, pygments): nothing installs them in one pip
    `"security"`; `"breaking": true` or `false`), and tags `vX.Y.Z`. A unit test fails if the
    `pyproject.toml` version is not listed. The version-check service refuses to start if any entry
    lacks either field, and the release workflow refuses a breaking release whose version is not
-   `X.Y.0`.
+   `X.Y.0`, or one without `upgrade-notes/X.Y.Z.json` (see "Upgrade notes" below).
 3. `.github/workflows/release.yml` checks the tag with `scripts/release-lint.py` (listed in
    `releases.json` with a valid class, matching `pyproject.toml`), then, in a read-only job, runs
    the tests, builds the installer and bundle, and generates an SBOM (`scripts/generate-sbom.sh`:
@@ -261,6 +262,47 @@ which ask it for an `install.sh` run by hand).
 To raise the floor, announce it in the release notes of the release that becomes the bridge,
 then in the next release change the constants in both files, move the hop test's shims across,
 and delete what the new floor retires.
+
+### Upgrade notes
+
+Every release from 0.11.8 has `upgrade-notes/X.Y.Z.json`: what it asks of projects and boxes, as
+data. The release workflow's publish job compiles every file up to the tag into
+`upgrade-notes.json` (`scripts/release-lint.py upgrade-notes`, stdlib only) and lists it in the
+signed `SHA256SUMS`. On a box, `upgrade-howto` verifies it as an upgrade verifies a bundle, then
+shows the entries introduced after the box's release, up to the target, minus superseded ones.
+A box below the upgrade floor is shown none: it is told to reach the bridge release by hand first.
+
+```json
+{"version": "0.12.0", "no_project_action": false, "entries": [
+  {"id": "0.12.0-python-floor", "scope": "box", "when": "before", "kind": "required",
+   "title": "...", "change": "...", "verify": "...",
+   "files": [], "superseded_by": null, "refs": ["#231"]}]}
+```
+
+- `scope` is `box` or `project`; `when` is `before` or `after` the box upgrade; `kind` is
+  `required`, `recommended` or `fact`.
+- `files` names what a project entry asks an agent to check: one or more of `manifest.yml`,
+  `compose.yml` and `Dockerfile`. A box entry has `[]`.
+- `id` is `<version>-<slug>`, the slug in lowercase letters, digits and hyphens.
+- `title` (one line, at most 100 characters), `change` (1000) and `verify` (500) hold printable
+  characters, plus newlines outside the title. Agents act on this text: write it as instructions
+  to one, and say how to check the change was made.
+- `superseded_by`: when a later release replaces an entry's advice, the PR that does so sets the
+  old entry's `superseded_by` to the new release, and the guide shows only the new entry.
+- `refs`: the PRs or issues behind the entry, like `#231`.
+- A release that asks nothing says so:
+  `{"version": "X.Y.Z", "no_project_action": true, "entries": []}`.
+
+`release-lint.py check` refuses a tag whose file is missing or invalid, and a unit test loads
+every file on every pull request. The rule from 0.12 on: a PR with project or box impact adds
+its entry to the next release's file in the same PR. Releases before 0.11.8 have no file:
+`upgrade-howto` first ships in 0.11.8, and a box is only shown entries newer than its own
+release, so no box could ever be shown them.
+
+Boxes on older releases read the compiled file, so `src/boxmunge/upgrade_notes.py` ignores keys
+it does not know. Adding a key is fine; a new `scope`, `when`, `kind` or class value, or a key
+whose meaning changes, needs `FORMAT` 2, and boxes on earlier releases then cannot compose a
+guide from that release's notes.
 
 ## The version-check admin pages
 

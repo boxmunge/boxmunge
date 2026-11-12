@@ -7,7 +7,8 @@ name: Release
 #   installs and runs third-party packages, so it gets no write token and no
 #   OIDC token.
 # - publish: holds contents: write and id-token: write. Runs no third-party
-#   Python: it signs SHA256SUMS with cosign (keyless), composes the notes,
+#   Python: it compiles upgrade-notes.json from the repository, signs
+#   SHA256SUMS (which lists it) with cosign (keyless), composes the notes,
 #   drafts the release, verifies the draft's class markers, and publishes.
 #
 # Any failure fails the workflow. There is no unsigned fallback: the upgrade
@@ -51,7 +52,8 @@ jobs:
         # `breaking` flag; a breaking release must be X.Y.0. The release
         # title and notes preamble (with the [security] or [breakfix] and
         # [breaking] markers that GitHub-fallback boxes read) are generated
-        # from that entry, never typed by hand.
+        # from that entry, never typed by hand. Its upgrade notes
+        # (upgrade-notes/<version>.json) must exist and compile.
         run: >-
           python scripts/release-lint.py check
           --tag "$GITHUB_REF_NAME"
@@ -119,12 +121,20 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
 
+      - name: Build upgrade notes
+        # What each release asks of projects and boxes, compiled from
+        # upgrade-notes/*.json at this tag by stdlib-only code. Built here,
+        # not in build, so nothing build installed can shape it; listed in
+        # SHA256SUMS below, so `upgrade-howto` on a box verifies it as an
+        # upgrade verifies the bundle.
+        run: python3 scripts/release-lint.py upgrade-notes --tag "$GITHUB_REF_NAME" --out dist/upgrade-notes.json
+
       - name: Sign artifacts (cosign keyless)
         run: |
           # Compute checksums with bare filenames so consumers can verify
           # by running `sha256sum -c SHA256SUMS` from any directory.
           # SHA256SUMS is computed FIRST so the signature covers it.
-          (cd dist && sha256sum boxmunge-install.sh boxmunge-*.tar.gz > SHA256SUMS)
+          (cd dist && sha256sum boxmunge-install.sh boxmunge-*.tar.gz upgrade-notes.json > SHA256SUMS)
           # Keyless sign SHA256SUMS — this is the signature the upgrade shim
           # verifies. Output BOTH .sig and .cert; keyless verify-blob needs
           # the certificate to chain to Fulcio + Rekor.
@@ -165,6 +175,7 @@ jobs:
             dist/SHA256SUMS.sig
             dist/SHA256SUMS.cert
             dist/sbom.json
+            dist/upgrade-notes.json
           fail_on_unmatched_files: true
           name: ${{ needs.build.outputs.title }}
           body_path: dist/release-notes.md
