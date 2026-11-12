@@ -156,12 +156,27 @@ def test_check_after_a_pre_switch_journal_runs_the_resume_preflight_with_images(
     assert not any(line.startswith("VERDICT") for line in out[:-1])
 
 
+@pytest.mark.parametrize("window", ["merged daemon.json, no record yet",
+                                    "record, daemon.json put back"])
 def test_check_after_an_interrupted_switch_leaves_the_checks_to_the_resume(
-        paths, monkeypatch, capsys) -> None:
-    """The daemon may run remapped: the resume puts its prior config back
-    before its checks, which the check cannot do, so it does not scan."""
-    save_journal(paths, Journal(FORWARD, "quiesced", S))
-    monkeypatch.setattr(userns_cmd.uo, "recorded_offset", lambda paths: S)
+        paths, monkeypatch, capsys, window) -> None:
+    """The switch writes the merged daemon.json, then the record; undoing it
+    writes the original back, then drops the record. A kill in either
+    window leaves one without the other, and the resume puts the old daemon
+    back before its checks (switch.ensure_prior), which a read-only check
+    cannot do: it does not scan."""
+    from boxmunge.userns import switch as sw
+    from boxmunge.userns.daemon_config import merged_daemon_json
+    original = '{"log-driver": "json-file"}'
+    (sw.uo.ETC / "docker").mkdir()
+    daemon_json = sw.uo.ETC / "docker" / "daemon.json"
+    paths.config_file.write_text("hostname: h\nadmin_email: a@b.c\n")
+    if window.startswith("merged"):
+        daemon_json.write_bytes(merged_daemon_json(original.encode()))
+    else:
+        daemon_json.write_text(original)
+        sw.uo.write_offset_record(paths, S)
+    save_journal(paths, Journal(FORWARD, "quiesced", S, daemon_json=original))
     monkeypatch.setattr(userns_cmd, "preflight", lambda *a, **kw: pytest.fail("scanned"))
     assert userns_cmd.run_check(paths) == 0
     out = capsys.readouterr().out.splitlines()

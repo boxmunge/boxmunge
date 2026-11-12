@@ -185,14 +185,27 @@ def drop_bridges(names: list[str]) -> None:
             raise MigrationError(f"ip link delete {name} failed: {result.stderr.strip()}")
 
 
+def _merged(daemon_json: str | None) -> str:
+    """This migration's daemon.json: the original with the remap merged in."""
+    from boxmunge.userns.daemon_config import merged_daemon_json
+    return merged_daemon_json(daemon_json.encode() if daemon_json is not None else None).decode()
+
+
+def switch_interrupted(paths: BoxPaths, daemon_json: str | None) -> bool:
+    """Did a switch to the remapped daemon begin and was not undone, given
+    the journalled original `daemon_json`? to_remapped writes the merged
+    daemon.json, then the record; back_to_prior writes the original, then
+    drops the record: a kill between the two leaves either one alone. The
+    resume puts the old daemon back first (ensure_prior); --check says so."""
+    return read_daemon_json() == _merged(daemon_json) or uo.recorded_offset(paths) is not None
+
+
 def to_remapped(paths: BoxPaths, daemon_json: str | None, s: int, daemon: DaemonControl,
                 bridges: list[str]) -> None:
     """Stop the daemon, write the merged daemon.json and the record, start it."""
-    from boxmunge.userns.daemon_config import merged_daemon_json
     daemon.stop()
     drop_bridges(bridges)
-    merged = merged_daemon_json(daemon_json.encode() if daemon_json is not None else None)
-    write_daemon_json(merged.decode())
+    write_daemon_json(_merged(daemon_json))
     uo.write_offset_record(paths, s)
     daemon.start()
 
@@ -216,10 +229,9 @@ def ensure_prior(paths: BoxPaths, daemon_json: str | None, s: int,
     the operator changed since (to fix why the remapped daemon would not
     start) becomes the prior config, unless it still names a userns remap.
     Returns the prior config to journal."""
-    from boxmunge.userns.daemon_config import merged_daemon_json, parse_daemon_json
-    now = read_daemon_json()
-    ours = merged_daemon_json(daemon_json.encode() if daemon_json is not None else None).decode()
-    if now not in (daemon_json, ours):
+    from boxmunge.userns.daemon_config import parse_daemon_json
+    journalled, now = daemon_json, read_daemon_json()
+    if now not in (journalled, _merged(journalled)):
         if parse_daemon_json(now.encode() if now is not None else None).get("userns-remap"):
             raise MigrationError(f"{daemon_json_path()} changed since the migration began and "
                                  f"names a userns-remap; put back the original (the journal "
@@ -227,7 +239,7 @@ def ensure_prior(paths: BoxPaths, daemon_json: str | None, s: int,
         print(f"  {daemon_json_path()} changed since the migration began; using it as the "
               f"prior config")
         daemon_json = now
-    if now == ours or uo.recorded_offset(paths) is not None:
+    if switch_interrupted(paths, journalled):
         back_to_prior(paths, daemon_json, s, daemon, owner)
     elif not daemon_answers():
         daemon.start()

@@ -206,17 +206,24 @@ def test_the_switch_writes_the_merged_config_and_the_record(paths, monkeypatch,
     assert daemon.calls == ["stop", "start"]
 
 
+@pytest.mark.parametrize("left", ["both", "merged daemon.json only", "record only"])
 def test_a_crash_inside_the_switch_is_undone_before_phase_0_runs_again(paths, monkeypatch,
-                                                                      tmp_path) -> None:
+                                                                      tmp_path, left) -> None:
+    """The switch writes the merged daemon.json, then the record (undoing it,
+    the original, then drops the record): a kill can leave either alone."""
     etc, original, j = _real_switch_box(paths, monkeypatch, tmp_path)
     from boxmunge.userns.daemon_config import merged_daemon_json
-    (etc / "docker" / "daemon.json").write_bytes(merged_daemon_json(original.encode()))
-    sw.uo.write_offset_record(paths, S)
+    if left != "record only":
+        (etc / "docker" / "daemon.json").write_bytes(merged_daemon_json(original.encode()))
+    if left != "merged daemon.json only":
+        sw.uo.write_offset_record(paths, S)
+    assert sw.switch_interrupted(paths, original)
     daemon = _Daemon()
     assert sw.ensure_prior(paths, original, S, daemon) == original
     assert (etc / "docker" / "daemon.json").read_text() == original
     assert sw.uo.recorded_offset(paths) is None and daemon.calls == ["stop", "start"]
     monkeypatch.setattr(sw, "daemon_answers", lambda: True)
+    assert not sw.switch_interrupted(paths, original)
     assert sw.ensure_prior(paths, original, S, daemon) == original
     assert daemon.calls == ["stop", "start"]  # nothing left to undo
 

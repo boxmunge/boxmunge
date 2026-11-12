@@ -29,7 +29,7 @@ from boxmunge.userns.journal import (
 )
 from boxmunge.userns.preflight import PreflightRefused, Report, preflight
 from boxmunge.userns.shift import ShiftRefused
-from boxmunge.userns.switch import MigrationError, host_ids
+from boxmunge.userns.switch import MigrationError, host_ids, switch_interrupted
 from boxmunge.userns.volumes import VolumeError
 
 _SUBCOMMANDS = ("check", "migrate", "rollback", "commit")
@@ -73,7 +73,7 @@ def run_check(paths: BoxPaths) -> int:
         journal = load_journal(paths)
         at, hint = state(journal), finish_hint(journal, _SHIM + " ")
         if at is State.MIGRATING and not journal.reached("switched"):
-            if uo.recorded_offset(paths) is not None:  # the resume's ensure_prior undoes it first
+            if switch_interrupted(paths, journal.daemon_json):
                 print("the switch to the remapped daemon was interrupted: the resume puts the "
                       "old daemon back on its prior config before it runs its checks, so they "
                       "cannot run here")
@@ -90,7 +90,8 @@ def run_check(paths: BoxPaths) -> int:
             return 0
         report = preflight(paths, inv, direction=FORWARD, offset=s, images_dir=IMAGES_DIR)
         print(f"remap offset: {s}")
-    except (JournalError, uo.RemapError, DockerError, OSError, ValueError) as e:
+    except (JournalError, uo.RemapError, DockerError, DaemonConfigError, OSError,
+            ValueError) as e:
         report = Report(refusals=[f"the check could not run to the end: {e}"])
     print(report.text())
     return 0  # a report, never a failed upgrade
