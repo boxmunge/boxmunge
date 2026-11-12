@@ -15,7 +15,7 @@
       "findings": [
         {
           "id": "project.compose",
-          "message": "app: would be refused by this release's compose validator",
+          "message": "would be refused by this release's compose validator",
           "remedy": "fix compose.yml as the message says, then prod-deploy app",
           "severity": "todo",
           "when": "before"

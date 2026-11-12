@@ -179,6 +179,36 @@ def test_project_image_missing(box, fake_containers) -> None:
     assert r.projects[0].result == "blocked"
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root enters any directory")
+def test_a_project_finding_does_not_repeat_the_project_name(box, fake_containers) -> None:
+    """Findings are listed under their project, and the shim's one-line
+    summary puts the name in front of each: a message that starts with it
+    too reads "shop: shop: ..."."""
+    add_project(box, "alpha", compose=f"name: other\nservices:\n  web:\n    image: {IMAGE}\n")
+    add_project(box, "blog", compose="services:\n  web:\n    image: blog/app:1\n")
+    fake_containers.images["blog/app:1"] = None
+    add_project(box, "broken", compose="services: [\n")
+    add_project(box, "mid")
+    open_install(box, "mid")
+    add_project(box, "shop", compose=f"services:\n  web:\n    image: {IMAGE}\n"
+                                     f"    pull_policy: always\n")
+    add_project(box, "torn").joinpath("manifest.yml").write_text("- not a mapping\n")
+    locked = add_project(box, "zlocked")
+    locked.chmod(0o000)
+    try:
+        r = evaluate(box)
+    finally:
+        locked.chmod(0o755)
+    rules = {"project.compose", "project.image_missing", "project.left_as_is",
+             "project.unreadable", "project.validate"}
+    assert rules <= {rule for _, rule in ids(r)}, ids(r)
+    assert {name for name, rule in ids(r) if rule == "project.unreadable"} >= {
+        "broken", "torn", "zlocked"}, ids(r)
+    for p in r.projects:
+        for f in p.findings:
+            assert not f.message.startswith(f"{p.name}: "), (p.name, f.id, f.message)
+
+
 def test_a_git_project_not_yet_deployed_does_not_block(box, fake_containers) -> None:
     """add-git-project links manifest.yml into repo/ before any deploy: no
     image is missing until its first deploy, and the dry run passes it."""

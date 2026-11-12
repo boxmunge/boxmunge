@@ -163,10 +163,17 @@ def _unenterable(paths: BoxPaths) -> dict[str, Finding]:
             continue  # unmanageable at all; the upgrade reports it and goes on
         if entry.is_dir() and not os.access(entry, os.R_OK | os.X_OK):
             found[entry.name] = _block(
-                UNREADABLE, f"{entry.name}: {entry} cannot be read by the user this "
-                            f"check runs as, so its files cannot be checked",
+                UNREADABLE, f"{entry} cannot be read by the user this check runs as, "
+                            f"so its files cannot be checked",
                 f"give it back to the deploy user (`{fix_command(entry)}`), {_RECHECK}")
     return found
+
+
+def _unnamed(name: str, text: str) -> str:
+    """A dry-run line as a project finding's message: without the `<name>: `
+    the dry run starts it with. A finding is listed under its project, and
+    the shim's summary names the project before it."""
+    return text.removeprefix(f"{name}: ")
 
 
 def _unreadable_remedy(paths: BoxPaths, name: str) -> str:
@@ -184,8 +191,7 @@ def _unreadable(paths: BoxPaths, project_dir: Path) -> Finding | None:
             problem = str(e)
     if problem is None:
         return None
-    return _block(UNREADABLE, f"{project_dir.name}: {problem}",
-                  _unreadable_remedy(paths, project_dir.name))
+    return _block(UNREADABLE, problem, _unreadable_remedy(paths, project_dir.name))
 
 
 def _dry_run(paths: BoxPaths, skip: set[str],
@@ -221,8 +227,8 @@ def _missing_images(paths: BoxPaths, name: str, docker: _Docker) -> list[Finding
     try:
         images = started_images(project_dir, _compose_files(paths, name), name)
     except (ComposeResolveError, InventoryError) as e:
-        return [_block(UNREADABLE, f"{name}: its deployed compose model cannot be "
-                                   f"resolved: {e}", _unreadable_remedy(paths, name))]
+        return [_block(UNREADABLE, f"its deployed compose model cannot be resolved: {e}",
+                       _unreadable_remedy(paths, name))]
     missing = []
     for service, ref in sorted(images.items()):
         try:
@@ -232,9 +238,8 @@ def _missing_images(paths: BoxPaths, name: str, docker: _Docker) -> list[Finding
             return []
         if not present:
             missing.append(_block(
-                IMAGE_MISSING, f"{name}: service {service} starts from image {ref}, which "
-                               f"is not on this box, so the project cannot be started as "
-                               f"deployed",
+                IMAGE_MISSING, f"service {service} starts from image {ref}, which is not "
+                               f"on this box, so the project cannot be started as deployed",
                 f"`{redeploy_or_bare(paths, name)}` pulls or builds it again, or "
                 f"`project-delete {name}` removes the project"))
     return missing
@@ -242,8 +247,8 @@ def _missing_images(paths: BoxPaths, name: str, docker: _Docker) -> list[Finding
 
 def _project(paths: BoxPaths, name: str, refused: list[DryRunLine],
              docker: _Docker) -> ProjectReadiness:
-    findings = [_todo(COMPOSE, line.text, str(line.remedy)) for line in refused]
-    findings += [_todo(VALIDATE, f"{name}: {error}",
+    findings = [_todo(COMPOSE, _unnamed(name, line.text), str(line.remedy)) for line in refused]
+    findings += [_todo(VALIDATE, error,
                        f"fix it in the project's source and deploy the fixed release: "
                        f"`prod-deploy {name}` after uploading it, or once the fix is on a "
                        f"git project's ref; `validate {name}` lists every problem, and "
@@ -283,7 +288,8 @@ def _settled(paths: BoxPaths, name: str) -> ProjectReadiness | None:
     before anything opens them."""
     left = left_as_is(paths, name)
     if left is not None:
-        return ProjectReadiness(name, (_todo(LEFT_AS_IS, left.text, str(left.remedy)),))
+        return ProjectReadiness(name, (_todo(LEFT_AS_IS, _unnamed(name, left.text),
+                                             str(left.remedy)),))
     finding = _unreadable(paths, paths.project_dir(name))
     return None if finding is None else ProjectReadiness(name, (finding,))
 
