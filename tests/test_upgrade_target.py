@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.paths import BoxPaths
-from boxmunge.upgrade_shim import check_command, guide_command
+from boxmunge.upgrade_shim import check_command, guide_command, sudo_refusal
 from boxmunge.upgrade_target import (
     TargetError, installed_release, is_newer, resolve_target,
 )
@@ -154,3 +154,26 @@ def test_shim_argv_for_check_and_guide() -> None:
     paths = BoxPaths()
     assert check_command(paths, "0.12.0") == ["sudo", "-n", SHIM, "check", "0.12.0"]
     assert guide_command(paths, "0.12.0") == ["sudo", "-n", SHIM, "guide", "0.12.0"]
+
+
+@pytest.mark.parametrize("stderr", [
+    "sudo: a password is required\n",
+    "Sorry, user deploy is not allowed to execute '/opt/boxmunge/bin/boxmunge-upgrade guide "
+    "0.12.0' as root on box.\n",
+    "deploy is not in the sudoers file.\n",
+    "sudo: unable to resolve host box: Name or service not known\nsudo: a password is "
+    "required\n",
+])
+def test_sudo_refusal_names_install_sudoers(stderr: str) -> None:
+    assert "boxmunge-upgrade install-sudoers" in sudo_refusal(stderr)
+
+
+@pytest.mark.parametrize("stderr", [
+    "sudo: unable to resolve host box: Name or service not known\nboxmunge-upgrade: Failed "
+    "to download upgrade-notes.json of 0.12.0 (curl exit 6); retry later\n",
+    "",
+    "2026-11-12T00:00:00Z boxmunge-upgrade: FATAL: sudo: a password is required\n",
+    "boxmunge-upgrade: FATAL: Release 0.12.0 publishes no upgrade-notes.json\n",
+])
+def test_sudo_warnings_and_shim_errors_are_not_a_refusal(stderr: str) -> None:
+    assert sudo_refusal(stderr) is None

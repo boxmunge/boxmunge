@@ -8,10 +8,16 @@ See install-sudoers in scripts/boxmunge-upgrade.
 """
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
+
+# How sudo -n says the rule does not permit a command: no NOPASSWD rule
+# matches, a rule names other commands, or the user has no rule at all.
+_SUDO_REFUSED = re.compile(r"sudo: a password is required|Sorry, user \S+ is not allowed to "
+                           r"execute |(?:sudo: )?\S+ is not in the sudoers file")
 
 
 def shim_command(paths: BoxPaths, target: str | None = None) -> list[str]:
@@ -64,9 +70,9 @@ def stderr_tail(stderr: str, limit: int = 400) -> str:
 
 def sudo_refusal(stderr: str) -> str | None:
     """What to do when sudo itself refused (the deploy user's rule does not
-    permit the verb yet), or None when the shim ran."""
-    if not any(line.startswith("sudo: ") or " is not allowed to execute " in line
-               for line in stderr.splitlines()):
+    permit the verb yet), or None. Only sudo's refusals count, never its
+    warnings ("unable to resolve host") or what the shim said."""
+    if not any(map(_SUDO_REFUSED.match, stderr.splitlines())):
         return None
     return ("sudo refused: the deploy user's sudo rule does not permit this upgrade-shim "
             "verb. The operator installs the current rule as supervisor: sudo "
