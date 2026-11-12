@@ -114,6 +114,17 @@ def test_a_verdict_for_another_release_is_refused() -> None:
     assert r.result == "cant_verify" and "0.11.9" in r.reasons[0] and TARGET in r.reasons[0]
 
 
+@pytest.mark.parametrize("result", ["pass", "blocked"])
+def test_a_verdict_about_another_installed_release_is_refused(result: str) -> None:
+    r = parse(k3(result, installed="0.1.0"))
+    assert r.result == "cant_verify" and "0.1.0" in r.reasons[0] and INSTALLED in r.reasons[0]
+
+
+def test_a_readiness_answer_about_another_installed_release_is_refused() -> None:
+    r = parse(k3(readiness={**readiness(), "installed": "9.9.9"}))
+    assert r.result == "cant_verify" and "9.9.9" in r.reasons[0] and INSTALLED in r.reasons[0]
+
+
 def test_a_readiness_answer_from_another_release_is_refused() -> None:
     """A signed older release's bundle replayed under the target's name runs
     that release's readiness command."""

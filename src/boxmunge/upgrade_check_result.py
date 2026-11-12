@@ -10,9 +10,10 @@ object, check contract 1:
      "dry_run": {"ok": bool, "output": str} | null}
 
 It is read failing closed: anything outside that shape, a verdict for
-another release than the one asked for, a readiness answer from another
-release (a signed older bundle served under the target's name), or a pass
-that its own parts or exit code contradict is "can't verify" here, at the
+another release than the one asked for or about a box running another
+release than this one records, a readiness answer from another release (a
+signed older bundle served under the target's name), or a pass that its own
+parts, stage or exit code contradict is "can't verify" here, at the
 deploy-side stage "shim", never a pass. Keys it does not know are ignored.
 """
 from __future__ import annotations
@@ -106,13 +107,20 @@ def _read(doc: dict) -> CheckResult:
                        "" if dry_run is None else dry_run["output"])
 
 
-def _contradiction(r: CheckResult, target: str, returncode: int) -> str | None:
+def _contradiction(r: CheckResult, target: str, installed: str,
+                   returncode: int) -> str | None:
     """Why a well-formed verdict still cannot be believed, or None."""
     if r.target != target:
         return f"the verdict is for release {r.target}, not {target}, the release asked for"
+    if r.installed != installed:
+        return (f"the verdict is about a box running {r.installed}, but this box records "
+                f"{installed}")
     if r.readiness is not None and r.readiness.release != target:
         return (f"the readiness check that ran was release {r.readiness.release}'s, not "
                 f"{target}'s: the bundle served for {target} is another release's")
+    if r.readiness is not None and r.readiness.installed != installed:
+        return (f"the readiness check read a box running {r.readiness.installed}, but this "
+                f"box records {installed}")
     if (returncode == 0) != (r.result == "pass"):
         return (f"the upgrade shim exited {returncode}, which contradicts its result, "
                 f"{r.result}")
@@ -143,9 +151,9 @@ def parse_check(stdout: str, stderr: str, returncode: int, *, target: str,
     except (_Unreadable, ContractError) as e:
         return _no_verdict(target, installed, "the upgrade shim's verdict is not one this "
                            f"release reads: {_bounded(e)}")
-    problem = _contradiction(r, target, returncode)
+    problem = _contradiction(r, target, installed, returncode)
     if problem is not None:
-        return _no_verdict(target, r.installed,
+        return _no_verdict(target, installed,
                            f"the upgrade shim's verdict cannot be used: {problem}")
     return r
 

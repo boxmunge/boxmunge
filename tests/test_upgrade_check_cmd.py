@@ -126,7 +126,8 @@ def test_a_release_not_newer_than_the_box_is_refused(tmp_path, capsys, version) 
 
 
 def test_a_pre_release_box_checks_its_release(tmp_path) -> None:
-    with patch(RUN, return_value=_shim(k3(installed="0.12.0-rc.1"), 0)):
+    answer = {**readiness(), "installed": "0.12.0-rc.1"}
+    with patch(RUN, return_value=_shim(k3(installed="0.12.0-rc.1", readiness=answer), 0)):
         assert run_upgrade_check(_box(tmp_path, version="0.12.0-rc.1"), "0.12.0",
                                  as_json=False) == 0
 
