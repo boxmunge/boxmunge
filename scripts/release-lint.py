@@ -2,15 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Release class gate for .github/workflows/release.yml.
 
-Four subcommands, each exits 1 with an ERROR: line on any violation:
+Five subcommands, each exits 1 with an ERROR: line on any violation:
 
   check  --tag vX.Y.Z --github-output FILE --notes-out FILE
-         [--releases PATH] [--pyproject PATH]
+         [--releases PATH] [--pyproject PATH] [--notes-dir PATH] [--floor-module PATH]
       Before building: the tag must be vX.Y.Z, match pyproject.toml's version,
       and be listed in services/version-check/releases.json with a valid class
       and `breaking` flag (validated by the service's own release_catalog
       rules). A breaking release must be X.Y.0: breaking changes bump the
-      minor version. Writes `class`, `breaking` and `title` to the GitHub step
+      minor version. The upgrade notes must compile for it (as `upgrade-notes`
+      below): every file in upgrade-notes/ is valid, and the release has its
+      own. Writes `class`, `breaking` and `title` to the GitHub step
       output file and the release-notes preamble to --notes-out. The markers
       ([security] or [breakfix], and [breaking]) are generated from
       releases.json, so the notes cannot disagree with it.
@@ -40,6 +42,15 @@ Four subcommands, each exits 1 with an ERROR: line on any violation:
       by default) must carry [held] in their title. Edit the title of any
       release it reports.
 
+  upgrade-notes --tag vX.Y.Z --out FILE
+         [--notes-dir PATH] [--releases PATH] [--floor-module PATH]
+      In the publish job, before signing: compiles upgrade-notes/*.json, the
+      class and breaking flag of every release from the upgrade floor, and
+      UPGRADE_FLOOR and BRIDGE_RELEASE (src/boxmunge/upgrade_floor.py) into
+      the upgrade-notes.json the release lists in its signed SHA256SUMS.
+      Boxes compose `upgrade-howto` from it (src/boxmunge/upgrade_notes.py,
+      which this script loads by path).
+
 The [held] marker is the GitHub twin of a circuit-breaker hold, for boxes
 that cannot reach the service. Boxes read it from the title only (notes
 quote contributors' PR titles), so only someone with write access to the
@@ -51,6 +62,7 @@ Stdlib only, so it runs before any dependency is installed.
 from __future__ import annotations
 
 import argparse
+import functools
 import importlib.util
 import json
 import re
@@ -63,6 +75,9 @@ REPO = Path(__file__).resolve().parents[1]
 RELEASES_JSON = REPO / "services" / "version-check" / "releases.json"
 PYPROJECT = REPO / "pyproject.toml"
 CATALOG_MODULE = REPO / "services" / "version-check" / "release_catalog.py"
+NOTES_MODULE = REPO / "src" / "boxmunge" / "upgrade_notes.py"
+NOTES_DIR = REPO / "upgrade-notes"
+FLOOR_MODULE = REPO / "src" / "boxmunge" / "upgrade_floor.py"
 TAG_RE = re.compile(r"^v(\d+\.\d+\.\d+)$")
 
 MARKERS = {"security": "[security]", "breakfix": "[breakfix]"}
@@ -103,6 +118,57 @@ def _catalog():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@functools.cache
+def _notes_lib():
+    spec = importlib.util.spec_from_file_location("upgrade_notes", NOTES_MODULE)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclasses resolve their module by name
+    spec.loader.exec_module(module)
+    return module
+
+
+def _tag_version(tag: str) -> str:
+    match = TAG_RE.match(tag)
+    if not match:
+        raise ReleaseLintError(f"tag {tag!r} is not vX.Y.Z")
+    return match.group(1)
+
+
+def _load_releases(releases_path: Path) -> list[dict]:
+    catalog = _catalog()
+    try:
+        return catalog.load_releases(Path(releases_path))
+    except catalog.ReleaseCatalogError as e:
+        raise ReleaseLintError(str(e)) from e
+
+
+def floor_values(floor_module: Path) -> tuple[str, str]:
+    """UPGRADE_FLOOR and BRIDGE_RELEASE, read from the module's text (it
+    imports boxmunge, so it cannot be loaded here)."""
+    text = Path(floor_module).read_text()
+    values = []
+    for name in ("UPGRADE_FLOOR", "BRIDGE_RELEASE"):
+        found = re.findall(rf'^{name} = "([0-9.]+)"$', text, re.MULTILINE)
+        if len(found) != 1:
+            raise ReleaseLintError(f'{floor_module}: expected one line {name} = "X.Y.Z", '
+                                   f"found {len(found)}")
+        values.append(found[0])
+    return values[0], values[1]
+
+
+def compiled_notes(version: str, notes_dir: Path, releases_path: Path,
+                   floor_module: Path) -> bytes:
+    """The upgrade-notes.json bytes for `version`, validated end to end."""
+    notes = _notes_lib()
+    floor, bridge = floor_values(floor_module)
+    releases = {"releases": _load_releases(releases_path)}
+    try:
+        return notes.dump_notes(
+            notes.compile_notes(Path(notes_dir), version, releases, floor, bridge))
+    except notes.NotesError as e:
+        raise ReleaseLintError(str(e)) from e
 
 
 def classify_release(name: str, body: str) -> str:
@@ -146,19 +212,12 @@ def compose_notes(preamble: str, changelog: str) -> str:
 
 
 def plan_release(tag: str, releases_path: Path, pyproject_path: Path) -> ReleasePlan:
-    match = TAG_RE.match(tag)
-    if not match:
-        raise ReleaseLintError(f"tag {tag!r} is not vX.Y.Z")
-    version = match.group(1)
+    version = _tag_version(tag)
     declared = tomllib.loads(Path(pyproject_path).read_text())["project"]["version"]
     if declared != version:
         raise ReleaseLintError(
             f"tag {tag} does not match pyproject.toml version {declared}")
-    catalog = _catalog()
-    try:
-        releases = catalog.load_releases(Path(releases_path))
-    except catalog.ReleaseCatalogError as e:
-        raise ReleaseLintError(str(e)) from e
+    releases = _load_releases(releases_path)
     entry = next((r for r in releases if r["version"] == version), None)
     if entry is None:
         raise ReleaseLintError(
@@ -210,11 +269,7 @@ def audit_releases(releases_path: Path, github: list[dict],
     """Raise listing every releases.json entry whose published GitHub release
     is missing or reads differently from its entry, or is held (or not)
     against `held`. Returns the tags held on GitHub."""
-    catalog = _catalog()
-    try:
-        releases = catalog.load_releases(Path(releases_path))
-    except catalog.ReleaseCatalogError as e:
-        raise ReleaseLintError(str(e)) from e
+    releases = _load_releases(releases_path)
     published = {r.get("tag_name"): r for r in github
                  if not r.get("draft") and not r.get("prerelease")}
     problems = [f"--held {v}: not a release listed in {releases_path}"
@@ -261,12 +316,14 @@ def _hold_problems(tag: str, name: str, body: str, should_hold: bool) -> list[st
 
 def _cmd_check(args: argparse.Namespace) -> None:
     plan = plan_release(args.tag, Path(args.releases), Path(args.pyproject))
+    notes = json.loads(compiled_notes(plan.version, Path(args.notes_dir),
+                                      Path(args.releases), Path(args.floor_module)))
     Path(args.notes_out).write_text(plan.notes)
     with open(args.github_output, "a") as out:
         out.write(f"class={plan.release_class}\n"
                   f"breaking={str(plan.breaking).lower()}\ntitle={plan.title}\n")
     print(f"{args.tag}: class {plan.release_class}, breaking {plan.breaking}, "
-          f"title {plan.title!r}")
+          f"title {plan.title!r}; upgrade notes: {len(notes['entries'])} entries")
 
 
 def _cmd_notes(args: argparse.Namespace) -> None:
@@ -301,6 +358,20 @@ def _cmd_audit(args: argparse.Namespace) -> None:
           f"held on GitHub: {', '.join(held) or 'none'}")
 
 
+def _cmd_upgrade_notes(args: argparse.Namespace) -> None:
+    version = _tag_version(args.tag)
+    data = compiled_notes(version, Path(args.notes_dir), Path(args.releases),
+                          Path(args.floor_module))
+    Path(args.out).write_bytes(data)
+    print(f"{args.out}: upgrade notes for {version}, "
+          f"{len(json.loads(data)['entries'])} entries, {len(data)} bytes")
+
+
+def _add_notes_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--notes-dir", default=str(NOTES_DIR))
+    parser.add_argument("--floor-module", default=str(FLOOR_MODULE))
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -310,6 +381,7 @@ def main(argv: list[str]) -> int:
     check.add_argument("--pyproject", default=str(PYPROJECT))
     check.add_argument("--github-output", required=True)
     check.add_argument("--notes-out", required=True)
+    _add_notes_args(check)
     notes = sub.add_parser("notes")
     notes.add_argument("--preamble", required=True)
     notes.add_argument("--generated-json", required=True)
@@ -324,10 +396,15 @@ def main(argv: list[str]) -> int:
     audit.add_argument("--releases", default=str(RELEASES_JSON))
     audit.add_argument("--held", action="append", default=[], metavar="X.Y.Z",
                        help="a version the circuit breaker holds (repeat for each)")
+    compiled = sub.add_parser("upgrade-notes")
+    compiled.add_argument("--tag", required=True)
+    compiled.add_argument("--out", required=True)
+    compiled.add_argument("--releases", default=str(RELEASES_JSON))
+    _add_notes_args(compiled)
     args = parser.parse_args(argv)
     try:
         {"check": _cmd_check, "notes": _cmd_notes, "verify": _cmd_verify,
-         "audit": _cmd_audit}[args.command](args)
+         "audit": _cmd_audit, "upgrade-notes": _cmd_upgrade_notes}[args.command](args)
     except ReleaseLintError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
