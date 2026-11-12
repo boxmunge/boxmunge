@@ -30,12 +30,13 @@ def box(paths: BoxPaths) -> BoxPaths:
 
 def _upgrade(cls: str, **extra) -> dict:
     return {"action": "upgrade", "version": "0.3.6", "url": URL, "class": cls,
-            "source": "endpoint", "current_version": "0.3.5", "blocked": None, **extra}
+            "source": "endpoint", "current_version": "0.3.5", "blocked": None,
+            "manual": None, **extra}
 
 
 def _up_to_date(blocked=None) -> dict:
     return {"action": "up_to_date", "current_version": "0.3.5", "blocked": blocked,
-            "source": "endpoint"}
+            "manual": None, "source": "endpoint"}
 
 
 BLOCKED = {"version": "0.4.2", "class": "security",
@@ -129,7 +130,7 @@ class TestDispatch:
     @patch("boxmunge.upgrade_discovery.discover_update")
     def test_blocklisted_skipped_no_exec(self, mock_discover, mock_exec, box) -> None:
         mock_discover.return_value = {"action": "blocklisted", "version": "0.3.6",
-                                      "class": "breakfix", "source": "endpoint",
+                                      "class": "breakfix", "source": "endpoint", "manual": None,
                                       "current_version": "0.3.5", "blocked": None}
         assert run_auto_update(box) == 0
         mock_exec.assert_not_called()
@@ -173,7 +174,7 @@ class TestBlocked:
     @patch("boxmunge.upgrade_discovery.discover_update")
     def test_blocklisted_but_blocked_alerts(self, mock_discover, box, sent) -> None:
         mock_discover.return_value = {"action": "blocklisted", "version": "0.3.6",
-                                      "class": "security", "source": "endpoint",
+                                      "class": "security", "source": "endpoint", "manual": None,
                                       "current_version": "0.3.5", "blocked": BLOCKED}
         assert run_auto_update(box) == 0
         assert len(sent) == 1

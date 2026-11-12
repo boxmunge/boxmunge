@@ -17,6 +17,7 @@ from boxmunge.blocked_update import (
 )
 from boxmunge.commands.health_cmd import HealthCheck
 from boxmunge.config import ConfigError
+from boxmunge.manual_update import ManualStateError, notice_text, read_manual
 from boxmunge.discovery_freshness import DiscoveryStateError, stale_discovery_warning
 from boxmunge.release_selection import newer
 from boxmunge.version import parse_version_string, read_installed_version
@@ -36,6 +37,27 @@ def check_platform_updates(paths: BoxPaths) -> HealthCheck:
     except ConfigError as e:
         return HealthCheck(NAME, "warn", f"cannot read boxmunge.yml, so auto-update cannot "
                                          f"run: {e}")
+    check = _check_updates(paths)
+    try:
+        notice = _manual_notice(paths)
+    except ManualStateError as e:
+        return HealthCheck(NAME, "warn",
+                           f"{check.detail}; cannot read manual-update state: {e}")
+    if notice is None:
+        return check
+    # The notice is information: it never changes the status.
+    return HealthCheck(NAME, check.status, f"{check.detail}; {notice}")
+
+
+def _manual_notice(paths: BoxPaths) -> str | None:
+    state = read_manual(paths)
+    if state is None:
+        return None
+    installed, _ = parse_version_string(read_installed_version(paths))
+    return notice_text(state["version"]) if newer(state["version"], installed) else None
+
+
+def _check_updates(paths: BoxPaths) -> HealthCheck:
     blocked = _check_blocked(paths)
     try:
         stale = stale_discovery_warning(paths)
