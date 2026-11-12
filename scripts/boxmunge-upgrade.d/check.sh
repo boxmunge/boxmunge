@@ -62,11 +62,11 @@ cmd_check() {
     if missing="$(missing_requirement "$bundle")"; then
         check_finish cant_verify venv "the bundle of $CHECK_VERSION has no hash-pinned $missing, so no venv is built from it"
     fi
-    output_tail "$CHECK_OUT/venv.txt" 1024 build_check_venv "$bundle" "$CHECK_DIR/venv" || rc=$?
+    build_check_venv "$bundle" "$CHECK_DIR/venv" "$CHECK_OUT/venv.txt" || rc=$?
     case "$rc" in
         0) ;;
         124) check_finish cant_verify venv "building $CHECK_VERSION's venv did not finish within $VENV_SECS s; retry when the box is less busy" ;;
-        *) check_finish cant_verify venv "building $CHECK_VERSION's venv failed (exit $rc): $(cat "$CHECK_OUT/venv.txt")" ;;
+        *) check_finish cant_verify venv "building $CHECK_VERSION's venv failed (exit $rc): $(tail -c 1024 "$CHECK_OUT/venv.txt")" ;;
     esac
     "$BASH" "$SHIM_PATH" _check-run "$CHECK_VERSION" "$CHECK_INSTALLED" >"$CHECK_OUT/check-run.log" 2>&1 || rc=$?
     check_outcome "$rc"
@@ -171,9 +171,10 @@ sys.exit(st.st_uid != os.geteuid() or st.st_mode & 0o022)' "$BOXMUNGE_ROOT" \
         || check_refused "$CHECK_DIR has ${avail} MB free, and a check needs $CHECK_FREE_MB MB (an upgrade's 250 MB, and the scratch venv). Free disk space, then run upgrade-check again"
 }
 
-# build_check_venv <bundle> <venv>: the release's venv, built as an upgrade
-# builds a slot (only the bundle's hash-pinned requirements, then the package
-# with no further resolution), as root, confined, writing only CHECK_DIR.
+# build_check_venv <bundle> <venv> <output>: the release's venv, built as an
+# upgrade builds a slot (only the bundle's hash-pinned requirements, then the
+# package with no further resolution), as root, confined, writing only
+# CHECK_DIR; what it prints goes to <output>.
 build_check_venv() {
     local script
     script="$(declare -p PINNED_REQUIREMENTS)
@@ -182,7 +183,7 @@ set -euo pipefail
 python3 -m venv \"\$2\"
 install_pinned_deps_into \"\$1\" \"\$2\"
 \"\$2/bin/pip\" install --quiet --no-cache-dir --no-deps --no-build-isolation \"\$1\""
-    confined_run venv "$VENV_SECS" root "$CHECK_DIR" -- bash -c "$script" build-venv "$1" "$2"
+    confined_run venv "$VENV_SECS" root "$CHECK_DIR" "$3" + -- bash -c "$script" build-venv "$1" "$2"
 }
 
 # _check-run <version> <installed>: the part of a check that reads the live
@@ -207,8 +208,9 @@ cmd_check_run() {
     echo "$verdict" > "$out/readiness.verdict"
     [[ "$verdict" != invalid ]] || exit 0
     rc=0
-    output_tail "$out/dry_run.txt" 4096 confined_run dryrun "$DRY_RUN_SECS" deploy - \
+    confined_run dryrun "$DRY_RUN_SECS" deploy - "$out/dry_run.out" + \
         -- "$venv/bin/boxmunge-server" upgrade --dry-run || rc=$?
+    tail -c 4096 "$out/dry_run.out" > "$out/dry_run.txt"
     echo "$rc" > "$out/dry_run.rc"
 }
 
@@ -223,7 +225,7 @@ check_outcome() {
     esac
     rc="$(cat "$out/readiness.rc")"
     verdict="$(cat "$out/readiness.verdict")"
-    err="$(cat "$out/readiness.json.err")"
+    err="$(tail -c 1024 "$out/readiness.json.err")"
     case "$rc:$verdict" in
         124:*) check_finish cant_verify readiness "the readiness check of $CHECK_VERSION did not finish within $READINESS_SECS s; retry when the box is less busy" ;;
         125:*) check_finish cant_verify readiness "could not tell how the readiness check of $CHECK_VERSION ended: $err" ;;
