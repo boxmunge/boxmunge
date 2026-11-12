@@ -46,7 +46,7 @@ cmd_check() {
     CHECK_INSTALLED="$(installed_version)"
     require_systemd_run
     # Before load_active_slot, which repairs active-slot after a cut-short swap.
-    ! check_interrupted || check_refused "an earlier upgrade or rollback was interrupted, and the health timer's check-probation finishes it within minutes; run upgrade-check again after that"
+    ! check_interrupted || check_refused "an earlier upgrade or rollback was interrupted, and the health timer's check-probation finishes it within minutes; run upgrade-check --version $CHECK_VERSION again after that"
     load_active_slot
     take_check_lock || check_refused "a readiness check is already running; retry when it ends"
     check_refusals
@@ -96,19 +96,19 @@ take_check_lock() {
 check_refusals() {
     local v="$CHECK_VERSION" state
     semver_lt "$CHECK_INSTALLED" "$v" \
-        || check_refused "this box runs $CHECK_INSTALLED, and upgrade-check checks a newer release: run upgrade-howto to see the latest"
+        || check_refused "this box runs $CHECK_INSTALLED, and upgrade-check checks a newer release: run upgrade-howto --version <a release newer than $CHECK_INSTALLED>"
     semver_lt "$LAST_RELEASE_WITHOUT_MCP_LOCK" "$v" \
-        || check_refused "$v predates the hash-pinned requirements every install needs, so this box can neither check nor install it; run upgrade-howto to see the latest release"
+        || check_refused "$v predates the hash-pinned requirements every install needs, so this box can neither check nor install it; run upgrade-howto --version <a release newer than $CHECK_INSTALLED>"
     ! semver_lt "$v" "$FIRST_NOTES_RELEASE" \
         || check_refused "$v predates the readiness check (releases carry it from $FIRST_NOTES_RELEASE on), so it cannot be checked; upgrade to it from the deploy shell: upgrade --target $v"
     ! is_blocklisted "$v" \
-        || check_refused "$v is blocklisted on this box (it failed an earlier upgrade). The operator clears it as supervisor (sudo $BIN_DIR/boxmunge-upgrade clear-blocklist $v), then run upgrade-check again"
+        || check_refused "$v is blocklisted on this box (it failed an earlier upgrade). The operator clears it as supervisor (sudo $BIN_DIR/boxmunge-upgrade clear-blocklist $v), then run upgrade-check --version $CHECK_VERSION again"
     check_probation
     state="$(userns_state)" \
         || check_refused "the userns migration journal is malformed; the operator inspects it as supervisor: sudo $BIN_DIR/boxmunge-upgrade userns-migrate --check"
     case "${state#* }" in
         ""|applied|committed|rolled-back) ;;
-        *) check_refused "a userns $state is stopped part-way, and no upgrade runs until it is finished. The operator finishes it as supervisor (sudo $BIN_DIR/boxmunge-upgrade $(userns_finish "$state")), then run upgrade-check again" ;;
+        *) check_refused "a userns $state is stopped part-way, and no upgrade runs until it is finished. The operator finishes it as supervisor (sudo $BIN_DIR/boxmunge-upgrade $(userns_finish "$state")), then run upgrade-check --version $CHECK_VERSION again" ;;
     esac
     check_rate_limit
 }
@@ -121,14 +121,14 @@ check_probation() {
     local found version ends expired status previous
     found="$( { read_probation && printf '%s|%s|%s|%s|%s' "$PROB_VERSION" "$PROB_EXPIRES_AT" "$PROB_EXPIRED" \
         "$PROB_STATUS" "$PROB_PREV_SLOT"; } 2>/dev/null)" \
-        || check_refused "$PROBATION_FILE is unreadable or malformed, and defers every upgrade until it is removed. The operator inspects and removes it as supervisor (sudo rm $PROBATION_FILE), then run upgrade-check again"
+        || check_refused "$PROBATION_FILE is unreadable or malformed, and defers every upgrade until it is removed. The operator inspects and removes it as supervisor (sudo rm $PROBATION_FILE), then run upgrade-check --version $CHECK_VERSION again"
     IFS='|' read -r version ends expired status previous <<< "$found"
     if [[ "$status" == unrecorded || "$previous" == "$ACTIVE_SLOT" ]]; then
-        check_refused "$PROBATION_FILE names $version on probation, but no upgrade on this box is running that probation; the health timer's check-probation removes it within minutes, then run upgrade-check again"
+        check_refused "$PROBATION_FILE names $version on probation, but no upgrade on this box is running that probation; the health timer's check-probation removes it within minutes, then run upgrade-check --version $CHECK_VERSION again"
     fi
     [[ "$expired" == no ]] \
-        || check_refused "$version has finished its probation, and the health timer's check-probation promotes it within minutes; run upgrade-check again after that"
-    check_refused "$version is on probation until $ends, and no upgrade runs until it ends; run upgrade-check again after that"
+        || check_refused "$version has finished its probation, and the health timer's check-probation promotes it within minutes; run upgrade-check --version $CHECK_VERSION again after that"
+    check_refused "$version is on probation until $ends, and no upgrade runs until it ends; run upgrade-check --version $CHECK_VERSION again after that"
 }
 
 # check_rate_limit: one check every CHECK_WINDOW_SECS. A stamp in the future
@@ -140,10 +140,10 @@ check_rate_limit() {
     [[ -e "$CHECK_STAMP_FILE" ]] || return 0
     last="$(cat "$CHECK_STAMP_FILE")"
     [[ "$last" =~ ^[0-9]{1,15}$ ]] \
-        || check_refused "$CHECK_STAMP_FILE is malformed; the operator removes it as supervisor (sudo rm $CHECK_STAMP_FILE), then run upgrade-check again"
+        || check_refused "$CHECK_STAMP_FILE is malformed; the operator removes it as supervisor (sudo rm $CHECK_STAMP_FILE), then run upgrade-check --version $CHECK_VERSION again"
     now="$(date +%s)"
     if (( now - 10#$last >= 0 && now - 10#$last < CHECK_WINDOW_SECS )); then
-        check_refused "the last readiness check ran less than $((CHECK_WINDOW_SECS / 60)) minutes ago, and checks start at least $((CHECK_WINDOW_SECS / 60)) minutes after the last one ended; run upgrade-check again from $(utc_time $((10#$last + CHECK_WINDOW_SECS)))"
+        check_refused "the last readiness check ran less than $((CHECK_WINDOW_SECS / 60)) minutes ago, and checks start at least $((CHECK_WINDOW_SECS / 60)) minutes after the last one ended; run upgrade-check --version $CHECK_VERSION again from $(utc_time $((10#$last + CHECK_WINDOW_SECS)))"
     fi
 }
 
@@ -167,7 +167,7 @@ st = os.stat(sys.argv[1])
 sys.exit(st.st_uid != os.geteuid() or st.st_mode & 0o022)' "$BOXMUNGE_ROOT" \
         || check_refused "$BOXMUNGE_ROOT is not root's alone (another user owns it or may write it), so no scratch is made under it. The operator fixes it as supervisor: sudo chown root:root $BOXMUNGE_ROOT && sudo chmod 0755 $BOXMUNGE_ROOT"
     [[ ! -L "$CHECK_DIR" ]] \
-        || check_refused "$CHECK_DIR is a symlink; the operator removes it as supervisor (sudo rm $CHECK_DIR), then run upgrade-check again"
+        || check_refused "$CHECK_DIR is a symlink; the operator removes it as supervisor (sudo rm $CHECK_DIR), then run upgrade-check --version $CHECK_VERSION again"
     # From here this check owns the scratch (it holds check.lock): removed
     # however the shim exits. A refusal before here leaves everything as it was.
     # shellcheck disable=SC2034  # read by cleanup_scratch (release.sh)
@@ -181,7 +181,7 @@ sys.exit(st.st_uid != os.geteuid() or st.st_mode & 0o022)' "$BOXMUNGE_ROOT" \
     avail="$(df -P -m "$CHECK_DIR" | awk 'NR==2{print $4}')"
     [[ "$avail" =~ ^[0-9]+$ ]] || die "Cannot read the free space of $CHECK_DIR from df (got '$(printable "$avail")')"
     [[ "$avail" -ge "$CHECK_FREE_MB" ]] \
-        || check_refused "$CHECK_DIR has ${avail} MB free, and a check needs $CHECK_FREE_MB MB (an upgrade's 250 MB, and the scratch venv). Free disk space, then run upgrade-check again"
+        || check_refused "$CHECK_DIR has ${avail} MB free, and a check needs $CHECK_FREE_MB MB (an upgrade's 250 MB, and the scratch venv). Free disk space, then run upgrade-check --version $CHECK_VERSION again"
 }
 
 # build_check_venv <bundle> <venv> <output>: the release's venv, built as an
@@ -233,7 +233,7 @@ check_outcome() {
     case "$1" in
         0) ;;
         75) check_finish cant_verify readiness "an upgrade is in progress; retry after it" ;;
-        76) check_finish cant_verify readiness "the box was upgraded during the check; run upgrade-check again" ;;
+        76) check_finish cant_verify readiness "the box was upgraded during the check; run upgrade-check --version $CHECK_VERSION again" ;;
         *) check_finish cant_verify readiness "the readiness run stopped (exit $1): $(tail -c 1024 "$out/check-run.log")" ;;
     esac
     rc="$(cat "$out/readiness.rc")"
@@ -310,9 +310,9 @@ cmd_guide() {
     local version="$1" installed notes size status rc=0
     installed="$(installed_version)"
     semver_lt "$installed" "$version" \
-        || die "Not fetching the upgrade notes of $version: this box runs $installed, and they are for a newer release; run upgrade-howto to see the latest"
+        || die "Not fetching the upgrade notes of $version: this box runs $installed, and they are for a newer release; run upgrade-howto --version <a release newer than $installed>"
     ! semver_lt "$version" "$FIRST_NOTES_RELEASE" \
-        || die "$version has no upgrade notes: releases publish them from $FIRST_NOTES_RELEASE on; run upgrade-howto to see the latest"
+        || die "$version has no upgrade notes: releases publish them from $FIRST_NOTES_RELEASE on; run upgrade-howto --version <a release from $FIRST_NOTES_RELEASE on>"
     start_download
     notes="$TMP_DOWNLOAD/upgrade-notes.json"
     fetch_signed_sums "$version" "$TMP_DOWNLOAD" readonly || die "$FETCH_ERROR (the upgrade notes of $version)"

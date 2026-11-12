@@ -60,7 +60,7 @@ mock="$BOXMUNGE_ROOT/mock/$run"
 [[ ! -e "$mock.err" ]] || cat "$mock.err" >&2
 [[ ! -e "$mock.out" ]] || cat "$mock.out"
 exit "$(cat "$mock.rc" 2>/dev/null || echo 0)"'
-export PATH="$SYSTEMD_RUN_STUB:$FIXTURE/bin:$PATH"
+export PATH="$FIXTURE/bin:$PATH"
 export STUB_UNIT_PATH="$FIXTURE/bin"
 # Every confined run is cut to this in the stand-in; the mocks that sleep
 # outlast it, so a time limit is met in seconds.

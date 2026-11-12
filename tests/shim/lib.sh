@@ -148,8 +148,8 @@ BUSYLOCK="$(mktemp -d)"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$BUSYLOCK/flock"
 chmod +x "$BUSYLOCK/flock"
 
-# SYSTEMD_RUN_STUB: prepend to PATH for a systemd-run that runs the unit's
-# command here, as systemd 257 does (checked on Debian 13), and the systemctl
+# SYSTEMD_RUN_STUB, on PATH for every test (no test may reach the host's
+# systemd): a systemd-run that runs the unit's command here, as systemd 257 does (checked on Debian 13), and the systemctl
 # that reports how it ended. systemd-run records its argv in
 # $BOXMUNGE_ROOT/calls. The command gets a clean environment: the --setenv
 # variables (STUB_UNIT_PATH is put in front of PATH, for the test's own
@@ -239,28 +239,34 @@ case "$1" in
 esac
 EOF
 chmod +x "$SYSTEMD_RUN_STUB"/*
+export PATH="$SYSTEMD_RUN_STUB:$PATH"
+
+# BUILT_SHIM: the shim under test as a release ships it (built, when it is
+# the source shim). new_root installs it as the box's bin/boxmunge-upgrade,
+# which an upgrade runs once it has self-updated (install-sudoers).
+BUILT_SHIM="$SHIM"
+if grep -q '^# >>> boxmunge-upgrade.d:' "$SHIM"; then
+    BUILT_SHIM="$FAKEBIN.built-shim"
+    python3 "$REPO_DIR/scripts/build-shim.py" "$SHIM" "$BUILT_SHIM"
+fi
 
 # with_shim_functions <cmd...>: run <cmd> in a subshell that has every
-# constant and function of the shim under test (built first, when it is the
-# source shim) and has run none of its commands.
+# constant and function of the shim under test and has run none of its
+# commands.
 SHIM_FUNCTIONS=""
 with_shim_functions() {
     if [[ -z "$SHIM_FUNCTIONS" ]]; then
-        local built="$SHIM"
         SHIM_FUNCTIONS="$(mktemp)"
-        if grep -q '^# >>> boxmunge-upgrade.d:' "$SHIM"; then
-            built="$SHIM_FUNCTIONS.built"
-            python3 "$REPO_DIR/scripts/build-shim.py" "$SHIM" "$built"
-        fi
-        awk 'index($0, "case \"${1:-}\" in") == 1 { exit } { print }' "$built" > "$SHIM_FUNCTIONS"
+        awk 'index($0, "case \"${1:-}\" in") == 1 { exit } { print }' "$BUILT_SHIM" > "$SHIM_FUNCTIONS"
     fi
     # shellcheck source=/dev/null
     ( source "$SHIM_FUNCTIONS"; "$@" )
 }
 
 # new_root [slot]: fresh BOXMUNGE_ROOT whose active slot is <slot> (default a),
-# with a mock boxmunge-server and python in both slots and a consistent
-# active-slot file and env-active symlink.
+# with a mock boxmunge-server and python in both slots, a consistent
+# active-slot file and env-active symlink, and the shim under test (built)
+# in bin/.
 new_root() {
     local slot="${1:-a}"
     BOXMUNGE_ROOT="$(mktemp -d)"
@@ -276,10 +282,31 @@ new_root() {
     done
     echo "$slot" > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
     ln -s "$BOXMUNGE_ROOT/env-$slot" "$BOXMUNGE_ROOT/env-active"
+    cp "$BUILT_SHIM" "$BOXMUNGE_ROOT/bin/boxmunge-upgrade"
+    chmod 0755 "$BOXMUNGE_ROOT/bin/boxmunge-upgrade"
     # The stash a rollback restores when no upgrade recorded one.
     mkdir -m 0770 "$BOXMUNGE_ROOT/stashes"
     : > "$BOXMUNGE_ROOT/stashes/$OLD_STASH"
     chmod 0600 "$BOXMUNGE_ROOT/stashes/$OLD_STASH"
+}
+
+# release_notes <dir> <version> [<breaking version>...]: <version>'s
+# upgrade-notes.json in release directory <dir> (format 1; its releases table
+# holds <version>, not breaking, and each breaking one named), and its line
+# appended to <dir>/SHA256SUMS. Call it once SHA256SUMS is written.
+release_notes() {
+    python3 - "$@" <<'PY'
+import hashlib, json, sys
+directory, version, breaking = sys.argv[1], sys.argv[2], sys.argv[3:]
+releases = {v: {"class": "feature", "breaking": True} for v in breaking}
+releases.setdefault(version, {"class": "breakfix", "breaking": False})
+data = json.dumps({"format": 1, "release": version, "floor": "0.11.0", "bridge": "0.11.6",
+                   "releases": releases, "no_action": [version], "entries": []}).encode()
+with open(f"{directory}/upgrade-notes.json", "wb") as f:
+    f.write(data)
+with open(f"{directory}/SHA256SUMS", "a") as f:
+    f.write(f"{hashlib.sha256(data).hexdigest()}  upgrade-notes.json\n")
+PY
 }
 
 # OLD_STASH: the stash new_root leaves in stashes/.
@@ -364,7 +391,8 @@ drop_root() { rm -rf "$BOXMUNGE_ROOT"; unset BOXMUNGE_ROOT; }
 
 finish() {
     rm -rf "$FAKEBIN" "$FAILVISUDO" "$BUSYLOCK" "$SYSTEMD_RUN_STUB"
-    [[ -z "$SHIM_FUNCTIONS" ]] || rm -f "$SHIM_FUNCTIONS" "$SHIM_FUNCTIONS.built"
+    [[ "$BUILT_SHIM" == "$SHIM" ]] || rm -f "$BUILT_SHIM"
+    [[ -z "$SHIM_FUNCTIONS" ]] || rm -f "$SHIM_FUNCTIONS"
     echo ""
     echo "Results: $PASS passed, $FAIL failed"
     [[ "$FAIL" -eq 0 ]]

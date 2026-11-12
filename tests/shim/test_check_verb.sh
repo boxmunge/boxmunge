@@ -200,7 +200,7 @@ ran "readiness: lock" && fail "the readiness ran while an upgrade held the lock"
     || fail "lock-skips: $(cat "$BOXMUNGE_ROOT/upgrade-root/lock-skips")"
 touch "$BOXMUNGE_ROOT/mock/bump-version"
 RUN_DESC="installed release changed" run_check 1.5.0
-expect_check 1 cant_verify readiness "the box was upgraded during the check; run upgrade-check again" \
+expect_check 1 cant_verify readiness "the box was upgraded during the check; run upgrade-check --version 1.5.0 again" \
     "a check whose box was upgraded meanwhile asks to be run again"
 drop_root
 

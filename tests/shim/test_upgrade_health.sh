@@ -49,6 +49,7 @@ for f in requirements-build.txt requirements-tui.txt requirements-mcp.txt; do ec
 echo "1.5.0 ops" > "$FIXTURE/release/boxmunge/on-server/OPERATIONS.md"
 tar czf "$FIXTURE/release/boxmunge-1.5.0.tar.gz" -C "$FIXTURE/release" boxmunge
 echo "0000  boxmunge-1.5.0.tar.gz" > "$FIXTURE/release/SHA256SUMS"
+release_notes "$FIXTURE/release" 1.5.0
 touch "$FIXTURE/release/SHA256SUMS.sig" "$FIXTURE/release/SHA256SUMS.cert"
 export PATH="$FIXTURE/bin:$PATH"
 
