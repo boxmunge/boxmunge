@@ -6,9 +6,13 @@
 # Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
 # the shim that releases ship.
 
-# Time limits of each confined run, in seconds. The readiness check holds
-# upgrade.lock only for the readiness and dry runs: at most 600 s, so the
-# health timer (every 5 minutes) skips at most two check-probation runs.
+# Time limits of each confined run, in seconds. A unit still running at its
+# limit gets SIGTERM, and STOP_SECS later SIGKILL, every process in it. The
+# readiness check holds upgrade.lock only for the readiness and dry runs: at
+# most READINESS_SECS + DRY_RUN_SECS + 2 * STOP_SECS = 610 s (and a few
+# seconds of the shim's own), so the health timer (every 5 minutes) skips
+# at most three check-probation runs, and auto-update waits it out.
+STOP_SECS=5
 PREREQ_SECS=60
 # shellcheck disable=SC2034  # VENV_SECS and DRY_RUN_SECS are check.sh's
 VENV_SECS=900
@@ -17,6 +21,9 @@ READINESS_SECS=300
 DRY_RUN_SECS=300
 # The readiness command's stdout, at most; a longer one is not contract 1.
 READINESS_MAX_BYTES=1048576
+# The largest file a unit with no writable path may write: its output files
+# (and its private /tmp). A larger write fails (EFBIG, or SIGXFSZ).
+CONFINED_FILE_MAX=2097152
 
 # PY_CLEAN: Python that every message built from a release's output goes
 # through. clean(text, limit, tail=False) gives one line of printable ASCII
@@ -34,32 +41,55 @@ require_systemd_run() {
         || die "systemd-run is missing, and a readiness check runs a release's code only inside it. It comes with systemd: as supervisor, sudo apt-get install systemd"
 }
 
-# confined_run <name> <secs> <user> <rw-dir|-> -- <cmd...>: run <cmd> as
-# <user> in the transient unit boxmunge-check-<name>-<pid>, stopped after
-# <secs> seconds, with the filesystem read-only except <rw-dir> (none for -),
-# a private /tmp, no new privileges and no kernel tunables, modules or
-# cgroups. Its stdin is /dev/null; its stdout and stderr are this shell's.
-# The environment is PATH, BOXMUNGE_ROOT, PYTHONSAFEPATH and
-# PYTHONDONTWRITEBYTECODE alone, the working directory /. Returns <cmd>'s
+# confined_run <name> <secs> <user> <rw-dir|-> <out> <err> -- <cmd...>: run
+# <cmd> as <user> in the transient unit boxmunge-check-<name>-<pid>, stopped
+# after <secs> seconds (STOP_SECS more to end), with the filesystem read-only
+# except <rw-dir> (none for -; then no file over CONFINED_FILE_MAX either), a
+# private /tmp, no new privileges and no kernel tunables, modules or cgroups;
+# as root, also no capabilities, devices or namespaces, and only the system
+# calls of @system-service.
+# Its stdin is /dev/null. Its stdout goes to the file <out>, its stderr to
+# <err> ("-" discards either, an <err> of "+" goes with stdout); systemd
+# opens them, emptied first. So nothing here ever reads the unit's output
+# while it runs: a process the unit's output is handed to (deploy can reach a
+# deploy unit's) cannot keep this shell, or upgrade.lock, waiting. The
+# environment is PATH, BOXMUNGE_ROOT, PYTHONSAFEPATH and
+# PYTHONDONTWRITEBYTECODE, and what systemd adds (USER, and for a <user> not
+# root HOME, LOGNAME and SHELL), the working directory /. Returns <cmd>'s
 # exit code, or 124 when the time limit stopped it, or 125 when systemd can
 # no longer say how the unit ended (confined_ending).
 confined_run() {
-    local name="$1" secs="$2" user="$3" rw="$4"
-    [[ "${5:-}" == -- && $# -gt 5 && "$name" =~ ^[a-z0-9-]+$ && "$secs" =~ ^[1-9][0-9]*$ \
-        && "$user" =~ ^[a-z_][a-z0-9_-]*$ && ( "$rw" == - || "$rw" == /* ) ]] \
-        || die "Usage: confined_run <name> <secs> <user> <rw-dir|-> -- <cmd...>"
-    shift 5
+    local name="$1" secs="$2" user="$3" rw="$4" out="$5" err="$6" stream
+    [[ "${7:-}" == -- && $# -gt 7 && "$name" =~ ^[a-z0-9-]+$ && "$secs" =~ ^[1-9][0-9]*$ \
+        && "$user" =~ ^[a-z_][a-z0-9_-]*$ && ( "$rw" == - || "$rw" == /* ) \
+        && ( "$out" == - || "$out" == /* ) && ( "$err" == - || "$err" == + || "$err" == /* ) ]] \
+        || die "Usage: confined_run <name> <secs> <user> <rw-dir|-> <out|-> <err|-|+> -- <cmd...>"
+    shift 7
     require_systemd_run
     local unit="boxmunge-check-$name-$$" rc=0
-    local props=(-p "RuntimeMaxSec=$secs" -p ProtectSystem=strict -p ProtectHome=read-only -p PrivateTmp=yes
-        -p NoNewPrivileges=yes -p ProtectKernelTunables=yes -p ProtectKernelModules=yes -p ProtectControlGroups=yes)
-    [[ "$rw" == - ]] || props+=(-p "ReadWritePaths=$rw")
-    [[ "$user" == root ]] || props+=(-p "User=$user")
+    local props=(-p "RuntimeMaxSec=$secs" -p "TimeoutStopSec=$STOP_SECS" -p ProtectSystem=strict
+        -p ProtectHome=read-only -p PrivateTmp=yes -p NoNewPrivileges=yes -p ProtectKernelTunables=yes
+        -p ProtectKernelModules=yes -p ProtectControlGroups=yes)
+    if [[ "$rw" == - ]]; then props+=(-p "LimitFSIZE=$CONFINED_FILE_MAX"); else props+=(-p "ReadWritePaths=$rw"); fi
+    if [[ "$user" == root ]]; then
+        # Root runs only the signed release's own scripts and pip, and needs
+        # none of root's powers for them: no capabilities, no devices, no
+        # namespaces, and only the system calls an ordinary service makes.
+        props+=(-p CapabilityBoundingSet= -p PrivateDevices=yes -p RestrictNamespaces=yes
+            -p SystemCallFilter=@system-service)
+    else
+        props+=(-p "User=$user")
+    fi
+    for stream in "$out" "$err"; do
+        [[ "$stream" != /* ]] || : > "$stream"  # there, empty, even if the unit never starts
+    done
+    props+=(-p "StandardOutput=$(confined_stream "$out")")
+    if [[ "$err" == + ]]; then props+=(-p StandardError=inherit); else props+=(-p "StandardError=$(confined_stream "$err")"); fi
     # A failed unit keeps its name until it is reset. One a killed run left
     # under this name (the same pid) would stop this one from starting; when
     # there is none, systemctl says so, and that is not an error here.
     systemctl reset-failed "$unit.service" >/dev/null 2>&1 || true
-    systemd-run --quiet --wait --pipe --unit="$unit" "${props[@]}" \
+    systemd-run --quiet --wait --unit="$unit" "${props[@]}" \
         --setenv=PATH=/usr/sbin:/usr/bin:/sbin:/bin --setenv="BOXMUNGE_ROOT=$BOXMUNGE_ROOT" \
         --setenv=PYTHONSAFEPATH=1 --setenv=PYTHONDONTWRITEBYTECODE=1 --working-directory=/ \
         -- "$@" </dev/null || rc=$?
@@ -92,30 +122,8 @@ confined_ending() {
     return "$rc"
 }
 
-# Capturing a run's output without letting it fill a disk. Each returns the
-# command's exit code, so call them as `<helper> ... || rc=$?`.
-#   stdout_capped <out> <max> <err> <err_max> <cmd...>  the first <max>
-#       bytes of stdout to <out>, the last <err_max> of stderr to <err>
-#   output_tail <file> <max> <cmd...>  the last <max> bytes of both, together
-#   stderr_tail <file> <max> <cmd...>  stdout dropped, the end of stderr kept
-stdout_capped() {
-    local out="$1" max="$2" err="$3" err_max="$4"
-    shift 4
-    ( "$@" | head -c "$max" > "$out"; exit "${PIPESTATUS[0]}" ) 2>&1 | tail -c "$err_max" > "$err"
-    return "${PIPESTATUS[0]}"
-}
-output_tail() {
-    local file="$1" max="$2"
-    shift 2
-    "$@" 2>&1 | tail -c "$max" > "$file"
-    return "${PIPESTATUS[0]}"
-}
-stderr_tail() {
-    local file="$1" max="$2"
-    shift 2
-    "$@" 2>&1 >/dev/null | tail -c "$max" > "$file"
-    return "${PIPESTATUS[0]}"
-}
+# confined_stream <file|->: a systemd StandardOutput= or StandardError= value.
+confined_stream() { if [[ "$1" == - ]]; then echo null; else echo "truncate:$1"; fi; }
 
 # run_prerequisites <bundle_dir> <out_jsonl>: run the box checks the bundle
 # lists in bootstrap/prerequisites (one bootstrap/<name>.sh a line; # comments
@@ -143,7 +151,7 @@ run_prerequisites() {
     done < "$manifest"
     for script in "${scripts[@]+"${scripts[@]}"}"; do
         rc=0
-        stderr_tail "$out.err" 1024 confined_run "prereq-$(basename "$script" .sh)" "$PREREQ_SECS" root - \
+        confined_run "prereq-$(basename "$script" .sh)" "$PREREQ_SECS" root - - "$out.err" \
             -- bash "$bundle/$script" || rc=$?
         case "$rc" in
             0) prerequisite_line "$out" "$script" true "" ;;
@@ -168,6 +176,8 @@ import json, sys
 out, script, ok, message = sys.argv[1:5]
 if len(sys.argv) > 5:
     with open(sys.argv[5], "rb") as f:
+        f.seek(0, 2)
+        f.seek(max(0, f.tell() - 4096))
         message = clean(f.read().decode("utf-8", "replace"), 1024, tail=True) or message
 with open(out, "a") as f:
     f.write(json.dumps({"script": script, "ok": ok == "true", "message": clean(message, 1024)}) + "\n")
@@ -178,11 +188,11 @@ with open(out, "a") as f:
 # <venv_dir> against this box, as deploy, confined with no writable path,
 # READINESS_SECS at most. As deploy, so a project file deploy links elsewhere
 # cannot make root read it into a finding. Its stdout goes to <out_file>
-# (READINESS_MAX_BYTES, and one more byte that shows it was longer), the end
-# of its stderr to <out_file>.err. Returns its exit code (124: timed out).
+# (readiness_verdict reads at most READINESS_MAX_BYTES and one more byte),
+# its stderr to <out_file>.err. Returns its exit code (124: timed out).
 run_readiness() {
-    stdout_capped "$2" $((READINESS_MAX_BYTES + 1)) "$2.err" 1024 \
-        confined_run readiness "$READINESS_SECS" deploy - -- "$1/bin/boxmunge-server" upgrade-readiness --json
+    confined_run readiness "$READINESS_SECS" deploy - "$2" "$2.err" \
+        -- "$1/bin/boxmunge-server" upgrade-readiness --json
 }
 
 # readiness_verdict <out_file> [<exit code>]: pass, blocked or invalid. Only

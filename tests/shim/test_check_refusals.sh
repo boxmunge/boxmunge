@@ -35,7 +35,10 @@ CHECK_TARGET=0.11.7 refused "0.11.7 predates the readiness check (releases carry
     "check: a release before the first with a readiness check is refused, naming upgrade --target"
 echo "0.9.0" > "$BOXMUNGE_ROOT/config/version"
 CHECK_TARGET=0.10.1 run_check 0.10.1
-CHECK_TARGET=0.10.1 refused "predates the readiness check" "check: a release without the hash-pinned MCP requirements is refused"
+CHECK_TARGET=0.10.1 refused "0.10.1 predates the hash-pinned requirements every install needs, so this box can neither check nor install it; run upgrade-howto to see the latest release" \
+    "check: a release without the hash-pinned MCP requirements is refused, naming no command that refuses it"
+[[ "$(field 'd["reasons"][0]')" != *"upgrade --target"* ]] && pass "no upgrade --target for a release target refuses" \
+    || fail "names target: $JSON"
 drop_root
 
 box
@@ -96,6 +99,15 @@ mkfifo "$BOXMUNGE_ROOT/upgrade-state/probation.json"
 RUN_DESC="probation.json a FIFO" run_check 1.5.0
 refused "is unreadable or malformed" "check: a FIFO at probation.json is refused, not read"
 rm "$BOXMUNGE_ROOT/upgrade-state/probation.json"
+head -c 1048577 /dev/zero > "$BOXMUNGE_ROOT/upgrade-state/probation.json"
+RUN_DESC="probation.json over 1 MiB" run_check 1.5.0
+refused "is unreadable or malformed" "check: a planted probation.json over 1 MiB is refused, not read whole"
+rm "$BOXMUNGE_ROOT/upgrade-state/probation.json"
+head -c 1048577 /dev/zero > "$BOXMUNGE_ROOT/upgrade-state/blocklist.json"
+RUN_DESC="blocklist.json over 1 MiB" run_check 1.5.0
+[[ "$RC" -eq 1 && -z "$JSON" && "$ERR" == *"blocklist.json is over 1048576 bytes; refusing to read it as root"* ]] \
+    && pass "check: a planted blocklist over 1 MiB stops the check, saying so" || fail "huge blocklist: rc=$RC $ERR"
+rm "$BOXMUNGE_ROOT/upgrade-state/blocklist.json"
 ln -s /etc/hostname "$BOXMUNGE_ROOT/upgrade-state/probation.json"
 RUN_DESC="probation.json a link" run_check 1.5.0
 refused "is unreadable or malformed" "check: a link at probation.json is refused, not followed"
@@ -131,7 +143,7 @@ rm -rf "$BOXMUNGE_ROOT/upgrade-check"
 
 echo $(( $(date +%s) - 60 )) > "$BOXMUNGE_ROOT/upgrade-root/check-last"
 KEEP_STAMP=1 run_check 1.5.0
-refused "one runs at most every 10 minutes; run upgrade-check again from 20" "check: a second check within 600 s is refused naming the time"
+refused "checks start at least 10 minutes after the last one ended; run upgrade-check again from 20" "check: a second check within 600 s is refused naming the time"
 [[ "$(field 'd["reasons"][0]')" =~ again\ from\ [0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}\ UTC$ ]] \
     && pass "the rate limit names the UTC time of the next check" || fail "rate limit: $JSON"
 echo $(( $(date +%s) + 86400 )) > "$BOXMUNGE_ROOT/upgrade-root/check-last"

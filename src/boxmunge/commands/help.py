@@ -93,6 +93,8 @@ Platform updates:
 Operator only (as root, not in the deploy shell):
   auto-update             Check for and apply a platform update now, as the
                           auto-update timer does (deploy shell: upgrade)
+  upgrade-readiness       Check this box and its projects against the installed
+                          release's rules (--json: the upgrade check's contract)
   container-update        Pull and recreate Caddy and project image: containers
   install-txn <p> --drop  Drop a stale install record
   project-forget <p>      Drop a registry entry whose project directory is gone

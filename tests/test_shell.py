@@ -139,6 +139,8 @@ class TestAllowedCommands:
             "userns",            # Root-only: the userns migration, through the upgrade shim.
             "auto-update",       # Root-only: its lock is in root-only upgrade-root/ (`upgrade`
                                  # is the deploy shell's way to update).
+            "upgrade-readiness",  # Operator-only: agents use upgrade-check, which runs the
+                                  # target release's copy through the upgrade shim.
         }
 
         for cmd in COMMANDS:

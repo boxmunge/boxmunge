@@ -18,6 +18,8 @@
 SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
 ACTIVE_SLOT=""
 LOCK_HELD=0
+# How long the auto-update timer's run waits for upgrade.lock (acquire_lock).
+LOCK_WAIT_SECS=900
 
 printable() { local s="${1:0:80}"; printf '%s' "${s//[^[:alnum:]._+-]/?}"; }
 
@@ -40,11 +42,13 @@ refuse_symlink() {
 # read_untrusted <file>: print a deploy-writable file. A FIFO would block a
 # plain read forever with upgrade.lock held, and a link swapped in after
 # refuse_symlink would be read through, so the file is opened O_NOFOLLOW |
-# O_NONBLOCK and anything but a regular file is refused. Use it as
+# O_NONBLOCK and anything but a regular file is refused; so is one over
+# UNTRUSTED_MAX_BYTES, which no state file root reads comes near. Use it as
 # value="$(read_untrusted <file>)" || exit 1 (it has already said why).
+UNTRUSTED_MAX_BYTES=1048576
 read_untrusted() {
     local rc=0
-    python3 - "$1" <<'PYRU' || rc=$?
+    python3 - "$1" "$UNTRUSTED_MAX_BYTES" <<'PYRU' || rc=$?
 import errno, os, stat, sys
 try:
     fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -53,11 +57,15 @@ except OSError as e:
 with os.fdopen(fd, "rb") as f:
     if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
         sys.exit(3)
-    sys.stdout.buffer.write(f.read())
+    data = f.read(int(sys.argv[2]) + 1)
+    if len(data) > int(sys.argv[2]):
+        sys.exit(4)
+    sys.stdout.buffer.write(data)
 PYRU
     case "$rc" in
         0) ;;
         3) die_logged "$1 is a symlink, FIFO or other non-regular file; refusing to read it as root. Remove it and re-run." ;;
+        4) die_logged "$1 is over $UNTRUSTED_MAX_BYTES bytes; refusing to read it as root. Remove it and re-run." ;;
         *) die_logged "Cannot read $1; inspect it and repair or remove it" ;;
     esac
 }
@@ -119,11 +127,14 @@ load_active_slot() {
 standby_slot() { [[ "$ACTIVE_SLOT" == "a" ]] && echo "b" || echo "a"; }
 active_venv() { echo "$BOXMUNGE_ROOT/env-$ACTIVE_SLOT"; }
 
-# acquire_lock [skip|try]: take upgrade.lock once per run. With "skip", a
-# busy lock exits 0 (the health timer retries on its next fire); with "try"
-# (a readiness check), it returns 1 and counts no skip; otherwise it dies.
-# Only "try" leaves check-probation's skip count (lock-skips) alone when it
-# takes the lock: a readiness check is not a check-probation run.
+# acquire_lock [skip|try|wait]: take upgrade.lock once per run. With "skip",
+# a busy lock exits 0 (the health timer retries on its next fire); with "try"
+# (a readiness check), it returns 1 and counts no skip; with "wait" (the
+# auto-update timer's run, whose discovery waited the same), it waits up to
+# LOCK_WAIT_SECS, as a readiness check holds the lock for up to ten minutes,
+# then dies, logged; otherwise it dies at once. Only "try" leaves
+# check-probation's skip count (lock-skips) alone when it takes the lock: a
+# readiness check is not a check-probation run.
 #
 # upgrade.lock is in root-only upgrade-root/, so deploy cannot replace it to
 # let a second upgrade run. Every shim and release an upgrade can start from
@@ -180,7 +191,11 @@ for fd, path in ((9, sys.argv[1]), (8, sys.argv[2])):
     if not (stat.S_ISREG(held.st_mode) and (held.st_dev, held.st_ino) == (name.st_dev, name.st_ino)):
         sys.exit(f"fd {fd} is not {path}")' "$LOCK_FILE" "$LEGACY_LOCK_FILE" 2>&1)" \
         || die "$why (it was replaced, or the descriptor came from elsewhere); refusing to lock it. Remove it and re-run."
-    if ! flock -n 9 || ! flock -n 8; then
+    if [[ "${1:-}" == wait ]]; then
+        if ! flock -w "$LOCK_WAIT_SECS" 9 || ! flock -w "$LOCK_WAIT_SECS" 8; then
+            die_logged "upgrade.lock was held for the whole $((LOCK_WAIT_SECS / 60)) minutes the auto-update timer waited, so nothing was installed; it tries again on its next run. Find the holder as supervisor: sudo lslocks | grep upgrade.lock"
+        fi
+    elif ! flock -n 9 || ! flock -n 8; then
         [[ "${1:-}" != "skip" ]] || lock_busy_skip "upgrade.lock is held"
         [[ "${1:-}" != "try" ]] || return 1
         die "Another upgrade is in progress"

@@ -12,7 +12,19 @@ source "$(dirname "$0")/lib.sh"
 
 FIXTURE="$(mktemp -d)"
 mkdir -p "$FIXTURE/bin"
-printf '#!/usr/bin/env bash\necho "curl $*" >> "$BOXMUNGE_ROOT/calls"\nf="$RELEASE/$(basename "${@: -1}")"\n[[ -f "$f" ]] || exit 22\ncp "$f" "$3"\n' > "$FIXTURE/bin/curl"
+# curl answers --write-out's %{http_code}: 503 while $RELEASE/unavailable
+# exists, 404 for a file the release does not have.
+cat > "$FIXTURE/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+echo "curl $*" >> "$BOXMUNGE_ROOT/calls"
+f="$RELEASE/$(basename "${@: -1}")"
+code=200
+[[ -f "$f" ]] || code=404
+[[ ! -e "$RELEASE/unavailable" || "$f" != *upgrade-notes.json ]] || code=503
+[[ "$*" != *"--write-out"* ]] || printf '%s' "$code"
+[[ "$code" == 200 ]] || exit 22
+cp "$f" "$3"
+EOF
 printf '#!/usr/bin/env bash\n[[ ! -e "$BOXMUNGE_ROOT/cosign-fails" ]] || { echo "Error: invalid signature" >&2; exit 1; }\n' > "$FIXTURE/bin/cosign"
 # Every scratch directory the shim makes is under here, so none can be left.
 mkdir "$FIXTURE/tmp"
@@ -113,7 +125,13 @@ drop_root
 box
 rm "$RELEASE/upgrade-notes.json"
 guide 1.5.0
-refused 1 "Release 1.5.0 publishes no upgrade-notes.json" "guide says when a release has no notes"
+refused 1 "Release 1.5.0 publishes no upgrade-notes.json (GitHub answered 404)" "guide says when a release has no notes"
+echo notes > "$RELEASE/upgrade-notes.json"
+touch "$RELEASE/unavailable"
+guide 1.5.0
+refused 1 "GitHub refused the download of upgrade-notes.json of 1.5.0 (HTTP 503); retry later" \
+    "guide tells an HTTP error from a release without notes"
+rm "$RELEASE/unavailable"
 head -c 1048577 /dev/zero > "$RELEASE/upgrade-notes.json"
 (cd "$RELEASE" && sha256sum boxmunge-1.5.0.tar.gz upgrade-notes.json > SHA256SUMS)
 guide 1.5.0

@@ -350,25 +350,40 @@ deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmun
 - `check <version>` runs a newer release's own readiness check against the box
   and prints one JSON answer. It changes no upgrade state: the blocklist, the
   slots, the interruption, pip and cosign counts, probation and the stash stay
-  byte-identical whatever happens. It first refuses a version that is not newer
-  than the installed one, predates the check (0.11.8), or is blocklisted, and
-  any check while an upgrade or rollback is unfinished, during a probation
-  (`probation.json` is only read, never acted on), during a stopped userns
-  migration, or within ten minutes of the last check. As root it then downloads
-  the release and verifies it like an upgrade, without the lock and without
-  touching the cosign count, into `/opt/boxmunge/upgrade-check/`, which is
-  root's (0755; the bundle and results inside are 0700) and removed when the
-  check ends. The bundle's listed prerequisite scripts (`bootstrap/prerequisites`)
-  run as root, and a scratch venv is built from its hash-pinned requirements
-  (outside the A/B slots), each inside `systemd-run` with `ProtectSystem=strict`
-  and a time limit. Last, holding the upgrade lock for at most ten minutes, the
-  release's `upgrade-readiness --json` and `upgrade --dry-run` run **as
-  deploy**, confined the same way with nothing writable: deploy starts the
-  check and reads its findings, so running them as root would let a link deploy
-  plants in a project make root read a file into a finding. Only the Docker
-  socket is still reachable from them, which the readiness rules use to inspect.
-  The ten-minute stamp (`upgrade-root/check-last`) and the one-at-a-time lock
-  (`upgrade-root/check.lock`) are root-only, so deploy cannot reset either.
+  byte-identical whatever happens. The one exception is what every taker of
+  the upgrade lock does: it may create the lock files, make the legacy
+  `upgrade-state/upgrade.lock` 0600, and replace one deploy owns. It first
+  refuses a version that is not newer than the installed one, predates the
+  check (0.11.8), or is blocklisted, and any check while an upgrade or rollback
+  is unfinished, during a probation (`probation.json` is only read, never acted
+  on), during a stopped userns migration, or within ten minutes of the start or
+  the end of the last check. As root it then downloads the release and
+  verifies it like an upgrade, without the lock and without touching the
+  cosign count, into `/opt/boxmunge/upgrade-check/`, which is root's (0755; the
+  bundle and results inside are 0700) and removed when the check ends. The
+  bundle's listed prerequisite scripts (`bootstrap/prerequisites`) run as
+  root, and a scratch venv is built from its hash-pinned requirements (outside
+  the A/B slots). Each runs inside `systemd-run` with `ProtectSystem=strict`,
+  no capabilities, devices or namespaces, the `@system-service` system calls
+  and a time limit. Last, holding the upgrade lock, the release's
+  `upgrade-readiness --json` and `upgrade --dry-run` run **as deploy**,
+  confined the same way with nothing writable. deploy starts the check and
+  reads its findings, so running them as root would let a link deploy plants
+  in a project make root read a file into a finding. They can do only what
+  deploy can do:
+  - reach the network, abstract Unix sockets and deploy's own processes;
+  - use the Docker socket, which the readiness rules use to inspect;
+  - write their private `/tmp` and `/dev/shm`, but nothing of root's and no
+    upgrade state.
+
+  Every run's output goes to files that systemd opens, so nothing a run does
+  can keep the shim waiting. A run is stopped at its limit and killed 5 s
+  later. So the lock is held for at most 610 s: 300 s for each run, plus 5 s
+  each. Auto-update waits up to 15 minutes for the lock rather than skipping,
+  and a check stamps the ten-minute limit again as it ends, so checks cannot
+  hold off an update. The stamp (`upgrade-root/check-last`) and the
+  one-at-a-time lock (`upgrade-root/check.lock`) are root-only, so deploy
+  cannot reset either.
 - `guide <version>` prints a newer release's `upgrade-notes.json` exactly as
   published, and only once its own line in the release's cosign-signed
   `SHA256SUMS` verifies it (at most 1 MiB). It runs no release code, takes no

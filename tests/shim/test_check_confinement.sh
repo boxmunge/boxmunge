@@ -22,11 +22,20 @@ units="$(python3 - "$BOXMUNGE_ROOT" "$BOXMUNGE_ROOT/calls" <<'PY'
 import re, sys
 root = sys.argv[1]
 common = {"ProtectSystem=strict", "ProtectHome=read-only", "PrivateTmp=yes", "NoNewPrivileges=yes",
-          "ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectControlGroups=yes"}
+          "ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectControlGroups=yes",
+          "TimeoutStopSec=5"}
+out = f"{root}/upgrade-check/out"
+capped = "LimitFSIZE=2097152"
+rooted = {"CapabilityBoundingSet=", "PrivateDevices=yes", "RestrictNamespaces=yes", "SystemCallFilter=@system-service"}
 want = {
-    "prereq-ok": {"RuntimeMaxSec=60"}, "prereq-floor": {"RuntimeMaxSec=60"},
-    "venv": {"RuntimeMaxSec=900", f"ReadWritePaths={root}/upgrade-check"},
-    "readiness": {"RuntimeMaxSec=300", "User=deploy"}, "dryrun": {"RuntimeMaxSec=300", "User=deploy"},
+    "prereq-ok": {"RuntimeMaxSec=60", capped, "StandardOutput=null", f"StandardError=truncate:{out}/prerequisites.jsonl.err"} | rooted,
+    "prereq-floor": {"RuntimeMaxSec=60", capped, "StandardOutput=null", f"StandardError=truncate:{out}/prerequisites.jsonl.err"} | rooted,
+    "venv": {"RuntimeMaxSec=900", f"ReadWritePaths={root}/upgrade-check", f"StandardOutput=truncate:{out}/venv.txt",
+             "StandardError=inherit"} | rooted,
+    "readiness": {"RuntimeMaxSec=300", "User=deploy", capped, f"StandardOutput=truncate:{out}/readiness.json",
+                  f"StandardError=truncate:{out}/readiness.json.err"},
+    "dryrun": {"RuntimeMaxSec=300", "User=deploy", capped, f"StandardOutput=truncate:{out}/dry_run.out",
+               "StandardError=inherit"},
 }
 env = {"PATH=/usr/sbin:/usr/bin:/sbin:/bin", f"BOXMUNGE_ROOT={root}", "PYTHONSAFEPATH=1", "PYTHONDONTWRITEBYTECODE=1"}
 seen = []
@@ -51,7 +60,7 @@ for line in open(sys.argv[2]):
         problems.append(f"properties {sorted(props ^ (common | want.get(unit, set())))}")
     if envs != env:
         problems.append(f"environment {sorted(envs ^ env)}")
-    if flags != {"--quiet", "--wait", "--pipe", "--working-directory=/"}:
+    if flags != {"--quiet", "--wait", "--working-directory=/"}:
         problems.append(f"flags {sorted(flags)}")
     seen.append(f"{unit}: {'; '.join(problems) or 'ok'}")
 print("\n".join(seen))
@@ -61,19 +70,20 @@ PY
 prereq-floor: ok
 venv: ok
 readiness: ok
-dryrun: ok" ]] && pass "confined_run passes exactly the K6 property list (User=deploy only for readiness/dry run)" \
+dryrun: ok" ]] && pass "confined_run passes exactly the K6 property list (User=deploy only for readiness/dry run; root units hardened), output to files" \
     || fail "confined runs: $units"
 drop_root
 
 # --- confined_run itself -----------------------------------------------------------
 
 box
-confined() {  # confined <secs> <cmd...>: confined_run's return code, and what it printed
+confined() {  # confined <secs> <cmd...>: confined_run's return code; the output in $BOXMUNGE_ROOT/unit.out
     local rc=0 secs="$1"
     shift
-    confined_run t "$secs" root - -- "$@" || rc=$?
+    confined_run t "$secs" root - "$BOXMUNGE_ROOT/unit.out" + -- "$@" || rc=$?
     echo "rc=$rc"
 }
+unit_out() { cat "$BOXMUNGE_ROOT/unit.out"; }
 out="$(STUB_MAX_SECS=1 with_shim_functions confined 300 sleep 30 2>&1)"
 [[ "$out" == *"rc=124" ]] && pass "confined_run returns 124 on RuntimeMaxSec" || fail "timeout: $out"
 [[ -z "$(ls "$BOXMUNGE_ROOT/units")" ]] && pass "the timed-out unit is reset" || fail "units left: $(ls "$BOXMUNGE_ROOT/units")"
@@ -84,8 +94,25 @@ out="$(with_shim_functions confined 300 bash -c 'exit 124' 2>&1)"
 out="$(with_shim_functions confined 300 bash -c 'exit 7' 2>&1)"
 [[ "$out" == *"rc=7" && -z "$(ls "$BOXMUNGE_ROOT/units")" ]] && pass "a failed command's exit code, and its unit reset" \
     || fail "exit 7: $out $(ls "$BOXMUNGE_ROOT/units")"
-out="$(with_shim_functions confined 300 bash -c 'echo "$BOXMUNGE_ROOT|${HOME:-}|$PWD|$PYTHONSAFEPATH$PYTHONDONTWRITEBYTECODE"' 2>&1)"
-[[ "$out" == "$BOXMUNGE_ROOT||/|11"* ]] && pass "the command gets only the set environment, in /" || fail "environment: $out"
+# The unit's environment: the variables set, and systemd's own; nothing of the
+# shim's (LEAKED), and as root, no HOME (as systemd 257 runs a root unit).
+out="$(LEAKED=x with_shim_functions confined 300 bash -c 'env' 2>&1)"
+names="$(unit_out | sed 's/=.*//' | grep -v -e '^_$' -e '^SHLVL$' | sort | tr '\n' ' ')"
+[[ "$out" == *"rc=0" && "$names" == "BOXMUNGE_ROOT INVOCATION_ID LANG PATH PWD PYTHONDONTWRITEBYTECODE PYTHONSAFEPATH SYSTEMD_EXEC_PID USER " ]] \
+    && unit_out | grep -qx "PWD=/" && unit_out | grep -qx "USER=root" \
+    && pass "a root unit gets only the set environment and systemd's own, in /" || fail "environment: $names $(unit_out)"
+deploy_env() { confined_run t 300 deploy - "$BOXMUNGE_ROOT/unit.out" - -- bash -c 'echo "$USER $HOME $LOGNAME $SHELL"'; }
+with_shim_functions deploy_env >/dev/null 2>&1
+[[ "$(unit_out)" == "deploy /home/deploy deploy /bin/sh" ]] && pass "a User=deploy unit gets deploy's login environment" \
+    || fail "deploy environment: $(unit_out)"
+# Output goes to files systemd opens: nothing here waits on a reader, and a
+# unit with nothing writable writes no file over CONFINED_FILE_MAX.
+out="$(with_shim_functions confined 300 bash -c 'head -c 3000000 /dev/zero; echo done >&2' 2>&1)"
+[[ "$(wc -c < "$BOXMUNGE_ROOT/unit.out" | tr -d ' ')" -le 2097152 && "$out" != *"rc=0" ]] \
+    && pass "a unit with nothing writable writes at most 2 MiB of output, and fails past it" || fail "size cap: $out"
+out="$(STUB_MAX_SECS=1 with_shim_functions confined 300 bash -c 'trap "" TERM; sleep 30 & wait; sleep 30' 2>&1)"
+[[ "$out" == *"rc=124" ]] && pass "a unit that ignores SIGTERM is killed STOP_SECS after its limit, as a timeout" \
+    || fail "TERM ignored: $out"
 # A failed unit of the same name, left by a killed run (same pid), is reset first.
 echo exit-code > "$BOXMUNGE_ROOT/units/boxmunge-check-t-$$"
 out="$(with_shim_functions confined 300 true 2>&1)"
@@ -98,11 +125,12 @@ out="$(PATH="$NOUNIT:$PATH" with_shim_functions confined 300 true 2>&1)"
 [[ "$out" == *"rc=125" && "$out" == *"systemd does not know the unit"* ]] \
     && pass "confined_run returns 125 when systemd cannot say how the unit ended" || fail "unknown unit: $out"
 rm -rf "$NOUNIT"
-missing() { PATH=/nonexistent confined_run t 5 root - -- true; }
+missing() { PATH=/nonexistent confined_run t 5 root - - - -- true; }
 out="$(with_shim_functions missing 2>&1)" && fail "ran without systemd-run: $out" \
     || { [[ "$out" == *"systemd-run is missing"*"apt-get install systemd"* ]] \
         && pass "confined_run dies naming systemd-run when it is missing" || fail "missing: $out"; }
-for bad in "x/y 5 root - --" "x 0 root - --" "x 5 root relative --" "x 5 root - true" "x 5 'root;id' - --"; do
+for bad in "x/y 5 root - - - --" "x 0 root - - - --" "x 5 root relative - - --" "x 5 root - - - true" \
+           "x 5 'root;id' - - - --" "x 5 root - relative - --" "x 5 root - - relative --" "x 5 root - --"; do
     eval "set -- $bad"
     out="$(with_shim_functions confined_run "$@" true 2>&1)" && fail "confined_run accepted: $bad" \
         || { [[ "$out" == *"Usage: confined_run"* ]] && pass "confined_run refuses: $bad" || fail "bad args $bad: $out"; }

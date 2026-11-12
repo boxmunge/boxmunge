@@ -12,9 +12,11 @@
 # NOTES_MAX_BYTES) and carries the readiness command.
 FIRST_NOTES_RELEASE="0.11.8"
 NOTES_MAX_BYTES=1048576
-# One check at a time (check.lock), and at most one every CHECK_WINDOW_SECS
-# (check-last, the epoch second the last one began): a check downloads a
-# release and builds a venv as root. Both root-only, in upgrade-root/.
+# One check at a time (check.lock), each starting at least CHECK_WINDOW_SECS
+# after the last one began and after it ended (check-last, the epoch second
+# of the later): a check downloads a release and builds a venv as root, and
+# holds upgrade.lock for up to ten minutes, so back-to-back checks must not
+# be able to keep it held. Both root-only, in upgrade-root/.
 CHECK_WINDOW_SECS=600
 CHECK_LOCK_FILE="$UPGRADE_ROOT_DIR/check.lock"
 CHECK_STAMP_FILE="$UPGRADE_ROOT_DIR/check-last"
@@ -29,6 +31,7 @@ CHECK_FREE_MB=400
 CHECK_VERSION=""
 CHECK_INSTALLED=""
 CHECK_OUT=""
+CHECK_STAMPED=0
 
 usage_exit() { echo "Usage: $1" >&2; exit 2; }
 
@@ -49,6 +52,7 @@ cmd_check() {
     check_refusals
     prepare_check_dir
     write_root_file "$CHECK_STAMP_FILE" "$(date +%s)"
+    CHECK_STAMPED=1
     bm_log info upgrade "readiness check started" "{\"version\": \"$CHECK_VERSION\"}"
 
     local bundle="$CHECK_DIR/download/boxmunge" rc=0 missing
@@ -62,11 +66,11 @@ cmd_check() {
     if missing="$(missing_requirement "$bundle")"; then
         check_finish cant_verify venv "the bundle of $CHECK_VERSION has no hash-pinned $missing, so no venv is built from it"
     fi
-    output_tail "$CHECK_OUT/venv.txt" 1024 build_check_venv "$bundle" "$CHECK_DIR/venv" || rc=$?
+    build_check_venv "$bundle" "$CHECK_DIR/venv" "$CHECK_OUT/venv.txt" || rc=$?
     case "$rc" in
         0) ;;
         124) check_finish cant_verify venv "building $CHECK_VERSION's venv did not finish within $VENV_SECS s; retry when the box is less busy" ;;
-        *) check_finish cant_verify venv "building $CHECK_VERSION's venv failed (exit $rc): $(cat "$CHECK_OUT/venv.txt")" ;;
+        *) check_finish cant_verify venv "building $CHECK_VERSION's venv failed (exit $rc): $(tail -c 1024 "$CHECK_OUT/venv.txt")" ;;
     esac
     "$BASH" "$SHIM_PATH" _check-run "$CHECK_VERSION" "$CHECK_INSTALLED" >"$CHECK_OUT/check-run.log" 2>&1 || rc=$?
     check_outcome "$rc"
@@ -93,9 +97,10 @@ check_refusals() {
     local v="$CHECK_VERSION" state
     semver_lt "$CHECK_INSTALLED" "$v" \
         || check_refused "this box runs $CHECK_INSTALLED, and upgrade-check checks a newer release: run upgrade-howto to see the latest"
-    if semver_lt "$v" "$FIRST_NOTES_RELEASE" || ! semver_lt "$LAST_RELEASE_WITHOUT_MCP_LOCK" "$v"; then
-        check_refused "$v predates the readiness check (releases carry it from $FIRST_NOTES_RELEASE on), so it cannot be checked; upgrade to it from the deploy shell: upgrade --target $v"
-    fi
+    semver_lt "$LAST_RELEASE_WITHOUT_MCP_LOCK" "$v" \
+        || check_refused "$v predates the hash-pinned requirements every install needs, so this box can neither check nor install it; run upgrade-howto to see the latest release"
+    ! semver_lt "$v" "$FIRST_NOTES_RELEASE" \
+        || check_refused "$v predates the readiness check (releases carry it from $FIRST_NOTES_RELEASE on), so it cannot be checked; upgrade to it from the deploy shell: upgrade --target $v"
     ! is_blocklisted "$v" \
         || check_refused "$v is blocklisted on this box (it failed an earlier upgrade). The operator clears it as supervisor (sudo $BIN_DIR/boxmunge-upgrade clear-blocklist $v), then run upgrade-check again"
     check_probation
@@ -138,8 +143,16 @@ check_rate_limit() {
         || check_refused "$CHECK_STAMP_FILE is malformed; the operator removes it as supervisor (sudo rm $CHECK_STAMP_FILE), then run upgrade-check again"
     now="$(date +%s)"
     if (( now - 10#$last >= 0 && now - 10#$last < CHECK_WINDOW_SECS )); then
-        check_refused "a readiness check ran less than $((CHECK_WINDOW_SECS / 60)) minutes ago, and one runs at most every $((CHECK_WINDOW_SECS / 60)) minutes; run upgrade-check again from $(utc_time $((10#$last + CHECK_WINDOW_SECS)))"
+        check_refused "the last readiness check ran less than $((CHECK_WINDOW_SECS / 60)) minutes ago, and checks start at least $((CHECK_WINDOW_SECS / 60)) minutes after the last one ended; run upgrade-check again from $(utc_time $((10#$last + CHECK_WINDOW_SECS)))"
     fi
+}
+
+# check_exit: the EXIT trap of a check that owns the scratch. One that got as
+# far as its stamp stamps again as it ends, however it ends, so the next can
+# start only CHECK_WINDOW_SECS after this one has let go of upgrade.lock.
+check_exit() {
+    [[ "$CHECK_STAMPED" -eq 0 ]] || write_root_file "$CHECK_STAMP_FILE" "$(date +%s)"
+    cleanup_scratch
 }
 
 utc_time() { python3 -I -c 'import sys, time; print(time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(int(sys.argv[1]))))' "$1"; }
@@ -159,7 +172,7 @@ sys.exit(st.st_uid != os.geteuid() or st.st_mode & 0o022)' "$BOXMUNGE_ROOT" \
     # however the shim exits. A refusal before here leaves everything as it was.
     # shellcheck disable=SC2034  # read by cleanup_scratch (release.sh)
     OWNED_CHECK_DIR="$CHECK_DIR"
-    trap cleanup_scratch EXIT
+    trap check_exit EXIT
     rm -rf "$CHECK_DIR"
     mkdir -m 0755 "$CHECK_DIR"
     mkdir -m 0700 "$CHECK_DIR/download" "$CHECK_DIR/out"
@@ -171,9 +184,10 @@ sys.exit(st.st_uid != os.geteuid() or st.st_mode & 0o022)' "$BOXMUNGE_ROOT" \
         || check_refused "$CHECK_DIR has ${avail} MB free, and a check needs $CHECK_FREE_MB MB (an upgrade's 250 MB, and the scratch venv). Free disk space, then run upgrade-check again"
 }
 
-# build_check_venv <bundle> <venv>: the release's venv, built as an upgrade
-# builds a slot (only the bundle's hash-pinned requirements, then the package
-# with no further resolution), as root, confined, writing only CHECK_DIR.
+# build_check_venv <bundle> <venv> <output>: the release's venv, built as an
+# upgrade builds a slot (only the bundle's hash-pinned requirements, then the
+# package with no further resolution), as root, confined, writing only
+# CHECK_DIR; what it prints goes to <output>.
 build_check_venv() {
     local script
     script="$(declare -p PINNED_REQUIREMENTS)
@@ -182,7 +196,7 @@ set -euo pipefail
 python3 -m venv \"\$2\"
 install_pinned_deps_into \"\$1\" \"\$2\"
 \"\$2/bin/pip\" install --quiet --no-cache-dir --no-deps --no-build-isolation \"\$1\""
-    confined_run venv "$VENV_SECS" root "$CHECK_DIR" -- bash -c "$script" build-venv "$1" "$2"
+    confined_run venv "$VENV_SECS" root "$CHECK_DIR" "$3" + -- bash -c "$script" build-venv "$1" "$2"
 }
 
 # _check-run <version> <installed>: the part of a check that reads the live
@@ -207,8 +221,9 @@ cmd_check_run() {
     echo "$verdict" > "$out/readiness.verdict"
     [[ "$verdict" != invalid ]] || exit 0
     rc=0
-    output_tail "$out/dry_run.txt" 4096 confined_run dryrun "$DRY_RUN_SECS" deploy - \
+    confined_run dryrun "$DRY_RUN_SECS" deploy - "$out/dry_run.out" + \
         -- "$venv/bin/boxmunge-server" upgrade --dry-run || rc=$?
+    tail -c 4096 "$out/dry_run.out" > "$out/dry_run.txt"
     echo "$rc" > "$out/dry_run.rc"
 }
 
@@ -223,13 +238,14 @@ check_outcome() {
     esac
     rc="$(cat "$out/readiness.rc")"
     verdict="$(cat "$out/readiness.verdict")"
-    err="$(cat "$out/readiness.json.err")"
+    err="$(tail -c 1024 "$out/readiness.json.err")"
     case "$rc:$verdict" in
         124:*) check_finish cant_verify readiness "the readiness check of $CHECK_VERSION did not finish within $READINESS_SECS s; retry when the box is less busy" ;;
         125:*) check_finish cant_verify readiness "could not tell how the readiness check of $CHECK_VERSION ended: $err" ;;
         2:invalid) check_finish cant_verify readiness "$CHECK_VERSION has no working readiness command (boxmunge-server upgrade-readiness --json exited 2, a usage error: $err), so it cannot be checked" ;;
-        *:invalid) check_finish cant_verify readiness "the readiness command of $CHECK_VERSION gave no valid answer (exit $rc): $err" ;;
-        *:blocked) reasons+=("the readiness check of $CHECK_VERSION found what blocks the upgrade: $(readiness_summary "$out/readiness.json")") ;;
+        0:pass) ;;
+        1:blocked) reasons+=("the readiness check of $CHECK_VERSION found what blocks the upgrade: $(readiness_summary "$out/readiness.json")") ;;
+        *) check_finish cant_verify readiness "the readiness command of $CHECK_VERSION gave no valid answer (exit $rc): $err" ;;
     esac
     dry="$(cat "$out/dry_run.rc")"
     case "$dry" in
@@ -291,7 +307,7 @@ print(json.dumps({"check": 1, "target": os.environ["BM_TARGET"], "installed": os
 cmd_guide() {
     [[ $# -eq 1 && "$1" =~ $SEMVER_RE ]] || usage_exit "boxmunge-upgrade guide <version>"
     exec 3>&1 1>&2
-    local version="$1" installed notes size rc=0
+    local version="$1" installed notes size status rc=0
     installed="$(installed_version)"
     semver_lt "$installed" "$version" \
         || die "Not fetching the upgrade notes of $version: this box runs $installed, and they are for a newer release; run upgrade-howto to see the latest"
@@ -300,11 +316,13 @@ cmd_guide() {
     start_download
     notes="$TMP_DOWNLOAD/upgrade-notes.json"
     fetch_signed_sums "$version" "$TMP_DOWNLOAD" readonly || die "$FETCH_ERROR (the upgrade notes of $version)"
-    download "$notes" "$(release_url "$version" upgrade-notes.json)" --max-filesize "$NOTES_MAX_BYTES" || rc=$?
-    case "$rc" in
-        0) ;;
-        22) die "Release $version publishes no upgrade-notes.json (GitHub refused the download)" ;;
-        63) die "upgrade-notes.json of $version is over $NOTES_MAX_BYTES bytes; refusing it" ;;
+    status="$(download "$notes" "$(release_url "$version" upgrade-notes.json)" --max-filesize "$NOTES_MAX_BYTES" \
+        --write-out '%{http_code}')" || rc=$?
+    case "$rc:$status" in
+        0:*) ;;
+        22:404) die "Release $version publishes no upgrade-notes.json (GitHub answered 404)" ;;
+        22:*) die "GitHub refused the download of upgrade-notes.json of $version (HTTP $(printable "$status")); retry later" ;;
+        63:*) die "upgrade-notes.json of $version is over $NOTES_MAX_BYTES bytes; refusing it" ;;
         *) die "Failed to download upgrade-notes.json of $version (curl exit $rc); retry later" ;;
     esac
     size="$(wc -c < "$notes" | tr -d ' ')"

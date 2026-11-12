@@ -140,6 +140,7 @@ done
 # only). Releases before 0.10.1 pass no class.
 cmd_run() {
     [[ $# -eq 2 || $# -eq 3 ]] || die "Usage: boxmunge-upgrade run <version> <url> [<class>]"
+    acquire_lock wait  # as auto-update's discovery waited; upgrade_to finds it held
     upgrade_to "$1" run "${3:-}"
 }
 
