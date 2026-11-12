@@ -121,6 +121,13 @@ def test_a_pass_its_own_parts_contradict_is_cant_verify(change: dict) -> None:
     assert r.result == "cant_verify" and "pass" in r.reasons[0]
 
 
+@pytest.mark.parametrize("stage", ["refused", "fetch", "prerequisites", "venv", "readiness",
+                                   "dry_run"])
+def test_a_pass_before_the_check_completed_is_cant_verify(stage: str) -> None:
+    r = parse(k3(stage=stage), rc=0)
+    assert r.result == "cant_verify" and stage in r.reasons[0]
+
+
 @pytest.mark.parametrize("result,rc", [("pass", 1), ("blocked", 0)])
 def test_an_exit_code_that_contradicts_the_verdict_is_cant_verify(result: str, rc: int) -> None:
     r = parse(k3(result), rc=rc)

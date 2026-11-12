@@ -108,6 +108,8 @@ def _contradiction(r: CheckResult, target: str, returncode: int) -> str | None:
     if (returncode == 0) != (r.result == "pass"):
         return (f"the upgrade shim exited {returncode}, which contradicts its result, "
                 f"{r.result}")
+    if r.result == "pass" and r.stage != "complete":
+        return f"the upgrade shim said pass at stage {r.stage}, before the check completed"
     if r.result == "pass" and not (
             all(p["ok"] for p in r.prerequisites) and r.readiness is not None
             and r.readiness.result == "pass" and r.dry_run_ok is True):
