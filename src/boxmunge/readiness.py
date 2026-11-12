@@ -232,9 +232,6 @@ def _missing_images(paths: BoxPaths, name: str, docker: _Docker) -> list[Finding
 
 def _project(paths: BoxPaths, name: str, refused: list[DryRunLine],
              docker: _Docker) -> ProjectReadiness:
-    left = left_as_is(paths, name)
-    if left is not None:  # mid-deploy: the apply leaves its files alone, and so does this
-        return ProjectReadiness(name, (_todo(LEFT_AS_IS, left.text, str(left.remedy)),))
     findings = [_todo(COMPOSE, line.text, str(line.remedy)) for line in refused]
     findings += [_todo(VALIDATE, f"{name}: {error}",
                        f"fix it in the project's source and deploy the fix (`prod-deploy "
@@ -257,8 +254,8 @@ def _box_rule(rule: str, check: Callable[[], list[Finding]]) -> list[Finding]:
         return [_block(rule, _crash(rule, e), f"fix what the message names, {_RECHECK}")]
 
 
-def _project_rule(paths: BoxPaths, name: str, check: Callable[[], ProjectReadiness]
-                  ) -> ProjectReadiness:
+def _project_rule(paths: BoxPaths, name: str, check: Callable[[], ProjectReadiness | None]
+                  ) -> ProjectReadiness | None:
     """A project's findings; a check that fails on it is project.unreadable
     naming the failure and the project."""
     try:
@@ -268,9 +265,16 @@ def _project_rule(paths: BoxPaths, name: str, check: Callable[[], ProjectReadine
                                               _unreadable_remedy(paths, name)),))
 
 
-def _prescreened(paths: BoxPaths, name: str) -> ProjectReadiness:
+def _settled(paths: BoxPaths, name: str) -> ProjectReadiness | None:
+    """The project's verdict when nothing more of it is to be read, or None.
+    Mid-deploy, it is left as is, as the dry run and the apply leave it:
+    its files are not read at all. Otherwise, unreadable files block it
+    before anything opens them."""
+    left = left_as_is(paths, name)
+    if left is not None:
+        return ProjectReadiness(name, (_todo(LEFT_AS_IS, left.text, str(left.remedy)),))
     finding = _unreadable(paths, paths.project_dir(name))
-    return ProjectReadiness(name, (finding,) if finding is not None else ())
+    return None if finding is None else ProjectReadiness(name, (finding,))
 
 
 def _evaluate(paths: BoxPaths) -> Readiness:
@@ -285,14 +289,12 @@ def _evaluate(paths: BoxPaths) -> Readiness:
         box += [_block(DRY_RUN, _crash("the projects", e), f"fix what the message names, "
                                                            f"{_RECHECK}")]
         unenterable, names = {}, []
-    screened = {name: ProjectReadiness(name, (unenterable[name],)) if name in unenterable
-                else _project_rule(paths, name, lambda name=name: _prescreened(paths, name))
-                for name in names}
-    unreadable = {name for name, project in screened.items() if project.findings}
-    refused, failed = _dry_run(paths, unreadable, docker)
+    settled = {name: ProjectReadiness(name, (unenterable[name],)) if name in unenterable
+               else _project_rule(paths, name, lambda name=name: _settled(paths, name))
+               for name in names}
+    refused, failed = _dry_run(paths, {n for n, p in settled.items() if p is not None}, docker)
     projects = tuple(
-        screened[name] if name in unreadable
-        else _project_rule(paths, name, lambda name=name: _project(
+        settled[name] or _project_rule(paths, name, lambda name=name: _project(
             paths, name, refused.get(name, []), docker))
         for name in names)
     return Readiness(release=parse_version_string(get_build_version())[0],

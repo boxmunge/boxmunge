@@ -147,9 +147,9 @@ def check_upgrade(paths: BoxPaths, *, skip: Collection[str] = ()) -> list[DryRun
     nothing is written, locked or logged. Raises on anything that would make
     --apply fail. Returns the lines, project by project.
 
-    Projects in `skip` are not read: the readiness check found their files
-    unreadable (a FIFO, say, which would stall the read) and blocks on them
-    itself. `upgrade --dry-run` skips none."""
+    Projects in `skip` are not read: the readiness check has its verdict on
+    them already (left as is, or files it found unreadable, such as a FIFO
+    that would stall the read). `upgrade --dry-run` skips none."""
     project_dirs = list(_project_dirs(paths))
     refuse_unresolved_stages(paths, [project_dir.name for project_dir in project_dirs])
     return [line for project_dir in project_dirs if project_dir.name not in skip

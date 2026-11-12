@@ -215,12 +215,20 @@ def test_docker_unreachable_is_one_box_block(box, monkeypatch) -> None:
 
 
 def test_open_install_is_left_as_is_and_takes_no_lock(box, monkeypatch) -> None:
-    """Review focus 2: a project mid-deploy is reported, not locked or read."""
-    add_project(box, "shop")
+    """Review focus 2: a project mid-deploy is reported, not locked, and its
+    files are not read (the install may be rewriting them): a manifest it
+    left broken, or a FIFO, is the install's business, as in the dry run."""
+    pdir = add_project(box, "shop")
     open_install(box, "shop")
+    (pdir / "manifest.yml").write_text("- not a mapping\n")
+    (pdir / "compose.yml").unlink()
+    os.mkfifo(pdir / "compose.yml")
+    assert run_upgrade(box, dry_run=True) == 0
     taken = []
     monkeypatch.setattr("boxmunge.fileutil.fcntl.flock",
                         lambda fd, op: taken.append(op))
+    monkeypatch.setattr("boxmunge.readiness.load_manifest_as_written",
+                        lambda path: pytest.fail(f"read {path} mid-deploy"))
     monkeypatch.setattr("boxmunge.readiness.gather_validation",
                         lambda name, paths: pytest.fail(f"validated {name} mid-deploy"))
     before = sorted(p.name for p in box.state.iterdir())
