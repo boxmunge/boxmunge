@@ -75,7 +75,7 @@ class TestEndpointSelection:
         mock_open.return_value = _endpoint()
         result = discover_update(_setup(tmp_path), mode="latest")
         assert result == {"action": "up_to_date", "current_version": "0.3.0",
-                          "blocked": None, "source": "endpoint"}
+                          "blocked": None, "manual": None, "source": "endpoint"}
 
     @pytest.mark.parametrize("mode,version,cls", [
         ("security", "0.3.2", "security"),
@@ -88,7 +88,8 @@ class TestEndpointSelection:
         result = discover_update(_setup(tmp_path), mode=mode)
         assert result == {"action": "upgrade", "version": version,
                           "url": f"{GH}v{version}", "class": cls, "source": "endpoint",
-                          "current_version": "0.3.0", "blocked": None}
+                          "current_version": "0.3.0", "blocked": None,
+                          "manual": None if mode == "latest" else _offer("0.4.0", "feature")}
 
     @patch("urllib.request.OpenerDirector.open")
     def test_security_mode_ignores_breakfix(self, mock_open, tmp_path):
@@ -113,7 +114,8 @@ class TestEndpointSelection:
         result = discover_update(paths, mode="breakfix")
         assert result == {"action": "blocklisted", "version": "0.3.3",
                           "class": "breakfix", "source": "endpoint",
-                          "current_version": "0.3.0", "blocked": None}
+                          "current_version": "0.3.0", "blocked": None,
+                          "manual": _offer("0.4.0", "feature")}
 
     @pytest.mark.parametrize("content", ["{not json", "[]"])
     @patch("urllib.request.OpenerDirector.open")
@@ -480,3 +482,59 @@ class TestBothSourcesFail:
         mock_open.side_effect = TimeoutError("timed out")
         result = discover_update(_setup(tmp_path), mode="breakfix")
         assert result["action"] == "error"
+
+
+class TestManual:
+    """``manual``: the newest offer, when auto-update will not install it."""
+
+    @patch("urllib.request.OpenerDirector.open")
+    def test_manual_is_latest_when_auto_will_not_install(self, mock_open, tmp_path):
+        mock_open.return_value = _endpoint(**FULL)
+        result = discover_update(_setup(tmp_path), mode="breakfix")
+        assert result["manual"] == _offer("0.4.0", "feature")
+
+    @patch("urllib.request.urlopen")
+    @patch("urllib.request.OpenerDirector.open")
+    def test_manual_via_github_fallback(self, mock_open, mock_urlopen, tmp_path):
+        mock_open.side_effect = URLError("down")
+        mock_urlopen.return_value = _github([
+            _gh_release("0.3.3", body="[breakfix]"), _gh_release("0.4.0")])
+        result = discover_update(_setup(tmp_path), mode="breakfix")
+        assert result["source"] == "github" and result["version"] == "0.3.3"
+        assert result["manual"]["version"] == "0.4.0"
+
+    @patch("urllib.request.OpenerDirector.open")
+    def test_manual_none_when_latest_is_the_candidate(self, mock_open, tmp_path):
+        mock_open.return_value = _endpoint(**FULL)
+        assert discover_update(_setup(tmp_path), mode="latest")["manual"] is None
+
+    @patch("urllib.request.OpenerDirector.open")
+    def test_manual_none_when_latest_is_held(self, mock_open, tmp_path):
+        payload = {"status": "x", "security": None, "breakfix": None,
+                   "latest": _offer("0.4.0", "feature"), "blocked": None,
+                   "held": [{"version": "0.4.0", "reason": "broken"}]}
+        mock_open.return_value = _response(payload)
+        assert discover_update(_setup(tmp_path), mode="breakfix")["manual"] is None
+
+    @patch("urllib.request.OpenerDirector.open")
+    def test_manual_none_when_latest_is_the_blocked_release(self, mock_open, tmp_path):
+        mock_open.return_value = _endpoint(
+            latest=_offer("0.4.2", "security"),
+            blocked=_blocked("0.4.2", "security"))
+        assert discover_update(_setup(tmp_path), mode="breakfix")["manual"] is None
+
+    @patch("urllib.request.OpenerDirector.open")
+    def test_manual_none_when_latest_is_not_newer(self, mock_open, tmp_path):
+        mock_open.return_value = _endpoint(latest=_offer("0.3.0", "feature"))
+        assert discover_update(_setup(tmp_path), mode="breakfix")["manual"] is None
+
+    @pytest.mark.parametrize("latest", [
+        {"version": "0.4.0"}, "0.4.0", {"version": "0.4.0", "url": "u", "class": "bogus"}])
+    @patch("urllib.request.OpenerDirector.open")
+    def test_malformed_latest_never_blocks_the_candidate(self, mock_open, tmp_path, latest):
+        mock_open.return_value = _response({
+            "status": "x", "security": _offer("0.3.2", "security"), "breakfix": None,
+            "latest": latest, "blocked": None})
+        result = discover_update(_setup(tmp_path), mode="security")
+        assert result["action"] == "upgrade" and result["version"] == "0.3.2"
+        assert result["manual"] is None

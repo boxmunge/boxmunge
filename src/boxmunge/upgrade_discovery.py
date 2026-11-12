@@ -12,7 +12,9 @@ A release is reachable when it has the box's major version and no release
 between the box and it (it included) is breaking; it may be on a newer
 minor line (see boxmunge.release_selection). Every result also carries
 ``blocked``: the newest security or break-fix release auto-update may not
-install, and why, or None.
+install, and why, or None; and ``manual``: the offered newest release when
+auto-update will not install it and it is not ``blocked`` (a feature or
+breaking release that needs a manual upgrade), or None.
 
 The version-check endpoint is asked first. Its answer also carries the
 releases its circuit breaker holds (``held``): a held release is never
@@ -187,10 +189,29 @@ def _endpoint_held(held: Any) -> list[str]:
     return versions
 
 
+def _manual_offer(result: dict[str, Any], candidate: dict[str, Any] | None,
+                  blocked: dict | None, held: list[str], current: str) -> dict[str, Any] | None:
+    """The newest offer when it is newer than ``current``, not held, not the
+    ``candidate`` and not ``blocked`` (which has its own alert): a release the
+    operator must upgrade to by hand. A malformed ``latest`` gives None: the
+    notice must never stop the install path."""
+    try:
+        latest = _endpoint_candidate(result, "latest")
+    except EndpointContractError:
+        return None
+    if latest is None or not newer(latest["version"], current) or latest["version"] in held:
+        return None
+    if candidate is not None and candidate["version"] == latest["version"]:
+        return None
+    if blocked is not None and blocked["version"] == latest["version"]:
+        return None
+    return latest
+
+
 def _read_endpoint(
-    result: Any, mode: str,
-) -> tuple[dict[str, Any] | None, dict | None, list[str]]:
-    """(candidate, blocked, held versions) from a /v1/check response."""
+    result: Any, mode: str, current: str,
+) -> tuple[dict[str, Any] | None, dict | None, list[str], dict[str, Any] | None]:
+    """(candidate, blocked, held versions, manual) from a /v1/check response."""
     if not isinstance(result, dict):
         raise EndpointContractError("response is not a JSON object")
     for field in ("security", "breakfix", "latest", "blocked"):
@@ -198,7 +219,9 @@ def _read_endpoint(
             raise EndpointContractError(
                 f"response has no '{field}' field (version-check service out of date?)")
     held = _endpoint_held(result.get("held", []))
-    return _endpoint_offer(result, mode, held), _endpoint_blocked(result["blocked"]), held
+    candidate = _endpoint_offer(result, mode, held)
+    blocked = _endpoint_blocked(result["blocked"])
+    return candidate, blocked, held, _manual_offer(result, candidate, blocked, held, current)
 
 
 def _endpoint_offer(result: dict[str, Any], mode: str, held: list[str]) -> dict[str, Any] | None:
@@ -246,7 +269,7 @@ def discover_update(paths: BoxPaths, mode: str) -> dict[str, Any]:
     With ``version_check.enabled: false`` in boxmunge.yml (or a boxmunge.yml
     that cannot be read) it asks nobody and returns an error saying so.
     Every action but "error" also carries ``current_version``, ``blocked``
-    (see the module docstring) and ``source`` ("endpoint" or "github"), and
+    and ``manual`` (see the module docstring) and ``source`` ("endpoint" or "github"), and
     ``held`` (the versions held: by the service's circuit breaker, or by
     ``[held]`` in a GitHub release title) when it is not empty. A github
     result, and an error the service caused, also carry ``endpoint_error``
@@ -266,17 +289,17 @@ def discover_update(paths: BoxPaths, mode: str) -> dict[str, Any]:
     meta: dict[str, Any] = {"source": "endpoint"}
     held: list[str] = []
     try:
-        candidate, blocked, held = _read_endpoint(_check_endpoint(current), mode)
+        candidate, blocked, held, manual = _read_endpoint(_check_endpoint(current), mode, current)
     except EndpointContractError as e:
         return {"action": "error", "message": _unusable_answer(e), "endpoint_error": str(e)}
     except OSError as e:  # no answer at all: the service is unreachable
         meta = {"source": "github", "endpoint_error": str(e)}
         try:
-            candidate, blocked, held = _read_endpoint(_check_github(current), mode)
+            candidate, blocked, held, manual = _read_endpoint(_check_github(current), mode, current)
         except _SOURCE_ERRORS as gh:
             return {"action": "error", "endpoint_error": str(e),
                     "message": f"Cannot use boxmunge.dev ({e}) or GitHub ({gh})"}
-    meta = {"current_version": current, "blocked": blocked, **meta}
+    meta = {"current_version": current, "blocked": blocked, "manual": manual, **meta}
     if held:
         meta["held"] = held
 

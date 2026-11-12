@@ -41,15 +41,46 @@ drop_root
 for held in "$ROOT_LOCK" "$LEGACY_LOCK"; do
     new_root a
     hold "$BOXMUNGE_ROOT/$held"
-    PATH="$FAILVISUDO:$PATH" run_shim run 1.2.3 ignored-url
-    expect 1 "Another upgrade is in progress" "run refuses while $held is held"
+    PATH="$FAILVISUDO:$PATH" run_shim target 1.2.3
+    expect 1 "Another upgrade is in progress" "target refuses while $held is held"
     run_shim check-probation
     expect 0 "Another upgrade is in progress; skipping" "check-probation skips while $held is held"
     exec 7>&-
-    PATH="$FAILVISUDO:$PATH" run_shim run 1.2.3 ignored-url
-    expect 1 "failed visudo" "run proceeds once $held is released"
+    PATH="$FAILVISUDO:$PATH" run_shim target 1.2.3
+    expect 1 "failed visudo" "target proceeds once $held is released"
     drop_root
 done
+
+# The auto-update timer's run waits for the lock, as its discovery does: a
+# readiness check holds it for up to ten minutes, and must not hold off an
+# update. One released meanwhile lets it go ahead; one held past the wait is
+# an error in the operational log, naming how to find the holder.
+for held in "$ROOT_LOCK" "$LEGACY_LOCK"; do
+    new_root a
+    hold "$BOXMUNGE_ROOT/$held"
+    PATH="$FAILVISUDO:$PATH" bash "$SHIM" run 1.2.3 ignored-url > "$BOXMUNGE_ROOT/run.out" 2>&1 7>&- &
+    waiter=$!
+    sleep 1
+    exec 7>&-
+    RC=0; wait "$waiter" || RC=$?
+    OUT="$(cat "$BOXMUNGE_ROOT/run.out")"
+    expect 1 "failed visudo" "run waits for $held and goes ahead once it is released"
+    drop_root
+done
+new_root a
+printf '%s\n' '#!/usr/bin/env bash' \
+    'if [[ "$1" == "-" ]]; then cat >/dev/null; echo "bm_log $BM_LEVEL $BM_MSG" >> "$BOXMUNGE_ROOT/calls"; fi' \
+    > "$BOXMUNGE_ROOT/env-a/bin/python"
+WAITLOCK="$(mktemp -d)"
+printf '#!/usr/bin/env bash\necho "flock $*" >> "$BOXMUNGE_ROOT/calls"\nexit 1\n' > "$WAITLOCK/flock"
+chmod +x "$WAITLOCK/flock"
+PATH="$WAITLOCK:$PATH" run_shim run 1.2.3 ignored-url
+expect 1 "upgrade.lock was held for the whole 15 minutes the auto-update timer waited" "run gives up after its wait, saying so"
+grep -q "^flock -w 900 9$" "$BOXMUNGE_ROOT/calls" && grep -q "bm_log error .*sudo lslocks | grep upgrade.lock" "$BOXMUNGE_ROOT/calls" \
+    && pass "run waits 900 s, and a lock held past it is an error naming the holder's search" \
+    || fail "wait: $(cat "$BOXMUNGE_ROOT/calls")"
+rm -rf "$WAITLOCK"
+drop_root
 
 # Deploy renames the legacy lock away and leaves a fresh file while an upgrade
 # holds both: the root-only lock still stops a second upgrade.
@@ -59,7 +90,7 @@ exec 6<>"$BOXMUNGE_ROOT/$LEGACY_LOCK"
 flock -n 6
 mv "$BOXMUNGE_ROOT/$LEGACY_LOCK" "$BOXMUNGE_ROOT/upgrade-state/moved-away"
 : > "$BOXMUNGE_ROOT/$LEGACY_LOCK"
-PATH="$FAILVISUDO:$PATH" run_shim run 1.2.3 ignored-url
+PATH="$FAILVISUDO:$PATH" run_shim target 1.2.3
 expect 1 "Another upgrade is in progress" "a replaced legacy lock does not let a second upgrade run"
 exec 7>&- 6>&-
 drop_root
