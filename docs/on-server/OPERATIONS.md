@@ -686,7 +686,7 @@ backup-sync myapp
 
 ### Snapshot kinds and retention
 
-Every snapshot is named `<project>-<UTC timestamp>-<kind>.tar.gz.age`, for example `myapp-2026-03-30T020000-nightly.tar.gz.age`. Retention is counted separately for each kind, per project, so one kind never evicts another:
+Every snapshot is named `<project>-<UTC timestamp>-<unique>-<kind>.tar.gz.age`, for example `myapp-2026-03-30T020000-9f3c1a7e-nightly.tar.gz.age`. The unique part is eight random hex digits, so two backups in the same second (or one taken after the clock stepped back) get different names, and a stored snapshot is never overwritten: a backup whose name is somehow taken fails and leaves the stored file alone. Snapshots taken before 0.11.9 have no unique part (`myapp-2026-03-30T020000-nightly.tar.gz.age`); they are listed, restored and pruned as before. Retention is counted separately for each kind, per project, so one kind never evicts another:
 
 | Kind | Taken by | Local copies kept |
 |---|---|---|
@@ -700,6 +700,23 @@ Every snapshot is named `<project>-<UTC timestamp>-<kind>.tar.gz.age`, for examp
 | `manual` | `backup <project>`, the MCP `backup` tool, the console, `self-test` | 5 |
 
 After each backup, the oldest snapshots of that kind beyond its count are deleted, except a snapshot something is paired with: the one the kept previous release's rollback restores, an open install's, and the one `pause` or `data chown` recorded for the next deploy. Those stay however many newer ones arrive, so a run of failed deploy attempts cannot evict the snapshot `rollback` needs. Those records are `.releases/previous.json`, `.releases/install.json` and the `pending_snapshot` entry in `state/deploy/<project>.json`. If one of them is malformed or unreadable (corrupt JSON, not UTF-8, a link or other non-regular file), no snapshot of that project is pruned: each backup still succeeds but logs a WARN naming the record, so the nightly run warns every night and that kind's snapshots accumulate until the record is fixed or removed. The next backup after that prunes as usual. Archives from before kinds existed (`<project>-<timestamp>.tar.gz.age`) count as `nightly` and age out as new nightly backups arrive. Other files in `backups/` are never touched. `backup.retention` must be a whole number of at least 1. `validate`, `stage`, `promote` and `prod-deploy` refuse anything else; a project that already has a bad value keeps running through an upgrade (it is a warning there), but its backups fail before they dump until it is fixed.
+
+### When a backup fails or goes stale
+
+boxmunge records, per project, its newest good snapshot and when its snapshots were last copied off-site (`state/backup/<project>.json`, and `state/backup-sync.json` for the sync as a whole). The records start with the first backup after the upgrade to 0.11.9.
+
+| What happened | What you get |
+|---|---|
+| `backup-all` (the 02:00 timer, or run by hand) could not back up a project | a Pushover alert naming the project and the cause, once for as long as it keeps failing. A good backup, also `backup <project>` by hand, ends it; a later failure alerts again |
+| the newest good snapshot of a project is over 26 hours old | `health` warns (`backup-freshness`) |
+| it is over 50 hours old (two missed nights) | a priority-1 alert, once, with the cause if the scheduled backup is failing |
+| the all-projects `backup-sync` (the 03:00 timer, or run by hand) failed | an alert with rclone's error, once for as long as it keeps failing |
+| a snapshot has waited over 26 hours for its off-site copy | `health` warns (`backup-freshness`) |
+| it has waited over 50 hours | a priority-1 alert, once |
+
+A night a project was rightly not backed up (paused, quarantined, mid-migration) counts as a good night, and a project with `backup.type: none` is never reported. The off-site rows apply only once `backup_remote` is set, and their clock starts at the first scheduled `backup-sync` that runs with it. `backup-sync <project>` records that project's copy but does not alert when it fails: it prints the error to you.
+
+An alert counts as sent only when Pushover accepts it. One that was not delivered is tried again by the next 5-minute health check, which is also what sends the 50-hour alerts on time. A record that cannot be read is reported by `backup-freshness` and replaced by the project's next backup.
 
 ### Off-site copies
 
@@ -1615,6 +1632,7 @@ unless `health` also ran past its budget before the upgrade.
 | `recent-errors` | more than 10 errors in the log in the last 24 hours, or torn lines in the log that may have been errors | `log --level error --since 24h --all` (`log --since 24h` lists torn lines) |
 | `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
+| `backup-freshness` | a deployed project's newest good snapshot is over 26 hours old, its last scheduled backup failed, a snapshot has waited over 26 hours for its off-site copy (only once `backup_remote` is set), the all-projects sync is failing, or a backup record cannot be read | the detail names the project and the cause; fix it, then `backup <project>` or `backup-sync`. See [When a backup fails or goes stale](#when-a-backup-fails-or-goes-stale) |
 | `platform-updates` | a security or break-fix release cannot be installed automatically, or the version-check service has given no usable answer for 48 hours | see [Upgrading the Platform](#upgrading-the-platform) |
 | `upgrade-probation` | a platform upgrade's probation expired more than 30 minutes ago and the health timer has not promoted it, or `probation.json` cannot be read | the supervisor user runs `sudo /opt/boxmunge/bin/boxmunge-upgrade check-probation` to see why; `sudo rm /opt/boxmunge/upgrade-state/probation.json` accepts the release, as does `backup <project>` from the deploy shell when it can read the file |
 | `upgrade-slot` | `upgrade-state/active-slot` does not agree with root's `env-active` symlink outside an interrupted swap, so every upgrade and `check-probation` refuses to run (the refusal is also in `log --level error`) | unless an upgrade is running, the supervisor user puts back the slot `env-active` names, as the warning shows: `echo a \| sudo tee /opt/boxmunge/upgrade-state/active-slot` |
