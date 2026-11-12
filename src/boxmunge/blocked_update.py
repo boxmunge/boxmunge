@@ -87,7 +87,9 @@ def alert_text(blocked: dict[str, Any], current: str) -> tuple[str, str]:
     title = f"{word} release {version} needs a manual upgrade"
     body = (f"{word} release {version} cannot be installed automatically: "
             f"{describe_reason(blocked, current)}. Read the release notes, then run "
-            f"`upgrade`.\n{blocked['url']}")
+            f"`upgrade`. Ask your agent to run `upgrade-howto`, then "
+            f"`upgrade-check --version {version}`, for what each project needs."
+            f"\n{blocked['url']}")
     return title, body
 
 
