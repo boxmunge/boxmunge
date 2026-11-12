@@ -310,6 +310,12 @@ run_shim target 1.5.0
 expect 1 "The new shim could not write deploy's sudo rule" "a new shim that cannot write the sudo rule fails the pre-flight"
 grep -q "^blocklist reason=preflight_failed: install_sudoers$" "$BOXMUNGE_ROOT/calls" && [[ "$(live)" == a ]] \
     && pass "the sudo rule failure is blocklisted before the swap" || fail "sudoers failure: $(calls)"
+# A shim that cannot write the rule would refuse every later upgrade,
+# force-target included: the one the box ran before is put back.
+cmp -s "$BOXMUNGE_ROOT/bin/boxmunge-upgrade" "$BUILT_SHIM" && [[ -x "$BOXMUNGE_ROOT/bin/boxmunge-upgrade" ]] \
+    && pass "the previous shim is put back when the new one cannot write the sudo rule" \
+    || fail "bin/boxmunge-upgrade is still the failed release's: $(head -3 "$BOXMUNGE_ROOT/bin/boxmunge-upgrade")"
+[[ "$OUT" == *"the previous shim is back in place"* ]] && pass "the failure says the previous shim is back" || fail "out: $OUT"
 drop_root
 rm -rf "$RELEASE"
 

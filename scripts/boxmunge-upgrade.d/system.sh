@@ -156,6 +156,20 @@ self_update_shim() {
     done
 }
 
+# new_shim_sudoers <previous shim> <version> <from_version>: the shim just
+# self-updated writes deploy's sudo rule (the one written earlier was the
+# running shim's), so the rule follows the shim. If it cannot, <version>
+# fails its pre-flight, with the shim the box ran before put back first: a
+# shim that cannot write the rule refuses every later upgrade, force-target
+# included.
+new_shim_sudoers() {
+    "$BIN_DIR/boxmunge-upgrade" install-sudoers && return 0
+    install_by_rename "$1" "$BIN_DIR/boxmunge-upgrade" \
+        || log "ERROR: could not put the previous shim back from $1; reinstall the installed release (sudo bash boxmunge-install.sh)"
+    preflight_fail "$2" "$3" "preflight_failed: install_sudoers" \
+        "The new shim could not write deploy's sudo rule; the previous shim is back in place"
+}
+
 # ---------------------------------------------------------------------------
 # System upgrade: re-run the bundle's install.sh before the slot swap when it
 # differs from the one this box last ran, so new system pieces (apt packages,

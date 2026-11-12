@@ -287,11 +287,11 @@ upgrade_to() {
         bm_log info upgrade "canary refreshed" "{\"version\": \"$version\"}"
     fi
 
-    # 3b. Self-update the upgrade shim and its libraries (see self_update_shim).
+    # 3b. Self-update the upgrade shim and its libraries (see self_update_shim),
+    # then deploy's sudo rule as the new shim writes it (new_shim_sudoers).
+    cp "$BIN_DIR/boxmunge-upgrade" "$tmp_download/previous-shim"
     self_update_shim "$tmp_download/boxmunge"
-    # deploy's sudo rule as the new shim writes it (the early one was this shim's).
-    "$BIN_DIR/boxmunge-upgrade" install-sudoers || preflight_fail "$version" "$from_version" \
-        "preflight_failed: install_sudoers" "The new shim could not write deploy's sudo rule"
+    new_shim_sudoers "$tmp_download/previous-shim" "$version" "$from_version"
 
     # 3c. System upgrade: re-run the bundle's install.sh if it changed (see
     # system_upgrade).
