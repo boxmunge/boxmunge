@@ -141,7 +141,7 @@ post_install_todo() {
         return 0
     fi
     run_readiness "$(active_venv)" "$out" || rc=$?
-    verdict="$(readiness_verdict "$out" "$rc")"
+    verdict="$(readiness_verdict "$out" "$rc")" || verdict=invalid
     if [[ "$verdict" == invalid ]] || ! alert="$(todo_alert "$version" "$out" "$mode")"; then
         log "WARN: the readiness check of $version gave no to-do list (exit $rc); run validate <project> before deploying each project"
         bm_log warn upgrade "post-install to-do list unavailable" "{\"version\": \"$version\", \"exit\": $rc}"
