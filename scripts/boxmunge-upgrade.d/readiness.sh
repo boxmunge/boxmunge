@@ -45,7 +45,9 @@ require_systemd_run() {
 # <cmd> as <user> in the transient unit boxmunge-check-<name>-<pid>, stopped
 # after <secs> seconds (STOP_SECS more to end), with the filesystem read-only
 # except <rw-dir> (none for -; then no file over CONFINED_FILE_MAX either), a
-# private /tmp, no new privileges and no kernel tunables, modules or cgroups.
+# private /tmp, no new privileges and no kernel tunables, modules or cgroups;
+# as root, also no capabilities, devices or namespaces, and only the system
+# calls of @system-service.
 # Its stdin is /dev/null. Its stdout goes to the file <out>, its stderr to
 # <err> ("-" discards either, an <err> of "+" goes with stdout); systemd
 # opens them, emptied first. So nothing here ever reads the unit's output
@@ -69,7 +71,15 @@ confined_run() {
         -p ProtectHome=read-only -p PrivateTmp=yes -p NoNewPrivileges=yes -p ProtectKernelTunables=yes
         -p ProtectKernelModules=yes -p ProtectControlGroups=yes)
     if [[ "$rw" == - ]]; then props+=(-p "LimitFSIZE=$CONFINED_FILE_MAX"); else props+=(-p "ReadWritePaths=$rw"); fi
-    [[ "$user" == root ]] || props+=(-p "User=$user")
+    if [[ "$user" == root ]]; then
+        # Root runs only the signed release's own scripts and pip, and needs
+        # none of root's powers for them: no capabilities, no devices, no
+        # namespaces, and only the system calls an ordinary service makes.
+        props+=(-p CapabilityBoundingSet= -p PrivateDevices=yes -p RestrictNamespaces=yes
+            -p SystemCallFilter=@system-service)
+    else
+        props+=(-p "User=$user")
+    fi
     for stream in "$out" "$err"; do
         [[ "$stream" != /* ]] || : > "$stream"  # there, empty, even if the unit never starts
     done

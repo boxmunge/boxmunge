@@ -26,11 +26,12 @@ common = {"ProtectSystem=strict", "ProtectHome=read-only", "PrivateTmp=yes", "No
           "TimeoutStopSec=5"}
 out = f"{root}/upgrade-check/out"
 capped = "LimitFSIZE=2097152"
+rooted = {"CapabilityBoundingSet=", "PrivateDevices=yes", "RestrictNamespaces=yes", "SystemCallFilter=@system-service"}
 want = {
-    "prereq-ok": {"RuntimeMaxSec=60", capped, "StandardOutput=null", f"StandardError=truncate:{out}/prerequisites.jsonl.err"},
-    "prereq-floor": {"RuntimeMaxSec=60", capped, "StandardOutput=null", f"StandardError=truncate:{out}/prerequisites.jsonl.err"},
+    "prereq-ok": {"RuntimeMaxSec=60", capped, "StandardOutput=null", f"StandardError=truncate:{out}/prerequisites.jsonl.err"} | rooted,
+    "prereq-floor": {"RuntimeMaxSec=60", capped, "StandardOutput=null", f"StandardError=truncate:{out}/prerequisites.jsonl.err"} | rooted,
     "venv": {"RuntimeMaxSec=900", f"ReadWritePaths={root}/upgrade-check", f"StandardOutput=truncate:{out}/venv.txt",
-             "StandardError=inherit"},
+             "StandardError=inherit"} | rooted,
     "readiness": {"RuntimeMaxSec=300", "User=deploy", capped, f"StandardOutput=truncate:{out}/readiness.json",
                   f"StandardError=truncate:{out}/readiness.json.err"},
     "dryrun": {"RuntimeMaxSec=300", "User=deploy", capped, f"StandardOutput=truncate:{out}/dry_run.out",
@@ -69,7 +70,7 @@ PY
 prereq-floor: ok
 venv: ok
 readiness: ok
-dryrun: ok" ]] && pass "confined_run passes exactly the K6 property list (User=deploy only for readiness/dry run), output to files" \
+dryrun: ok" ]] && pass "confined_run passes exactly the K6 property list (User=deploy only for readiness/dry run; root units hardened), output to files" \
     || fail "confined runs: $units"
 drop_root
 
