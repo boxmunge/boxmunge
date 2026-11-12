@@ -43,6 +43,11 @@ class TestCheck:
             assert github_release_class(release) == cls
             assert lint.classify_release(plan.title, plan.notes) == cls
 
+    def test_breakfix_preamble_says_prevention_not_urgency(self):
+        text = lint.PREAMBLE["breakfix"]
+        assert "prevents issues" in text and "fall behind" in text
+        assert "critical" not in text.lower() and "cannot wait" not in text.lower()
+
     def test_unlisted_version_fails(self, tmp_path):
         files = write_tree(tmp_path, "0.11.2", [("0.11.1", "feature")])
         with pytest.raises(lint.ReleaseLintError, match="0.11.2"):
