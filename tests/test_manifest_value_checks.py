@@ -7,7 +7,8 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from boxmunge.commands.upgrade_steps import check_upgrade, restart_projects
+from boxmunge.commands.upgrade_report import check_upgrade
+from boxmunge.commands.upgrade_steps import restart_projects
 from boxmunge.manifest import validate_manifest
 from boxmunge.paths import BoxPaths
 from boxmunge.upgrade_exclusions import apply_projects
@@ -107,7 +108,7 @@ def test_upgrade_leaves_a_project_with_every_new_problem_running(mock_up, tmp_pa
     (pdir / "compose.yml").write_text("services:\n  web:\n    image: nginx:1.25\n")
     mark_deployed(paths, "shop")
 
-    assert any("shop" in line for line in check_upgrade(paths))
+    assert any("shop" in line.text for line in check_upgrade(paths))
     migration, regen, excluded = apply_projects(paths)
     restart = restart_projects(paths, refused=regen.refused, excluded=excluded.names())
 
