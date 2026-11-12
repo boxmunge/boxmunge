@@ -210,14 +210,19 @@ AGENT_HELP_TOPICS: dict[str, str] = {
 
 
 def _resolve_hostname() -> str:
-    """Try to read hostname from boxmunge config. Falls back to <host>."""
+    """The box's hostname for the examples. Help is shown whatever state
+    the config is in: a wrong setting is said on stderr, and so is a config
+    that cannot be loaded, which leaves the examples their <host>."""
+    from boxmunge.config import ConfigError, read_config
+    from boxmunge.paths import BoxPaths
     try:
-        from boxmunge.config import load_config
-        from boxmunge.paths import BoxPaths
-        config = load_config(BoxPaths())
-        return config.get("hostname", "<host>")
-    except Exception:
+        config, problems = read_config(BoxPaths())
+    except ConfigError as e:
+        print(f"WARNING: {e}", file=sys.stderr)
         return "<host>"
+    for problem in problems:
+        print(f"WARNING: {problem.message}", file=sys.stderr)
+    return str(config["hostname"])
 
 
 def _substitute_hostname(text: str) -> str:

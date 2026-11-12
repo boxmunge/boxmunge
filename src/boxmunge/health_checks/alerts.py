@@ -25,9 +25,11 @@ _DROPPED = ("health failures, CVE quarantines, failed container updates, blocked
 
 def check_alerts(paths: BoxPaths) -> HealthCheck:
     try:
+        # As notify loads it: a wrong value in another setting stops no
+        # alert (the `host-config` check lists those).
         user_key, app_token = pushover_credentials(load_config(paths))
     except ConfigError as e:
-        return HealthCheck(NAME, "warn", f"cannot load config, so no alert can be sent: {e}")
+        return HealthCheck(NAME, "warn", f"no alert can be sent until this is corrected: {e}")
     missing = [f"pushover.{k}" for k, v in (("user_key", user_key), ("app_token", app_token))
                if not v]
     if missing:

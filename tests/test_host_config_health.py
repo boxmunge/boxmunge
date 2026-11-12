@@ -26,9 +26,9 @@ def box(paths: BoxPaths) -> BoxPaths:
     return paths
 
 
-def test_the_setting_is_refused_at_load(box: BoxPaths) -> None:
+def test_the_setting_is_refused_by_what_reads_it(box: BoxPaths) -> None:
     with pytest.raises(ConfigError, match="'health.alert_threshold'"):
-        load_config(box)
+        load_config(box, reads=("health.alert_threshold",))
 
 
 def test_the_tick_goes_on_to_the_next_project_and_still_alerts(box: BoxPaths) -> None:

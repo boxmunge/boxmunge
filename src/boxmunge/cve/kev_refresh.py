@@ -57,7 +57,9 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from boxmunge.config import ConfigError, load_config
+from boxmunge.config import ConfigError
+from boxmunge.config_values import found
+from boxmunge.host_config_alert import load_for_job
 from boxmunge.http_read import ReadDeadline, read_within
 from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, KevCatalog, load_kev
 from boxmunge.cve.kev_source_history import KevHistoryError, load_history, note_served
@@ -169,11 +171,10 @@ def _listed(ids: list[str]) -> str:
 def kev_sources(paths: BoxPaths) -> tuple[str, ...]:
     """The KEV sources from boxmunge.yml, or the defaults if it sets none.
 
-    Validated here rather than in load_config, so a mistake in kev.sources
-    fails only the KEV refresh (with an alert that can still be sent), not
-    every command that reads the config.
+    `kev` is the one setting the refresh reads, and it is checked here: a
+    mistake in it fails only the KEV refresh, and no other setting does.
     """
-    config = load_config(paths)
+    config = load_for_job(paths, "cve-scan")
     if "kev" not in config:
         return KEV_DEFAULT_SOURCES
     block = config["kev"]
@@ -188,8 +189,8 @@ def kev_sources(paths: BoxPaths) -> tuple[str, ...]:
                           f"remove it to use the defaults")
     bad = [s for s in sources if not (isinstance(s, str) and s.startswith("https://"))]
     if bad:
-        raise ConfigError(f"'kev.sources' in {where} must hold https:// URLs, got "
-                          f"{', '.join(map(repr, bad))}")
+        raise ConfigError(f"'kev.sources' in {where} must hold https:// URLs, found "
+                          f"{', '.join(sorted({found(s) for s in bad}))} that is not one")
     return tuple(sources)
 
 

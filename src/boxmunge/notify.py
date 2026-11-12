@@ -99,10 +99,9 @@ def notify(
 ) -> bool:
     """Send a Pushover notification. True only if it was delivered."""
     try:
-        # Lenient: an alert is sent over a setting config_values refuses.
-        # The command that reads the setting refuses it; this must still
-        # be able to say so, and to report a refused start or upgrade.
-        config = load_config(paths, lenient_values=True)
+        # Not strict: an alert goes out whatever another setting holds,
+        # and with whatever of `pushover` can be used.
+        config = load_config(paths)
         user_key, app_token = pushover_credentials(config)
     except ConfigError as e:
         log_error(component, f"Alert not sent ({title}): cannot load config: {e}",

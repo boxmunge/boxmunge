@@ -4,8 +4,10 @@
 # version_check) take
 # the defaults in src/boxmunge/config.py until set, kev takes those in
 # src/boxmunge/cve/kev.py, and webhooks are off until set. Edited by hand,
-# as root. Every value is checked when the file is read: one of the wrong
-# type or out of range is refused, naming the setting.
+# as root. Every value is checked: `health` lists a setting of the wrong
+# type or out of range under host-config, the commands you run by hand
+# refuse until it is corrected, and a timer's job refuses only if it reads
+# that setting.
 
 hostname: __HOSTNAME__
 ssh_port: 922

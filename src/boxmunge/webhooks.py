@@ -95,7 +95,7 @@ def webhook_safe(
     development instead of being silently dropped.
     """
     try:
-        config = load_config(paths)
+        config = load_config(paths, reads=("webhooks",))
     except (ConfigError, OSError) as e:
         log_warning("webhook", f"failed to fire {event} webhook: {e}",
                     paths, project=name)

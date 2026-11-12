@@ -13,7 +13,8 @@ from boxmunge.backup import (
     resolve_backup_service,
 )
 from boxmunge.backup_dump import execute_dump, remove_stale_dumps
-from boxmunge.config import load_config, ConfigError
+from boxmunge.config import ConfigError
+from boxmunge.host_config_alert import load_for_job
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.lifecycle import BlockReason, is_blocked
@@ -424,7 +425,7 @@ def run_backup_sync(paths: BoxPaths, project_name: str | None = None) -> int:
     rule). Layout on the remote: ``<remote>/<project>/backups/<snapshot>``.
     """
     try:
-        config = load_config(paths)
+        config = load_for_job(paths, "backup-sync", reads=("backup_remote",))
     except ConfigError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1

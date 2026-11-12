@@ -1,8 +1,10 @@
-"""load_config checks the shape and value of every setting it knows.
+"""The shape and value of every setting load_config knows is checked.
 
 A value of the wrong type used to load, and fail wherever it was first
 used: `health: {alert_threshold: '3'}` raised TypeError in the health
-state machine, in the middle of the fleet's tick.
+state machine, in the middle of the fleet's tick. A command run by hand
+(strict) now refuses any of them, an unattended job the ones it reads,
+and a bare load none: it returns each value as written.
 """
 from __future__ import annotations
 
@@ -17,9 +19,15 @@ from boxmunge.paths import BoxPaths
 BASE = {"hostname": "box.example.com", "admin_email": "ops@example.com"}
 
 
-def _load(paths: BoxPaths, extra: dict, **kwargs) -> dict:
+def _load(paths: BoxPaths, extra: dict, *, strict: bool = True, **kwargs) -> dict:
     paths.config_file.write_text(yaml.safe_dump({**BASE, **extra}))
-    return load_config(paths, **kwargs)
+    return load_config(paths, strict=strict, **kwargs)
+
+
+def _kept_as_written(config: dict, extra: dict) -> None:
+    for key, value in extra.items():
+        assert config[key] == ({**DEFAULTS.get(key, {}), **value}
+                               if isinstance(value, dict) else value)
 
 
 REFUSED = [
@@ -45,8 +53,7 @@ REFUSED = [
     ("reboot.auto_reboot", {"reboot": {"auto_reboot": "yes"}}),
     ("reboot.auto_reboot", {"reboot": {"auto_reboot": 1}}),
     ("reboot.reboot_window", {"reboot": {"reboot_window": 240}}),
-    ("reboot.reboot_window", {"reboot": {"reboot_window": "25:00"}}),
-    ("reboot.reboot_window", {"reboot": {"reboot_window": "4am"}}),
+    ("reboot.reboot_window", {"reboot": {"reboot_window": ""}}),
     ("logging", {"logging": "50m"}),
     ("logging.docker_max_size", {"logging": {"docker_max_size": 50}}),
     ("logging.docker_max_file", {"logging": {"docker_max_file": "5"}}),
@@ -67,6 +74,21 @@ def test_a_wrong_value_is_refused_naming_its_setting(paths: BoxPaths, setting, e
         _load(paths, extra)
     assert f"'{setting}'" in str(refused.value)
     assert str(paths.config_file) in str(refused.value)
+    assert ", found " in str(refused.value)
+
+
+@pytest.mark.parametrize("setting,extra", REFUSED, ids=[f"{s}={e}" for s, e in REFUSED])
+def test_an_unattended_job_refuses_only_what_it_reads(paths: BoxPaths, setting, extra) -> None:
+    block = setting.split(".")[0]
+    with pytest.raises(ConfigError, match=f"'{setting}'"):
+        _load(paths, extra, strict=False, reads=(setting,))
+    with pytest.raises(ConfigError, match=f"'{setting}'"):
+        _load(paths, extra, strict=False, reads=(block,))
+    if "." not in setting:  # a block that is no mapping is wrong in each of its settings
+        with pytest.raises(ConfigError, match=f"'{setting}'"):
+            _load(paths, extra, strict=False, reads=(f"{setting}.any",))
+    other = "ssh_port" if block != "ssh_port" else "hostname"
+    _kept_as_written(_load(paths, extra, strict=False, reads=(other,)), extra)
 
 
 def test_every_wrong_value_is_named_at_once(paths: BoxPaths) -> None:
@@ -82,6 +104,8 @@ ACCEPTED = [
     {"pushover": {"user_key": "u", "app_token": "t"}},
     {"pushover": {"user_key": None, "app_token": None}, "backup_remote": None},
     {"health": {"alert_threshold": 1}, "reboot": {"auto_reboot": False, "reboot_window": "23:59"}},
+    # Handed to the OS's unattended upgrades as written, which take these.
+    {"reboot": {"reboot_window": "4:00"}}, {"reboot": {"reboot_window": "now"}},
     {"container_updates": {"enabled": False, "strategy": "rollback_to_previous"}},
     {"webhooks": [{"url": "https://hooks.example.com/x", "events": ["deploy", "rollback"]}]},
     {"webhooks": []},
@@ -108,19 +132,20 @@ def test_the_reference_template_loads(paths: BoxPaths) -> None:
     assert load_config(paths)["ssh_port"] == 922
 
 
-class TestLenientValues:
-    """The paths that act on a box that is already running take the value
-    as it is; the checks older than these stay errors there."""
+class TestABareLoad:
+    """What load_config(paths) does, in this release and to whatever still
+    calls it from an older one: every value as written; the checks older
+    than config_values stay errors."""
 
-    def test_the_value_is_kept(self, paths: BoxPaths) -> None:
-        config = _load(paths, {"health": {"alert_threshold": "3"}}, lenient_values=True)
-        assert config["health"]["alert_threshold"] == "3"
+    @pytest.mark.parametrize("setting,extra", REFUSED, ids=[f"{s}={e}" for s, e in REFUSED])
+    def test_every_value_is_kept_as_written(self, paths: BoxPaths, setting, extra) -> None:
+        _kept_as_written(_load(paths, extra, strict=False), extra)
 
     def test_the_older_checks_still_refuse(self, paths: BoxPaths) -> None:
         with pytest.raises(ConfigError, match="auto_update.breakfix"):
-            _load(paths, {"auto_update": {"breakfix": "yes"}}, lenient_values=True)
+            _load(paths, {"auto_update": {"breakfix": "yes"}}, strict=False)
         with pytest.raises(ConfigError, match="version_check"):
-            _load(paths, {"version_check": "off"}, lenient_values=True)
+            _load(paths, {"version_check": "off"}, strict=False)
         paths.config_file.write_text("admin_email: ops@example.com\n")
         with pytest.raises(ConfigError, match="hostname"):
-            load_config(paths, lenient_values=True)
+            load_config(paths)

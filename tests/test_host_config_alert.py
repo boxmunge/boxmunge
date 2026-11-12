@@ -1,5 +1,5 @@
-"""A box whose boxmunge.yml holds a value load_config now refuses still
-starts its projects, upgrades and alerts; it is warned and alerted instead.
+"""A box whose boxmunge.yml holds a wrong setting still starts its
+projects, upgrades and alerts; the operator is told instead.
 
 Real config, state and log files; only `docker compose up` and Pushover's
 HTTP call are stood in for.
@@ -60,13 +60,13 @@ def _start(paths: BoxPaths, component: str = "upgrade") -> None:
 
 def _warnings(paths: BoxPaths) -> int:
     log = paths.log_file.read_text() if paths.log_file.exists() else ""
-    return log.count("holds values this release refuses")
+    return log.count("are not what they must be")
 
 
-def test_the_config_is_refused_where_it_is_read(box) -> None:
+def test_a_command_run_by_hand_refuses_the_config(box) -> None:
     paths, *_ = box
     with pytest.raises(ConfigError, match="'ssh_port'.*'reboot.auto_reboot'"):
-        load_config(paths)
+        load_config(paths, strict=True)
 
 
 def test_a_start_goes_ahead_and_the_operator_is_told_once_a_day(box) -> None:
@@ -129,6 +129,26 @@ def test_a_refused_start_still_alerts(box) -> None:
     assert [title for title, _ in sent] == [
         "[box.example.com] boxmunge.yml needs correcting",
         "[box.example.com] shop: start refused"]
+
+
+def test_a_record_that_cannot_be_written_does_not_stop_a_start(box) -> None:
+    """An upgrade's restart and a rollback start projects through here:
+    failing would roll a release back, or strand the rollback. The start
+    goes ahead, the failure is logged, and the next start does the same."""
+    paths, up, sent, _ = box
+    (paths.state / "start-refused" / "boxmunge.yml.json").mkdir(parents=True)
+    for _ in range(2):
+        _start(paths)
+    assert up.call_count == 2
+    assert [title for title, _ in sent] == ["[box.example.com] boxmunge.yml needs correcting"] * 2
+    assert "Cannot record that the alert was sent" in paths.log_file.read_text()
+
+
+def test_a_state_directory_that_cannot_be_made_does_not_stop_a_start(box) -> None:
+    paths, up, sent, _ = box
+    (paths.state / "start-refused").write_text("not a directory")
+    _start(paths)
+    assert up.call_count == 1 and len(sent) == 1
 
 
 def test_any_alert_is_delivered(box) -> None:

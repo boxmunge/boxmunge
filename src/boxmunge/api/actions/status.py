@@ -62,7 +62,7 @@ def _platform_info(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]
         "build": get_build_version(),
         "min_client_version": handshake["min_client_version"],
         "schema_version": handshake["schema_version"],
-        "hostname": load_config(ctx.paths)["hostname"],
+        "hostname": load_config(ctx.paths, strict=True)["hostname"],
     }
 
 

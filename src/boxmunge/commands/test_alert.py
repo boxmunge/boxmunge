@@ -14,7 +14,7 @@ def cmd_test_alert(args: list[str]) -> None:
     paths = BoxPaths()
 
     try:
-        user_key, app_token = pushover_credentials(load_config(paths))
+        user_key, app_token = pushover_credentials(load_config(paths, strict=True))
     except ConfigError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

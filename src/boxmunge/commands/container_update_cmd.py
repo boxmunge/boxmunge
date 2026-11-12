@@ -6,7 +6,8 @@ import os
 import sys
 from typing import Any
 
-from boxmunge.config import load_config, ConfigError
+from boxmunge.config import ConfigError
+from boxmunge.host_config_alert import load_for_job
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.container_update import (
     SKIPPED_LOCKED, SKIPPED_MONITOR_STOPPED, lock_skipped, update_target_locked,
@@ -248,7 +249,7 @@ def run_container_update(
 
         # Step 2: Load config
         try:
-            config = load_config(paths)
+            config = load_for_job(paths, "container-update", reads=("container_updates",))
         except ConfigError as e:
             log_error("container-update", f"Config error: {e}", paths)
             print(f"ERROR: {e}", file=sys.stderr)

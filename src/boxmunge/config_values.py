@@ -1,23 +1,51 @@
 # SPDX-License-Identifier: Apache-2.0
 """The shape and value of each setting in the host configuration.
 
-load_config runs these on the config with its defaults applied, so a
-wrong value is refused where it is read from disk rather than failing
-wherever it is first used. Two blocks are checked by their one reader
-instead: `kev` (cve.kev_refresh, so a mistake there fails only the KEV
-refresh) and `userns` (userns.offset, which writes it).
+read_config runs these on the config with its defaults applied. What a
+caller does with the result is its own: an interactive command refuses on
+any of them, an unattended job only on the settings it reads (load_config).
+Two blocks are checked by their one reader instead: `kev` (cve.kev_refresh)
+and `userns` (userns.offset, which writes it).
+
+No message here holds a setting's value: boxmunge.yml carries secrets (a
+webhook URL, the Pushover keys, whatever was pasted on the wrong line), and
+these messages go to the log, to alerts and to the API. Each names the
+setting, what it must be and the kind of thing found.
 """
 from __future__ import annotations
 
-import re
-from typing import Any, Callable
+from typing import Any, Callable, Iterable, NamedTuple
 
 from boxmunge.manifest_fields import VALID_STRATEGIES
 
-# What a value must be, or None when it is.
-Check = Callable[[Any], "str | None"]
 
-_REBOOT_WINDOW = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
+class Problem(NamedTuple):
+    """A setting that is not what it must be."""
+    setting: str  # dotted, e.g. "health.alert_threshold"; a block's own name if it is no mapping
+    message: str
+
+
+# None when the value is right, else (what it must be, the kind of thing found).
+Check = Callable[[Any], "tuple[str, str] | None"]
+
+
+def found(value: Any) -> str:
+    """The kind of thing a value is, never the value."""
+    if value is None:
+        return "nothing"
+    if isinstance(value, bool):
+        return "a boolean"
+    if isinstance(value, int):
+        return "a whole number"
+    if isinstance(value, float):
+        return "a decimal number"
+    if isinstance(value, str):
+        return "a string" if value else "an empty string"
+    if isinstance(value, list):
+        return "a list"
+    if isinstance(value, dict):
+        return "a mapping"
+    return f"a {type(value).__name__}"
 
 
 def _whole_number(low: int, high: int | None = None) -> Check:
@@ -26,33 +54,48 @@ def _whole_number(low: int, high: int | None = None) -> Check:
     what = (f"a whole number of at least {low}" if high is None
             else f"a whole number from {low} to {high}")
 
-    def check(value: Any) -> str | None:
-        in_range = (isinstance(value, int) and not isinstance(value, bool)
-                    and value >= low and (high is None or value <= high))
-        return None if in_range else what
+    def check(value: Any) -> tuple[str, str] | None:
+        if not isinstance(value, int) or isinstance(value, bool):
+            return what, found(value)
+        if value < low or (high is not None and value > high):
+            return what, "one outside that range"
+        return None
     return check
 
 
-def _boolean(value: Any) -> str | None:
-    return None if isinstance(value, bool) else "true or false"
+def _boolean(value: Any) -> tuple[str, str] | None:
+    return None if isinstance(value, bool) else ("true or false", found(value))
 
 
-def _text(value: Any) -> str | None:
-    return None if isinstance(value, str) and value else "a non-empty string"
+def _text(value: Any) -> tuple[str, str] | None:
+    return None if isinstance(value, str) and value else ("a non-empty string", found(value))
 
 
-def _optional_text(value: Any) -> str | None:
-    return None if value is None or isinstance(value, str) else 'a string ("" when unset)'
-
-
-def _reboot_window(value: Any) -> str | None:
-    if isinstance(value, str) and _REBOOT_WINDOW.fullmatch(value):
+def _optional_text(value: Any) -> tuple[str, str] | None:
+    if value is None or isinstance(value, str):
         return None
-    return 'a quoted 24-hour time such as "04:00"'
+    return 'a string ("" when unset)', found(value)
 
 
-def _strategy(value: Any) -> str | None:
-    return None if value in VALID_STRATEGIES else f"one of {', '.join(VALID_STRATEGIES)}"
+def _strategy(value: Any) -> tuple[str, str] | None:
+    if isinstance(value, str) and value in VALID_STRATEGIES:
+        return None
+    return (f"one of {', '.join(VALID_STRATEGIES)}",
+            "another string" if isinstance(value, str) else found(value))
+
+
+def _webhooks(hooks: Any) -> tuple[str, str] | None:
+    """`webhooks` is optional: a list of {url, events}."""
+    what = "a list of mappings, each with a url string and a list of event names"
+    if not isinstance(hooks, list):
+        return what, found(hooks)
+    for hook in hooks:
+        events = hook.get("events", []) if isinstance(hook, dict) else None
+        if (not isinstance(hook, dict) or _text(hook.get("url")) is not None
+                or not isinstance(events, list)
+                or not all(isinstance(event, str) for event in events)):
+            return what, "a list with an entry of another shape"
+    return None
 
 
 TOP_LEVEL: dict[str, Check] = {
@@ -62,49 +105,51 @@ TOP_LEVEL: dict[str, Check] = {
     "backup_remote": _optional_text,
 }
 
+# reboot_window is handed to the OS's unattended upgrades as written
+# (bootstrap/init-host.sh), which take more forms than HH:MM; boxmunge
+# never reads it, so only its type is checked.
 BLOCKS: dict[str, dict[str, Check]] = {
     "pushover": {"user_key": _optional_text, "app_token": _optional_text},
     "health": {"check_interval_minutes": _whole_number(1),
                "alert_threshold": _whole_number(1)},
-    "reboot": {"auto_reboot": _boolean, "reboot_window": _reboot_window},
+    "reboot": {"auto_reboot": _boolean, "reboot_window": _text},
     "logging": {"docker_max_size": _text, "docker_max_file": _whole_number(1)},
     "container_updates": {"enabled": _boolean, "strategy": _strategy},
 }
 
 
-def _webhook_problem(hooks: Any) -> str | None:
-    """`webhooks` is optional: a list of {url, events}."""
-    if not isinstance(hooks, list):
-        return "a list of {url, events} mappings"
-    for hook in hooks:
-        events = hook.get("events", []) if isinstance(hook, dict) else None
-        if (not isinstance(hook, dict) or _text(hook.get("url")) is not None
-                or not isinstance(events, list)
-                or not all(isinstance(event, str) for event in events)):
-            return ("a list of mappings, each with a url string and a list of "
-                    "event names")
-    return None
+def value_problems(config: dict[str, Any], where: object) -> list[Problem]:
+    """Every setting in `config` (defaults applied) that is not what it
+    must be, in the file's documented order."""
+    def problem(name: str, value: Any, check: Check) -> list[Problem]:
+        wrong = check(value)
+        return [] if wrong is None else [Problem(
+            name, f"'{name}' in {where} must be {wrong[0]}, found {wrong[1]}")]
 
-
-def value_problems(config: dict[str, Any], where: object) -> list[str]:
-    """Every setting in `config` (defaults applied) that is not what it must
-    be. Each line names the setting, the file and the value found."""
-    def problem(name: str, value: Any, check: Check) -> list[str]:
-        must_be = check(value)
-        return [] if must_be is None else [
-            f"'{name}' in {where} must be {must_be}, got {value!r}"]
-
-    problems: list[str] = []
+    problems: list[Problem] = []
     for name, check in TOP_LEVEL.items():
         problems += problem(name, config[name], check)
     for block_name, keys in BLOCKS.items():
         block = config[block_name]
         if not isinstance(block, dict):
-            problems.append(f"'{block_name}' in {where} must be a mapping of "
-                            f"{', '.join(keys)}, got {block!r}")
+            problems.append(Problem(
+                block_name, f"'{block_name}' in {where} must be a mapping of "
+                            f"{', '.join(keys)}, found {found(block)}"))
             continue
         for key, check in keys.items():
             problems += problem(f"{block_name}.{key}", block[key], check)
     if "webhooks" in config:
-        problems += problem("webhooks", config["webhooks"], _webhook_problem)
+        problems += problem("webhooks", config["webhooks"], _webhooks)
     return problems
+
+
+def among(problems: Iterable[Problem], reads: Iterable[str]) -> list[Problem]:
+    """The problems in the settings a caller reads. `reads` names settings
+    or whole blocks; a block that is no mapping is a problem in each of its
+    settings."""
+    reads = tuple(reads)
+
+    def read(setting: str) -> bool:
+        return any(setting == name or setting.startswith(name + ".")
+                   or name.startswith(setting + ".") for name in reads)
+    return [p for p in problems if read(p.setting)]

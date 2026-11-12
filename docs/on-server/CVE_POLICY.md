@@ -290,7 +290,8 @@ To replace the list, set `kev.sources` in `boxmunge.yml`. It must be a
 non-empty list of `https://` URLs that serve the same JSON, for example an
 internal mirror. A redirect to a non-`https://` URL is refused. A mistake
 in the setting fails only the KEV refresh, with the priority-1 alert
-below naming it; every other command still reads the config:
+below naming it (the setting, never the URL); every other job still runs,
+and the refresh itself stops over no other setting:
 
 ```yaml
 kev:

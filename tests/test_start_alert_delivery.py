@@ -5,6 +5,8 @@ for, so the delivery result is the one notify reports.
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -62,3 +64,28 @@ def test_an_unconfigured_pushover_records_nothing_as_sent(box: BoxPaths) -> None
     assert _refuse(box, delivered=True) == 0
     box.config_file.write_text(yaml.safe_dump(config))
     assert _refuse(box, delivered=True) == 1
+
+
+def test_a_record_dated_ahead_of_now_does_not_silence_the_alert(box: BoxPaths) -> None:
+    """A clock that was wrong when the alert was recorded, or an edited
+    file: the time is not one this box could have written, so it is not
+    believed."""
+    assert _refuse(box, delivered=True) == 1
+    record = box.state / "start-refused" / f"{NAME}.json"
+    ahead = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
+    record.write_text(json.dumps({key: ahead for key in json.loads(record.read_text())}))
+
+    assert _refuse(box, delivered=True) == 1
+    assert _refuse(box, delivered=True) == 0  # recorded at the real time again
+
+
+def test_a_record_that_cannot_be_written_does_not_fail_the_refusal(box: BoxPaths) -> None:
+    """The alert is sent by then. The refusal is returned as ever, the
+    failure is logged, and the next refusal alerts again."""
+    (box.state / "start-refused" / f"{NAME}.json").mkdir(parents=True)
+
+    for _ in range(2):
+        assert _refuse(box, delivered=True) == 1
+    log = box.log_file.read_text()
+    assert log.count("Cannot record that the alert was sent") == 2
+    assert log.count(f"Refused to start {NAME}") == 2

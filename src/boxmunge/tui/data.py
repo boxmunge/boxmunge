@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from boxmunge import compose_inventory
-from boxmunge.config import load_config, ConfigError
+from boxmunge.config import read_config, ConfigError
 from boxmunge.docker_run import DockerError, docker_env
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
@@ -32,6 +32,9 @@ class HostInfo:
     hostname: str
     disk_free_gb: float
     caddy_running: bool
+    # Why boxmunge.yml cannot be loaded, or which of its settings are
+    # wrong; empty when it is sound.
+    config_error: str = ""
 
 
 @dataclass
@@ -114,10 +117,11 @@ def load_all_project_status(paths: BoxPaths) -> list[ProjectStatus]:
 def load_host_info(paths: BoxPaths) -> HostInfo:
     """Load host-level information."""
     try:
-        config = load_config(paths)
-        hostname = config.get("hostname", "unknown")
-    except ConfigError:
-        hostname = "unknown"
+        config, problems = read_config(paths)
+        hostname = str(config["hostname"])
+        config_error = "; ".join(p.message for p in problems)
+    except ConfigError as e:
+        hostname, config_error = "unknown", str(e)
 
     try:
         usage = shutil.disk_usage(paths.root)
@@ -136,6 +140,7 @@ def load_host_info(paths: BoxPaths) -> HostInfo:
         hostname=hostname,
         disk_free_gb=disk_free_gb,
         caddy_running=caddy_running,
+        config_error=config_error,
     )
 
 

@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The host config's refused values, on the paths that only warn of them.
+"""Telling the operator that boxmunge.yml holds a wrong setting.
 
-load_config refuses a setting config_values rejects, so `container-update`,
-`backup-sync` and the other commands that read boxmunge.yml refuse to
-run, naming it. Three paths do not refuse: the platform upgrade
-(auto-update's discovery), every start of a project's containers (which
-the upgrade's restart and a rollback go through) and the alerts
-themselves. Refusing there would stop a box, or silence it, over a value
-it ran with until this release; the same reasoning as validate_manifest's
-`lenient_values`. Those paths log the settings as a warning and alert the
-operator, at most once a day once the alert is delivered.
+The unattended jobs (check-all, container-update, backup-sync, the KEV
+refresh, auto-update, and every start of a project's containers, which an
+upgrade's restart and a rollback go through) do not stop over a setting
+they do not read: a box keeps running with a value it has always carried.
+Each one that meets such a config says so here instead, and then refuses
+only if a setting it reads is among them (load_for_job).
+
+One alert for one set of problems, whichever job meets it first and
+however many do: start_alerts paces it by the problems' text, in one
+record beside the projects' own. It counts as sent only when notify
+delivered it, and repeats daily while the problems stay. The log line is
+paced the same way. The `host-config` health check is the standing
+signal, and needs no Pushover.
 """
 from __future__ import annotations
 
@@ -18,46 +22,66 @@ from typing import TYPE_CHECKING, Any
 
 from boxmunge import start_alerts
 from boxmunge.config import ConfigError, read_config
+from boxmunge.config_values import Problem, among
 from boxmunge.log import log_warning
 from boxmunge.notify import notify
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
-# The record start_alerts paces this alert by, beside the projects' own in
-# state/start-refused/. Not a project's name: none can hold a dot.
+# The record start_alerts paces this by. Not a project's name: none can
+# hold a dot.
 _RECORD = "boxmunge.yml"
+TITLE = "boxmunge.yml needs correcting"
 
 
-def load_lenient(paths: BoxPaths, component: str) -> dict[str, Any]:
-    """load_config(lenient_values=True), reporting the values it let
-    through. Raises ConfigError for what stays an error."""
+def load_for_job(paths: BoxPaths, component: str, *,
+                 reads: tuple[str, ...] = ()) -> dict[str, Any]:
+    """The config for an unattended job that reads the settings `reads`.
+
+    Any wrong setting is reported to the operator. One the job reads then
+    raises ConfigError naming it; the rest are returned as written. Raises
+    ConfigError as load_config does for a config that cannot be loaded.
+    """
     config, problems = read_config(paths)
-    if problems:
-        _warn_and_alert(paths, component, problems)
+    _tell(paths, component, problems)
+    refused = among(problems, reads)
+    if refused:
+        raise ConfigError("; ".join(p.message for p in refused))
     return config
+
+
+def report(paths: BoxPaths, component: str) -> None:
+    """For a job that reads no setting itself: tell the operator of any
+    wrong one. Raises ConfigError for a config that cannot be loaded."""
+    load_for_job(paths, component)
 
 
 def report_at_start(paths: BoxPaths, component: str) -> None:
     """Before a start of a project's containers. A start reads no host
-    setting, so a config that cannot be loaded at all is not refused here:
-    notify logs that when the start has something to alert, and `health`
+    setting, so a config that cannot be loaded at all is not its business:
+    notify logs that when the start has something to alert, and check-all
     reports it on every tick."""
     try:
-        load_lenient(paths, component)
+        report(paths, component)
     except ConfigError:
         pass
 
 
-def _warn_and_alert(paths: BoxPaths, component: str, problems: list[str]) -> None:
-    reason = "; ".join(problems)
+def _tell(paths: BoxPaths, component: str, problems: list[Problem]) -> None:
+    if not problems:
+        return
+    reason = "; ".join(p.message for p in problems)
     now = datetime.now(timezone.utc)
+    message = (f"{len(problems)} setting(s) in the host config are not what they must be: "
+               f"{reason}. A job that reads one of them refuses to run until it is "
+               f"corrected, as do the commands you run by hand; everything else carries "
+               f"on. `health` lists them under host-config.")
+    logged = f"logged: {reason}"
+    if not start_alerts.alerted_recently(paths, _RECORD, logged, now):
+        log_warning(component, message, paths)
+        start_alerts.record_or_warn(paths, _RECORD, logged, now, component)
     if start_alerts.alerted_recently(paths, _RECORD, reason, now):
         return
-    message = (f"The host config holds values this release refuses: {reason}. "
-               f"Upgrades, starts, rollbacks and alerts carry on. Until each is corrected "
-               f"in {paths.config_file}, the other commands that read it refuse to run, "
-               f"`container-update` and `backup-sync` among them.")
-    log_warning(component, message, paths)
-    if notify(paths, "boxmunge.yml needs correcting", message, component=component):
-        start_alerts.record(paths, _RECORD, reason, now)
+    if notify(paths, TITLE, message, component=component):
+        start_alerts.record_or_warn(paths, _RECORD, reason, now, component)

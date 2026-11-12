@@ -23,6 +23,7 @@ from typing import Any
 
 import yaml
 
+from boxmunge.config import yaml_position
 from boxmunge.docker_run import DockerError, run as _run
 from boxmunge.fileutil import atomic_write_bytes
 from boxmunge.paths import BoxPaths
@@ -133,7 +134,9 @@ def recorded_offset(paths: BoxPaths) -> int | None:
         doc = yaml.safe_load(paths.config_file.read_text()) or {}
     except FileNotFoundError:
         return None
-    except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
+    except yaml.YAMLError as e:
+        raise RemapError(f"{paths.config_file} is not valid YAML{yaml_position(e)}") from e
+    except (OSError, UnicodeDecodeError) as e:
         raise RemapError(f"cannot read {paths.config_file}: {e}") from e
     block = doc.get("userns") if isinstance(doc, dict) else None
     if block is None:
@@ -144,7 +147,7 @@ def recorded_offset(paths: BoxPaths) -> int | None:
             or value <= 0 or value % RANGE):
         raise RemapError(
             f"{paths.config_file}: userns must be {{name: {REMAP_NAME}, offset: <a positive "
-            f"multiple of {RANGE}>}}, got {block!r}")
+            f"multiple of {RANGE}>}}")
     return value
 
 

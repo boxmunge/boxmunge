@@ -94,14 +94,16 @@ def _send_alert(
 
 
 def _alert_threshold(project_name: str, paths: BoxPaths) -> int:
-    """The configured alert threshold: a whole number, which load_config
-    has checked. A config it refuses is logged as an error, naming the
-    setting or the file at fault; the state machine still runs, on the
+    """The configured alert threshold: a whole number, the one setting
+    read here, so no other stops it being honoured. A wrong one, or a
+    config that cannot be loaded, is logged as an error naming the setting
+    or the file at fault; the state machine still runs, on the
     documented default threshold, so a critical result still stops the
     project and a warning still alerts (notify says so itself if the config
     is too broken to send one)."""
     try:
-        return load_config(paths)["health"]["alert_threshold"]
+        config = load_config(paths, reads=("health.alert_threshold",))
+        return config["health"]["alert_threshold"]
     except ConfigError as e:
         default = DEFAULTS["health"]["alert_threshold"]
         log_error(

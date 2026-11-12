@@ -24,6 +24,6 @@ OFF = ("version checks are off (version_check.enabled: false in boxmunge.yml), s
 def version_checks_off(paths: BoxPaths) -> bool:
     """True if boxmunge.yml turns version checks off. Raises ConfigError
     when it cannot be read: whether the operator opted out is then unknown,
-    and nothing may be sent. Lenient about the other settings' values
-    (load_config): discovering an upgrade must not stop over them."""
-    return not version_check_enabled(load_config(paths, lenient_values=True))
+    and nothing may be sent. No other setting is read, so none stops the
+    discovery of an upgrade."""
+    return not version_check_enabled(load_config(paths))

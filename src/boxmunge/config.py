@@ -5,7 +5,7 @@ from typing import Any
 
 import yaml
 
-from boxmunge.config_values import value_problems
+from boxmunge.config_values import Problem, among, found, value_problems
 from boxmunge.paths import BoxPaths
 
 
@@ -42,6 +42,14 @@ BOOLEAN_BLOCKS = {
 REQUIRED_FIELDS = ["hostname", "admin_email"]
 
 
+def yaml_position(error: yaml.YAMLError) -> str:
+    """Where a YAML error is, as ", line N, column M". Never the parser's
+    own text: it quotes the file (an alias's name, the lines around the
+    fault), and this file holds secrets."""
+    mark = getattr(error, "problem_mark", None)
+    return f", line {mark.line + 1}, column {mark.column + 1}" if mark else ""
+
+
 def _deep_merge(defaults: dict, overrides: dict) -> dict:
     """Merge overrides into defaults, recursing into nested dicts."""
     result = dict(defaults)
@@ -53,32 +61,36 @@ def _deep_merge(defaults: dict, overrides: dict) -> dict:
     return result
 
 
-def load_config(paths: BoxPaths, *, lenient_values: bool = False) -> dict[str, Any]:
-    """Load boxmunge.yml, apply defaults, and validate every setting.
+def load_config(paths: BoxPaths, *, strict: bool = False,
+                reads: tuple[str, ...] = ()) -> dict[str, Any]:
+    """Load boxmunge.yml and apply defaults.
 
     Raises ConfigError, naming the file, if it is missing, unreadable, not
-    valid YAML, not a mapping, required fields are absent, or a setting is
-    not what it must be (config_values), naming each such setting.
+    valid YAML, not a mapping, a required field is absent, or one of the
+    BOOLEAN_BLOCKS is malformed. No message holds a setting's value.
 
-    `lenient_values` is for what must keep working on a box that is already
-    running: discovering a platform upgrade, the health report the upgrade
-    is judged by, and sending an alert (which the upgrade, every start and
-    a rollback do). Those must not stop over a value the box has always
-    been allowed to carry, so the checks in config_values (added in 0.11.9)
-    are not errors there and the value is returned as written;
-    host_config_alert reports them on those paths. The checks older than
-    that stay errors.
+    The other settings are checked by config_values, and what a wrong one
+    costs is the caller's choice:
+    - by default nothing: the value is returned exactly as written. A box
+      that has run with it keeps running, and whatever is in memory from an
+      older release (the upgrade shim's alerts) loads the config as before.
+    - `reads` names the settings (or blocks) an unattended job reads: one
+      of those wrong raises ConfigError naming it; any other is left to
+      host_config_alert, which tells the operator.
+    - `strict` is for a command a person runs: any wrong setting raises,
+      naming each.
     """
     config, problems = read_config(paths)
-    if problems and not lenient_values:
-        raise ConfigError("; ".join(problems))
+    refused = problems if strict else among(problems, reads)
+    if refused:
+        raise ConfigError("; ".join(p.message for p in refused))
     return config
 
 
-def read_config(paths: BoxPaths) -> tuple[dict[str, Any], list[str]]:
-    """The config with defaults applied, and the settings config_values
-    refuses (see load_config, which raises on them unless lenient). Raises
-    ConfigError for everything else load_config does."""
+def read_config(paths: BoxPaths) -> tuple[dict[str, Any], list[Problem]]:
+    """The config with defaults applied, every value as written, and the
+    settings config_values finds wrong. Raises ConfigError for what
+    load_config always refuses."""
     config_file = paths.config_file
     if not config_file.exists():
         raise ConfigError(f"Config file not found: {config_file}")
@@ -87,7 +99,7 @@ def read_config(paths: BoxPaths) -> tuple[dict[str, Any], list[str]]:
         with open(config_file) as f:
             raw = yaml.safe_load(f) or {}
     except yaml.YAMLError as e:
-        raise ConfigError(f"Config is not valid YAML: {config_file}: {e}") from e
+        raise ConfigError(f"Config is not valid YAML: {config_file}{yaml_position(e)}") from e
     except (OSError, UnicodeDecodeError) as e:
         raise ConfigError(f"Cannot read config {config_file}: {e}") from e
     if not isinstance(raw, dict):
@@ -120,7 +132,8 @@ def _validate_boolean_block(config: dict[str, Any], name: str, key: str, example
         )
     if not isinstance(block[key], bool):
         raise ConfigError(
-            f"'{name}.{key}' in {config_file} must be true or false, got {block[key]!r}"
+            f"'{name}.{key}' in {config_file} must be true or false, "
+            f"found {found(block[key])}"
         )
 
 

@@ -78,7 +78,7 @@ def _refused(paths: BoxPaths, project_name: str, component: str, reason: str,
         # not take is tried again at the next refusal.
         if notify(paths, f"{project_name}: start refused", message + hint,
                   component=component, project=project_name, priority=1):
-            start_alerts.record(paths, project_name, reason, now)
+            start_alerts.record_or_warn(paths, project_name, reason, now, component)
     return ComposeRefused(message)
 
 

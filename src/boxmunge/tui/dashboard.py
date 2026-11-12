@@ -74,6 +74,7 @@ class DashboardScreen(Screen):
         bar.update(
             f"{host.hostname} │ Disk: {host.disk_free_gb}GB free │ "
             f"Caddy: {caddy_status}"
+            + (f"\nboxmunge.yml: {host.config_error}" if host.config_error else "")
         )
 
     def on_data_table_row_highlighted(
