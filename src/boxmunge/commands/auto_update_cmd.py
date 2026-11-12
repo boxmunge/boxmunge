@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """boxmunge auto-update — check for and apply automatic platform releases.
 
-Security releases are always applied. Break-fix releases (critical
-non-security fixes) are applied unless boxmunge.yml sets
+Security releases are always applied. Break-fix releases (important
+fixes that prevent issues) are applied unless boxmunge.yml sets
 ``auto_update.breakfix: false``. Feature releases are never applied here,
 and neither is any release across a breaking release or into a new major
 version. When such a security or break-fix release is all there is, the

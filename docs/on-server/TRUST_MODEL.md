@@ -477,7 +477,7 @@ prints the same report with no side effects.
 ## Security and Break-fix Releases
 
 Every release has a class recorded in the version-check service's
-`releases.json`: `security`, `breakfix` (a critical non-security fix), or
+`releases.json`: `security`, `breakfix` (an important fix that prevents issues; you shouldn't fall behind on it), or
 `feature`. Security releases are applied automatically within 12 hours.
 Break-fix releases are applied the same way unless the box sets
 `auto_update.breakfix: false` in `boxmunge.yml`. Feature releases are never
@@ -573,18 +573,21 @@ compromise of any single one cannot silently propagate.
    The SBOM enumerates exactly the versions verified in steps 4–6.
 
 8. **Artifact signing.** The workflow calls `cosign sign-blob --yes` on
-   `SHA256SUMS` (which itself covers the install script and every
-   tarball) and on `boxmunge-install.sh`. Keyless signing produces a
+   `SHA256SUMS` (which itself covers the install script, every
+   tarball and `upgrade-notes.json`) and on `boxmunge-install.sh`. Keyless signing produces a
    Fulcio certificate proving the signature was produced by this exact
    workflow on this exact tag, with the OIDC issuer being GitHub
    Actions. The signature is published as `SHA256SUMS.sig` +
    `SHA256SUMS.cert`. Signing has no fallback: if cosign cannot be
    installed or signing fails, the workflow fails and nothing is
-   published.
+   published. The `publish` job builds `upgrade-notes.json` itself, from
+   the tag's `upgrade-notes/` files with stdlib-only code, just before
+   computing `SHA256SUMS`: nothing `build` ran can shape it.
 
 9. **Release publication.** `softprops/action-gh-release` (SHA-pinned)
    attaches the install script, the tarball(s), `SHA256SUMS`, the
-   cosign signature and cert, and the SBOM to a draft GitHub release
+   cosign signature and cert, the SBOM and `upgrade-notes.json` to a
+   draft GitHub release
    (every file is required). The draft's title and notes are checked
    against the release's class in `releases.json`, then it is published.
 
@@ -601,6 +604,11 @@ compromise of any single one cannot silently propagate.
 
 12. **Checksum verification.** The shim then runs `sha256sum -c` against
     the signed `SHA256SUMS` to confirm the tarball's contents.
+    `upgrade-howto` verifies `upgrade-notes.json` the same way, through
+    the shim, before composing a guide from it: the file must have its
+    own line in the signed `SHA256SUMS`. Agents with deploy rights act
+    on that text, so it reaches a box only on the signed path, never
+    from the version-check service.
 
 13. **Installation.** Only after both signature and checksum verify does
     the shim extract the bundle and install it into the standby venv.

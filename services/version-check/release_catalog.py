@@ -3,8 +3,8 @@
 Every release has a class:
 
 - ``feature``  — never auto-applied; the operator upgrades when ready.
-- ``breakfix`` — a critical non-security fix; auto-applied by boxes that allow it
-  (``auto_update.breakfix`` in boxmunge.yml, default on).
+- ``breakfix`` — an important fix that prevents issues (you shouldn't fall behind on it);
+  auto-applied by boxes that allow it (``auto_update.breakfix`` in boxmunge.yml, default on).
 - ``security`` — always auto-applied. A security release is also a break-fix.
 
 Every release also says whether it is ``breaking``: it changed an operator
