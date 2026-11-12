@@ -300,6 +300,15 @@ boxmunge-upgrade target VERSION, or boxmunge-upgrade repair-deps.
   --dry-run         Check migrations and config regeneration; change nothing
   --apply           Migrate/regenerate/restart only (called by the shim)
   --skip-self-test  Skip the post-upgrade self-test""",
+    "upgrade-readiness": """\
+Usage: boxmunge upgrade-readiness [--json]
+
+Check this box and every project against the rules of the release this code
+is: what blocks an upgrade to it, and what each project's next deploy needs,
+each with its fix. Changes and locks nothing. Exit 0 pass, 1 blocked.
+  --json  One JSON object, the stable contract the upgrade check reads
+Operator-only: run it as root, as boxmunge-server. From the deploy shell, use
+upgrade-check, which runs the target release's own copy of this check.""",
     "userns": """\
 Usage: boxmunge userns {check|migrate|rollback|commit}
        (on the server: boxmunge-server userns ..., as the shim runs it)
