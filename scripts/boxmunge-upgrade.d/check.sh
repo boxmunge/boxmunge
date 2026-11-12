@@ -242,8 +242,9 @@ check_outcome() {
         124:*) check_finish cant_verify readiness "the readiness check of $CHECK_VERSION did not finish within $READINESS_SECS s; retry when the box is less busy" ;;
         125:*) check_finish cant_verify readiness "could not tell how the readiness check of $CHECK_VERSION ended: $err" ;;
         2:invalid) check_finish cant_verify readiness "$CHECK_VERSION has no working readiness command (boxmunge-server upgrade-readiness --json exited 2, a usage error: $err), so it cannot be checked" ;;
-        *:invalid) check_finish cant_verify readiness "the readiness command of $CHECK_VERSION gave no valid answer (exit $rc): $err" ;;
-        *:blocked) reasons+=("the readiness check of $CHECK_VERSION found what blocks the upgrade: $(readiness_summary "$out/readiness.json")") ;;
+        0:pass) ;;
+        1:blocked) reasons+=("the readiness check of $CHECK_VERSION found what blocks the upgrade: $(readiness_summary "$out/readiness.json")") ;;
+        *) check_finish cant_verify readiness "the readiness command of $CHECK_VERSION gave no valid answer (exit $rc): $err" ;;
     esac
     dry="$(cat "$out/dry_run.rc")"
     case "$dry" in
