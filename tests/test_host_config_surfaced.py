@@ -5,12 +5,9 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from boxmunge.api.principal import Principal, Tier
-from boxmunge.api.result import ActionError, ErrorCode
 from boxmunge.commands import help as help_cmd
 from boxmunge.paths import BoxPaths
 from boxmunge.tui.data import load_host_info
-from tests.api.fakes import make_invoker
 
 CONFIG = {"hostname": "box.example.com", "admin_email": "ops@example.com"}
 ODD = {**CONFIG, "ssh_port": "922"}
@@ -64,10 +61,3 @@ class TestHelp:
         monkeypatch.setattr("boxmunge.config.read_config", broken)
         with pytest.raises(RuntimeError):
             help_cmd.cmd_help([])
-
-
-def test_platform_info_fails_with_the_setting_named(box) -> None:
-    with pytest.raises(ActionError) as refused:
-        make_invoker(box).invoke("platform.info", {}, Principal.plugin("webui", Tier.OBSERVE))
-    assert refused.value.code is ErrorCode.FAILED
-    assert "'ssh_port'" in refused.value.message

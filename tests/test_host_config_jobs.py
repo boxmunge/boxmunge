@@ -168,12 +168,13 @@ class TestACommandRunByHandRefuses:
                   if "Config file loads" in line]
         assert "'logging.docker_max_file'" in line and "'reboot.auto_reboot'" in line
 
-    def test_platform_info(self, box) -> None:
+    def test_platform_info_refuses_over_the_hostname_it_reads(self, box) -> None:
         paths, *_ = box
+        _write(paths, {**CONFIG, "hostname": ["box.example.com"]})
         with pytest.raises(ActionError) as refused:
             make_invoker(paths).invoke("platform.info", {},
                                        Principal.plugin("webui", Tier.OBSERVE))
-        assert "'logging.docker_max_file'" in refused.value.message
+        assert "'hostname'" in refused.value.message
 
     def test_a_strict_load_names_every_wrong_setting(self, box) -> None:
         paths, *_ = box
@@ -198,15 +199,19 @@ class TestTheOperatorIsToldOnce:
         [body] = _config_alerts(sent)
         assert "'container_updates.enabled'" in body
 
-    def test_an_undelivered_alert_is_sent_by_the_next_job(self, box, system_container) -> None:
+    def test_an_undelivered_alert_is_tried_again_after_an_hour(self, box, system_container) -> None:
         paths, sent, delivery = box
         delivery["ok"] = False
         assert _container_update(paths) == (0, True)
         assert kev_sources(paths) == KEV_DEFAULT_SOURCES
-        assert len(_config_alerts(sent)) == 2
+        assert len(_config_alerts(sent)) == 1  # tried again hourly, not by each job
         delivery["ok"] = True
+        record = paths.state / "start-refused" / "boxmunge.yml.json"
+        earlier = (datetime.now(timezone.utc) - timedelta(minutes=61)).isoformat()
+        record.write_text(json.dumps({key: earlier for key in json.loads(record.read_text())}))
         _every_job(paths, system_container)
-        assert len(_config_alerts(sent)) == 3
+        _every_job(paths, system_container)
+        assert len(_config_alerts(sent)) == 2
         assert paths.log_file.read_text().count("are not what they must be") == 1
 
     def test_it_repeats_after_a_day(self, box, system_container) -> None:

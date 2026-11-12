@@ -8,6 +8,8 @@ and a bare load none: it returns each value as written.
 """
 from __future__ import annotations
 
+import re
+
 from pathlib import Path
 
 import pytest
@@ -62,9 +64,13 @@ REFUSED = [
     ("container_updates.enabled", {"container_updates": {"enabled": "false"}}),
     ("container_updates.strategy", {"container_updates": {"strategy": "rollback"}}),
     ("webhooks", {"webhooks": {"url": "https://hooks.example.com/x"}}),
-    ("webhooks", {"webhooks": ["https://hooks.example.com/x"]}),
-    ("webhooks", {"webhooks": [{"url": 5, "events": ["deploy"]}]}),
-    ("webhooks", {"webhooks": [{"url": "https://hooks.example.com/x", "events": "deploy"}]}),
+    ("webhooks[0]", {"webhooks": ["https://hooks.example.com/x"]}),
+    ("webhooks[0].url", {"webhooks": [{"url": 5, "events": ["deploy"]}]}),
+    ("webhooks[0].events",
+     {"webhooks": [{"url": "https://hooks.example.com/x", "events": "deployed"}]}),
+    ("webhooks[1].events", {"webhooks": [
+        {"url": "https://hooks.example.com/x", "events": ["deploy"]},
+        {"url": "https://hooks.example.com/y", "events": [5]}]}),
 ]
 
 
@@ -79,13 +85,14 @@ def test_a_wrong_value_is_refused_naming_its_setting(paths: BoxPaths, setting, e
 
 @pytest.mark.parametrize("setting,extra", REFUSED, ids=[f"{s}={e}" for s, e in REFUSED])
 def test_an_unattended_job_refuses_only_what_it_reads(paths: BoxPaths, setting, extra) -> None:
-    block = setting.split(".")[0]
-    with pytest.raises(ConfigError, match=f"'{setting}'"):
+    block = re.split(r"[.\[]", setting)[0]
+    named = re.escape(f"'{setting}'")
+    with pytest.raises(ConfigError, match=named):
         _load(paths, extra, strict=False, reads=(setting,))
-    with pytest.raises(ConfigError, match=f"'{setting}'"):
+    with pytest.raises(ConfigError, match=named):
         _load(paths, extra, strict=False, reads=(block,))
     if "." not in setting:  # a block that is no mapping is wrong in each of its settings
-        with pytest.raises(ConfigError, match=f"'{setting}'"):
+        with pytest.raises(ConfigError, match=named):
             _load(paths, extra, strict=False, reads=(f"{setting}.any",))
     other = "ssh_port" if block != "ssh_port" else "hostname"
     _kept_as_written(_load(paths, extra, strict=False, reads=(other,)), extra)
@@ -108,6 +115,7 @@ ACCEPTED = [
     {"reboot": {"reboot_window": "4:00"}}, {"reboot": {"reboot_window": "now"}},
     {"container_updates": {"enabled": False, "strategy": "rollback_to_previous"}},
     {"webhooks": [{"url": "https://hooks.example.com/x", "events": ["deploy", "rollback"]}]},
+    {"webhooks": [{"url": "https://hooks.example.com/x", "events": "deploy"}]},
     {"webhooks": []},
 ]
 

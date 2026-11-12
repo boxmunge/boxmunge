@@ -6,6 +6,8 @@ HTTP call are stood in for.
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -82,16 +84,19 @@ def test_a_start_goes_ahead_and_the_operator_is_told_once_a_day(box) -> None:
     assert _warnings(paths) == 1
 
 
-def test_an_undelivered_alert_is_tried_again_at_the_next_start(box) -> None:
+def test_an_undelivered_alert_is_tried_again_after_an_hour(box) -> None:
     paths, up, sent, delivery = box
     delivery["ok"] = False
     _start(paths)
     _start(paths)
-    assert len(sent) == 2
+    assert len(sent) == 1
     delivery["ok"] = True
+    record = paths.state / "start-refused" / "boxmunge.yml.json"
+    earlier = (datetime.now(timezone.utc) - timedelta(minutes=61)).isoformat()
+    record.write_text(json.dumps({key: earlier for key in json.loads(record.read_text())}))
     _start(paths)
     _start(paths)
-    assert len(sent) == 3
+    assert len(sent) == 2
     assert up.call_count == 4
 
 
@@ -141,7 +146,7 @@ def test_a_record_that_cannot_be_written_does_not_stop_a_start(box) -> None:
         _start(paths)
     assert up.call_count == 2
     assert [title for title, _ in sent] == ["[box.example.com] boxmunge.yml needs correcting"] * 2
-    assert "Cannot record that the alert was sent" in paths.log_file.read_text()
+    assert "Cannot record the alert" in paths.log_file.read_text()
 
 
 def test_a_state_directory_that_cannot_be_made_does_not_stop_a_start(box) -> None:

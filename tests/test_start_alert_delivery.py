@@ -87,5 +87,5 @@ def test_a_record_that_cannot_be_written_does_not_fail_the_refusal(box: BoxPaths
     for _ in range(2):
         assert _refuse(box, delivered=True) == 1
     log = box.log_file.read_text()
-    assert log.count("Cannot record that the alert was sent") == 2
+    assert log.count("Cannot record the alert") == 2
     assert log.count(f"Refused to start {NAME}") == 2

@@ -30,8 +30,8 @@ BASE = {"hostname": "box.example.com", "admin_email": "ops@example.com",
 # name -> (the settings, the setting every surface must name)
 CASES = {
     "a webhook URL beside events that is no list": (
-        {"webhooks": [{"url": f"https://hooks.example.com/{SECRET}", "events": "deploy"}]},
-        "webhooks"),
+        {"webhooks": [{"url": f"https://hooks.example.com/{SECRET}", "events": "deploy stage"}]},
+        "webhooks[0].events"),
     "pushover as one string": ({"pushover": f"user:{SECRET}"}, "pushover"),
     "a key in a list": ({"pushover": {"user_key": [SECRET], "app_token": "t"}},
                         "pushover.user_key"),

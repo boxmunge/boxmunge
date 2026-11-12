@@ -23,7 +23,8 @@ if TYPE_CHECKING:
 _ALERT_INTERVAL = timedelta(hours=24)
 
 
-def alerted_recently(paths: BoxPaths, project_name: str, reason: str, now: datetime) -> bool:
+def alerted_recently(paths: BoxPaths, project_name: str, reason: str, now: datetime,
+                     within: timedelta = _ALERT_INTERVAL) -> bool:
     path = paths.state / "start-refused" / f"{project_name}.json"
     key = hashlib.sha256(reason.encode()).hexdigest()[:16]
     try:
@@ -34,7 +35,7 @@ def alerted_recently(paths: BoxPaths, project_name: str, reason: str, now: datet
     # A time ahead of now was not written by this clock (a corrected clock,
     # an edited file): it would silence the alert until it passed, so it
     # counts for nothing.
-    return last.tzinfo is not None and timedelta(0) <= now - last < _ALERT_INTERVAL
+    return last.tzinfo is not None and timedelta(0) <= now - last < within
 
 
 def record(paths: BoxPaths, project_name: str, reason: str, now: datetime) -> None:
@@ -60,6 +61,6 @@ def record_or_warn(paths: BoxPaths, project_name: str, reason: str, now: datetim
     try:
         record(paths, project_name, reason, now)
     except OSError as e:
-        log_warning(component, f"Cannot record that the alert was sent "
+        log_warning(component, f"Cannot record the alert "
                     f"({paths.state / 'start-refused' / (project_name + '.json')}: {e}); "
                     f"it repeats at the next run until this is fixed", paths)

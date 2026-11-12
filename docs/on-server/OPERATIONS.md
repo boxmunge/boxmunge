@@ -1802,18 +1802,19 @@ Every setting is checked for its type and range (`ssh_port` a whole number from 
 and so on). What a wrong one costs depends on who reads the file:
 
 - **Commands you run by hand refuse**, naming each wrong setting: `doctor` (as a failed
-  "Config file loads"), `test-alert`, the `platform.info` API action and the user-namespace
-  migration's preflight. `help` and the dashboard still open, and show the same lines.
+  "Config file loads"), `test-alert` and the user-namespace migration's preflight. `help` and the dashboard still open, and show the same lines.
 - **Timer jobs refuse only over a setting they read.** `container-update` refuses over
   `container_updates`, `backup-sync` over `backup_remote`, the KEV refresh over `kev`,
-  auto-update over `auto_update` and `version_check`; webhooks are not fired while `webhooks` is
-  wrong, and the health monitor uses the default `alert_threshold` (3) while that one is. A wrong
+  auto-update over `auto_update` and `version_check`, the `platform.info` API action over
+  `hostname`; the health monitor uses the default `alert_threshold` (3) while that one is wrong.
+  Each webhook is judged on its own: one that is wrong (named by its place in the list, as
+  `webhooks[1].events`) is not fired, and the others are. A wrong
   value anywhere else stops none of them: `check-all`, platform upgrades, project starts,
   rollbacks and every alert carry on.
 - **You are told once.** The first job to meet the wrong settings logs a warning and sends one
   alert, "boxmunge.yml needs correcting", naming them. It repeats at most once a day while they
   stay, whichever jobs run, and again when the set of wrong settings changes; an alert Pushover
-  did not take is sent again by the next job. `health` shows them under `host-config` for as long
+  did not take is tried again hourly. `health` shows them under `host-config` for as long
   as they last, with or without Pushover.
 
 No log line, alert, error or API message quotes a setting's value, since the file holds secrets:

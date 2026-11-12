@@ -427,6 +427,7 @@ def run_backup_sync(paths: BoxPaths, project_name: str | None = None) -> int:
     try:
         config = load_for_job(paths, "backup-sync", reads=("backup_remote",))
     except ConfigError as e:
+        log_error("backup-sync", f"Config error: {e}", paths)
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 

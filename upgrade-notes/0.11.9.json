@@ -1,0 +1,20 @@
+{
+ "version": "0.11.9",
+ "no_project_action": false,
+ "entries": [
+  {
+   "id": "0.11.9-host-config-checked",
+   "scope": "box",
+   "when": "after",
+   "kind": "recommended",
+   "title": "Correct any setting in boxmunge.yml that the new checks report",
+   "change": "Every setting in /opt/boxmunge/config/boxmunge.yml is now checked for type and range: ssh_port (whole number 1-65535); backup_remote and the pushover keys (strings); the health and logging counts (unquoted whole numbers of at least 1); reboot.auto_reboot, container_updates.enabled (true or false); container_updates.strategy; each block a mapping; each webhook a url with a list of event names, or one event name.\nA wrong setting does not stop the upgrade, project starts, rollbacks, the health check or alerts. Commands run by hand (doctor, test-alert, the userns migration preflight) refuse while any setting is wrong. Scheduled jobs refuse only over a setting they read: container-update over container_updates, backup-sync over backup_remote. A wrong webhook is skipped; the others fire.\nThe operator is told by one Pushover alert, 'boxmunge.yml needs correcting', repeated daily, and by a host-config warning in health. No message shows a value. Edit the file as root; nothing needs restarting.",
+   "verify": "Run `health`: the host-config check is ok and says every setting in boxmunge.yml is valid. `doctor` passes 'Config file loads'.",
+   "files": [],
+   "superseded_by": null,
+   "refs": [
+    "#214"
+   ]
+  }
+ ]
+}

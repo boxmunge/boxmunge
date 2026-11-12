@@ -11,13 +11,14 @@ only if a setting it reads is among them (load_for_job).
 One alert for one set of problems, whichever job meets it first and
 however many do: start_alerts paces it by the problems' text, in one
 record beside the projects' own. It counts as sent only when notify
-delivered it, and repeats daily while the problems stay. The log line is
+delivered it, and repeats daily while the problems stay; an undelivered
+one is tried again hourly. The log line is
 paced the same way. The `host-config` health check is the standing
 signal, and needs no Pushover.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 from boxmunge import start_alerts
@@ -33,6 +34,10 @@ if TYPE_CHECKING:
 # hold a dot.
 _RECORD = "boxmunge.yml"
 TITLE = "boxmunge.yml needs correcting"
+# check-all meets the config every few minutes. While the alert cannot be
+# delivered, each try can take the Pushover timeout and logs an error, so
+# an undelivered one is tried again this often rather than every tick.
+_RETRY_INTERVAL = timedelta(hours=1)
 
 
 def load_for_job(paths: BoxPaths, component: str, *,
@@ -81,7 +86,9 @@ def _tell(paths: BoxPaths, component: str, problems: list[Problem]) -> None:
     if not start_alerts.alerted_recently(paths, _RECORD, logged, now):
         log_warning(component, message, paths)
         start_alerts.record_or_warn(paths, _RECORD, logged, now, component)
-    if start_alerts.alerted_recently(paths, _RECORD, reason, now):
+    tried = f"tried: {reason}"
+    if (start_alerts.alerted_recently(paths, _RECORD, reason, now)
+            or start_alerts.alerted_recently(paths, _RECORD, tried, now, _RETRY_INTERVAL)):
         return
-    if notify(paths, TITLE, message, component=component):
-        start_alerts.record_or_warn(paths, _RECORD, reason, now, component)
+    delivered = notify(paths, TITLE, message, component=component)
+    start_alerts.record_or_warn(paths, _RECORD, reason if delivered else tried, now, component)

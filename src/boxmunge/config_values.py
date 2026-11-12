@@ -84,18 +84,42 @@ def _strategy(value: Any) -> tuple[str, str] | None:
             "another string" if isinstance(value, str) else found(value))
 
 
-def _webhooks(hooks: Any) -> tuple[str, str] | None:
-    """`webhooks` is optional: a list of {url, events}."""
-    what = "a list of mappings, each with a url string and a list of event names"
-    if not isinstance(hooks, list):
-        return what, found(hooks)
-    for hook in hooks:
-        events = hook.get("events", []) if isinstance(hook, dict) else None
-        if (not isinstance(hook, dict) or _text(hook.get("url")) is not None
-                or not isinstance(events, list)
-                or not all(isinstance(event, str) for event in events)):
-            return what, "a list with an entry of another shape"
+# The events a webhook can subscribe to (webhooks.webhook_safe's callers).
+WEBHOOK_EVENTS = ("deploy", "stage", "promote", "unstage", "rollback")
+
+
+def hook_events(hook: dict[str, Any]) -> list[str] | None:
+    """The events a hook subscribes to, or None when `events` is not a
+    list of names. One known event name on its own is that one event:
+    `events: deploy` fired before these checks existed, and still does."""
+    events = hook.get("events", [])
+    if isinstance(events, str):
+        return [events] if events in WEBHOOK_EVENTS else None
+    if isinstance(events, list) and all(isinstance(event, str) for event in events):
+        return events
     return None
+
+
+def hook_problems(hooks: Any) -> list[tuple[str, str, str]]:
+    """`webhooks` is optional: a list of {url, events}. Each hook is
+    judged on its own, as (setting, what it must be, kind found), so one
+    that is wrong does not stop the others (webhooks skips it)."""
+    if not isinstance(hooks, list):
+        return [("webhooks", "a list of mappings, each with a url and events", found(hooks))]
+    wrong: list[tuple[str, str, str]] = []
+    for i, hook in enumerate(hooks):
+        if not isinstance(hook, dict):
+            wrong.append((f"webhooks[{i}]", "a mapping with a url and events", found(hook)))
+            continue
+        if _text(hook.get("url")) is not None:
+            wrong.append((f"webhooks[{i}].url", "a non-empty string", found(hook.get("url"))))
+        if hook_events(hook) is None:
+            events = hook.get("events")
+            wrong.append((
+                f"webhooks[{i}].events",
+                f"a list of event names, or one of {', '.join(WEBHOOK_EVENTS)} on its own",
+                "another string" if isinstance(events, str) else found(events)))
+    return wrong
 
 
 TOP_LEVEL: dict[str, Check] = {
@@ -139,17 +163,18 @@ def value_problems(config: dict[str, Any], where: object) -> list[Problem]:
         for key, check in keys.items():
             problems += problem(f"{block_name}.{key}", block[key], check)
     if "webhooks" in config:
-        problems += problem("webhooks", config["webhooks"], _webhooks)
+        problems += [Problem(name, f"'{name}' in {where} must be {must_be}, found {kind}")
+                     for name, must_be, kind in hook_problems(config["webhooks"])]
     return problems
 
 
 def among(problems: Iterable[Problem], reads: Iterable[str]) -> list[Problem]:
     """The problems in the settings a caller reads. `reads` names settings
-    or whole blocks; a block that is no mapping is a problem in each of its
-    settings."""
+    or whole blocks (a list's entries are in it); a block that is no
+    mapping is a problem in each of its settings."""
     reads = tuple(reads)
 
     def read(setting: str) -> bool:
-        return any(setting == name or setting.startswith(name + ".")
+        return any(setting == name or setting.startswith((name + ".", name + "["))
                    or name.startswith(setting + ".") for name in reads)
     return [p for p in problems if read(p.setting)]
