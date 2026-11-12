@@ -535,6 +535,6 @@ class TestManual:
         mock_open.return_value = _response({
             "status": "x", "security": _offer("0.3.2", "security"), "breakfix": None,
             "latest": latest, "blocked": None})
-        result = discover_update(_setup(tmp_path), mode="breakfix")
+        result = discover_update(_setup(tmp_path), mode="security")
         assert result["action"] == "upgrade" and result["version"] == "0.3.2"
         assert result["manual"] is None
