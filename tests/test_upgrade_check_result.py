@@ -97,6 +97,18 @@ def test_embedded_readiness_contract_2_is_cant_verify() -> None:
     assert "contract 2" in " ".join(r.reasons)
 
 
+@pytest.mark.parametrize("bad", [
+    lambda d: d["readiness"]["projects"][0].update(name=list(range(200_000))),
+    lambda d: d["readiness"].update(release="0." * 50_000),
+    lambda d: d.update(stage="x" * 100_000),
+])
+def test_the_reason_for_an_unreadable_verdict_is_bounded(bad) -> None:
+    doc = k3()
+    bad(doc)
+    r = parse(doc, rc=0)
+    assert r.result == "cant_verify" and len(r.reasons[0]) <= 400
+
+
 def test_a_verdict_for_another_release_is_refused() -> None:
     r = parse(k3(target="0.11.9"))
     assert r.result == "cant_verify" and "0.11.9" in r.reasons[0] and TARGET in r.reasons[0]

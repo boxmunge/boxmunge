@@ -30,6 +30,7 @@ RESULTS = ("pass", "blocked", "cant_verify")
 STAGES = ("refused", "fetch", "prerequisites", "venv", "readiness", "dry_run", "complete")
 NO_VERDICT_STAGE = "shim"  # the deploy side's own: the shim gave no usable verdict
 _SHOWN = {"pass": "PASS", "blocked": "BLOCKED", "cant_verify": "CAN'T VERIFY"}
+_PROBLEM_MAX = 300
 _RELEASE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?")
 
 
@@ -57,8 +58,15 @@ def _no_verdict(target: str, installed: str, reason: str) -> CheckResult:
 
 def _field(doc: dict, key: str, ok: Any, what: str) -> Any:
     if key not in doc or not ok(doc[key]):
-        raise _Unreadable(f"{key} must be {what}, not {doc.get(key, '(missing)')!r}"[:300])
+        raise _Unreadable(f"{key} must be {what}, not {doc.get(key, '(missing)')!r}")
     return doc[key]
+
+
+def _bounded(problem: Exception) -> str:
+    """A problem with the verdict, quoted at most _PROBLEM_MAX characters:
+    it may quote any value the verdict holds."""
+    text = str(problem)
+    return text if len(text) <= _PROBLEM_MAX else text[:_PROBLEM_MAX - 3] + "..."
 
 
 def _is_text_list(value: Any) -> bool:
@@ -133,8 +141,8 @@ def parse_check(stdout: str, stderr: str, returncode: int, *, target: str,
     try:
         r = _read(doc)
     except (_Unreadable, ContractError) as e:
-        return _no_verdict(target, installed,
-                           f"the upgrade shim's verdict is not one this release reads: {e}")
+        return _no_verdict(target, installed, "the upgrade shim's verdict is not one this "
+                           f"release reads: {_bounded(e)}")
     problem = _contradiction(r, target, returncode)
     if problem is not None:
         return _no_verdict(target, r.installed,
