@@ -8,13 +8,14 @@
 # deploy's sudo rule. Owned here so install.sh and every upgrade write the
 # same text; a box whose rule predates a tightening is fixed on its next
 # upgrade. sudo matches the whole argument string against each pattern, so
-# `target *` cannot reach force-target or any other subcommand, and `auto`
+# `target *`, `check *` and `guide *` cannot reach force-target, _check-run
+# or any other subcommand (each verb takes exactly one version), and `auto`
 # and `repair-deps` take no further words.
 # ---------------------------------------------------------------------------
 sudoers_rule() {
     cat <<EOF
 # Managed by boxmunge-upgrade install-sudoers; rewritten on every install and upgrade.
-deploy ALL=(root) NOPASSWD: $BIN_DIR/boxmunge-upgrade auto, $BIN_DIR/boxmunge-upgrade target *, $BIN_DIR/boxmunge-upgrade repair-deps
+deploy ALL=(root) NOPASSWD: $BIN_DIR/boxmunge-upgrade auto, $BIN_DIR/boxmunge-upgrade target *, $BIN_DIR/boxmunge-upgrade repair-deps, $BIN_DIR/boxmunge-upgrade check *, $BIN_DIR/boxmunge-upgrade guide *
 EOF
 }
 

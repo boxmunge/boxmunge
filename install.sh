@@ -54,6 +54,9 @@ if grep -q '^# >>> boxmunge-upgrade.d:' "${SCRIPT_DIR}/scripts/boxmunge-upgrade"
     echo "       Install from a release bundle (boxmunge-install.sh, or \`make bundle\`), not a source checkout." >&2
     exit 1
 fi
+# The read-only checks below (upgrade-floor, python-floor, compose-version)
+# are also listed in bootstrap/prerequisites, which a readiness check runs from
+# this release's bundle before any upgrade to it.
 BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/upgrade-floor.sh"
 command -v python3 >/dev/null && bash "${SCRIPT_DIR}/bootstrap/python-floor.sh"
 

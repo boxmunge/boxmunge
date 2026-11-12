@@ -182,5 +182,75 @@ grep -q "msg=The verified bundle of 1.5.0 did not extract" "$BOXMUNGE_ROOT/calls
 drop_root
 rm -rf "$RELEASE"
 
+# --- the signed sums alone, and one listed file -----------------------------------
+
+# A readiness check or a guide fetches read-only: a verified signature leaves
+# the cosign failure count of the version as it was (an upgrade clears it).
+release good
+box 1.4.0
+mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+seed='{"1.5.0": 1}'
+printf '%s' "$seed" > "$BOXMUNGE_ROOT/upgrade-root/cosign-failures.json"
+signed_sums() {  # signed_sums [readonly]: fetch 1.5.0's signed sums into a fresh directory
+    local dir rc=0
+    dir="$(mktemp -d)"
+    fetch_signed_sums 1.5.0 "$dir" "$@" || rc=$?
+    rm -rf "$dir"
+    echo "rc=$rc"
+}
+out="$(with_shim_functions signed_sums readonly 2>/dev/null)"
+[[ "$out" == rc=0 && "$(cat "$BOXMUNGE_ROOT/upgrade-root/cosign-failures.json")" == "$seed" ]] \
+    && pass "a readonly fetch leaves cosign-failures.json byte-identical" \
+    || fail "readonly fetch: $out, count now $(cat "$BOXMUNGE_ROOT/upgrade-root/cosign-failures.json")"
+fetched() {  # fetched: fetch_release 1.5.0 read-only, as a readiness check does
+    local dir rc=0
+    dir="$(mktemp -d)"
+    fetch_release 1.5.0 "$dir" readonly || rc=$?
+    echo "rc=$rc extracted=$([[ -d "$dir/boxmunge" ]] && echo yes || echo no)"
+    rm -rf "$dir"
+}
+out="$(with_shim_functions fetched 2>/dev/null)"
+[[ "$out" == "rc=0 extracted=yes" && "$(cat "$BOXMUNGE_ROOT/upgrade-root/cosign-failures.json")" == "$seed" ]] \
+    && pass "a readonly fetch_release verifies and extracts, leaving the cosign count" \
+    || fail "readonly fetch_release: $out, count now $(cat "$BOXMUNGE_ROOT/upgrade-root/cosign-failures.json")"
+out="$(with_shim_functions signed_sums 2>/dev/null)"
+[[ "$out" == rc=0 && "$(cat "$BOXMUNGE_ROOT/upgrade-root/cosign-failures.json")" == "{}" ]] \
+    && pass "an upgrade's fetch clears the cosign count of a verified version" \
+    || fail "upgrade fetch: $out, count now $(cat "$BOXMUNGE_ROOT/upgrade-root/cosign-failures.json")"
+drop_root
+rm -rf "$RELEASE"
+
+# verify_listed <dir> <file> <step>: exactly one line for the file, and its hash.
+box 1.4.0
+listed() {  # listed <sums content> <file content>: verify_listed of notes.json
+    local dir rc=0
+    dir="$(mktemp -d)"
+    printf '%s' "$2" > "$dir/notes.json"
+    printf '%s' "$1" > "$dir/SHA256SUMS"
+    verify_listed "$dir" notes.json notes || rc=$?
+    echo "rc=$rc step=$FETCH_STEP error=$FETCH_ERROR"
+    rm -rf "$dir"
+}
+good_hash="$(printf 'notes' | sha256sum | awk '{print $1}')"
+zeros="$(printf '0%.0s' {1..64})"
+out="$(with_shim_functions listed "$good_hash  notes.json" notes 2>/dev/null)"
+[[ "$out" == "rc=0 "* ]] && pass "verify_listed passes the one true line" || fail "verify_listed, true line: $out"
+out="$(with_shim_functions listed "$good_hash  other.json
+$good_hash  notesXjson" notes 2>/dev/null)"
+[[ "$out" == "rc=1 step=notes_missing_entry error=Checksum verification FAILED: SHA256SUMS does not list notes.json" ]] \
+    && pass "verify_listed refuses a SHA256SUMS without the file's line (a dot is not a wildcard)" \
+    || fail "verify_listed, no line: $out"
+out="$(with_shim_functions listed "$good_hash  notes.json
+$good_hash  notes.json" notes 2>/dev/null)"
+[[ "$out" == "rc=1 step=notes_mismatch "* ]] && pass "verify_listed refuses a file listed twice" \
+    || fail "verify_listed, twice: $out"
+out="$(with_shim_functions listed "$zeros  notes.json" notes 2>/dev/null)"
+[[ "$out" == "rc=1 step=notes_mismatch error=Checksum verification FAILED" ]] \
+    && pass "verify_listed refuses a wrong hash" || fail "verify_listed, wrong hash: $out"
+out="$(with_shim_functions listed "$good_hash  notes.json" tampered 2>/dev/null)"
+[[ "$out" == "rc=1 step=notes_mismatch "* ]] && pass "verify_listed refuses a tampered file" \
+    || fail "verify_listed, tampered: $out"
+drop_root
+
 rm -rf "$FIXTURE"
 finish

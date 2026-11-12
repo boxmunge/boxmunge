@@ -1,0 +1,10 @@
+# bootstrap/prerequisites: the box checks a release needs met before it can be
+# installed, run by the upgrade shim's readiness check (`boxmunge-upgrade check
+# <version>`) from the target release's own bundle, each as root, confined and
+# read-only, before it builds anything. One bootstrap/<name>.sh a line; each
+# exits 0 when the box meets it, and otherwise says why on stderr. install.sh
+# runs each of them too, before it changes anything
+# (tests/test_sudoers_delivery.py holds the two together).
+bootstrap/upgrade-floor.sh
+bootstrap/python-floor.sh
+bootstrap/compose-version.sh

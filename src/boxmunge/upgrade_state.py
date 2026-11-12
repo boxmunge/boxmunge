@@ -9,6 +9,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import time
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -138,10 +139,10 @@ class UpgradeInProgress(Exception):
 
 
 @contextmanager
-def upgrade_lock(paths: BoxPaths) -> Iterator[None]:
-    """Hold the lock the upgrade shim takes, without waiting.
+def upgrade_lock(paths: BoxPaths, *, wait: float = 0) -> Iterator[None]:
+    """Hold the lock the upgrade shim takes, waiting up to ``wait`` seconds.
 
-    Raises UpgradeInProgress if it is held. upgrade.lock is in root-only
+    Raises UpgradeInProgress if it is still held then. upgrade.lock is in root-only
     upgrade-root/, so deploy cannot replace it to let two upgrades run, and
     every shim an upgrade may start from (0.11.0 on) holds it. It is opened
     with open_regular_nofollow, so a planted link or FIFO is an
@@ -167,10 +168,16 @@ def upgrade_lock(paths: BoxPaths) -> Iterator[None]:
             raise UpgradeStateError(f"{path} is owned by uid {owner}, not {os.geteuid()}, so "
                                     "another user may be holding it to stall upgrades; refusing "
                                     "to lock it. Remove it so it can be recreated.")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as e:
-            raise UpgradeInProgress("an upgrade is in progress") from e
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError as e:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise UpgradeInProgress("an upgrade is in progress") from e
+                time.sleep(min(1.0, left))
         yield
     finally:
         os.close(fd)

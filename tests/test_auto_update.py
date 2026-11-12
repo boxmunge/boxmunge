@@ -220,6 +220,7 @@ class TestUpgradeLock:
         fcntl.flock(fd, fcntl.LOCK_EX)
         return fd
 
+    @patch("boxmunge.commands.auto_update_cmd.LOCK_WAIT_SECS", 0.2)
     @patch("os.execvp")
     @patch("boxmunge.upgrade_discovery.discover_update")
     def test_skips_discovery_while_an_upgrade_runs(self, mock_discover, mock_exec, box) -> None:
@@ -231,6 +232,67 @@ class TestUpgradeLock:
             os.close(fd)
         mock_discover.assert_not_called()
         mock_exec.assert_not_called()
+
+    @patch("boxmunge.commands.auto_update_cmd.LOCK_WAIT_SECS", 10)
+    @patch("os.execvp")
+    @patch("boxmunge.upgrade_discovery.discover_update")
+    def test_waits_for_a_lock_released_within_the_wait(self, mock_discover, mock_exec, box) -> None:
+        """A readiness check holds upgrade.lock for minutes; auto-update waits
+        it out rather than skip, so checks cannot hold off a security fix."""
+        import os
+        import threading
+        mock_discover.return_value = _upgrade("security")
+        fd = self._hold(box)
+        threading.Timer(0.5, os.close, (fd,)).start()
+        run_auto_update(box)
+        mock_discover.assert_called_once()
+        mock_exec.assert_called_once()
+
+    @patch("boxmunge.commands.auto_update_cmd.LOCK_WAIT_SECS", 0.1)
+    @patch("boxmunge.commands.auto_update_cmd.log_error")
+    @patch("boxmunge.commands.auto_update_cmd.log_warning")
+    @patch("boxmunge.upgrade_discovery.discover_update")
+    def test_a_lock_held_past_the_wait_is_counted_and_a_second_is_an_error(
+            self, mock_discover, mock_warning, mock_error, box) -> None:
+        import os
+        fd = self._hold(box)
+        try:
+            assert run_auto_update(box) == 0
+            assert (box.upgrade_root / "auto-update-lock-skips").read_text() == "1\n"
+            assert mock_warning.call_count == 1 and mock_error.call_count == 0
+            assert run_auto_update(box) == 0
+        finally:
+            os.close(fd)
+        mock_discover.assert_not_called()
+        assert mock_error.call_count == 1
+        message = mock_error.call_args.args[1]
+        assert "could not take upgrade.lock 2 times in a row" in message
+        assert "sudo lslocks | grep upgrade.lock" in message
+        assert (box.upgrade_root / "auto-update-lock-skips").stat().st_mode & 0o077 == 0
+
+    @patch("os.execvp")
+    @patch("boxmunge.upgrade_discovery.discover_update")
+    def test_taking_the_lock_clears_the_skip_count(self, mock_discover, mock_exec, box) -> None:
+        mock_discover.return_value = _up_to_date()
+        box.upgrade_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        (box.upgrade_root / "auto-update-lock-skips").write_text("1\n")
+        run_auto_update(box)
+        assert not (box.upgrade_root / "auto-update-lock-skips").exists()
+
+    def test_upgrade_lock_waits_then_gives_up(self, paths) -> None:
+        import os
+        import time
+        import pytest
+        from boxmunge.upgrade_state import UpgradeInProgress, upgrade_lock
+        fd = self._hold(paths)
+        try:
+            start = time.monotonic()
+            with pytest.raises(UpgradeInProgress):
+                with upgrade_lock(paths, wait=0.5):
+                    pass
+            assert time.monotonic() - start >= 0.5
+        finally:
+            os.close(fd)
 
     @patch("boxmunge.upgrade_discovery.discover_update")
     def test_discovery_holds_the_lock_and_releases_it_before_exec(self, mock_discover, box) -> None:
