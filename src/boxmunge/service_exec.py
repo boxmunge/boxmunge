@@ -38,7 +38,7 @@ _LOGGER = logging.getLogger("boxmunge")
 # $0 is this script, $1 the pid file name, $2 the command. No output on
 # stdout, which carries the dump.
 _WRAPPER = r"""
-read -r stat < /proc/$$/stat 2>/dev/null || stat=""
+read -r stat 2>/dev/null < /proc/$$/stat || stat=""
 set -- "$0" "$1" "$2" ${stat##*) }
 if [ "$6" != "$$" ] && command -v setsid >/dev/null 2>&1 && [ -z "$BOXMUNGE_SETSID" ]; then
   BOXMUNGE_SETSID=1 exec setsid sh -c "$1" "$1" "$2" "$3"
@@ -73,7 +73,7 @@ esac
 # one still running (a zombie has been killed), "" for any entry at all.
 left() {
   for f in /proc/[0-9]*/stat; do
-    read -r line < "$f" 2>/dev/null || continue
+    read -r line 2>/dev/null < "$f" || continue
     set -- "$1" ${line##*) }
     [ "$4" = "$pid" ] && [ "$2" != "$1" ] && return 0
   done
