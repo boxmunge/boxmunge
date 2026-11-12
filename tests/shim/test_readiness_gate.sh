@@ -225,6 +225,10 @@ for breaking in "" 1.4.0 1.3.0 1.6.0; do
     expect 0 "probation started" "gate: a non-crossing target is not gated and installs (breaking: ${breaking:-none})"
     [[ "$(ran 'boxmunge-check-prereq-')" == 0 && "$(ran 'readiness ran')" == 1 && "$(live)" == b ]] \
         && pass "no prerequisites or gate readiness without a crossing (breaking: ${breaking:-none})" || fail "ran: $(calls)"
+    # Installed ungated, and its readiness says blocked: a release bug, alerted.
+    grep -q "^alert p=0 title=boxmunge 1.5.0: readiness reports blocked (a boxmunge bug) msg=1.5.0 is installed" "$BOXMUNGE_ROOT/calls" \
+        && pass "post-install: a blocked answer after an ungated install is alerted as a bug, priority 0 (breaking: ${breaking:-none})" \
+        || fail "bug alert: $(calls)"
     drop_root
     rm -rf "$RELEASE"
 done
@@ -235,9 +239,11 @@ run_shim force-target 1.5.0
 expect 0 "probation started" "gate: force-target skips the gate"
 [[ "$(ran 'upgrade-notes.json')" == 0 && "$(ran 'boxmunge-check-prereq-')" == 0 ]] \
     && pass "gate: force-target skips the gate and downloads no notes" || fail "force-target: $(calls)"
-# After it, the release's readiness still reports blocked: a release bug, alerted.
-grep -q "^alert p=0 title=boxmunge 1.5.0: readiness reports blocked (a boxmunge bug) msg=1.5.0 is installed" "$BOXMUNGE_ROOT/calls" \
-    && pass "post-install: a blocked answer after an install is alerted as a bug, priority 0" || fail "bug alert: $(calls)"
+# After it, the release's readiness still reports the blocks the operator
+# installed over: said as that, not as a release bug.
+grep -q "^alert p=0 title=boxmunge 1.5.0: installed by force-target over its readiness blocks msg=The operator installed 1.5.0 with force-target over what its own readiness check blocks: box: Docker Compose 2.30.0 is too old. " "$BOXMUNGE_ROOT/calls" \
+    && [[ "$(ran 'a boxmunge bug')" == 0 ]] \
+    && pass "post-install: after force-target, the blocks are alerted as the operator's override" || fail "override alert: $(calls)"
 drop_root
 
 # --- the notes are part of the signed release ----------------------------------------

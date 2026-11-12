@@ -126,13 +126,15 @@ gate_refused() {
     die "$msg"
 }
 
-# post_install_todo <version>: once <version> is live and on probation, its
-# readiness command (as deploy, confined) lists what each project must
-# change before its next deploy, as one low-priority alert; "blocked" is a
-# release bug (the upgrade went ahead), said at normal priority. It can
-# neither fail nor roll back the upgrade: whatever goes wrong is a warning.
+# post_install_todo <version> <mode>: once <version> is live and on
+# probation, its readiness command (as deploy, confined) lists what each
+# project must change before its next deploy, as one low-priority alert.
+# "blocked" is said at normal priority: after force-target, as the blocks the
+# operator installed over; otherwise as a release bug (the upgrade went
+# ahead). It can neither fail nor roll back the upgrade: whatever goes wrong
+# is a warning.
 post_install_todo() {
-    local version="$1" out="$TMP_DOWNLOAD/todo.json" rc=0 verdict alert priority title
+    local version="$1" mode="$2" out="$TMP_DOWNLOAD/todo.json" rc=0 verdict alert priority title
     ! semver_lt "$version" "$FIRST_NOTES_RELEASE" || return 0
     if ! command -v systemd-run >/dev/null 2>&1; then
         log "WARN: no systemd-run, so no to-do list for $version's projects"
@@ -140,7 +142,7 @@ post_install_todo() {
     fi
     run_readiness "$(active_venv)" "$out" || rc=$?
     verdict="$(readiness_verdict "$out" "$rc")"
-    if [[ "$verdict" == invalid ]] || ! alert="$(todo_alert "$version" "$out")"; then
+    if [[ "$verdict" == invalid ]] || ! alert="$(todo_alert "$version" "$out" "$mode")"; then
         log "WARN: the readiness check of $version gave no to-do list (exit $rc); run validate <project> before deploying each project"
         bm_log warn upgrade "post-install to-do list unavailable" "{\"version\": \"$version\", \"exit\": $rc}"
         return 0
@@ -152,17 +154,25 @@ post_install_todo() {
     send_notification "$title" "${alert#*$'\n'}" "$priority"
 }
 
-# todo_alert <version> <answer>: the to-do alert as its priority, title and
-# body, one a line (the body over several), or nothing when there is nothing
-# to do.
+# todo_alert <version> <answer> <mode>: the to-do alert as its priority,
+# title and body, one a line (the body over several), or nothing when there
+# is nothing to do.
 todo_alert() {
     python3 -I -c "$PY_CLEAN"'
 import json, sys
-version = sys.argv[1]
+version, mode = sys.argv[1], sys.argv[3]
 with open(sys.argv[2], "rb") as f:
     d = json.loads(f.read())
-def todos(findings):
-    return [f for f in findings if isinstance(f, dict) and f.get("severity") == "todo"] if isinstance(findings, list) else []
+def todos(findings, severity="todo"):
+    return [f for f in findings if isinstance(f, dict) and f.get("severity") == severity] if isinstance(findings, list) else []
+def first_blocks():
+    found = [("box", todos(d.get("box"), "block")[:1])] + [
+        (p.get("name"), todos(p.get("findings"), "block")[:1]) for p in d.get("projects") or [] if isinstance(p, dict)]
+    return clean("; ".join(str(n) + ": " + str(f[0].get("message")) for n, f in found if f), 400)
+if d["result"] == "blocked" and mode == "force":
+    print(0, f"boxmunge {version}: installed by force-target over its readiness blocks", sep="\n")
+    print(f"The operator installed {version} with force-target over what its own readiness check blocks: {first_blocks()}. Fix them before deploying what they name; the whole list: boxmunge-server upgrade-readiness")
+    sys.exit()
 if d["result"] == "blocked":
     print(0, f"boxmunge {version}: readiness reports blocked (a boxmunge bug)", sep="\n")
     print(f"{version} is installed, but its own readiness check reports the box blocked, which an installed release must never do. Report it as a boxmunge bug, with the output of: boxmunge-server upgrade-readiness")
@@ -174,5 +184,5 @@ for name, findings in [("box", d.get("box"))] + [(p.get("name"), p.get("findings
         lines.append(clean(str(name) + ": " + str(first[0].get("message")) + " (" + str(first[0].get("remedy")) + ")", 300))
 if lines:
     print(-1, f"boxmunge {version}: project to-dos before their next deploy", *lines, sep="\n")
-    print("Run validate <project> before deploying each one.")' "$1" "$2"
+    print("Run validate <project> before deploying each one.")' "$1" "$2" "$3"
 }

@@ -345,7 +345,7 @@ write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT']
     rm -f "$(inflight_marker "$ACTIVE_SLOT")"
     refresh_docs_for_slot "$ACTIVE_SLOT"
 
-    post_install_todo "$version"
+    post_install_todo "$version" "$mode"
     local alert
     alert="$(applied_alert "$version" "$mode" "$class")"
     send_notification "${alert%%$'\t'*}" "${alert#*$'\t'}"
