@@ -9,10 +9,9 @@ recorded it from docker info) is emptied through containerd's garbage
 collector (_clean_containerd), and checked empty: that check is the proof,
 since the store's size counts other namespaces, and blobs they share. On a
 graph driver, overlay2/ and image/ go; there, and for dockerd's own
-containerd, the store's size must have fallen by at least the old store's
-inventoried size, less 10%. The size before is journalled when the commit
-starts, so a resumed commit measures against the same figure. Once
-committed, rollback is no longer offered.
+containerd, at least 90% of what the store held when the commit started
+must be gone. That size is journalled then, so a resumed commit measures
+against the same figure. Once committed, rollback is no longer offered.
 """
 from __future__ import annotations
 
@@ -218,12 +217,15 @@ def commit(paths: BoxPaths, *, now: datetime | None = None,
 
 
 def _check_freed(prior: dict, old_root: Path, before: int) -> None:
-    """What was deleted as directories: the old store must have gone."""
+    """What was deleted as directories: the old store, as it stood when this
+    commit began, must have gone. Not the size phase 0 journalled: that is
+    from the migration's first run, and a store pruned before a resume holds
+    less, so the commit would delete it all and still refuse, for good."""
     freed = before - store_size(prior, old_root)
-    if freed < 0.9 * prior["size"]:
-        raise MigrationError(f"only {freed} bytes were freed under {prior['store_root']}, not "
-                             f"the old store's {prior['size']} (less 10%); inspect what is "
-                             f"left, then run userns-commit again")
+    if freed < 0.9 * before:
+        raise MigrationError(f"only {freed} of the {before} bytes the old store held when the "
+                             f"commit began were freed under {prior['store_root']} (90% must "
+                             f"go); inspect what is left, then run userns-commit again")
 
 
 def _commit(paths: BoxPaths, j: Journal, images_dir: Path) -> Journal:

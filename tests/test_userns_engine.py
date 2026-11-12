@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -11,7 +12,7 @@ from boxmunge.userns import switch as sw
 from boxmunge.userns.inventory import ImageEntry, Inventory, VolumeEntry
 from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, load_journal, save_journal
 from boxmunge.userns.preflight import Report
-from boxmunge.userns.shift import ShiftReport
+from boxmunge.userns.shift import Scan, ShiftReport
 from tests.integration.userns.dockerd import FakeTimers
 
 S = 1048576
@@ -205,17 +206,24 @@ def test_the_switch_writes_the_merged_config_and_the_record(paths, monkeypatch,
     assert daemon.calls == ["stop", "start"]
 
 
+@pytest.mark.parametrize("left", ["both", "merged daemon.json only", "record only"])
 def test_a_crash_inside_the_switch_is_undone_before_phase_0_runs_again(paths, monkeypatch,
-                                                                      tmp_path) -> None:
+                                                                      tmp_path, left) -> None:
+    """The switch writes the merged daemon.json, then the record (undoing it,
+    the original, then drops the record): a kill can leave either alone."""
     etc, original, j = _real_switch_box(paths, monkeypatch, tmp_path)
     from boxmunge.userns.daemon_config import merged_daemon_json
-    (etc / "docker" / "daemon.json").write_bytes(merged_daemon_json(original.encode()))
-    sw.uo.write_offset_record(paths, S)
+    if left != "record only":
+        (etc / "docker" / "daemon.json").write_bytes(merged_daemon_json(original.encode()))
+    if left != "merged daemon.json only":
+        sw.uo.write_offset_record(paths, S)
+    assert sw.switch_interrupted(paths, original)
     daemon = _Daemon()
     assert sw.ensure_prior(paths, original, S, daemon) == original
     assert (etc / "docker" / "daemon.json").read_text() == original
     assert sw.uo.recorded_offset(paths) is None and daemon.calls == ["stop", "start"]
     monkeypatch.setattr(sw, "daemon_answers", lambda: True)
+    assert not sw.switch_interrupted(paths, original)
     assert sw.ensure_prior(paths, original, S, daemon) == original
     assert daemon.calls == ["stop", "start"]  # nothing left to undo
 
@@ -278,8 +286,7 @@ def test_rebuild_resumes_a_volume_part_way(paths, monkeypatch, tmp_path) -> None
     monkeypatch.setattr(en, "load_all", lambda *a: events.append("load"))
     monkeypatch.setattr(en, "recreate", lambda v: (events.append("create"),
                                                    new.mkdir(parents=True, exist_ok=True)))
-    monkeypatch.setattr(en, "scan_tree",
-                        lambda *a, **kw: type("S", (), {"setid": {"x": 0o4755}})())
+    monkeypatch.setattr(en, "scan_tree", lambda *a, **kw: Scan([], 1, {"x": 0o4755}))
     shifted = []
     monkeypatch.setattr(en, "shift_tree", lambda tree, s, d, setid, resumed, scan: shifted.append(
         (tree, setid)) or ShiftReport())
@@ -479,19 +486,44 @@ def test_a_journalled_shift_walks_the_tree_twice(monkeypatch, tmp_path) -> None:
     assert saved == [{f"rb:{tmp_path}": {}}]  # journalled once, before the shift
 
 
-def test_a_refused_shift_journals_its_list_first_and_walks_no_further(monkeypatch,
-                                                                      tmp_path) -> None:
+def test_a_refused_resumed_shift_journals_its_list_first_and_walks_no_further(monkeypatch,
+                                                                              tmp_path) -> None:
     """The scan handed to the shift is the one it refuses on, before any
-    change; the tree's list is in the journal by then, as it was when the
-    shift scanned for itself."""
+    change. Of a tree whose shift began, the list is in the journal by then,
+    as it was when the shift scanned for itself."""
     from boxmunge.userns import shift
     from boxmunge.userns.shift import Direction, Scan, ShiftRefused
     monkeypatch.setattr(en, "scan_tree", lambda tree, s, d, resumed: Scan(
         ["dev: device node"], 2, {"suid": 0o4755}))
     monkeypatch.setattr(shift, "walk", lambda root, visit: pytest.fail("walked a refused tree"))
-    j = Journal(FORWARD, "switched", S)
+    j = Journal(FORWARD, "switched", S, setid={str(tmp_path): {}})
     saved = []
     with pytest.raises(ShiftRefused, match="dev: device node"):
         en.shift_journalled(j, tmp_path, Direction.FORWARD, lambda: saved.append(dict(j.setid)),
                             str(tmp_path))
     assert saved == [{str(tmp_path): {"suid": 0o4755}}]
+
+
+def test_a_refused_first_scan_journals_no_setid_list(monkeypatch, tmp_path) -> None:
+    """A tree's list in the journal marks its shift as begun, and a begun
+    shift's scan accepts ids already in the remap range. A tree whose first
+    scan refused was never shifted: the next run must scan it as strictly."""
+    from boxmunge.userns import shift
+    from boxmunge.userns.shift import Direction, ShiftRefused
+    (tmp_path / "outside").write_text("x")
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    os.link(tmp_path / "outside", tree / "linked")
+    monkeypatch.setattr(shift, "mount_points_under", lambda root: [])  # Linux-only probes
+    monkeypatch.setattr(shift, "_xattrs", lambda fd: [])
+    monkeypatch.setattr(shift, "_flags", lambda fd: 0)
+    scans = []
+    real_scan = en.scan_tree
+    monkeypatch.setattr(en, "scan_tree", lambda tree, s, d, resumed: (
+        scans.append(resumed), real_scan(tree, s, d, resumed=resumed))[1])
+    j = Journal(FORWARD, "switched", S)
+    for _ in range(2):
+        with pytest.raises(ShiftRefused, match="hard link to a file outside the tree"):
+            en.shift_journalled(j, tree, Direction.FORWARD, lambda: pytest.fail("journalled"),
+                                str(tree))
+    assert str(tree) not in j.setid and scans == [False, False]
