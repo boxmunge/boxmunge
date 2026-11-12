@@ -72,6 +72,9 @@ def test_box_upgrade_floor_without_a_version_record(box) -> None:
     r = evaluate(box)
     finding = _only(r, "box.upgrade_floor")
     assert str(box.version_file) in finding.remedy
+    assert finding.message == (f"{box.version_file} does not record the release this box "
+                               f"runs as one line like 0.11.6 (it is missing), and an "
+                               f"upgrade must start from 0.11.0 or later")
     assert r.installed == "0.0.0" and r.result == "blocked"
 
 

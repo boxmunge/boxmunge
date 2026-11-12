@@ -44,7 +44,8 @@ from boxmunge.readiness_contract import Finding, ProjectReadiness, Readiness
 from boxmunge.redeploy_hint import redeploy_or_bare
 from boxmunge.state import read_state
 from boxmunge.upgrade_floor import (
-    BRIDGE_COMMAND, BRIDGE_RELEASE, RECORD_RE, BelowUpgradeFloor, require_upgrade_floor,
+    BRIDGE_COMMAND, BRIDGE_RELEASE, RECORD_RE, STARTS_FROM, BelowUpgradeFloor,
+    require_upgrade_floor,
 )
 from boxmunge.version import FALLBACK_VERSION, get_build_version, parse_version_string
 
@@ -100,21 +101,27 @@ def _installed(paths: BoxPaths) -> str | None:
 
 
 def _floor(paths: BoxPaths, installed: str | None) -> list[Finding]:
+    record = paths.version_file
     try:
         require_upgrade_floor(paths, get_build_version())
-    except (BelowUpgradeFloor, OSError) as e:
-        # The first line: what follows is about the blocklist the upgrade's
-        # own dry run leaves, which this check does not.
-        refusal = str(e).split("\n", 1)[0]
-    else:
         return []
-    if installed is None:
-        return [_block(UPGRADE_FLOOR, refusal,
-                       f"as root, write the release this box runs into {paths.version_file} "
-                       f"as X.Y.Z alone, as the message says, {_RECHECK}")]
-    return [_block(UPGRADE_FLOOR, refusal,
-                   f"upgrade to {BRIDGE_RELEASE} first: `upgrade --target {BRIDGE_RELEASE}` "
-                   f"from the deploy shell, or `{BRIDGE_COMMAND}`, {_RECHECK}")]
+    except OSError as e:
+        found = f"it cannot be read: {e.strerror or e}"
+    except BelowUpgradeFloor as e:
+        if installed is not None:
+            # Its first line: the rest is about the blocklist entry the
+            # upgrade's own dry run leaves, which this check does not.
+            return [_block(UPGRADE_FLOOR, str(e).split("\n", 1)[0],
+                           f"upgrade to {BRIDGE_RELEASE} first: `upgrade --target "
+                           f"{BRIDGE_RELEASE}` from the deploy shell, or `{BRIDGE_COMMAND}`, "
+                           f"{_RECHECK}")]
+        found = "it is missing" if not os.path.lexists(record) else "it holds something else"
+    return [_block(UPGRADE_FLOOR,
+                   f"{record} does not record the release this box runs as one line like "
+                   f"{BRIDGE_RELEASE} ({found}), and {STARTS_FROM}",
+                   f"as root, write the release this box runs into {record} as X.Y.Z alone "
+                   f"(`/opt/boxmunge/env-active/bin/boxmunge-server --version` prints it "
+                   f"after the word boxmunge), {_RECHECK}")]
 
 
 def _compose_version() -> list[Finding]:
