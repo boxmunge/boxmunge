@@ -24,7 +24,7 @@ DEFAULTS: dict[str, Any] = {
         "strategy": "leave_broken",
     },
     # Platform auto-update. Security releases always apply; break-fix
-    # releases (critical non-security fixes) apply unless disabled here.
+    # releases (important fixes that prevent issues) apply unless disabled here.
     "auto_update": {"breakfix": True},
     # The opt-out from everything the box sends the version-check service:
     # with enabled: false the box neither checks for releases (nor asks

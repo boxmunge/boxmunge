@@ -1880,7 +1880,7 @@ install without you:
 | Class | Applied automatically? |
 |---|---|
 | `security` | Always. |
-| `breakfix` (a critical non-security fix) | Yes, unless `auto_update.breakfix` is `false` in `boxmunge.yml`. |
+| `breakfix` (an important fix that prevents issues; you shouldn't fall behind on it) | Yes, unless `auto_update.breakfix` is `false` in `boxmunge.yml`. |
 | `feature` | Never. Run `upgrade` when ready. |
 
 Every release is also marked breaking or not. A breaking release changes an
