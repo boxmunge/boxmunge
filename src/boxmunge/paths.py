@@ -154,6 +154,10 @@ class BoxPaths:
         self.update_discovery_state = self.state / "update-discovery.json"
         # Last OS-update check by auto-update, and the alert sent for it.
         self.os_update_state = self.state / "os-updates.json"
+        # Backup evidence (backup_evidence): each project's newest good
+        # snapshot and off-site copy, and the all-projects sync's own record.
+        self.backup_state = self.state / "backup"
+        self.backup_sync_state = self.state / "backup-sync.json"
         # When notify() last logged that Pushover is not configured.
         self.alerts_unconfigured_state = self.state / "alerts-unconfigured.json"
 
@@ -241,6 +245,11 @@ class BoxPaths:
     def project_scan_state(self, name: str) -> Path:
         name = _checked(name)
         return self.state / "scans" / f"{name}.json"
+
+    def project_backup_state(self, name: str) -> Path:
+        """A project's newest good snapshot and off-site copy (backup_evidence)."""
+        name = _checked(name)
+        return self.backup_state / f"{name}.json"
 
     def project_staging_caddy_site(self, name: str) -> Path:
         name = _checked(name)

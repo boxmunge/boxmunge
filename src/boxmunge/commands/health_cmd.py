@@ -347,6 +347,7 @@ def _checks(paths: BoxPaths) -> list[tuple[str, Callable[[], HealthCheck]]]:
         ("recent-errors", lambda: check_recent_errors(paths)),
         ("operational-log", _in("operational_log", "check_operational_log", paths)),
         ("alerts", _in("alerts", "check_alerts", paths)),
+        ("backup-freshness", _in("backup_freshness", "check_backup_freshness", paths)),
         ("container-updates", _in("container_updates", "check_container_updates", paths)),
         ("platform-updates", _in("platform_updates", "check_platform_updates", paths)),
         ("upgrade-probation", _in("upgrade_probation", "check_upgrade_probation", paths)),

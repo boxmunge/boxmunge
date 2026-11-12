@@ -45,12 +45,16 @@ def paired_snapshots(paths: BoxPaths, project: str) -> set[str]:
 
 
 def prune_unpaired(paths: BoxPaths, project: str, kind: BackupKind,
-                   retention: int) -> list[Path]:
-    """prune_backups, sparing every paired snapshot. When a pairing record
-    cannot be read nothing is pruned (a paired snapshot cannot be told
-    apart), and that is said: the record's own readers report it too."""
+                   retention: int, *, published: str | None) -> list[Path]:
+    """prune_backups, sparing every paired snapshot and ``published``, the
+    snapshot the caller has just written (None: it wrote none). Retention
+    orders by the timestamp in the name, so after the clock steps back the
+    newest snapshot can sort as the oldest; it is never the one removed.
+    When a pairing record cannot be read nothing is pruned (a paired
+    snapshot cannot be told apart), and that is said: the record's own
+    readers report it too."""
     try:
-        keep = paired_snapshots(paths, project)
+        keep = paired_snapshots(paths, project) | ({published} if published else set())
     except (ReleaseStateError, StateError) as e:
         message = (f"Not pruning old {kind.value} backups of {project}: which snapshot a "
                    f"rollback is paired with cannot be read ({e}). Fix or remove that "

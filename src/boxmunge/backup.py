@@ -14,6 +14,7 @@ run `boxmunge doctor` to migrate the key.
 import enum
 import os
 import re
+import secrets
 import shutil
 import tempfile
 from collections.abc import Iterator
@@ -22,7 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from boxmunge.fileutil import durable_rename
+from boxmunge.fileutil import fsync_dir
+from boxmunge.fs_nofollow import open_regular_nofollow
 from boxmunge.paths import BoxPaths
 from boxmunge.system_container import (
     SystemContainerError, SystemTools, connect, platform_owner,
@@ -146,22 +148,32 @@ SNAPSHOT_RETENTION = {
 }
 
 _TIMESTAMP = r"\d{4}-\d{2}-\d{2}T\d{6}"
+_UNIQUE = r"[0-9a-f]{8}"
 
 
 def backup_filename(project_name: str, kind: BackupKind) -> str:
-    """Generate a timestamped, kind-tagged backup filename."""
+    """A new snapshot's name: ``<project>-<timestamp>-<unique>-<kind>.tar.gz.age``.
+
+    The timestamp (to the second) orders snapshots and says when each was
+    taken; it does not identify one. Two backups of a kind can finish in one
+    second, and a clock that steps back revisits old seconds, so the random
+    part is what keeps every snapshot's name its own.
+    """
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%S")
-    return f"{project_name}-{ts}-{kind.value}.tar.gz.age"
+    return f"{project_name}-{ts}-{secrets.token_hex(4)}-{kind.value}.tar.gz.age"
 
 
 def parse_snapshot(path: Path, project_name: str) -> tuple[str, BackupKind] | None:
     """(timestamp, kind) of a snapshot name, or None if it is not one.
 
-    Archives written before kinds existed (``<project>-<ts>.tar.gz.age``) count
-    as nightly, so they age out as new nightly backups arrive.
+    Snapshots on disk carry three name forms, and all stay restorable:
+    backup_filename's; ``<project>-<ts>-<kind>``, written before names had
+    a unique part; and ``<project>-<ts>``, written before kinds existed,
+    which counts as nightly so it ages out as nightly backups arrive.
     """
     m = re.fullmatch(
-        rf"{re.escape(project_name)}-({_TIMESTAMP})(?:-([a-z]+))?\.tar\.gz\.age",
+        rf"{re.escape(project_name)}-({_TIMESTAMP})(?:-(?:{_UNIQUE}-)?([a-z]+))?"
+        rf"\.tar\.gz\.age",
         path.name,
     )
     if not m:
@@ -180,11 +192,37 @@ def snapshot_kind(path: Path, project_name: str) -> BackupKind | None:
     return parsed[1] if parsed else None
 
 
+def publish_new(tmp_path: Path, path: Path) -> None:
+    """Give a fully written temp file its final name, durably, replacing nothing.
+
+    link(2) fails when the name is taken, where rename(2) would replace what
+    holds it: a stored snapshot is never overwritten, whatever produced the
+    name. The temp file must be in path's directory. Its data is synced
+    before the link and the directory after it, as durable_rename does.
+    Raises BackupError when path exists (a link at it included).
+    """
+    fd = open_regular_nofollow(tmp_path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    try:
+        os.link(tmp_path, path, follow_symlinks=False)
+    except FileExistsError as e:
+        raise BackupError(
+            f"{path} already exists; a stored snapshot is never overwritten. "
+            f"Run the backup again: every snapshot gets a new name."
+        ) from e
+    tmp_path.unlink()
+    fsync_dir(path.parent)
+
+
 def encrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:
     """Encrypt a file to the recipient of ``paths.backup_key`` using age.
 
-    Writes to a temp file then renames to prevent partial encrypted files
-    from appearing under the final name.
+    Writes to a temp file, then publishes it under the final name
+    (publish_new): no partial file appears there, and a file already there
+    is never replaced (BackupError).
     """
     key_path = paths.backup_key
     if not key_path.exists():
@@ -209,8 +247,8 @@ def encrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:
                 tools.path(input_path),
             ], timeout=BACKUP_CMD_TIMEOUT)
             # age wrote the temp from another container; sync it before it
-            # replaces anything, or a power cut could leave an empty backup.
-            durable_rename(tmp_path, output_path)
+            # gets its name, or a power cut could leave an empty backup.
+            publish_new(tmp_path, output_path)
         except BaseException:
             tmp_path.unlink(missing_ok=True)
             raise

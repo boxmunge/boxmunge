@@ -31,7 +31,8 @@ import pytest
 
 import boxmunge.system_container as sc
 from boxmunge.backup import BackupError, BackupKind, decrypt_file, encrypt_file
-from boxmunge.commands.backup_cmd import list_snapshots, run_backup, run_backup_sync
+from boxmunge.commands.backup_cmd import list_snapshots, run_backup
+from boxmunge.commands.backup_sync_cmd import run_backup_sync
 from boxmunge.commands.restore import run_restore
 from boxmunge.commands.test_restore_cmd import run_test_restore
 from boxmunge.paths import BoxPaths

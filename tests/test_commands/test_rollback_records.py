@@ -26,7 +26,7 @@ def _compose(tag: str) -> str:
 
 def test_rollback_with_a_snapshot_and_a_changed_compose_passes_restores_check(paths) -> None:
     add_project("myapp", paths)
-    with patch("boxmunge.commands.backup_cmd.backup_locked",
+    with patch("boxmunge.commands.backup_cmd.snapshot_locked",
                rb.TestRollbackRestoresData._fake_backup(paths)):
         _deploy(paths, V1, {"VERSION": "v1\n", "compose.yml": _compose("1.27-alpine")},
                 backup="postgres")

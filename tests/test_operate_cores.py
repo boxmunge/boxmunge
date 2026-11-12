@@ -118,7 +118,8 @@ def test_rollback_core(paths, lock_attempts) -> None:
 
 def test_backup_core(paths, lock_attempts) -> None:
     _setup_project(paths)
-    with patch.object(backup_cmd, "_run_backup_inner", return_value=0) as inner:
+    with patch.object(backup_cmd, "_run_backup_inner",
+                      return_value=backup_cmd.BackupResult(0)) as inner:
         assert backup_cmd.backup_locked(NAME, paths) == 0
     inner.assert_called_once()
 

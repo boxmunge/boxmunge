@@ -1,9 +1,10 @@
-"""boxmunge backup/backup-all/backup-sync commands."""
+"""boxmunge backup and backup-all commands (backup-sync: backup_sync_cmd)."""
 
 import enum
 import stat
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import boxmunge.backup as _backup
@@ -12,8 +13,9 @@ from boxmunge.backup import (
     SNAPSHOT_RETENTION, BackupError, BackupKind, backup_filename,
     resolve_backup_service,
 )
+from boxmunge.backup_alerts import deliver
 from boxmunge.backup_dump import execute_dump, remove_stale_dumps
-from boxmunge.config import load_config, ConfigError
+from boxmunge.backup_evidence import record_excused, record_failure, record_snapshot
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.lifecycle import BlockReason, is_blocked
@@ -30,6 +32,29 @@ from boxmunge.snapshot_pairings import prune_unpaired
 # Bounded so a stuck deploy doesn't keep nightly backup running forever.
 _LOCK_RETRY_BUDGET_SECONDS = 30.0
 _LOCK_RETRY_INTERVAL_SECONDS = 2.0
+
+
+@dataclass(frozen=True)
+class BackupResult:
+    """What one run of the backup core did.
+
+    rc 0 with a snapshot: it was published at exactly that path. rc 0
+    without one: none was due (type none, a quarantined project), unless
+    `cause` says backup_source skipped it, which it alerted. rc 1: the
+    backup failed, and `cause` says why."""
+
+    rc: int
+    snapshot: Path | None = None
+    cause: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.rc != 0 and not self.cause:
+            raise ValueError("a failed backup must say why")
+
+
+def _failed(cause: str) -> BackupResult:
+    print(f"ERROR: {cause}", file=sys.stderr)
+    return BackupResult(1, cause=cause)
 
 
 class BackupAttemptResult(enum.Enum):
@@ -80,19 +105,17 @@ def take_snapshot(
     project_name: str, paths: BoxPaths, kind: BackupKind, manifest: dict | None = None,
     compose_file: Path | None = None, *, offline: bool = False,
 ) -> tuple[int, str | None]:
-    """backup_locked, and the name of the snapshot it wrote. The name is
-    None when it wrote none, whose rc is 0 too: type none, a skip (a
-    quarantined project, or backup_source's). Never the newest older
-    snapshot, which holds older data. Caller holds the project lock."""
-    before = {p.name for p in list_snapshots(paths, project_name)}
+    """The backup core's rc, and the name of the snapshot it published: the
+    core says which, so it is never another backup's. The name is None
+    when it wrote none, whose rc is 0 too: type none, a skip (a quarantined
+    project, or backup_source's). Caller holds the project lock."""
     if offline:
-        rc = backup_locked(project_name, paths, kind=kind, manifest=manifest,
-                           compose_file=compose_file, offline=True)
+        result = snapshot_locked(project_name, paths, kind=kind, manifest=manifest,
+                                 compose_file=compose_file, offline=True)
     else:
-        rc = backup_locked(project_name, paths, kind=kind, manifest=manifest,
-                           compose_file=compose_file)
-    new = [p.name for p in list_snapshots(paths, project_name) if p.name not in before]
-    return rc, (new[0] if rc == 0 and new else None)
+        result = snapshot_locked(project_name, paths, kind=kind, manifest=manifest,
+                                 compose_file=compose_file)
+    return result.rc, (result.snapshot.name if result.snapshot is not None else None)
 
 
 def run_backup(
@@ -115,6 +138,17 @@ def backup_locked(
     compose_file: Path | None = None,
     offline: bool = False,
 ) -> int:
+    """snapshot_locked, for a caller that needs only its exit code."""
+    return snapshot_locked(project_name, paths, kind, manifest, compose_file, offline).rc
+
+
+def snapshot_locked(
+    project_name: str, paths: BoxPaths,
+    kind: BackupKind = BackupKind.MANUAL,
+    manifest: dict | None = None,
+    compose_file: Path | None = None,
+    offline: bool = False,
+) -> BackupResult:
     """The backup core. Caller holds the project lock; never takes it.
 
     ``kind`` tags the snapshot and selects its retention: the manifest's
@@ -141,8 +175,7 @@ def backup_locked(
     block = is_blocked(project_name, paths)
     if block and block.reason is BlockReason.MIGRATING or (
             block and block.reason is BlockReason.PAUSED and not offline):
-        print(f"ERROR: {block.refuse_message}", file=sys.stderr)
-        return 1
+        return _failed(block.refuse_message)
     if block and block.reason is BlockReason.QUARANTINED and not offline:
         # Backups of stopped services are pointless and would emit
         # confusing "volume empty" warnings — skip cleanly with a
@@ -155,24 +188,21 @@ def backup_locked(
             "backup", block.skip_message,
             paths, project=project_name,
         )
-        return 0
+        return BackupResult(0)
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
-        print(f"ERROR: Project not found: {project_name}", file=sys.stderr)
-        return 1
+        return _failed(f"Project not found: {project_name}")
 
     if paths.is_project_pre_registered(project_name):
-        print(f"ERROR: Project '{project_name}' is pre-registered (secrets set) but "
-              f"not yet deployed. Upload its first bundle, then deploy it with: "
-              f"boxmunge prod-deploy {project_name}", file=sys.stderr)
-        return 1
+        return _failed(f"Project '{project_name}' is pre-registered (secrets set) but "
+                       f"not yet deployed. Upload its first bundle, then deploy it with: "
+                       f"boxmunge prod-deploy {project_name}")
 
     if manifest is None:
         try:
             source = backup_source(paths, project_name)
         except (ManifestError, ReleaseStateError) as e:
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 1
+            return _failed(str(e))
         if source.manifest is None:
             print(f"{project_name}: backup skipped: {source.skip}")
             log_operation("backup", f"Backup skipped: {source.skip}", paths,
@@ -180,7 +210,8 @@ def backup_locked(
             if source.alert:
                 notify(paths, f"{project_name}: backup skipped", source.skip,
                        component="backup", project=project_name, priority=1)
-            return 0
+                return BackupResult(0, cause=source.skip)
+            return BackupResult(0)
         manifest, compose_file = source.manifest, source.compose_file
 
     backup_conf = manifest.get("backup", {})
@@ -188,29 +219,25 @@ def backup_locked(
 
     if backup_type == "none":
         print(f"{project_name}: no backup configured (type: none)")
-        return 0
+        return BackupResult(0)
 
     dump_command = backup_conf.get("dump_command", "")
     if not dump_command:
-        print(f"ERROR: backup type is '{backup_type}' but no dump_command defined", file=sys.stderr)
-        return 1
+        return _failed(f"backup type is '{backup_type}' but no dump_command defined")
 
     try:
         service = resolve_backup_service(manifest)
     except BackupError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+        return _failed(str(e))
     retention = (backup_conf.get("retention", 7) if kind is BackupKind.NIGHTLY
                  else SNAPSHOT_RETENTION[kind])
     problem = retention_problem(retention)
     if problem:
-        print(f"ERROR: {problem}", file=sys.stderr)
-        return 1
+        return _failed(problem)
     key_path = paths.backup_key
 
     if not key_path.exists():
-        print(f"ERROR: Backup encryption key not found: {key_path}", file=sys.stderr)
-        return 1
+        return _failed(f"Backup encryption key not found: {key_path}")
 
     return _run_backup_inner(
         project_name, paths, dump_command, service, kind, retention, compose_file, offline,
@@ -226,7 +253,7 @@ def _run_backup_inner(
     retention: int,
     compose_file: Path | None = None,
     offline: bool = False,
-) -> int:
+) -> BackupResult:
     print(f"{project_name}: starting {kind.value} backup (service: {service})...")
     sweep_stale_dumps(paths, project_name)
 
@@ -234,27 +261,27 @@ def _run_backup_inner(
         raw_path = execute_dump(paths, project_name, dump_command, service, compose_file,
                                 offline=offline)
     except BackupError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
         log_error("backup", f"Backup dump failed: {e}", paths, project=project_name)
-        return 1
+        return _failed(str(e))
 
     fname = backup_filename(project_name, kind)
+    published = paths.project_backups(project_name) / fname
     try:
-        _backup.encrypt_file(raw_path, paths.project_backups(project_name) / fname, paths)
+        _backup.encrypt_file(raw_path, published, paths)
     except (BackupError, FileNotFoundError) as e:
-        print(f"ERROR: Encryption failed: {e}", file=sys.stderr)
         log_error("backup", f"Backup encrypt failed: {e}", paths, project=project_name)
-        return 1
+        return _failed(f"Encryption failed: {e}")
     finally:
         raw_path.unlink(missing_ok=True)
+    record_snapshot(paths, project_name, fname)
 
-    pruned = prune_unpaired(paths, project_name, kind, retention)
+    pruned = prune_unpaired(paths, project_name, kind, retention, published=fname)
     if pruned:
         print(f"  Pruned {len(pruned)} old {kind.value} backup(s)")
 
     log_operation("backup", f"Backup completed: {fname}", paths, project=project_name)
     print(f"{project_name}: backup complete -> {fname}")
-    return 0
+    return BackupResult(0, snapshot=published)
 
 
 def _attempt_locked_backup(name: str, paths: BoxPaths) -> BackupAttemptResult:
@@ -267,10 +294,15 @@ def _attempt_locked_backup(name: str, paths: BoxPaths) -> BackupAttemptResult:
     """
     try:
         with project_lock(name, paths):
-            rc = backup_locked(name, paths, kind=BackupKind.NIGHTLY)
+            result = snapshot_locked(name, paths, kind=BackupKind.NIGHTLY)
     except LockError:
         return BackupAttemptResult.LOCKED
-    return BackupAttemptResult.OK if rc == 0 else BackupAttemptResult.FAILED
+    if result.rc != 0:
+        record_failure(paths, name, str(result.cause))
+        return BackupAttemptResult.FAILED
+    if result.snapshot is None and result.cause is None:
+        record_excused(paths, name)   # none was due; a skip (cause) is not excused
+    return BackupAttemptResult.OK
 
 
 def _attempt_isolated(name: str, paths: BoxPaths) -> BackupAttemptResult:
@@ -281,6 +313,7 @@ def _attempt_isolated(name: str, paths: BoxPaths) -> BackupAttemptResult:
         return _attempt_locked_backup(name, paths)
     except PROJECT_INPUT_ERRORS as e:
         report_project_failure("backup-all", name, e, paths)
+        record_failure(paths, name, str(e))
         return BackupAttemptResult.FAILED
 
 
@@ -337,16 +370,18 @@ def run_backup_all(paths: BoxPaths) -> int:
 
     # First pass: try every unblocked project once. Skip paused/quarantined
     # cleanly — quarantined gets a structured log entry; paused historically
-    # only printed (preserved).
+    # only printed (preserved). A rightly skipped night is not a missed one.
     for name in projects:
         try:
             block = is_blocked(name, paths)
             if block and block.reason is BlockReason.PAUSED:
                 print(f"  Skipping {name}: paused.")
+                record_excused(paths, name)
                 continue
             if block and block.reason is BlockReason.MIGRATING:
                 print(f"  Skipping {name}: {block.skip_message}.")
                 log_operation("backup", block.skip_message, paths, project=name)
+                record_excused(paths, name)
                 continue
             if block and block.reason is BlockReason.QUARANTINED:
                 print(f"  Skipping {name}: CVE-quarantined.")
@@ -354,9 +389,11 @@ def run_backup_all(paths: BoxPaths) -> int:
                     "backup", block.skip_message,
                     paths, project=name,
                 )
+                record_excused(paths, name)
                 continue
         except PROJECT_INPUT_ERRORS as e:
             report_project_failure("backup-all", name, e, paths)
+            record_failure(paths, name, str(e))
             failed.append(name)
             continue
         result = _attempt_isolated(name, paths)
@@ -410,55 +447,10 @@ def run_backup_all(paths: BoxPaths) -> int:
         )
         _notify_persistent_locks(paths, locked)
 
+    # Tell the operator of each failure above (and anything still undelivered).
+    deliver(paths, notify)
     if failed or locked:
         return 1
-    return 0
-
-
-def run_backup_sync(paths: BoxPaths, project_name: str | None = None) -> int:
-    """Copy encrypted backups to the configured remote with rclone.
-
-    ``rclone copy``, never ``sync``: the remote is an archive, not a mirror,
-    so a local prune or ``project-delete`` never deletes an off-site copy.
-    Off-site retention is the remote's job (for example a bucket lifecycle
-    rule). Layout on the remote: ``<remote>/<project>/backups/<snapshot>``.
-    """
-    try:
-        config = load_config(paths)
-    except ConfigError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
-
-    remote = config.get("backup_remote", "")
-    if not remote:
-        print("ERROR: backup_remote not configured in boxmunge.yml", file=sys.stderr)
-        return 1
-
-    if project_name:
-        src = paths.project_backups(project_name)
-        dest = f"{remote}/{project_name}/backups"
-        include = "/*.tar.gz.age"
-    else:
-        src = paths.projects
-        dest = remote
-        include = "/*/backups/*.tar.gz.age"
-
-    print(f"Copying backups to {dest}...")
-
-    from boxmunge.system_container import RCLONE_CONFIG, SystemContainerError, connect
-
-    try:
-        tools = connect(paths)
-        tools.run(["rclone", "copy", tools.path(src), dest,
-                   "--include", include,
-                   "--config", RCLONE_CONFIG])
-    except SystemContainerError as e:
-        print(f"ERROR: rclone copy failed: {e}", file=sys.stderr)
-        log_error("backup", f"Backup sync to {dest} failed: {e}", paths)
-        return 1
-
-    log_operation("backup", f"Backup sync to {dest} completed", paths)
-    print("Backup sync complete.")
     return 0
 
 
@@ -479,13 +471,3 @@ def cmd_backup_all(args: list[str]) -> None:
     parse_args("backup-all", args)
     paths = BoxPaths()
     sys.exit(run_backup_all(paths))
-
-
-def cmd_backup_sync(args: list[str]) -> None:
-    from boxmunge.commands.argv import parse_args, require_project_name
-    parsed = parse_args("backup-sync", args, max_positional=1)
-    project = None
-    if parsed.positional:
-        project = require_project_name("backup-sync", parsed.positional[0])
-    paths = BoxPaths()
-    sys.exit(run_backup_sync(paths, project))
