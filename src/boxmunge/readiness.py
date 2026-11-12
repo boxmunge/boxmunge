@@ -109,7 +109,7 @@ def _floor(paths: BoxPaths, installed: str | None) -> list[Finding]:
                        f"as X.Y.Z alone, as the message says, {_RECHECK}")]
     return [_block(UPGRADE_FLOOR, refusal,
                    f"upgrade to {BRIDGE_RELEASE} first: `upgrade --target {BRIDGE_RELEASE}` "
-                   f"(as root: {BRIDGE_COMMAND}), {_RECHECK}")]
+                   f"from the deploy shell, or `{BRIDGE_COMMAND}`, {_RECHECK}")]
 
 
 def _compose_version() -> list[Finding]:
