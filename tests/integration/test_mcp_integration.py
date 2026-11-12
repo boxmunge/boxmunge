@@ -217,7 +217,7 @@ def test_clients_of_older_protocol_versions_are_served(version: str) -> None:
     # answer, from the same source as the handshake tool's server_version.
     assert init["result"]["serverInfo"] == {
         "name": "boxmunge", "version": parse_version_string(get_build_version())[0]}
-    assert len(listed["result"]["tools"]) == 21
+    assert len(listed["result"]["tools"]) == 23
     assert called["result"]["isError"] is False
     assert json.loads(called["result"]["content"][0]["text"])["success"] is True
 

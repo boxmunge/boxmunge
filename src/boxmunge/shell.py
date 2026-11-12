@@ -64,8 +64,10 @@ ALLOWED_COMMANDS: set[str] = {
     # Self-test
     "self-test",
     # Upgrade (auto-update is root's: its timer runs it, and it locks
-    # upgrade-root/upgrade.lock, which deploy cannot open)
-    "upgrade",
+    # upgrade-root/upgrade.lock, which deploy cannot open). upgrade-howto
+    # and upgrade-check run as deploy and reach the shim's guide and check
+    # verbs through sudo themselves.
+    "upgrade", "upgrade-howto", "upgrade-check",
     # MCP server
     "mcp-serve",
 }
