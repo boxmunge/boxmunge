@@ -13,7 +13,7 @@ from boxmunge.commands.smoke_result import (
 )
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.service_exec import ServiceCommandTimeout, run_in_container
+from boxmunge.service_exec import UNREAPED, ServiceCommandTimeout, run_in_container
 
 if TYPE_CHECKING:
     from boxmunge.compose_inventory import RunningInventory
@@ -40,10 +40,14 @@ def _smoke_one(container: str, script: str, svc_name: str,
             container, smoke_command(script, svc_name), timeout=SMOKE_TIMEOUT,
             env=[PERIODIC_ENV] if periodic else [], capture_output=True, text=True)
     except ServiceCommandTimeout as e:
-        # No process group in a stopped smoke's message: it differs on every
-        # tick, and the monitor alerts again whenever the message changes.
-        outcome = ("and was stopped there" if e.stopped_group is not None else
-                   f"and stopping it there FAILED ({e.stop_error}), so it may still be running")
+        # Nothing in the message that differs from tick to tick (a process
+        # group, say): the monitor alerts again whenever the message changes.
+        if e.stopped_group is None:
+            outcome = f"and stopping it there FAILED ({e.stop_error}), so it may still be running"
+        elif e.unreaped:
+            outcome = f"and was killed there; {UNREAPED}"
+        else:
+            outcome = "and was stopped there"
         return SmokeResult(
             status="warning",
             message=(f"Smoke test for {svc_name} timed out ({SMOKE_TIMEOUT}s) in container "
@@ -51,7 +55,7 @@ def _smoke_one(container: str, script: str, svc_name: str,
         )
     except OSError as e:
         return SmokeResult(status="warning", message=f"Smoke test for {svc_name}: {e}")
-    return interpret_smoke_result(result.returncode, result.stderr)
+    return interpret_smoke_result(result.returncode, result.stdout, result.stderr)
 
 
 def _smoke_results(smoke_services: dict[str, str], targets: dict[str, list[str]],

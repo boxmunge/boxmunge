@@ -24,13 +24,16 @@ the report names the group that was killed.
 
 from __future__ import annotations
 
+import logging
 import secrets
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from boxmunge.docker_run import docker_env
+
+_LOGGER = logging.getLogger("boxmunge")
 
 # $0 is this script, $1 the pid file name, $2 the command. No output on
 # stdout, which carries the dump.
@@ -51,7 +54,10 @@ rc=$?
 [ -n "$pf" ] && rm -f "$pf"
 exit $rc
 """
-# $1 is the pid file name.
+# $1 is the pid file name. On stdout, the group it killed, and "unreaped"
+# after it when their entries are still listed. What it says on stderr is
+# the same for the same cause on every run (no pid, no file name): the
+# health monitor alerts again whenever a failure's message changes.
 _STOP_SCRIPT = r"""
 pid=""
 for d in /dev/shm /tmp; do
@@ -59,29 +65,49 @@ for d in /dev/shm /tmp; do
 done
 [ -n "$pid" ] || { echo "no record of the command's process group" >&2; exit 1; }
 case "$pid" in
-  *[!0-9]*) echo "pid record $pf holds '$pid', not a process group id" >&2; exit 1 ;;
+  *[!0-9]*) pid=0 ;;
 esac
-[ "$pid" -gt 1 ] || { echo "pid record $pf holds '$pid', not a process group id" >&2; exit 1; }
+[ "$pid" -gt 1 ] || { echo "the pid record does not hold a process group id" >&2; exit 1; }
 [ -r /proc/$$/stat ] || { echo "/proc is not readable" >&2; exit 1; }
-alive() {
+# Whether the group has a member in a state other than $1: "Z" asks for
+# one still running (a zombie has been killed), "" for any entry at all.
+left() {
   for f in /proc/[0-9]*/stat; do
     read -r line < "$f" 2>/dev/null || continue
-    set -- ${line##*) }
-    [ "$3" = "$pid" ] && [ "$1" != Z ] && return 0
+    set -- "$1" ${line##*) }
+    [ "$4" = "$pid" ] && [ "$2" != "$1" ] && return 0
   done
   return 1
 }
 # `kill -9 -N`, not `kill -s KILL -N`: dash (Debian's sh) reads the latter's
 # "-N" as an option and kills nothing.
 kill -9 "-$pid" 2>/dev/null
+running=1
 for i in 1 2 3 4 5 6 7 8 9 10; do
-  alive || { rm -f "$pf"; echo "$pid"; exit 0; }
+  left Z || { running=0; break; }
   sleep 1 2>/dev/null
 done
-echo "process group $pid is still running after SIGKILL" >&2
-exit 1
+[ "$running" = 0 ] || { echo "the process group is still running after SIGKILL" >&2; exit 1; }
+rm -f "$pf"
+# Killed. An init reaps them at once; a PID 1 that is the app itself may
+# never, and then their entries stay (each still counts as a process).
+for i in 1 2 3; do
+  left "" || { echo "$pid"; exit 0; }
+  sleep 1 2>/dev/null
+done
+echo "$pid unreaped"
 """
 _STOP_TIMEOUT = 60
+# Said of a command that was killed but whose entries nothing reaps.
+UNREAPED = ("its finished process entries remain until the container restarts, "
+            "because the container runs without an init process")
+
+
+class Stop(NamedTuple):
+    """How stopping a command in its container went."""
+    group: str | None  # the process group, killed and verified not running
+    error: str | None  # without one, why that could not be confirmed
+    unreaped: bool = False  # killed, but its entries are still listed
 
 
 class ServiceCommandTimeout(Exception):
@@ -89,15 +115,19 @@ class ServiceCommandTimeout(Exception):
 
     ``stopped_group`` is the process group killed and verified gone, or
     None with ``stop_error`` saying why that could not be confirmed.
+    ``unreaped`` is whether the killed group's entries were left listed.
     """
 
     def __init__(self, timeout: float, stopped_group: str | None,
-                 stop_error: str | None) -> None:
+                 stop_error: str | None, unreaped: bool = False) -> None:
         self.timeout = timeout
         self.stopped_group = stopped_group
         self.stop_error = stop_error
+        self.unreaped = unreaped
         if stopped_group is not None:
             outcome = f"it was stopped inside the container (process group {stopped_group})"
+            if unreaped:
+                outcome += f"; {UNREAPED}"
         else:
             outcome = (f"stopping it inside the container FAILED ({stop_error}), "
                        "so it may still be running there")
@@ -116,35 +146,38 @@ def _service_exec(project_dir: Path, project_name: str, service: str,
     return ["docker", "compose", *files, "-p", project_name, "exec", "-T", service]
 
 
-def _stop(exec_into: list[str], pid_name: str,
-          cwd: Path | None = None) -> tuple[str | None, str | None]:
+def _stop(exec_into: list[str], pid_name: str, cwd: Path | None = None) -> Stop:
     """Kill the command's process group in the container ``exec_into`` reaches.
 
-    Returns (group id, None) once the group is verified gone, else
-    (None, why not). The pid file's name is random, so a container that has
-    since been replaced under the same name holds no record and nothing in
-    it is killed.
+    The pid file's name is random, so a container that has since been
+    replaced under the same name holds no record and nothing in it is
+    killed. A failure is worded the same on every run (see _STOP_SCRIPT):
+    never the stop's own command, which holds that name.
     """
     cmd = [*exec_into, "sh", "-c", _STOP_SCRIPT, "boxmunge-stop", pid_name]
     try:
         result = subprocess.run(cmd, cwd=cwd, capture_output=True,
                                 text=True, timeout=_STOP_TIMEOUT, env=docker_env())
-    except (subprocess.TimeoutExpired, OSError) as e:
-        return None, str(e)
-    group = result.stdout.strip()
-    if result.returncode != 0 or not group.isdigit():
-        return None, result.stderr.strip() or f"exit {result.returncode}"
-    return group, None
+    except subprocess.TimeoutExpired:
+        return Stop(None, f"the stop did not finish in {_STOP_TIMEOUT}s")
+    except OSError as e:
+        return Stop(None, f"docker could not be run ({e.strerror or type(e).__name__})")
+    group, *rest = result.stdout.split() or [""]
+    if result.returncode != 0 or not group.isdigit() or rest not in ([], ["unreaped"]):
+        return Stop(None, result.stderr.strip() or f"exit {result.returncode}")
+    return Stop(group, None, unreaped=bool(rest))
 
 
-def _run(exec_into: list[str], command: str, *, timeout: float,
+def _run(exec_into: list[str], where: str, command: str, *, timeout: float,
          cwd: Path | None = None, **run_kwargs: Any) -> subprocess.CompletedProcess:
-    """``sh -c command`` in the container ``exec_into`` reaches, bounded by
-    ``timeout``.
+    """``sh -c command`` in the container ``exec_into`` reaches (``where``,
+    in words), bounded by ``timeout``.
 
     Raises ServiceCommandTimeout when it overruns, after trying to kill it in
     the container. If boxmunge is interrupted meanwhile, the command is
-    killed there too before the interruption propagates.
+    killed there too before the interruption propagates, and a stop that
+    did not leave the container clean is logged, since nothing else will
+    report it.
     """
     pid_name = f"boxmunge-exec-{secrets.token_hex(16)}.pid"
     cmd = [*exec_into, "sh", "-c", _WRAPPER, _WRAPPER, pid_name, command]
@@ -155,7 +188,14 @@ def _run(exec_into: list[str], command: str, *, timeout: float,
     except OSError:
         raise  # nothing started
     except BaseException:
-        _stop(exec_into, pid_name, cwd)
+        stop = _stop(exec_into, pid_name, cwd)
+        scope = {"component": "service-exec"}
+        if stop.group is None:
+            _LOGGER.warning("A command interrupted in %s may still be running there: "
+                            "stopping it failed (%s)", where, stop.error, extra=scope)
+        elif stop.unreaped:
+            _LOGGER.warning("A command interrupted in %s was killed there; %s",
+                            where, UNREAPED, extra=scope)
         raise
 
 
@@ -164,7 +204,8 @@ def run_in_service(
     *, timeout: float, compose_file: Path | None = None, **run_kwargs: Any,
 ) -> subprocess.CompletedProcess:
     """``sh -c command`` in the service's container, killably (see _run)."""
-    return _run(_service_exec(project_dir, project_name, service, compose_file), command,
+    return _run(_service_exec(project_dir, project_name, service, compose_file),
+                f"service {service} of {project_name}", command,
                 timeout=timeout, cwd=project_dir, **run_kwargs)
 
 
@@ -175,4 +216,5 @@ def run_in_container(
     """``sh -c command`` in that one container, killably (see _run), with
     each ``NAME=value`` of ``env`` added to its environment."""
     flags = [arg for variable in env for arg in ("-e", variable)]
-    return _run(["docker", "exec", *flags, container], command, timeout=timeout, **run_kwargs)
+    return _run(["docker", "exec", *flags, container], f"container {container}", command,
+                timeout=timeout, **run_kwargs)

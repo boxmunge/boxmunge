@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from boxmunge.commands.smoke_result import STARTED
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state, write_state
 from tests.deploy_helpers import mark_deployed
@@ -60,7 +61,7 @@ class _Smoke:
         assert cmd[:2] == ["docker", "exec"], cmd
         self.calls += 1
         rc, stderr = self.results.pop(0) if len(self.results) > 1 else self.results[0]
-        return subprocess.CompletedProcess(cmd, rc, stdout="", stderr=stderr)
+        return subprocess.CompletedProcess(cmd, rc, stdout=STARTED + "\n", stderr=stderr)
 
 
 def _tick(paths: BoxPaths, smoke: _Smoke, down, push) -> int:

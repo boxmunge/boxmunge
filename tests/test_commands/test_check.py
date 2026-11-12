@@ -8,12 +8,15 @@ from unittest.mock import patch, MagicMock
 
 from boxmunge.commands.check import run_check, run_smoke_in_container
 from boxmunge.commands.smoke_result import (
+    STARTED,
     SmokeResult,
     interpret_smoke_result,
     parse_smoke_stderr,
     smoke_command,
 )
 from boxmunge.paths import BoxPaths
+
+RAN = STARTED + "\n"  # what the platform's command prints before the script starts
 
 
 class TestParseSmokeStderr:
@@ -36,35 +39,36 @@ class TestParseSmokeStderr:
 
 class TestInterpretSmokeResult:
     def test_exit_zero_is_healthy(self) -> None:
-        result = interpret_smoke_result(0, "")
+        result = interpret_smoke_result(0, RAN, "")
         assert result.status == "ok"
 
     def test_exit_one_is_warning(self) -> None:
-        result = interpret_smoke_result(1, "Low disk space\n")
+        result = interpret_smoke_result(1, RAN, "Low disk space\n")
         assert result.status == "warning"
         assert result.message == "Low disk space"
 
     def test_exit_two_is_critical(self) -> None:
-        result = interpret_smoke_result(2, "Security breach detected\n")
+        result = interpret_smoke_result(2, RAN, "Security breach detected\n")
         assert result.status == "critical"
         assert result.message == "Security breach detected"
 
     def test_other_exit_code_is_warning(self) -> None:
-        result = interpret_smoke_result(127, "command not found\n")
+        result = interpret_smoke_result(127, RAN, "command not found\n")
         assert result.status == "warning"
 
     def test_container_gone_is_not_critical(self) -> None:
         """A missing/renamed container while a stage is active is expected —
         it means the smoke could not be run, not that the app is unhealthy."""
         result = interpret_smoke_result(
-            1, "Error response from daemon: No such container: engine-engine-1\n",
+            1, "", "Error response from daemon: No such container: engine-engine-1\n",
         )
         assert result.status == "warning"
+        assert result.message.startswith("smoke could not run (infrastructure, not app)")
 
     def test_real_app_critical_still_critical(self) -> None:
         """A genuine app-reported critical (exit 2, app's own message) must
         still escalate — the harness guard must not mask real failures."""
-        result = interpret_smoke_result(2, "Security breach detected\n")
+        result = interpret_smoke_result(2, RAN, "Security breach detected\n")
         assert result.status == "critical"
 
 
@@ -114,7 +118,7 @@ class TestRunSmokeInContainer:
 
     @patch("boxmunge.service_exec.subprocess.run")
     def test_failed_smoke(self, mock_run: MagicMock, tmp_path: Path) -> None:
-        mock_run.return_value = MagicMock(returncode=1, stderr="Connection refused\n")
+        mock_run.return_value = MagicMock(returncode=1, stdout=RAN, stderr="Connection refused\n")
         result = run_smoke_in_container(
             tmp_path, self.MANIFEST, ["compose.yml", "compose.boxmunge.yml"],
         )
@@ -179,7 +183,7 @@ class TestRunSmokeInContainer:
         self.containers.run("myapp", "web", _IMG, name="myapp-web-3", running=False)
         self.containers.run("myapp", "web", _IMG, name="myapp-web-run-x", oneoff=True)
         mock_run.side_effect = [MagicMock(returncode=0, stderr=""),
-                                MagicMock(returncode=1, stderr="replica 2 down\n"),
+                                MagicMock(returncode=1, stdout=RAN, stderr="replica 2 down\n"),
                                 MagicMock(returncode=0, stdout="", stderr="")]  # log scan
         result = run_smoke_in_container(tmp_path, self.MANIFEST, ["compose.yml"])
         execs = [c[0][0][2] for c in mock_run.call_args_list if c[0][0][:2] == ["docker", "exec"]]
