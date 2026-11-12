@@ -244,9 +244,10 @@ def _project(paths: BoxPaths, name: str, refused: list[DryRunLine],
              docker: _Docker) -> ProjectReadiness:
     findings = [_todo(COMPOSE, line.text, str(line.remedy)) for line in refused]
     findings += [_todo(VALIDATE, f"{name}: {error}",
-                       f"fix it in the project's source and deploy the fix (`prod-deploy "
-                       f"{name}`); `validate {name}` lists every problem, and the next "
-                       f"deploy is refused until they are fixed")
+                       f"fix it in the project's source and deploy the fixed release: "
+                       f"`prod-deploy {name}` after uploading it, or once the fix is on a "
+                       f"git project's ref; `validate {name}` lists every problem, and "
+                       f"the next deploy is refused until they are fixed")
                  for error in gather_validation(name, paths)[0]]
     return ProjectReadiness(name, tuple(findings + _missing_images(paths, name, docker)))
 
