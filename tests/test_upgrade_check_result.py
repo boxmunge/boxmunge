@@ -157,6 +157,19 @@ def test_an_exit_code_that_contradicts_the_verdict_is_cant_verify(result: str, r
     assert r.result == "cant_verify" and "exit" in r.reasons[0]
 
 
+@pytest.mark.parametrize("old,new", [
+    ('"result": "pass"', '"result": "blocked", "result": "pass"'),
+    ('"contract": 1', '"contract": 1, "contract": 1'),
+])
+def test_a_key_given_twice_is_cant_verify(old: str, new: str) -> None:
+    """json.loads keeps the last of two: a "blocked" must not be overwritten."""
+    stdout = json.dumps(k3()).replace(old, new, 1)
+    assert new in stdout
+    r = parse(stdout, rc=0)
+    assert r.result == "cant_verify" and r.stage == "shim"
+    assert "duplicate key" in r.reasons[0]
+
+
 def test_unknown_keys_are_ignored() -> None:
     assert parse(k3(later={"x": 1}, readiness=readiness(later=True))).result == "pass"
 

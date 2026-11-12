@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from boxmunge.readiness_contract import ContractError, Finding, Readiness, parse, to_json
+from boxmunge.upgrade_notes import NotesError, _unique_keys
 from boxmunge.upgrade_shim import printable, printable_lines, stderr_tail, sudo_refusal
 
 CHECK_CONTRACT = 1
@@ -148,7 +149,11 @@ def parse_check(stdout: str, stderr: str, returncode: int, *, target: str,
     """The verdict of `boxmunge-upgrade check <target>`, from what it printed
     and its exit code. Never raises: what cannot be read is can't verify."""
     try:
-        doc = json.loads(stdout)
+        # A key given twice would otherwise be read as its last value.
+        doc = json.loads(stdout, object_pairs_hook=_unique_keys)
+    except NotesError as e:
+        return _no_verdict(target, installed, "the upgrade shim's verdict is not one this "
+                           f"release reads: {_bounded(e)}")
     except (ValueError, RecursionError):
         doc = None
     if not isinstance(doc, dict) or "check" not in doc:
