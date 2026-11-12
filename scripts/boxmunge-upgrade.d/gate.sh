@@ -90,7 +90,8 @@ print(clean("; ".join(p["script"] + ": " + p["message"] for p in lines if not p[
 
 # gate_readiness <version> <standby>: with GATE set, the readiness command of
 # the release just built into env-<standby> (as deploy, confined) must pass,
-# or the upgrade is refused. Run after the pre-flight, before the stash.
+# or the upgrade is refused. Run in the pre-flight before the release's own
+# dry run, so a box the dry run would refuse is refused here, unblocklisted.
 gate_readiness() {
     local version="$1" out="$TMP_DOWNLOAD/readiness.json" rc=0 verdict
     [[ "$GATE" -eq 1 ]] || return 0

@@ -16,7 +16,8 @@ source "$(dirname "$0")/lib.sh"
 # records each URL; cosign accepts; python3 -m venv copies in the release's
 # venv. Its boxmunge-server answers `upgrade-readiness --json` from
 # mock/readiness.out and .rc (sleeping first while mock/readiness.sleep
-# exists); its python records alerts, blocklist entries, failure reports and
+# exists), and its `upgrade --dry-run` refuses while mock/dry-run-refuses
+# exists; its python records alerts, blocklist entries, failure reports and
 # log lines in calls, like slot a's.
 FIXTURE="$(mktemp -d)"
 REAL_PYTHON3="$(command -v python3)"
@@ -36,6 +37,11 @@ stub "$FIXTURE/venv/bin/pip" 'echo "pip $*" >> "$BOXMUNGE_ROOT/calls"'
 stub "$FIXTURE/venv/bin/boxmunge-server" 'case "$1" in
     --version) echo "boxmunge 1.5.0" ;;
     health) exec health-report 0 ;;
+    upgrade)
+        [[ "${2:-}" == --dry-run && -e "$BOXMUNGE_ROOT/mock/dry-run-refuses" ]] || exit 0
+        echo "dry run refused" >> "$BOXMUNGE_ROOT/calls"
+        echo "ERROR: project app: manifest cannot be migrated" >&2
+        exit 1 ;;
     upgrade-readiness)
         echo "readiness ran as $(id -un)" >> "$BOXMUNGE_ROOT/calls"
         [[ ! -e "$BOXMUNGE_ROOT/mock/readiness.sleep" ]] || sleep 30
@@ -148,6 +154,18 @@ drop_root
 box "$BLOCKED" 1
 run_shim run 1.5.0 https://example.invalid/ignored feature
 expect 1 "Not upgrading to 1.5.0: its readiness check found what blocks it" "gate: the timer's run is gated too"
+drop_root
+
+# The box's state that the release's own dry run would refuse is what its
+# readiness check reports as a block: the gate runs first, so such a box is
+# refused, never blocklisted as a bad release (upgrade-check refuses a
+# blocklisted version, so the agent could not even see why).
+box "$BLOCKED" 1
+touch "$BOXMUNGE_ROOT/mock/dry-run-refuses"
+run_shim target 1.5.0
+expect 1 "Not upgrading to 1.5.0: its readiness check found what blocks it" "gate: the readiness check runs before the root dry run"
+refused_unchanged "gate, before the dry run"
+[[ "$(ran 'dry run refused')" == 0 ]] && pass "the dry run never ran on a box the gate refused" || fail "dry run ran: $(calls)"
 drop_root
 
 box "$TODO"

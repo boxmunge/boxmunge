@@ -256,12 +256,15 @@ upgrade_to() {
         || preflight_fail "$version" "$from_version" "preflight_failed: cli_version" \
             "Pre-flight FAILED: CLI version check"
 
+    # Crossing a breaking release, the box must pass the release's readiness
+    # check (gate.sh) before its dry run: what the dry run would refuse on
+    # this box, the check reports, and it refuses without blocklisting.
+    gate_readiness "$version" "$standby"
     "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge-server" upgrade --dry-run \
         || preflight_fail "$version" "$from_version" "preflight_failed: dry_run" \
             "Pre-flight FAILED: dry-run upgrade"
 
     log "Pre-flight passed"
-    gate_readiness "$version" "$standby"
 
     # 3. STASH (using active/trusted venv)
     log "Creating platform stash..."
