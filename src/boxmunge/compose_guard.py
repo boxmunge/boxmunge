@@ -74,9 +74,11 @@ def _refused(paths: BoxPaths, project_name: str, component: str, reason: str,
     if not start_alerts.alerted_recently(paths, project_name, reason, now):
         hint = (" If you did not make this change, a container may have tampered with "
                 "the project's files: inspect it before redeploying." if tampering else "")
-        notify(paths, f"{project_name}: start refused", message + hint,
-               component=component, project=project_name, priority=1)
-        start_alerts.record(paths, project_name, reason, now)
+        # Only a delivered alert starts the quiet interval: one Pushover did
+        # not take is tried again at the next refusal.
+        if notify(paths, f"{project_name}: start refused", message + hint,
+                  component=component, project=project_name, priority=1):
+            start_alerts.record(paths, project_name, reason, now)
     return ComposeRefused(message)
 
 

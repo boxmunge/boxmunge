@@ -15,8 +15,9 @@ if TYPE_CHECKING:
 
 # A persistently tampered project is checked on every timer tick (container
 # update daily, health every few minutes); without this an operator is paged
-# on each one. The refusal is always logged; the alert repeats only this
-# often per project and reason.
+# on each one. The refusal is always logged; a delivered alert repeats only
+# this often per project and reason. The caller records an alert only once
+# notify says it was delivered, so an undelivered one is tried again.
 _ALERT_INTERVAL = timedelta(hours=24)
 
 
