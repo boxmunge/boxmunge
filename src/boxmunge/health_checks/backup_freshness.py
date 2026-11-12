@@ -12,7 +12,7 @@ project:
   recorded yet, or, once a scheduled sync has run with the remote, a
   snapshot that has waited over 26 hours for its copy;
 or when the all-projects sync is failing, a record cannot be read, or
-state/backup cannot be written (backup alerts are then held or repeat).
+state/backup looks unwritable (the five-minute backup alerts may be held).
 
 A warning, never an error: none of these is a defect of the release, and
 none must roll back a platform upgrade in probation. The alerts for the
@@ -48,7 +48,8 @@ def _state_problems(paths: BoxPaths) -> list[str]:
         problem = f"{paths.backup_state} cannot be examined: {e}"
     if problem is None:
         return []
-    return [f"{problem}: the five-minute backup alerts are held until it can be"]
+    return [f"{problem}: backup state may not be recorded, and the five-minute backup "
+            f"alerts may be held (the nightly runs still alert)"]
 
 
 def _sync(paths: BoxPaths, problems: list[str]) -> Evidence | None:

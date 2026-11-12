@@ -9,6 +9,7 @@ only the dump, age, notify and the state write are stood in for.
 """
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -16,10 +17,12 @@ from unittest.mock import patch
 
 import pytest
 
-from boxmunge import backup_alerts, backup_evidence
+from boxmunge import backup, backup_alerts, backup_evidence
 from boxmunge.backup import BackupError
 from boxmunge.backup_alerts import alert_backups, deliver
-from boxmunge.backup_evidence import project_evidence, record_failure
+from boxmunge.backup_evidence import (
+    project_evidence, record_excused, record_failure, record_synced,
+)
 from boxmunge.commands import backup_cmd
 from boxmunge.commands.backup_cmd import list_snapshots, run_backup, run_backup_all
 from boxmunge.health_checks.backup_freshness import check_backup_freshness
@@ -151,5 +154,104 @@ def test_the_check_names_why_the_state_cannot_be_written_without_writing(paths, 
     finally:
         paths.backup_state.chmod(0o700)
     assert check.status == "warn"
-    assert check.detail == (f"{paths.backup_state} cannot be written: Permission denied "
-                            f"(EACCES): the five-minute backup alerts are held until it can be")
+    assert check.detail == (
+        f"{paths.backup_state} is not writable by the user running this check "
+        f"(uid {os.geteuid()}): backup state may not be recorded, and the five-minute "
+        f"backup alerts may be held (the nightly runs still alert)")
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
+def test_a_nightly_run_that_cannot_open_the_alerts_lock_still_alerts(paths, project) -> None:
+    """No lock file and none can be made (as on a read-only filesystem):
+    the run used to stop there and send only the unwritten-state alert."""
+    stored_snapshot(paths, P, T0)
+    late = T0 + timedelta(hours=51)
+    paths.backup_state.mkdir(parents=True)
+    paths.backup_state.chmod(0o500)
+    alerts, unwritten, ticked = Alerts(), Alerts(), Alerts()
+    try:
+        with patch.object(backup_evidence, "notify", unwritten):
+            deliver(paths, alerts, now=late)
+        with patch.object(backup_alerts, "notify", ticked):
+            alert_backups(paths, now=late)
+    finally:
+        paths.backup_state.chmod(0o700)
+    assert alerts.titles == [STALE]
+    assert {title for title, _priority in unwritten.titles} == {UNWRITTEN[0]}
+    assert "Permission denied" in unwritten.sent[0][1]
+    assert ticked.sent == []                                  # the tick holds: no storm
+    assert "Backup alerts were not checked or sent" in paths.log_file.read_text()
+
+
+def test_a_lock_that_is_not_a_regular_file_is_named_by_the_check(paths, project) -> None:
+    stored_snapshot(paths, P, T0)
+    late = T0 + timedelta(hours=51)
+    paths.backup_state.mkdir(parents=True)
+    lock = paths.backup_state / ".alerts.lock"
+    lock.symlink_to("/dev/null")
+    ticked, alerts = Alerts(), Alerts()
+    with patch.object(backup_alerts, "notify", ticked):
+        alert_backups(paths, now=late)
+    assert ticked.sent == []
+    detail = check_backup_freshness(paths, now=late).detail
+    assert f"{lock} is not a regular file" in detail and "may be held" in detail
+    with patch.object(backup_evidence, "notify", Alerts()):
+        deliver(paths, alerts, now=late)                     # the nightly run goes on
+        deliver(paths, alerts, now=late)                     # claimed: said once
+    assert alerts.titles == [STALE]
+
+
+def test_a_snapshot_stored_but_not_confirmed_on_disk_is_said_to_be_there(
+        paths, project, capsys) -> None:
+    def io_error(directory):
+        raise OSError(5, "Input/output error")
+
+    alerts = Alerts()
+    with patch.object(backup, "fsync_dir", io_error):
+        assert _nightly(paths, alerts, _dump_works) == 1
+        capsys.readouterr()
+        with patch.object(backup_cmd, "execute_dump", _dump_works):
+            assert run_backup(P, paths) == 1
+    names = [s.name for s in list_snapshots(paths, P)]
+    [nightly] = [n for n in names if "-nightly" in n]
+    [by_hand] = [n for n in names if "-manual" in n]
+    assert sorted(f.name for f in paths.project_backups(P).iterdir()) == sorted(
+        [nightly, by_hand])                                   # no temporary file left
+    assert f"The snapshot {by_hand} is in place" in capsys.readouterr().err
+    [(title, body, _priority)] = alerts.sent
+    assert title == FAILED[0] and "Input/output error" in body
+    assert f"The snapshot {nightly} is in place, but it could not be confirmed" in body
+    assert "not stored" not in body and "No snapshot is on disk" not in body
+    assert project_evidence(paths, P).snapshot == by_hand
+    assert "no backup yet" not in check_backup_freshness(paths).detail
+
+
+def test_a_record_written_while_the_clock_ran_ahead_still_counts(paths, project) -> None:
+    """The clock stepped back two hours: the record read as damaged, the
+    next change replaced it, and the 50-hour alert went out again."""
+    now = datetime.now(timezone.utc)
+    stored_snapshot(paths, P, now - timedelta(hours=60))
+    alerts = Alerts()
+    deliver(paths, alerts)
+    assert len(alerts.sent) == 1
+    record_synced(paths, [P], now, now=now + timedelta(hours=2))
+    claimed = project_evidence(paths, P)
+    stored_snapshot(paths, P, now - timedelta(hours=59))      # a new condition to claim
+    deliver(paths, alerts)
+    deliver(paths, alerts)
+    assert len(alerts.sent) == 2
+    after = project_evidence(paths, P)
+    assert after.synced_at == claimed.synced_at == now + timedelta(hours=2)
+
+
+def test_a_change_drops_only_the_entries_of_a_record_that_are_wrong(paths, project) -> None:
+    record_excused(paths, P, now=T0)
+    record_synced(paths, [P], T0, now=T0)
+    path = paths.project_backup_state(P)
+    path.write_text(json.dumps({**json.loads(path.read_text()),
+                                "failing_since": "0001-01-01T00:00:00+12:00",
+                                "failure": "planted", "alerted": {"stale": "x"}}))
+    record_failure(paths, P, CAUSE, now=T0 + timedelta(hours=24))
+    after = project_evidence(paths, P)
+    assert (after.excused_at, after.synced_at, after.alerted) == (T0, T0, {"stale": "x"})
+    assert (after.failing_since, after.failure) == (T0 + timedelta(hours=24), CAUSE)

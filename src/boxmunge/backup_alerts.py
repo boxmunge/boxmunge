@@ -23,14 +23,19 @@ check-all's five-minute tick therefore sends nothing it cannot claim: it
 logs why, and backup-freshness reports the unwritable state. A nightly run
 sends it unclaimed (once a night at most) and reports the unwritten state
 with its other unwritten changes (backup_evidence.reporting_unwritten).
+The same holds when the lock that keeps two runs from sending one alert
+cannot be taken (a read-only filesystem): the tick sends nothing, a
+nightly run goes on without it.
 """
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from boxmunge.backup_evidence import (
-    Evidence, Send, claim, deployed_projects, report_unwritten, sync_evidence, withdraw,
+    ALERTS_LOCK, Evidence, Send, claim, deployed_projects, report_unwritten, sync_evidence,
+    withdraw,
 )
 from boxmunge.backup_standing import (
     ALERT_AFTER, Standing, awaiting_copy_since, newest_snapshot, remote_configured,
@@ -138,8 +143,15 @@ def _expected_sync(paths: BoxPaths) -> Evidence | None:
 
 
 def _deliver(paths: BoxPaths, send: Send, now: datetime, held: list[str] | None) -> None:
-    # Held across the sends: a second run waits, then finds them claimed.
-    with exclusive_lock(paths.backup_state / ".alerts.lock"):
+    with ExitStack() as locked:
+        try:
+            # Held across the sends: a second run waits, then finds them claimed.
+            locked.enter_context(exclusive_lock(paths.backup_state / ALERTS_LOCK))
+        except OSError as e:
+            if held is not None:
+                raise   # the tick sends nothing it could send twice
+            report_unwritten(paths, None, "that this run holds the backup alerts lock (it "
+                             "goes on without: another run could send the same alert)", e)
         sync = _expected_sync(paths)
         for project in deployed_projects(paths):
             try:
@@ -159,8 +171,8 @@ def deliver(paths: BoxPaths, send: Send, *, now: datetime | None = None) -> None
     alert that is due and was not delivered yet."""
     try:
         _deliver(paths, send, now or datetime.now(timezone.utc), held=None)
-    except OSError as e:
-        report_unwritten(paths, None, "which backup alerts were sent", e)
+    except OSError as e:   # the projects directory cannot be listed
+        report_unwritten(paths, None, "which backup alerts were due", e)
 
 
 def alert_backups(paths: BoxPaths, *, now: datetime | None = None) -> None:
@@ -170,7 +182,9 @@ def alert_backups(paths: BoxPaths, *, now: datetime | None = None) -> None:
     try:
         _deliver(paths, notify, now or datetime.now(timezone.utc), held)
     except OSError as e:
-        log_error("backup", f"Backup alerts were not checked: {e}", paths)
+        log_error("backup", f"Backup alerts were not checked or sent: {e}. `boxmunge "
+                  f"health` (backup-freshness) says what it sees of the backup state, "
+                  f"and the nightly runs alert.", paths)
     if held:
         log_error("backup", f"{len(held)} backup alert(s) held: the backup state cannot be "
                   f"written, so each would be sent again every five minutes. `boxmunge "

@@ -38,6 +38,10 @@ class BackupError(Exception):
     """Raised when a backup operation fails."""
 
 
+class SnapshotUnconfirmed(BackupError):
+    """The snapshot has its name, but that could not be confirmed on disk."""
+
+
 def resolve_backup_service(manifest: dict[str, Any]) -> str:
     """Resolve which compose service the backup dump/restore runs against.
 
@@ -246,6 +250,8 @@ def publish_new(tmp_path: Path, path: Path) -> None:
     before the link and the directory after it, as durable_rename does.
     Raises BackupError when path exists (a link at it included), or the
     filesystem refuses the link: the cause is named, and nothing is stored.
+    Raises SnapshotUnconfirmed when the link was made and what follows it
+    failed: the snapshot is there.
     """
     fd = open_regular_nofollow(tmp_path, os.O_RDONLY)
     try:
@@ -264,8 +270,15 @@ def publish_new(tmp_path: Path, path: Path) -> None:
             f"Cannot give the snapshot its name {path}: {e}. Nothing was stored. "
             f"Fix the cause, then run the backup again."
         ) from e
-    tmp_path.unlink()
-    fsync_dir(path.parent)
+    try:
+        tmp_path.unlink()
+        fsync_dir(path.parent)
+    except OSError as e:
+        raise SnapshotUnconfirmed(
+            f"The snapshot {path.name} is in place, but it could not be confirmed "
+            f"flushed to disk: {e}. A power loss now could lose it. Fix the cause, "
+            f"then run the backup again."
+        ) from e
 
 
 def encrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:

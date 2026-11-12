@@ -270,6 +270,10 @@ def _run_backup_inner(
     published = paths.project_backups(project_name) / fname
     try:
         _backup.encrypt_file(raw_path, published, paths)
+    except _backup.SnapshotUnconfirmed as e:   # stored, so recorded; still a failed run
+        record_snapshot(paths, project_name, fname)
+        log_error("backup", str(e), paths, project=project_name)
+        return _failed(str(e))
     except (BackupError, OSError) as e:   # the key is gone, age failed, no room, no link
         log_error("backup", f"Backup not stored: {e}", paths, project=project_name)
         return _failed(f"Snapshot not stored: {e}")

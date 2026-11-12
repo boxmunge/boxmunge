@@ -119,7 +119,7 @@ def test_a_failing_sync_warns_with_its_cause(box) -> None:
     assert "quota exceeded" in check.detail and "boxmunge backup-sync" in check.detail
 
 
-AHEAD = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+AHEAD = (datetime.now(timezone.utc) + timedelta(days=30)).isoformat()
 
 
 @pytest.mark.parametrize("recorded", [

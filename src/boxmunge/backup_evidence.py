@@ -28,7 +28,8 @@ Deploy writes these (backups, the sync) and so does root (check-all's
 alerts, the userns migration's backups), so every change is a
 read-modify-write under one lock. A record a writer cannot read is logged
 and replaced; a reader gets a StateError naming the file, which covers a
-time no backup could have run at (out of range, or ahead of the clock).
+time no backup could have run at (out of range, or far ahead of the
+clock). A writer drops only the entries that are wrong and keeps the rest.
 
 A change that cannot be written never fails the backup that made it, and
 is never kept quiet either: report_unwritten logs it, prints it, and
@@ -36,18 +37,17 @@ alerts, once per scheduled run (reporting_unwritten) or at once.
 """
 from __future__ import annotations
 
-import errno
 import os
+import stat
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from boxmunge.backup import AHEAD_SLACK
 from boxmunge.fileutil import exclusive_lock
 from boxmunge.log import log_error
 from boxmunge.notify import notify
@@ -57,6 +57,11 @@ from boxmunge.state import StateError, read_state, write_state
 _TIMES = ("snapshot_at", "excused_at", "failing_since", "failed_at", "synced_at",
           "unsynced_since", "expected_since")
 _TEXTS = ("snapshot", "failure")
+_FIELDS = (*_TIMES, *_TEXTS, "alerted")
+STATE_LOCK, ALERTS_LOCK = ".lock", ".alerts.lock"   # in state/backup
+# A time this far ahead of the clock was written before the clock stepped
+# back: the record stands, and an alert claimed then still counts as sent.
+_AHEAD_LIMIT = timedelta(days=2)
 _EARLIEST = datetime(2020, 1, 1, tzinfo=timezone.utc)   # no boxmunge backup is older
 CAUSE_LIMIT = 600   # an alert carries the cause; a dump's stderr can be long
 _SHOWN, _SHOWN_LENGTH = 3, 250   # of the unwritten changes, in one alert
@@ -83,7 +88,7 @@ class Evidence:
 def _time(raw: Any, key: str, path: Path) -> datetime:
     """A recorded time, in UTC. Raises StateError for anything else, and for
     a time no backup could have run at: arithmetic on one overflows, and
-    one ahead of the clock would keep a project fresh until the clock
+    one far ahead of the clock would keep a project fresh until the clock
     reached it."""
     try:
         at = datetime.fromisoformat(raw)
@@ -93,26 +98,31 @@ def _time(raw: Any, key: str, path: Path) -> datetime:
         raise StateError(f"State file {path}: {key} has no timezone ({raw!r})")
     try:
         at = at.astimezone(timezone.utc)
-        possible = _EARLIEST <= at <= datetime.now(timezone.utc) + AHEAD_SLACK
+        possible = _EARLIEST <= at <= datetime.now(timezone.utc) + _AHEAD_LIMIT
     except OverflowError:
         possible = False
     if not possible:
         raise StateError(f"State file {path}: {key} is not a time a backup could have "
-                         f"run at ({raw!r}: before 2020, or ahead of the clock)")
+                         f"run at ({raw!r}: before 2020, or over two days ahead of the clock)")
     return at
 
 
-def _parse(record: dict[str, Any], path: Path) -> Evidence:
-    values: dict[str, Any] = {
-        key: _time(record[key], key, path) for key in _TIMES if record.get(key) is not None}
-    for key in _TEXTS:
+def _field(record: dict[str, Any], key: str, path: Path) -> Any:
+    """The record's entry for `key`, as Evidence holds it. Raises StateError."""
+    if key in _TIMES:
+        return _time(record[key], key, path) if record.get(key) is not None else None
+    if key in _TEXTS:
         if not isinstance(record.get(key, ""), str):
             raise StateError(f"State file {path}: {key} is not text")
-        values[key] = record.get(key)
+        return record.get(key)
     alerted = record.get("alerted", {})
     if not isinstance(alerted, dict) or not all(isinstance(v, str) for v in alerted.values()):
         raise StateError(f"State file {path}: alerted is not a mapping of text")
-    return Evidence(alerted=dict(alerted), **values)
+    return dict(alerted)
+
+
+def _parse(record: dict[str, Any], path: Path) -> Evidence:
+    return Evidence(**{key: _field(record, key, path) for key in _FIELDS})
 
 
 def project_evidence(paths: BoxPaths, project: str) -> Evidence:
@@ -143,26 +153,35 @@ def deployed_projects(paths: BoxPaths) -> list[str]:
 
 
 def write_problem(paths: BoxPaths) -> str | None:
-    """Why a record cannot be written now, as far as shows without writing
-    one (`health` never writes); None when nothing shows. The first write
-    makes the directory, so a missing one is no problem. Raises OSError
-    when the directory cannot be examined."""
+    """What shows, without writing (`health` never writes), that a record
+    may not be writable; None when nothing shows. It is what this process
+    observed, not a verdict: root writes where deploy cannot and into
+    blocks reserved for it, and a write can fail for a cause that does not
+    show. The first write makes the directory, so a missing one is no
+    problem. Raises OSError when the directory cannot be examined."""
     directory = paths.backup_state
     try:
         vfs = os.statvfs(directory)
     except FileNotFoundError:
         return None
     if not directory.is_dir():
-        code = errno.ENOTDIR
-    elif vfs.f_flag & os.ST_RDONLY:
-        code = errno.EROFS
-    elif (vfs.f_blocks and not vfs.f_bavail) or (vfs.f_files and not vfs.f_favail):
-        code = errno.ENOSPC
-    elif not os.access(directory, os.W_OK | os.X_OK):
-        code = errno.EACCES
-    else:
-        return None
-    return f"{directory} cannot be written: {os.strerror(code)} ({errno.errorcode[code]})"
+        return f"{directory} is not a directory"
+    for lock in (directory / STATE_LOCK, directory / ALERTS_LOCK):
+        try:
+            regular = stat.S_ISREG(lock.lstat().st_mode)
+        except FileNotFoundError:
+            continue
+        if not regular:
+            return f"{lock} is not a regular file (remove it: the next run makes its own)"
+    if vfs.f_flag & os.ST_RDONLY:
+        return f"{directory} is on a filesystem mounted read-only"
+    if vfs.f_blocks and not vfs.f_bavail:
+        return f"the filesystem of {directory} has no space left for unprivileged users"
+    if vfs.f_files and not vfs.f_favail:
+        return f"the filesystem of {directory} has no inodes left for unprivileged users"
+    if not os.access(directory, os.W_OK | os.X_OK):
+        return f"{directory} is not writable by the user running this check (uid {os.geteuid()})"
+    return None
 
 
 def report_unwritten(paths: BoxPaths, project: str | None, what: str,
@@ -208,14 +227,19 @@ def _change(paths: BoxPaths, project: str | None,
     """Apply `change` to the project's record (the sync's, for None).
     Raises OSError when it cannot be written."""
     path = paths.project_backup_state(project) if project else paths.backup_sync_state
-    with exclusive_lock(paths.backup_state / ".lock"):
+    with exclusive_lock(paths.backup_state / STATE_LOCK):
         try:
             record = read_state(path)
-            _parse(record, path)
         except StateError as e:
             log_error("backup", f"{e}; replacing it", paths, project=project)
             record = {}
         before = dict(record)
+        for key in _FIELDS:   # only what is wrong goes: the rest still holds
+            try:
+                _field(record, key, path)
+            except StateError as e:
+                log_error("backup", f"{e}; dropping that entry", paths, project=project)
+                del record[key]
         change(record)
         if record != before:
             write_state(path, record)
