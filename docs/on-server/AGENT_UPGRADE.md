@@ -48,9 +48,9 @@ newest release, or the one you named).
 
 ## The box enforces it
 
-An upgrade that crosses a breaking release runs the same readiness check first, and refuses
-unless it passes; nothing is changed or blocklisted. Only the operator's `force-target`
-skips the check.
+From 0.11.8, the release that brings these commands, an upgrade that crosses a breaking
+release runs the same readiness check first, and refuses unless it passes; nothing is
+changed or blocklisted. Only the operator's `force-target` skips the check.
 
 ## When version checks are off
 
@@ -67,8 +67,9 @@ the deploy shell over SSH instead. Retrying less than 10 minutes after the last 
 is refused (CAN'T VERIFY, naming the time to retry from).
 
 - `upgrade-howto --json`: `{"guide": 1, "status": "guide|below_floor|up_to_date",
-  "installed", "target", "box_before", "project_before", "project_after", "box_after",
-  "no_action", "text"}`; `text` is the printed guide.
+  "installed", "target", "floor", "bridge", "box_before", "project_before",
+  "project_after", "box_after", "no_action", "text"}`; `text` is the printed guide, and
+  `floor` and `bridge` are null when the box is up to date.
 - `upgrade-check --json`: `{"check": 1, "result": "pass|blocked|cant_verify", "stage",
   "reasons", "prerequisites", "readiness", "dry_run", ...}`. `readiness` holds `box` and
   `projects[].findings`. Stage `shim` means the upgrade shim gave no usable verdict.
