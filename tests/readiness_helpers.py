@@ -18,6 +18,7 @@ from boxmunge.manifest import CURRENT_SCHEMA_VERSION
 from boxmunge.paths import BoxPaths
 from boxmunge.readiness_contract import Finding, Readiness
 from boxmunge.release_txn import open_txn
+from boxmunge.state import write_state
 from boxmunge.version import write_installed_version
 from tests.deploy_helpers import mark_deployed
 
@@ -51,6 +52,7 @@ def add_project(paths: BoxPaths, name: str, *, compose: str | None = None,
     (pdir / "compose.yml").write_text(f"services:\n  web:\n    image: {IMAGE}\n")
     paths.project_caddy_site(name).write_text(f"# live config for {name}\n")
     mark_deployed(paths, name)
+    write_state(paths.project_deploy_state(name), {"current_ref": f"{name}-v1"})
     if compose is not None:
         (pdir / "compose.yml").write_text(compose)
     return pdir

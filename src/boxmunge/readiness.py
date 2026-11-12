@@ -39,6 +39,7 @@ from boxmunge.manifest import ManifestError, load_manifest_as_written
 from boxmunge.paths import BoxPaths, InvalidProjectName, validate_project_name
 from boxmunge.readiness_contract import Finding, ProjectReadiness, Readiness
 from boxmunge.redeploy_hint import redeploy_or_bare
+from boxmunge.state import read_state
 from boxmunge.upgrade_floor import (
     BRIDGE_COMMAND, BRIDGE_RELEASE, RECORD_RE, BelowUpgradeFloor, require_upgrade_floor,
 )
@@ -195,8 +196,16 @@ def _dry_run(paths: BoxPaths, skip: set[str],
     return refused, []
 
 
+def _ever_deployed(paths: BoxPaths, name: str) -> bool:
+    """Whether a deploy recorded a release for it. A git project added but
+    not yet deployed has a manifest (a link into repo/) and no images until
+    its first deploy builds or pulls them: nothing of it is missing."""
+    ref = read_state(paths.project_deploy_state(name)).get("current_ref")
+    return isinstance(ref, str) and bool(ref)
+
+
 def _missing_images(paths: BoxPaths, name: str, docker: _Docker) -> list[Finding]:
-    if docker.error is not None:
+    if docker.error is not None or not _ever_deployed(paths, name):
         return []
     project_dir = paths.project_dir(name)
     try:

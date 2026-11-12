@@ -9,9 +9,11 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 from boxmunge.commands.upgrade_cmd import run_upgrade
 from boxmunge.docker_run import DockerError
+from boxmunge.manifest import CURRENT_SCHEMA_VERSION
 from boxmunge.readiness import evaluate
 from boxmunge.readiness_contract import parse, to_json
 from boxmunge.version import write_installed_version
@@ -174,6 +176,27 @@ def test_project_image_missing(box, fake_containers) -> None:
     assert r.projects[0].result == "blocked"
 
 
+def test_a_git_project_not_yet_deployed_does_not_block(box, fake_containers) -> None:
+    """add-git-project links manifest.yml into repo/ before any deploy: no
+    image is missing until its first deploy, and the dry run passes it."""
+    pdir = box.project_dir("fresh")
+    (pdir / "repo").mkdir(parents=True)
+    (pdir / "repo" / "manifest.yml").write_text(yaml.dump({
+        "schema_version": CURRENT_SCHEMA_VERSION, "project": "fresh", "source": "git",
+        "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ", "hosts": ["fresh.test"],
+        "services": {"web": {"port": 8080, "routes": [{"path": "/"}]}}}))
+    (pdir / "repo" / "compose.yml").write_text("services:\n  web:\n    image: fresh/app:1\n")
+    for name in ("manifest.yml", "compose.yml"):
+        (pdir / name).symlink_to(pdir / "repo" / name)
+    fake_containers.images["fresh/app:1"] = None
+    assert run_upgrade(box, dry_run=True) == 0
+    r = evaluate(box)
+    assert "project.image_missing" not in {rule for _, rule in ids(r)}
+    assert r.result == "pass"
+    box.project_deploy_state("fresh").write_text('{"current_ref": "abc1234"}')
+    assert ("fresh", "project.image_missing") in ids(evaluate(box))
+
+
 # --- review focus -----------------------------------------------------------
 
 def test_docker_unreachable_is_one_box_block(box, monkeypatch) -> None:
@@ -218,7 +241,6 @@ def test_never_laxer_than_the_dry_run(box) -> None:
 # --- a check that fails is a block, never a missing verdict -------------------
 
 def _manifest_with(paths, name: str, **values) -> None:
-    import yaml
     path = paths.project_manifest(name)
     path.write_text(yaml.dump({**yaml.safe_load(path.read_text()), **values}))
 
