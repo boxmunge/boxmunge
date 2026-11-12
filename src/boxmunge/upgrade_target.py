@@ -116,6 +116,6 @@ def resolve_target(paths: BoxPaths, explicit: str | None) -> str:
     if action == "up_to_date":
         return installed
     if action == "error":
-        raise TargetError(1, f"{found.get('message')} To name the release instead, {NAME_IT}")
+        raise TargetError(1, f"{found.get('message')} Or {NAME_IT}")
     raise TargetError(1, f"release discovery gave an answer this release does not know "
                          f"({action!r}); {NAME_IT}")

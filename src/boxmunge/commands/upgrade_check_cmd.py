@@ -32,8 +32,8 @@ COMMAND = "upgrade-check"
 
 def run_upgrade_check(paths: BoxPaths, version: str | None, *, as_json: bool) -> int:
     try:
-        installed = installed_release(paths)
         target = resolve_target(paths, version)
+        installed = installed_release(paths)
         if not is_newer(target, installed):
             raise not_newer(COMMAND, target, installed, explicit=version is not None)
     except TargetError as e:

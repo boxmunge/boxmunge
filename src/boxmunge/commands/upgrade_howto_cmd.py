@@ -51,8 +51,8 @@ def _fetch_notes(paths: BoxPaths, target: str) -> bytes | str:
 
 def run_upgrade_howto(paths: BoxPaths, version: str | None, *, as_json: bool) -> int:
     try:
-        installed = installed_release(paths)
         target = resolve_target(paths, version)
+        installed = installed_release(paths)
         if target == installed:
             newest = version is None
             print(json.dumps(up_to_date_json(installed, newest=newest)) if as_json

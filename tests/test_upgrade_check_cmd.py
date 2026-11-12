@@ -139,6 +139,12 @@ def test_cmd_parses_version_and_json() -> None:
     assert run.call_args[0][1:] == ("0.12.0",) and run.call_args[1] == {"as_json": True}
 
 
+def test_a_malformed_version_is_refused_before_anything_is_read(tmp_path, capsys) -> None:
+    paths = BoxPaths(root=tmp_path / "nothing-here")
+    assert run_upgrade_check(paths, "0.12", as_json=False) == 2
+    assert "'0.12' is not a release X.Y.Z" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("args", [["0.12.0"], ["--version"], ["--force"], ["--dry-run"]])
 def test_cmd_usage_errors_exit_2(args: list[str]) -> None:
     with pytest.raises(SystemExit) as done:

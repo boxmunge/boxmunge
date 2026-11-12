@@ -14,6 +14,7 @@ line).
 from __future__ import annotations
 
 import json
+import textwrap
 from dataclasses import replace
 from typing import Any
 
@@ -140,7 +141,8 @@ def render_guide(guide: Guide) -> str:
         lines += ["The release notes ask nothing of this box or its projects.", ""]
     if guide.no_action:
         lines += [f"No project action needed for: {', '.join(guide.no_action)}", ""]
-    lines += ["Base images:", f"  {BASE_IMAGES}", ""]
+    lines += ["Base images:", *textwrap.wrap(BASE_IMAGES, 88, initial_indent="  ",
+                                             subsequent_indent="  "), ""]
     lines += _next_steps(guide.target)
     return printable("\n".join(lines))
 
