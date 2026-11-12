@@ -36,8 +36,8 @@ def load_manifest_as_written(path: Path) -> dict[str, Any]:
     Raises ManifestError, naming the file, if it doesn't exist, is not a
     regular file (a FIFO is refused unopened), can't be read, or can't be parsed.
     """
-    try:  # follows a link: a git project's manifest.yml links into repo/
-        raw = read_bytes_following(path)
+    try:  # follows a link (a git project's, into repo/); 1 MiB is far above any manifest
+        raw = read_bytes_following(path, limit=1024 * 1024)
     except FileNotFoundError:
         raise ManifestError(f"Manifest not found: {path}") from None
     except OSError as e:

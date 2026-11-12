@@ -173,6 +173,11 @@ def test_manifest_loader_refuses_a_fifo_and_caps_the_size(tmp_path) -> None:
     with pytest.raises(OSError, match="larger than 64 bytes"):
         read_bytes_following(big, limit=64)
     assert read_bytes_following(big, limit=1024).startswith(b"project: shop")
+    huge = tmp_path / "huge.yml"
+    with open(huge, "wb") as f:
+        f.truncate(1024 * 1024 + 1)
+    with pytest.raises(ManifestError, match="larger than 1048576 bytes"):
+        load_manifest_as_written(huge)
 
 
 def test_a_fifo_swapped_in_between_stat_and_open_is_refused_not_waited_on(
