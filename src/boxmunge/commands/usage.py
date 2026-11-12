@@ -17,7 +17,7 @@ command.""",
 Usage: boxmunge agent-help [topic]
 
 AI agent orientation. Topics: architecture, operations, conventions, rules,
-security, cve, cve-incident, writable, images.""",
+security, cve, cve-incident, writable, images, upgrade.""",
     "init-host": """\
 Usage: boxmunge init-host
 
@@ -314,9 +314,10 @@ or verified, 2 usage.
 Usage: boxmunge upgrade-check [--version X.Y.Z] [--json]
 
 Run the target release's own readiness check against this box and every
-project, through the root upgrade shim (it can take several minutes, and runs
-at most once every 10 minutes). Exit 0 PASS, 1 BLOCKED or CAN'T VERIFY, 2
-usage. Do not upgrade unless the result is PASS.
+project, through the root upgrade shim. It can take several minutes, and a
+check starts at least 10 minutes after the last one ended. Exit 0 PASS, 1
+BLOCKED or CAN'T VERIFY, 2 usage or nothing to check. Do not upgrade unless
+the result is PASS.
   --version X.Y.Z  The release to check (default: the newest; required when
                    version_check.enabled is false)
   --json           The check's JSON verdict""",

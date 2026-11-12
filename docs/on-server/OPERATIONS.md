@@ -2137,6 +2137,49 @@ The dry run writes nothing and sends no alert. The upgrade shim runs it as a pre
 against the new release before touching anything, so `upgrade --dry-run` run by hand
 reports against the installed release.
 
+### Agent-led upgrades
+
+You, or an agent, can prepare a box and its projects for an upgrade from the deploy shell or
+MCP (`agent-help upgrade` is the agents' page):
+
+- `upgrade-howto [--version X.Y.Z]` prints what the target release (by default the newest)
+  asks of the box and of each project, before and after the upgrade, with a checklist per
+  project file. It is composed on the box from the release's `upgrade-notes.json`, which the
+  upgrade shim's `guide` verb downloads and verifies against the release's signed
+  `SHA256SUMS`, as an upgrade verifies its bundle; notes that name another release are
+  refused. Nothing about the box's projects is sent anywhere.
+- `upgrade-check [--version X.Y.Z]` runs the target release's own readiness check through
+  the shim's `check` verb, as root. The shim downloads and verifies the release, runs its
+  prerequisite scripts, and builds it a scratch venv in `/opt/boxmunge/upgrade-check/`
+  (400 MB free needed there; removed afterwards). It then runs the release's
+  `upgrade-readiness --json` and `upgrade --dry-run` against the live box as the deploy
+  user, confined by `systemd-run` so they can write nothing. The result is PASS, BLOCKED
+  (with every finding and its fix, per project) or CAN'T VERIFY. The check changes no
+  upgrade state: the blocklist, the slots, probation and the stash stay as they are.
+- `upgrade-readiness [--json]` (operator only, as `boxmunge-server`) checks the box against
+  the installed release's own rules. `upgrade-check` runs the target release's copy.
+
+CAN'T VERIFY means the check could not run or finish, never that the box passed. The
+causes: a check already running; one started less than 10 minutes after the last one ended
+(the rate limit, whose refusal names the time to retry from); an upgrade, rollback or
+probation in progress; a download or venv build that failed; a time limit reached on a busy
+box; or a target release without the readiness command. The reason says what to do.
+
+With `version_check.enabled: false` neither command asks boxmunge.dev which release is
+newest: both need `--version`. The release's files come from GitHub, as an upgrade's do.
+
+From 0.11.8 on, an upgrade that crosses a breaking release (as the target's signed notes
+say, not the version-check service) runs the same prerequisites and readiness check before
+it changes anything, and refuses unless they pass. Nothing is changed, the release is not
+blocklisted, and the alert names `upgrade-check --version X.Y.Z`. Security and break-fix
+releases are never breaking, so they install without it. The operator's override skips the
+check: `sudo /opt/boxmunge/bin/boxmunge-upgrade force-target X.Y.Z`.
+
+From the upgrade to 0.11.9 on, once the new release is installed its readiness check runs
+again, and one low-priority alert lists each project's to-do findings: what its next deploy
+needs (run `validate <project>` before deploying each). It never fails or rolls back the
+upgrade.
+
 ### What boxmunge sends home
 
 The box contacts one boxmunge service, the version-check service at boxmunge.dev:

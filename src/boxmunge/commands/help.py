@@ -88,6 +88,10 @@ Platform updates:
   upgrade --repair-deps   Install the installed release's missing hash-pinned
                           dependencies (e.g. MCP), also during probation (deploy
                           shell; as root: boxmunge-upgrade repair-deps)
+  upgrade-howto           What to change before and after an upgrade, on the box
+                          and in each project (--version VER: for that release)
+  upgrade-check           Run the target release's readiness check: PASS, BLOCKED
+                          or CAN'T VERIFY; upgrade only on PASS (--version VER)
   mcp-serve               Run MCP server (stdio) for AI agent integration
 
 Operator only (as root, not in the deploy shell):
@@ -132,7 +136,7 @@ boxmunge agent orientation
 
 You are operating a boxmunge-managed VPS through a restricted deploy shell.
 Only boxmunge commands exist here. 'help <command>' shows usage and never
-runs it. This page is short on purpose: read all of it.
+runs it. It is short: read all of it.
 
 Rules that prevent outages (building or changing a project):
   1. Base image: the smallest official image for your stack (-slim or
@@ -180,7 +184,7 @@ Secrets:  secrets set <project> DB_URL="postgres://..."
           secrets list <project>
 
 Maintenance:  pause <project>   (visitors see a maintenance page)
-              resume <project>  (brings it back; pulls latest images first)
+              resume <project>  (pulls latest images first)
 
 First moves:  status, doctor, inbox, log --tail 50
 
@@ -193,6 +197,7 @@ Topics (agent-help <topic>):
   security      Container security model and opt-outs
   cve           CVE policy reference
   cve-incident  Playbook for a CVE alert
+  upgrade       Platform upgrades: upgrade-howto, upgrade-check; never force
   architecture  How the system is structured
 """
 
@@ -206,6 +211,7 @@ AGENT_HELP_TOPICS: dict[str, str] = {
     "security": "SECURITY.md",
     "cve": "CVE_POLICY.md",
     "cve-incident": "CVE_INCIDENT_PLAYBOOK.md",
+    "upgrade": "AGENT_UPGRADE.md",
     # writable: shares the conventions doc — schema + worked examples live there
     "writable": "PROJECT_CONVENTIONS.md",
 }

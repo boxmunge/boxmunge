@@ -7,8 +7,8 @@ The root shim's `check` verb fetches and verifies that release, runs its
 prerequisite scripts, builds it a scratch venv, and runs its own readiness
 command and upgrade pre-flight against the live box, confined, as the deploy
 user. It prints one JSON verdict, read here failing closed
-(boxmunge.upgrade_check_result). It can take several minutes, and runs at
-most once every 10 minutes.
+(boxmunge.upgrade_check_result). It can take several minutes, and a check
+starts at least 10 minutes after the last one ended.
 
 Exit 0 PASS, 1 BLOCKED or CAN'T VERIFY, 2 a usage error or no target to
 check (an up-to-date box; no --version where one must be named).
