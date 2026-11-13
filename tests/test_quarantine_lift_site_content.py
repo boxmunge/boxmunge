@@ -85,5 +85,6 @@ def test_a_site_file_that_is_not_text_is_named_in_the_failed_lift(tmp_path, monk
     assert rc == 1
     assert str(site) in err
     assert "not valid UTF-8 text" in err
-    assert "security resume demo" in err
+    assert "Delete it and run `boxmunge security resume demo` (or deploy) to regenerate it" in err
+    assert "routing for this site is down until then" in err
     assert "codec can't decode" not in err
