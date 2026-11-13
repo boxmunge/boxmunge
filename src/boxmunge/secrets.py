@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Iterator
 
 from boxmunge.fileutil import atomic_write_text, exclusive_lock
+from boxmunge.fs_nofollow import read_bytes_nofollow
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -196,18 +197,26 @@ def validate_secret(key: str, value: str) -> None:
         )
 
 
+_FILE_LIMIT_BYTES = 1024 * 1024  # far above any secrets file
+
+
 def valid_key(key: str) -> bool:
     return _KEY_RE.fullmatch(key) is not None
 
 
 def _parse(path: Path) -> dict[str, _Entry]:
-    if not path.exists():
+    try:
+        data = read_bytes_nofollow(path, limit=_FILE_LIMIT_BYTES)
+    except FileNotFoundError:
         return {}
+    except OSError as e:  # a link, a FIFO or a huge file where the file should be
+        raise SecretsFileError(f"{path} cannot be read: {e} Make it a regular file "
+                               f"holding KEY=value lines, or remove it.") from e
     entries: dict[str, _Entry] = {}
     # Split on "\n" only, as Compose does: a value may hold U+2028 and kin,
     # which str.splitlines() would treat as line breaks, and bytes are read
     # untranslated so a stray CR stays visible to the checks below.
-    for lineno, line in enumerate(path.read_bytes().decode("utf-8").split("\n"), start=1):
+    for lineno, line in enumerate(data.decode("utf-8").split("\n"), start=1):
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         key, sep, raw = line.partition("=")

@@ -3,7 +3,9 @@
 import subprocess
 import sys
 
+from boxmunge.caddy_journal import MAX_SITE_BYTES
 from boxmunge.docker_run import docker_env
+from boxmunge.fs_nofollow import read_text_nofollow
 from boxmunge.paths import BoxPaths
 
 
@@ -26,14 +28,19 @@ def run_caddy_status(paths: BoxPaths) -> int:
         print("  Container: UNKNOWN (docker not available)")
 
     print("\nActive sites:")
+    unreadable = False
     sites_dir = paths.caddy_sites
     if sites_dir.exists():
         confs = sorted(sites_dir.glob("*.conf"))
         if confs:
-            for conf in confs:
-                project = conf.stem
-                first_line = conf.read_text().split("\n")[0].strip()
-                print(f"  {project}: {first_line}")
+            for conf in confs:  # deploy can write caddy/sites/: no link, no FIFO
+                try:
+                    first_line = read_text_nofollow(conf, limit=MAX_SITE_BYTES).split("\n")[0].strip()
+                except (OSError, UnicodeDecodeError) as e:
+                    print(f"  {conf.stem}: cannot read: {e}", file=sys.stderr)
+                    unreadable = True
+                    continue
+                print(f"  {conf.stem}: {first_line}")
         else:
             print("  (none)")
     else:
@@ -51,7 +58,7 @@ def run_caddy_status(paths: BoxPaths) -> int:
     except (subprocess.CalledProcessError, FileNotFoundError):
         pass
 
-    return 0
+    return 1 if unreadable else 0
 
 
 def cmd_caddy_status(args: list[str]) -> None:

@@ -11,6 +11,7 @@ import sys
 from boxmunge.docker import (
     DockerError, compose_logs, compose_logs_capture,
 )
+from boxmunge.fs_nofollow import read_text_nofollow
 from boxmunge.paths import (
     STAGING_SUFFIX, BoxPaths, InvalidProjectName, validate_project_name,
 )
@@ -29,7 +30,11 @@ def cmd_logs(args: list[str]) -> None:
         if args == ["--host"]:
             _show_host_logs()
         else:
-            _show_boxmunge_logs(paths)
+            try:
+                _show_boxmunge_logs(paths)
+            except (OSError, UnicodeDecodeError) as e:
+                print(f"ERROR: cannot read the operational log: {e}", file=sys.stderr)
+                sys.exit(1)
         return
     if "--host" in args or "--boxmunge" in args:
         usage_error("logs", "--host and --boxmunge take no other arguments")
@@ -150,7 +155,9 @@ def _show_host_logs() -> None:
 
 
 def _show_boxmunge_logs(paths: BoxPaths, tail: int = 100) -> None:
-    """Show the boxmunge operational log (last N lines, across rotation)."""
+    """Show the boxmunge operational log (last N lines, across rotation).
+    logs/ is deploy-writable: a link, a FIFO or a huge file where a log should
+    be raises OSError, naming it."""
     from boxmunge.log_rotation import log_files
     files = log_files(paths.log_file)
     if not files:
@@ -158,7 +165,7 @@ def _show_boxmunge_logs(paths: BoxPaths, tail: int = 100) -> None:
         return
     lines: list[str] = []
     for path in reversed(files):
-        lines = path.read_text().splitlines(keepends=True) + lines
+        lines = read_text_nofollow(path).splitlines(keepends=True) + lines
         if len(lines) >= tail:
             break
     for line in lines[len(lines) - tail:]:

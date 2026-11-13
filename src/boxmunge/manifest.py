@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Load and validate project manifests (manifest.yml)."""
 
-import io
 from pathlib import Path
 from typing import Any
 
@@ -9,7 +8,7 @@ import yaml
 
 from boxmunge.backup_command_warnings import backup_command_warnings
 from boxmunge.fileutil import LinkedTargetError, atomic_write_text
-from boxmunge.fs_nofollow import read_bytes_following
+from boxmunge.project_yaml import load_project_yaml
 from boxmunge.manifest_fields import (
     SERVICE_NAME_RE, backup_type_problem, deploy_problems, host_problem, port_problem,
     retention_problem, route_path_problem, strategy_problem,
@@ -36,15 +35,13 @@ def load_manifest_as_written(path: Path) -> dict[str, Any]:
     Raises ManifestError, naming the file, if it doesn't exist, is not a
     regular file (a FIFO is refused unopened), can't be read, or can't be parsed.
     """
-    try:  # follows a link (a git project's, into repo/); 1 MiB is far above any manifest
-        raw = read_bytes_following(path, limit=1024 * 1024)
+    try:  # a git project's is a link into repo/, followed only inside its directory
+        data = load_project_yaml(path, path.parent)
     except FileNotFoundError:
         raise ManifestError(f"Manifest not found: {path}") from None
     except OSError as e:
         raise ManifestError(f"Cannot read manifest {path}: {e}") from e
-    try:  # from a stream: PyYAML then quotes no line of the file in its errors
-        data = yaml.safe_load(io.BytesIO(raw))
-    except yaml.YAMLError as e:
+    except yaml.YAMLError as e:  # carries the problem and its line, never a line of the file
         raise ManifestError(f"Manifest is not valid YAML: {path}: {e}") from e
 
     if not isinstance(data, dict):

@@ -35,6 +35,7 @@ from boxmunge.data_dirs import ReleaseStateError, holds_data
 from boxmunge.data_helper import empty_dir
 from boxmunge.docker import staging_compose_project
 from boxmunge.log import log_operation, log_warning
+from boxmunge.project_yaml import load_project_yaml
 from boxmunge.release import project_data_dirs
 from boxmunge.staging_copies import foreign_copies, is_staging_copy, production_view
 
@@ -48,7 +49,13 @@ def _production_sources(project_dir: Path) -> list[str]:
     """Project-relative paths production's compose.yml mounts as files or
     directories: bind mounts and config/secret files."""
     path = project_dir / "compose.yml"
-    doc: Any = yaml.safe_load(path.read_text()) if path.exists() else None
+    doc: Any = None
+    if os.path.lexists(path):  # a link to nothing is not "no compose file"
+        try:
+            doc = load_project_yaml(path, project_dir)
+        except (OSError, yaml.YAMLError) as e:
+            raise ReleaseStateError(f"cannot read production's compose.yml: {e}. Fix or "
+                                    f"remove it, then retry.") from e
     if not isinstance(doc, dict):
         return []
     rels = (project_rel(bind.source, project_dir) for bind in bind_entries(doc, project_dir))

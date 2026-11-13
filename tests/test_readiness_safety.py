@@ -134,7 +134,7 @@ def test_message_never_quotes_a_linked_files_content(box, tmp_path) -> None:
     (pdir / "manifest.yml").symlink_to(secret)
     r = evaluate(box)
     assert ids(r) == [("shop", "project.unreadable")]
-    assert "not valid YAML" in r.projects[0].findings[0].message
+    assert "outside the project" in r.projects[0].findings[0].message  # refused, not read
     assert "SECRET-MARKER" not in str(to_json(r))
 
 

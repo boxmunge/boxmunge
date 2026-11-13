@@ -9,8 +9,11 @@ from typing import TYPE_CHECKING
 
 from boxmunge.bind_mounts import BindMountError, bind_mounted_dirs
 from boxmunge.bundle import BundleError, check_bundle_contents, extract_bundle
+from boxmunge.caddy_journal import MAX_SITE_BYTES
 from boxmunge.data_dirs import ReleaseStateError
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 from boxmunge.manifest import load_manifest, ManifestError
+from boxmunge.project_yaml import PROJECT_YAML_LIMIT_BYTES
 from boxmunge.release import check_install, project_data_dirs
 from boxmunge.source import resolve_bundle_source, SourceError
 
@@ -151,9 +154,16 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
 
         new_caddy, override = site_config(paths, project_name, manifest)
         source = f" (from {override.name})" if override is not None else ""
-        current_caddy_path = paths.project_caddy_site(project_name)
-        if current_caddy_path.exists():
-            if new_caddy != current_caddy_path.read_text():
+        try:  # deploy can write both names: no link followed, no FIFO waited on
+            current_caddy = read_text_nofollow_or_none(
+                paths.project_caddy_site(project_name), limit=MAX_SITE_BYTES)
+            current_overlay = read_text_nofollow_or_none(
+                paths.project_compose_override(project_name), limit=PROJECT_YAML_LIMIT_BYTES)
+        except OSError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        if current_caddy is not None:
+            if new_caddy != current_caddy:
                 print(f"  Caddy config:     would change{source}")
             else:
                 print(f"  Caddy config:     unchanged{source}")
@@ -169,9 +179,8 @@ def run_diff(project_name: str, paths: BoxPaths, ref: str | None = None) -> int:
             manifest, user_compose=candidate_user_compose,
             users=recorded_users(paths, project_name),
         )
-        current_compose_path = paths.project_compose_override(project_name)
-        if current_compose_path.exists():
-            if new_compose != current_compose_path.read_text():
+        if current_overlay is not None:
+            if new_compose != current_overlay:
                 print("  Compose overlay:  would change")
             else:
                 print("  Compose overlay:  unchanged")

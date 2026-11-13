@@ -226,7 +226,8 @@ def _yaml_reads(monkeypatch) -> list[str]:
 
     def counted(stream):
         if sys._getframe(1).f_globals.get("__name__", "").startswith("boxmunge"):
-            reads.append(str(stream).splitlines()[0] if str(stream).strip() else "")
+            text = stream.getvalue().decode() if hasattr(stream, "getvalue") else str(stream)
+            reads.append(text.splitlines()[0] if text.strip() else "")
         return real(stream)
 
     monkeypatch.setattr(yaml, "safe_load", counted)

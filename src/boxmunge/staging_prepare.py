@@ -13,14 +13,13 @@ import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import yaml
-
 from boxmunge.compose import generate_staging_compose_override, load_user_compose
 from boxmunge.compose_mounts import (
     file_entries, has_env_substitution, path_within, project_rel,
 )
 from boxmunge.compose_validate import validate_user_compose
 from boxmunge.fileutil import atomic_write_text
+from boxmunge.project_yaml import load_project_yaml
 from boxmunge.release import staged_box_state
 from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.staged_release import (
@@ -99,7 +98,7 @@ def require_read_files(base: Path, release: Path, project: str, project_dir: Pat
     Compose versions (2.35) cannot even resolve the base to validate it. A
     path leaving the project, or using substitution, is validation's to
     refuse."""
-    doc = yaml.safe_load(base.read_text())
+    doc = load_project_yaml(base)
     services = doc.get("services") if isinstance(doc, dict) else None
     missing = []
     for name, svc in (services.items() if isinstance(services, dict) else ()):

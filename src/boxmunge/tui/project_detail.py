@@ -11,10 +11,13 @@ from textual.widgets import (
 )
 
 from boxmunge.caddy import read_override
+from boxmunge.caddy_journal import MAX_SITE_BYTES
 from boxmunge.docker import compose_command
 from boxmunge.docker_run import docker_env
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
+from boxmunge.project_yaml import read_project_bytes
 from boxmunge.state import read_state
 from boxmunge.tui.data import (
     load_project_backups,
@@ -163,13 +166,14 @@ class ProjectDetailScreen(Screen):
 
     def _load_config(self) -> None:
         manifest_path = self.paths.project_manifest(self.project_name)
-        if manifest_path.exists():
-            content = manifest_path.read_text()
-            self.query_one("#manifest-view", Static).update(
-                f"[bold]manifest.yml[/]\n\n{content}"
-            )
-        else:
-            self.query_one("#manifest-view", Static).update("manifest.yml not found")
+        try:  # a git project's is a link into repo/, followed only inside the project
+            content = read_project_bytes(manifest_path, manifest_path.parent).decode("utf-8")
+            shown = f"[bold]manifest.yml[/]\n\n{content}"
+        except FileNotFoundError:
+            shown = "manifest.yml not found"
+        except (OSError, UnicodeDecodeError) as e:
+            shown = f"[bold]manifest.yml[/] (refused)\n\n{e}"
+        self.query_one("#manifest-view", Static).update(shown)
 
         self.query_one("#caddy-view", Static).update(self._caddy_text())
 
@@ -180,9 +184,13 @@ class ProjectDetailScreen(Screen):
             return f"[bold]caddy.override.conf[/] (refused)\n\n{e}"
         if override is not None:
             return f"[bold]caddy.override.conf[/] (custom override active)\n\n{override}"
-        caddy_path = self.paths.project_caddy_site(self.project_name)
-        if caddy_path.exists():
-            return f"[bold]Generated Caddy config[/]\n\n{caddy_path.read_text()}"
+        try:  # deploy can write caddy/sites/: no link followed, no FIFO waited on
+            site = read_text_nofollow_or_none(
+                self.paths.project_caddy_site(self.project_name), limit=MAX_SITE_BYTES)
+        except (OSError, UnicodeDecodeError) as e:
+            return f"[bold]Generated Caddy config[/] (refused)\n\n{e}"
+        if site is not None:
+            return f"[bold]Generated Caddy config[/]\n\n{site}"
         return "No Caddy config generated yet"
 
     async def _tail_logs(self, service: str | None = None) -> None:

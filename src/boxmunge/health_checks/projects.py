@@ -11,17 +11,20 @@ exiting 2 during an upgrade's probation rolls the platform back.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from boxmunge import compose_inventory
+from boxmunge.caddy_journal import MAX_SITE_BYTES
 from boxmunge.commands.health_cmd import HealthCheck, timeout_detail
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.config import ConfigError
 from boxmunge.cve.quarantine import QuarantineError, is_quarantined, read_quarantine_state
 from boxmunge.docker_run import DockerError
 from boxmunge.fleet import PROJECT_INPUT_ERRORS
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 from boxmunge.lifecycle import is_blocked
 from boxmunge.manifest import ManifestError
 from boxmunge.pause import awaiting_deploy, is_paused, pause_incomplete
@@ -179,8 +182,11 @@ def _drifted(paths: BoxPaths, project_dir: Path) -> str | None:
     # maintenance fragment. `lifecycle` reports the blocked state.
     if is_blocked(name, paths):
         return None
-    site_conf = paths.project_caddy_site(name)
-    if not site_conf.exists() or paths.project_caddy_override(name).exists():
+    if os.path.lexists(paths.project_caddy_override(name)):
+        return None  # a link to nothing is still an override: read_override refuses it
+    # deploy can write caddy/sites/: no link followed, no FIFO waited on
+    site = read_text_nofollow_or_none(paths.project_caddy_site(name), limit=MAX_SITE_BYTES)
+    if site is None:
         return None
     try:
         expected = generate_caddy_config(manifest)
@@ -191,7 +197,7 @@ def _drifted(paths: BoxPaths, project_dir: Path) -> str | None:
         if errors:
             raise ManifestError(f"cannot generate its Caddy config: {'; '.join(errors)}") from e
         raise
-    return name if site_conf.read_text() != expected else None
+    return name if site != expected else None
 
 
 def check_config_drift(paths: BoxPaths) -> HealthCheck:
