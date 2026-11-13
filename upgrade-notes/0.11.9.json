@@ -15,6 +15,20 @@
    "refs": [
     "#214"
    ]
+  },
+  {
+   "id": "0.11.9-host-config-readers",
+   "scope": "box",
+   "when": "after",
+   "kind": "fact",
+   "title": "What the KEV refresh, auto-update and platform.info do over a wrong boxmunge.yml",
+   "change": "These read the host config and react to a wrong setting as follows. The known-exploited-vulnerabilities refresh (security scan) and auto-update do not stop over a wrong setting elsewhere in boxmunge.yml: they run, and the operator is told by the one 'boxmunge.yml needs correcting' alert. The refresh still refuses a kev source that is not an https:// URL, naming the setting. The platform.info API action reads only hostname and fails, naming it, only if hostname is wrong. A file that cannot be loaded at all (missing, not YAML, no hostname or admin_email) still stops all three.",
+   "verify": "Run `health`: the host-config check lists any wrong setting by name. A wrong setting never shows its value.",
+   "files": [],
+   "superseded_by": null,
+   "refs": [
+    "#214"
+   ]
   }
  ]
 }

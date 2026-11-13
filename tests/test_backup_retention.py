@@ -24,9 +24,11 @@ def _make(bdir, project, day, kind=None):
 
 
 class TestBackupFilename:
-    def test_name_carries_timestamp_and_kind(self) -> None:
+    def test_name_carries_timestamp_unique_part_and_kind(self) -> None:
         name = backup_filename("myapp", BackupKind.PREDEPLOY)
-        assert re.fullmatch(r"myapp-\d{4}-\d{2}-\d{2}T\d{6}-predeploy\.tar\.gz\.age", name)
+        assert re.fullmatch(
+            r"myapp-\d{4}-\d{2}-\d{2}T\d{6}-[0-9a-f]{8}-predeploy\.tar\.gz\.age", name)
+        assert name != backup_filename("myapp", BackupKind.PREDEPLOY)
 
     def test_every_kind_round_trips(self, tmp_path) -> None:
         for kind in BackupKind:

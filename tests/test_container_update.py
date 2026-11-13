@@ -160,6 +160,7 @@ class FakeDocker:
         monkeypatch.setattr("boxmunge.compose_guard.compose_up", self._up)
         monkeypatch.setattr("boxmunge.docker_containers.local_image", self._local_image)
         monkeypatch.setattr(cu, "tag_image", self._tag)
+        monkeypatch.setattr("boxmunge.container_update_tags.tag_image", self._tag)
         monkeypatch.setattr(cu, "_HEALTHCHECK_POLL_INTERVAL_SEC", 0)
         self._recreate()
 

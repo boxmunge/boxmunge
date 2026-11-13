@@ -28,7 +28,8 @@ _CROWDSEC_WAIT = 60
 
 
 def _backups(paths: BoxPaths, inv: Inventory) -> None:
-    from boxmunge.commands.backup_cmd import backup_locked, run_backup_sync
+    from boxmunge.commands.backup_cmd import backup_locked
+    from boxmunge.commands.backup_sync_cmd import run_backup_sync
     for p in inv.projects:
         if not paths.project_manifest(p).exists():
             continue

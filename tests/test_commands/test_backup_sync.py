@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 import boxmunge.system_container as sc
-from boxmunge.commands.backup_cmd import run_backup_sync
+from boxmunge.commands.backup_sync_cmd import run_backup_sync
 from boxmunge.paths import BoxPaths
 
 

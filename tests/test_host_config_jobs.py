@@ -20,7 +20,7 @@ from boxmunge import host_config_alert
 from boxmunge.api.principal import Principal, Tier
 from boxmunge.api.result import ActionError
 from boxmunge.commands import check_all, test_alert
-from boxmunge.commands.backup_cmd import run_backup_sync
+from boxmunge.commands.backup_sync_cmd import run_backup_sync
 from boxmunge.commands.container_update_cmd import run_container_update
 from boxmunge.commands.doctor import run_doctor
 from boxmunge.commands.health_state import update_health_state

@@ -1,0 +1,35 @@
+{
+  "box": [
+    {
+      "id": "box.compose_version",
+      "message": "Docker Compose 2.30.0 is older than 2.35.0",
+      "remedy": "as root: apt-get install --only-upgrade docker-compose-plugin",
+      "severity": "block",
+      "when": "before"
+    }
+  ],
+  "contract": 1,
+  "installed": "0.11.8",
+  "projects": [
+    {
+      "findings": [
+        {
+          "id": "project.compose",
+          "message": "would be refused by this release's compose validator",
+          "remedy": "fix compose.yml as the message says, then prod-deploy app",
+          "severity": "todo",
+          "when": "before"
+        }
+      ],
+      "name": "app",
+      "result": "pass"
+    },
+    {
+      "findings": [],
+      "name": "shop",
+      "result": "pass"
+    }
+  ],
+  "release": "0.12.0",
+  "result": "blocked"
+}

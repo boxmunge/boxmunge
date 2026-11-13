@@ -9,6 +9,7 @@ import pytest
 from boxmunge import cli, shell
 from boxmunge.commands import userns_cmd
 from boxmunge.commands.usage import USAGE
+from boxmunge.userns.inventory import ContainerEntry, Inventory
 from boxmunge.userns.journal import FORWARD, ROLLBACK, Journal, save_journal
 from boxmunge.userns.preflight import Report
 
@@ -119,3 +120,66 @@ def test_check_reports_a_commit_stopped_part_way(paths, capsys) -> None:
     save_journal(paths, Journal(FORWARD, "applied", S, items={"commit-before": "1"}))
     userns_cmd.run_check(paths)
     assert "finish it: sudo /opt/boxmunge/bin/boxmunge-upgrade userns-commit" in capsys.readouterr().out
+
+
+def _container(cid: str, running: bool) -> ContainerEntry:
+    return ContainerEntry(cid, cid, "shop", "web", "sha256:i", running, False, "", "", "", "")
+
+
+@pytest.mark.parametrize("phase", ["started", "prepared", "quiesced"])
+def test_check_after_a_pre_switch_journal_runs_the_resume_preflight_with_images(
+        paths, monkeypatch, capsys, phase) -> None:
+    """A resume before the switch runs phase 0's checks again, images
+    included, and refuses on them: the check runs the same ones, on the
+    journal's offset and with who was running before a partial quiesce,
+    instead of only saying "resume"."""
+    earlier = Inventory("overlay2", "", "/var/lib/docker", "29.9.0",
+                        containers=[_container("gone", True), _container("web", True)])
+    save_journal(paths, Journal(FORWARD, phase, S, inventory=earlier.to_json()))
+    fresh = Inventory("overlay2", "", "/var/lib/docker", "29.9.0",
+                      containers=[_container("web", False)])  # stopped by the quiesce
+    monkeypatch.setattr(userns_cmd, "take_inventory", lambda paths: fresh)
+    monkeypatch.setattr(userns_cmd.uo, "allocate_offset", lambda *a: pytest.fail("new offset"))
+    calls = []
+    monkeypatch.setattr(userns_cmd, "preflight", lambda paths, inv, **kw: calls.append(
+        (inv, kw)) or Report(refusals=["shop:1: files in its layers are owned by uid 70000"]))
+    assert userns_cmd.run_check(paths) == 0
+    (inv, kw), = calls
+    assert kw["offset"] == S and kw["direction"] == FORWARD and kw.get("scan_images", True)
+    assert {(c.id, c.running) for c in inv.containers} == {("web", True), ("gone", True)}
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == (f"a userns migration stopped at {phase}; resume it: sudo /opt/boxmunge/"
+                      f"bin/boxmunge-upgrade userns-migrate, or undo it: sudo /opt/boxmunge/"
+                      f"bin/boxmunge-upgrade userns-rollback")
+    assert "REFUSED: shop:1: files in its layers are owned by uid 70000" in out
+    assert out[-1] == "VERDICT: not ready: 1 refusal(s) above"
+    assert not any(line.startswith("VERDICT") for line in out[:-1])
+
+
+@pytest.mark.parametrize("window", ["merged daemon.json, no record yet",
+                                    "record, daemon.json put back"])
+def test_check_after_an_interrupted_switch_leaves_the_checks_to_the_resume(
+        paths, monkeypatch, capsys, window) -> None:
+    """The switch writes the merged daemon.json, then the record; undoing it
+    writes the original back, then drops the record. A kill in either
+    window leaves one without the other, and the resume puts the old daemon
+    back before its checks (switch.ensure_prior), which a read-only check
+    cannot do: it does not scan."""
+    from boxmunge.userns import switch as sw
+    from boxmunge.userns.daemon_config import merged_daemon_json
+    original = '{"log-driver": "json-file"}'
+    (sw.uo.ETC / "docker").mkdir()
+    daemon_json = sw.uo.ETC / "docker" / "daemon.json"
+    paths.config_file.write_text("hostname: h\nadmin_email: a@b.c\n")
+    if window.startswith("merged"):
+        daemon_json.write_bytes(merged_daemon_json(original.encode()))
+    else:
+        daemon_json.write_text(original)
+        sw.uo.write_offset_record(paths, S)
+    save_journal(paths, Journal(FORWARD, "quiesced", S, daemon_json=original))
+    monkeypatch.setattr(userns_cmd, "preflight", lambda *a, **kw: pytest.fail("scanned"))
+    assert userns_cmd.run_check(paths) == 0
+    out = capsys.readouterr().out.splitlines()
+    assert "the switch to the remapped daemon was interrupted" in out[0]
+    assert out[-1].startswith("VERDICT: a userns migration stopped at quiesced; resume it: "
+                              "sudo /opt/boxmunge/bin/boxmunge-upgrade userns-migrate")

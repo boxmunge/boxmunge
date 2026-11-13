@@ -12,7 +12,7 @@ Run these commands in order:
 
 1. `help` -- see all available commands (`help <command>` shows one command's usage; it never runs the command)
 2. `status` -- check the current state of all projects
-3. `agent-help <topic>` -- read documentation (images, conventions, writable, rules, operations, security, cve, cve-incident, architecture)
+3. `agent-help <topic>` -- read documentation (images, conventions, writable, rules, operations, security, cve, cve-incident, upgrade, architecture)
 
 **Before you write or change a Dockerfile, read `agent-help images`.** Use the smallest official
 image for your stack, pinned by digest, with a multi-stage build. Every OS package in the image can
@@ -52,6 +52,8 @@ These operations are safe to run without human confirmation:
 | List registered project names | `project-list` |
 | Health-check every project | `check-all` (state-mutating; use `check-all --read-only` for pure introspection) |
 | Compatibility info for client handshake | `handshake` |
+| Prepare for a platform upgrade (what to change, per project) | `upgrade-howto` |
+| Check the box is ready for a platform upgrade | `upgrade-check --version X.Y.Z` |
 
 Several commands accept a `--json` flag for machine-readable output, useful when an agent needs to parse rather than render: `check --json`, `validate --json`, `inbox --json`, `project-list --json`, plus `status --json`, `doctor --json`, `health --json`, `self-test --json`, `security [<project>] --json`, and `log --json`.
 
@@ -141,6 +143,7 @@ If a task requires any of the above, it requires the **supervisor** user. Note t
 - Read error messages carefully -- boxmunge gives clear, actionable errors; do not skip them
 - Check `status` before and after making changes
 - Do not retry a failed operation blindly -- understand why it failed first
+- Never force a platform upgrade past a failing check. Upgrade only when `upgrade-check` says PASS; otherwise report its result to the person, per project (`agent-help upgrade`)
 - If a deploy says its install was left open, take one of the ways out it prints: run it again, `prod-deploy <project> --abandon` (before its pre-deploy hook ran), `rollback <project>` (after), or deploy a fix. Nothing else starts the project until then
 - Set secrets before the first deploy so containers start with the right environment
 - If asked about container security or you are about to relax a `security:` setting, run `security <project>` first to see the current effective posture, and read `agent-help security` for the full model

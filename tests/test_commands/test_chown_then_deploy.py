@@ -18,6 +18,7 @@ import pytest
 
 from boxmunge import chown_hold, docker_containers
 from boxmunge.backup import BackupKind
+from boxmunge.commands.backup_cmd import BackupResult
 from boxmunge.commands import chown_snapshot, data_cmd
 from boxmunge.commands.deploy import run_deploy
 from boxmunge.commands.deploy_steps import take_pre_deploy_snapshot
@@ -44,20 +45,20 @@ def _docker():
 
 
 def _backups(paths, *, service_running: bool):
-    """backup_locked writing a snapshot of its kind, or failing as a dump in
+    """The backup core writing a snapshot of its kind, or failing as a dump in
     a stopped service does."""
     seconds = itertools.count(10)
 
-    def backup_locked(project, paths_, kind=BackupKind.MANUAL, manifest=None, **_kw):
+    def snapshot_locked(project, paths_, kind=BackupKind.MANUAL, manifest=None, **_kw):
         if not service_running:
             print("ERROR: service web is not running")
-            return 1
+            return BackupResult(1, cause="service web is not running")
         name = f"{project}-2026-11-01T1000{next(seconds)}-{kind.value}.tar.gz.age"
         bdir = paths_.project_backups(project)
         bdir.mkdir(parents=True, exist_ok=True)
         (bdir / name).write_text(kind.value)
-        return 0
-    return patch("boxmunge.commands.backup_cmd.backup_locked", backup_locked)
+        return BackupResult(0, snapshot=bdir / name)
+    return patch("boxmunge.commands.backup_cmd.snapshot_locked", snapshot_locked)
 
 
 def _containers(monkeypatch, **states: StartState) -> None:
@@ -195,7 +196,7 @@ def test_a_backup_that_writes_nothing_is_no_snapshot(paths, capsys) -> None:
     bdir = paths.project_backups("myapp")
     bdir.mkdir(parents=True)
     (bdir / "myapp-2026-01-01T020000-nightly.tar.gz.age").write_text("old")
-    with patch("boxmunge.commands.backup_cmd.backup_locked", return_value=0):
+    with patch("boxmunge.commands.backup_cmd.snapshot_locked", return_value=BackupResult(0)):
         assert take_pre_deploy_snapshot(
             "myapp", paths, {"backup": {"type": "postgres"}}, False) is None
     assert "wrote no pre-deploy snapshot" in capsys.readouterr().out

@@ -12,6 +12,7 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.backup import BackupKind
+from boxmunge.commands.backup_cmd import BackupResult
 from boxmunge.commands.deploy import run_deploy
 from boxmunge.commands.rollback import (
     RollbackUnavailable, find_rollback_target, run_rollback,
@@ -125,19 +126,19 @@ class TestRollbackRestoresData:
     def _fake_backup(paths):
         counter = iter(range(100))
 
-        def backup_locked(project_name, paths_, kind=None, manifest=None,
-                          compose_file=None):
+        def snapshot_locked(project_name, paths_, kind=None, manifest=None,
+                            compose_file=None):
             assert kind is BackupKind.PREDEPLOY
             n = next(counter)
             snap = paths_.project_backups(project_name) / f"{project_name}-snap{n}.tar.gz.age"
             snap.parent.mkdir(parents=True, exist_ok=True)
             snap.write_text(f"snapshot {n}")
-            return 0
-        return backup_locked
+            return BackupResult(0, snapshot=snap)
+        return snapshot_locked
 
     def test_code_and_matching_snapshot_restored(self, paths) -> None:
         add_project("myapp", paths)
-        with patch("boxmunge.commands.backup_cmd.backup_locked", self._fake_backup(paths)):
+        with patch("boxmunge.commands.backup_cmd.snapshot_locked", self._fake_backup(paths)):
             _deploy(paths, V1, {"VERSION": "v1\n"}, backup="postgres")
             _deploy(paths, V2, {"VERSION": "v2\n"}, backup="postgres")
         pdir = paths.project_dir("myapp")
@@ -162,7 +163,8 @@ class TestRollbackRestoresData:
         self, paths, capsys,
     ) -> None:
         add_project("myapp", paths)
-        with patch("boxmunge.commands.backup_cmd.backup_locked", return_value=1):
+        with patch("boxmunge.commands.backup_cmd.snapshot_locked",
+                   return_value=BackupResult(1, cause="the dump failed")):
             _deploy(paths, V1, {"VERSION": "v1\n"}, backup="postgres")
             _deploy(paths, V2, {"VERSION": "v2\n"}, backup="postgres")
         pdir = paths.project_dir("myapp")

@@ -11,7 +11,7 @@ import yaml
 
 from boxmunge import host_config_alert
 from boxmunge.api.principal import Principal, Tier
-from boxmunge.commands.backup_cmd import run_backup_sync
+from boxmunge.commands.backup_sync_cmd import run_backup_sync
 from boxmunge.config import read_config
 from boxmunge.health_checks.host_config import check_host_config
 from boxmunge.paths import BoxPaths

@@ -5,7 +5,9 @@ import os
 from unittest.mock import patch, MagicMock
 
 import boxmunge.commands.backup_cmd as backup_cmd
-from boxmunge.commands.backup_cmd import run_backup, run_backup_all, list_snapshots
+from boxmunge.commands.backup_cmd import (
+    BackupResult, run_backup, run_backup_all, list_snapshots,
+)
 from boxmunge.pause import write_paused_state
 from boxmunge.paths import BoxPaths
 
@@ -109,7 +111,7 @@ class TestBackupRefusesPaused:
 
 
 class TestBackupAllSkipsPaused:
-    @patch("boxmunge.commands.backup_cmd.backup_locked")
+    @patch("boxmunge.commands.backup_cmd.snapshot_locked")
     def test_skips_paused_in_all(
         self, mock_backup: MagicMock, paths: BoxPaths, capsys
     ) -> None:
@@ -121,7 +123,7 @@ class TestBackupAllSkipsPaused:
             )
 
         write_paused_state("myapp", paths)
-        mock_backup.return_value = 0
+        mock_backup.return_value = BackupResult(0)
 
         run_backup_all(paths)
 
@@ -157,7 +159,7 @@ class TestBackupSkipsQuarantined:
         mock_dump.assert_not_called()
         mock_encrypt.assert_not_called()
 
-    @patch("boxmunge.commands.backup_cmd.backup_locked")
+    @patch("boxmunge.commands.backup_cmd.snapshot_locked")
     def test_skips_quarantined_in_all(
         self, mock_backup: MagicMock, paths: BoxPaths, capsys,
     ) -> None:
@@ -172,7 +174,7 @@ class TestBackupSkipsQuarantined:
             parents=True, exist_ok=True,
         )
         paths.project_quarantine_state("myapp").write_text("{}")
-        mock_backup.return_value = 0
+        mock_backup.return_value = BackupResult(0)
 
         run_backup_all(paths)
 
@@ -205,7 +207,7 @@ class TestBackupAllLockSkip:
         return fd
 
     @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
-    @patch("boxmunge.commands.backup_cmd.backup_locked")
+    @patch("boxmunge.commands.backup_cmd.snapshot_locked")
     def test_locked_project_is_retried_then_alerted(
         self, mock_backup: MagicMock, mock_notify: MagicMock,
         paths: BoxPaths, monkeypatch,
@@ -220,7 +222,7 @@ class TestBackupAllLockSkip:
         # alpha's lock is held for the entirety of the test.
         fd = self._hold_project_lock(paths, "alpha")
         try:
-            mock_backup.return_value = 0
+            mock_backup.return_value = BackupResult(0)
             rc = run_backup_all(paths)
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -240,7 +242,7 @@ class TestBackupAllLockSkip:
         assert rc == 1
 
     @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
-    @patch("boxmunge.commands.backup_cmd.backup_locked")
+    @patch("boxmunge.commands.backup_cmd.snapshot_locked")
     def test_locked_project_recovers_within_budget(
         self, mock_backup: MagicMock, mock_notify: MagicMock,
         paths: BoxPaths, monkeypatch,
@@ -260,7 +262,7 @@ class TestBackupAllLockSkip:
             os.close(fd)
         threading.Thread(target=_release_after_short_delay, daemon=True).start()
 
-        mock_backup.return_value = 0
+        mock_backup.return_value = BackupResult(0)
         rc = run_backup_all(paths)
 
         # Both projects eventually backed up.
@@ -272,7 +274,7 @@ class TestBackupAllLockSkip:
         assert rc == 0
 
     @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
-    @patch("boxmunge.commands.backup_cmd.backup_locked")
+    @patch("boxmunge.commands.backup_cmd.snapshot_locked")
     def test_real_failure_not_treated_as_lock_skip(
         self, mock_backup: MagicMock, mock_notify: MagicMock,
         paths: BoxPaths,
@@ -282,7 +284,7 @@ class TestBackupAllLockSkip:
         self._setup_two_projects(paths)
         # alpha "fails" with rc=1 (e.g. dump error); beta succeeds.
         def side(name, paths_, kind=None):
-            return 1 if name == "alpha" else 0
+            return BackupResult(1, cause="the dump failed") if name == "alpha" else BackupResult(0)
         mock_backup.side_effect = side
 
         rc = run_backup_all(paths)
@@ -292,7 +294,7 @@ class TestBackupAllLockSkip:
 
     @patch("boxmunge.commands.backup_cmd.log_operation")
     @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
-    @patch("boxmunge.commands.backup_cmd.backup_locked")
+    @patch("boxmunge.commands.backup_cmd.snapshot_locked")
     def test_first_pass_lock_logs_retry_intent(
         self, mock_backup: MagicMock, mock_notify: MagicMock,
         mock_log_op: MagicMock,
@@ -307,7 +309,7 @@ class TestBackupAllLockSkip:
 
         fd = self._hold_project_lock(paths, "alpha")
         try:
-            mock_backup.return_value = 0
+            mock_backup.return_value = BackupResult(0)
             run_backup_all(paths)
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -321,7 +323,7 @@ class TestBackupAllLockSkip:
 
     @patch("boxmunge.commands.backup_cmd.log_operation")
     @patch("boxmunge.commands.backup_cmd._notify_persistent_locks")
-    @patch("boxmunge.commands.backup_cmd.backup_locked")
+    @patch("boxmunge.commands.backup_cmd.snapshot_locked")
     def test_retry_success_emits_log_entry(
         self, mock_backup: MagicMock, mock_notify: MagicMock,
         mock_log_op: MagicMock,
@@ -343,7 +345,7 @@ class TestBackupAllLockSkip:
             os.close(fd)
         threading.Thread(target=_release, daemon=True).start()
 
-        mock_backup.return_value = 0
+        mock_backup.return_value = BackupResult(0)
         run_backup_all(paths)
 
         retry_completed = [
@@ -427,7 +429,7 @@ class TestBackupAllIsolation:
     """One project whose name or state cannot be used must not stop the
     nightly backup of the others, and must not vanish either."""
 
-    @patch("boxmunge.commands.backup_cmd.backup_locked")
+    @patch("boxmunge.commands.backup_cmd.snapshot_locked")
     def test_stranded_reserved_name_and_corrupt_state_do_not_stop_the_fleet(
         self, mock_backup: MagicMock, paths: BoxPaths, capsys,
     ) -> None:
@@ -440,7 +442,7 @@ class TestBackupAllIsolation:
         paused = paths.project_paused_state("bbb")
         paused.parent.mkdir(parents=True, exist_ok=True)
         paused.write_text("{truncated")
-        mock_backup.return_value = 0
+        mock_backup.return_value = BackupResult(0)
 
         assert run_backup_all(paths) == 1
 

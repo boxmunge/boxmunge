@@ -370,7 +370,8 @@ def _replace_data(
         return 1
     log_operation("restore", f"Restored from {snapshot_path.name}", paths, project=project_name)
     prune_unpaired(paths, project_name, BackupKind.PRERESTORE,
-                   SNAPSHOT_RETENTION[BackupKind.PRERESTORE])
+                   SNAPSHOT_RETENTION[BackupKind.PRERESTORE],
+                   published=safety.name if safety is not None else None)
     print(f"{project_name}: restore complete")
     if leave_stopped and not is_paused(project_name, paths):
         print(f"  It is still stopped by the health monitor: run 'recover "

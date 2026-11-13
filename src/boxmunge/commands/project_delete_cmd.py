@@ -46,6 +46,7 @@ def project_state_files(paths: BoxPaths, name: str) -> list[Path]:
         paths.project_paused_state(name),
         paths.project_quarantine_state(name),
         paths.project_scan_state(name),
+        paths.project_backup_state(name),
         paths.container_update_target_state(name),
         *(alert_state(paths, name, kind) for kind in ALERT_KINDS),
     ]
@@ -75,7 +76,7 @@ def run_project_delete(
         print(f"  - Delete {project_dir}, including its local backups")
         print("    (off-site copies made by backup-sync are kept; backup-sync never deletes)")
         print("  - Remove Caddy site config")
-        print("  - Remove health, deploy, pause, quarantine, scan, and update state")
+        print("  - Remove health, deploy, pause, quarantine, scan, backup, and update state")
         print("  - Deregister from project allowlist")
         if not confirm("project-delete"):
             return 1

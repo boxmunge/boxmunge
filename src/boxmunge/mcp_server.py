@@ -32,6 +32,8 @@ from boxmunge.mcp_tools import (
     _tool_status,
     _tool_unstage,
     _tool_upgrade,
+    _tool_upgrade_check,
+    _tool_upgrade_howto,
     _tool_validate,
 )
 from boxmunge.version import get_build_version, parse_version_string
@@ -202,6 +204,43 @@ _TOOL_DEFS: list[dict[str, Any]] = [
             },
         },
         "handler": _tool_upgrade,
+    },
+    {
+        "name": "upgrade_howto",
+        "description": (
+            "What to change before and after a platform upgrade, on the box and in each "
+            "project, from the target release's signed upgrade notes. Run it before "
+            "upgrade_check and before any upgrade (agent-help upgrade)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "version": {"type": "string", "description": "Release to prepare for, "
+                            "X.Y.Z (default: the newest; required when the box has "
+                            "version checks off)"},
+                "as_json": {"type": "boolean", "description": "Return JSON output"},
+            },
+        },
+        "handler": _tool_upgrade_howto,
+    },
+    {
+        "name": "upgrade_check",
+        "description": (
+            "Run the target release's own readiness check against this box and every "
+            "project: PASS, BLOCKED or CAN'T VERIFY, per project. It can take several "
+            "minutes (if the call times out, run upgrade-check in the deploy shell). "
+            "Upgrade only on PASS; never force."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "version": {"type": "string", "description": "Release to check, X.Y.Z "
+                            "(default: the newest; required when the box has version "
+                            "checks off)"},
+                "as_json": {"type": "boolean", "description": "Return JSON output"},
+            },
+        },
+        "handler": _tool_upgrade_check,
     },
     {
         "name": "self_test",

@@ -54,6 +54,11 @@ def _record(paths, blocked, now=T0, delivered=True, current="0.10.3"):
 
 
 class TestAlertText:
+    def test_blocked_alert_names_upgrade_howto_and_upgrade_check(self):
+        _, body = alert_text(_blocked(), "0.10.3")
+        assert ("Ask your agent to run `upgrade-howto`, then `upgrade-check --version 0.11.2`, "
+                "for what each project needs.") in body
+
     def test_breaking_release_between(self):
         title, body = alert_text(_blocked(), "0.10.3")
         assert body.startswith(

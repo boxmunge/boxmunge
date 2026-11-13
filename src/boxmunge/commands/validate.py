@@ -8,7 +8,7 @@ from boxmunge.paths import BoxPaths
 from boxmunge.user_entries import split_user_entries
 
 
-def _gather_validation(
+def gather_validation(
     project_name: str, paths: BoxPaths,
 ) -> tuple[list[str], list[str]]:
     """Collect (errors, warnings) for a project. Raises on hard fail.
@@ -92,7 +92,7 @@ def run_validate(project_name: str, paths: BoxPaths) -> int:
 
     Returns 0 on success, 1 on validation failure.
     """
-    errors, warnings = _gather_validation(project_name, paths)
+    errors, warnings = gather_validation(project_name, paths)
 
     if errors:
         # Surface dir/manifest hard-fail messages with the same ERROR prefix
@@ -124,7 +124,7 @@ def run_validate(project_name: str, paths: BoxPaths) -> int:
 
 def _run_validate_json(project_name: str, paths: BoxPaths) -> int:
     """Emit the validation result as a single JSON object on stdout."""
-    errors, warnings = _gather_validation(project_name, paths)
+    errors, warnings = gather_validation(project_name, paths)
     payload = {
         "project": project_name,
         "valid": not errors,

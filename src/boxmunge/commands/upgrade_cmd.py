@@ -15,13 +15,13 @@ import sys
 
 from boxmunge.commands.health_cmd import run_health
 from boxmunge.commands.self_test_cmd import run_self_test
+from boxmunge.commands.upgrade_report import check_upgrade
 from boxmunge.commands.upgrade_steps import (
     ManifestMigration,
     Regeneration,
     Restart,
     UnresolvedStages,
     UpgradeGateError,
-    check_upgrade,
     git_ownership_warnings,
     restart_projects,
 )
@@ -64,7 +64,7 @@ def _run_dry(paths: BoxPaths) -> int:
             notify_unresolved_stages(paths, semver, f"{e}\n{retry}")
         return 1
     for line in report:
-        print(f"  {line}")
+        print(f"  {line.text}")
     print("\nDry-run complete. Nothing was written.")
     return 0
 

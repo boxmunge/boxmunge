@@ -25,11 +25,18 @@ so also that of a box on v0.9.16); v0.9.1 (the shim of every release from
 v0.7.0 to v0.9.1, whose import test reads `boxmunge.__version__`); and v0.6.3
 (the same import test, and it never runs install.sh). Above it, each tag's
 `scripts/build-shim.py` output: v0.11.0 (the floor), v0.11.5 (the last that
-keeps no root record of the probation it starts) and v0.11.6 (the bridge
-release, the shim every box that was below the floor arrives with).
+keeps no root record of the probation it starts), v0.11.6 (the bridge
+release, the shim every box that was below the floor arrives with) and
+v0.11.7 (the release before this one).
+
+An old shim writes deploy's sudo rule as it knows it, so the verbs this
+release adds to the rule (`check`, `guide`) reach a box only through
+install.sh, which the old shim runs and which has the new shim write the
+rule. The image has sudo, so each rule is checked by the real visudo.
 """
 from __future__ import annotations
 
+import functools
 import re
 import subprocess
 import tarfile
@@ -47,9 +54,16 @@ pytestmark = [pytest.mark.integration, skip_no_docker]
 REPO = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 BASE = "python:3.13-slim"
-# The release under test: this tree, numbered as the first release with the floor.
-NEW = "0.11.7"
+# The release under test: this tree, numbered as the release it becomes.
+NEW = "0.11.8"
+# deploy's sudo rule as this release's shim writes it (sudoers_rule).
+SHIM = "/opt/boxmunge/bin/boxmunge-upgrade"
+RULE = (f"deploy ALL=(root) NOPASSWD: {SHIM} auto, {SHIM} target *, {SHIM} repair-deps, "
+        f"{SHIM} check *, {SHIM} guide *")
 PREPARE = f"""set -e
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq >/dev/null
+apt-get install -y -qq --no-install-recommends sudo >/dev/null
 cp -R /bundle/boxmunge /relsrc
 sed -i 's/^version = ".*"$/version = "{NEW}"/' /relsrc/pyproject.toml
 python3 -m venv /relvenv
@@ -90,7 +104,9 @@ def image(bundle: Path) -> Iterator[str]:
     _docker("image", "rm", "-f", tag)
 
 
+@functools.cache
 def _hop(bundle: Path, image: str, mode: str, old_shim: str, installed: str) -> dict[str, str]:
+    """The facts shim_hop.sh reports, once per hop (tests only read them)."""
     runner = f"bmtest-shim-hop-{uuid.uuid4().hex[:10]}"
     try:
         result = _docker("run", "--rm", "--name", runner,
@@ -107,6 +123,8 @@ def _hop(bundle: Path, image: str, mode: str, old_shim: str, installed: str) -> 
         facts[f"{name}_rc"], facts[f"{name}_out"] = rc, out
     for name, rc, out in re.findall(r"^DURING (\S+) rc=(\d+) :: (.*)$", result.stdout, re.M):
         facts[f"during_{name}_rc"], facts[f"during_{name}_out"] = rc, out
+    for name, text in re.findall(r"^--- (sudoers [a-z-]+)\n(.*?)(?=^--- )", result.stdout, re.M | re.S):
+        facts[name.replace(" ", "_").replace("-", "_")] = text
     facts["log"] = result.stdout
     return facts
 
@@ -160,6 +178,7 @@ def test_below_the_floor_the_release_is_refused_and_the_bridge_release_still_ins
     ("boxmunge-upgrade-v0.11.0", "0.11.0"),
     ("boxmunge-upgrade-v0.11.5", "0.11.5"),
     ("boxmunge-upgrade-v0.11.6", "0.11.6"),
+    ("boxmunge-upgrade-v0.11.7", "0.11.7"),
 ])
 def test_old_shim_hop_leaves_a_working_shim(
         bundle: Path, image: str, old_shim: str, installed: str, mode: str) -> None:
@@ -192,6 +211,8 @@ def test_old_shim_hop_leaves_a_working_shim(
         # evidence of the upgrade).
         assert facts["run_rc"] == "0" and "is on probation" in facts["run_out"], log
         assert facts["target_rc"] == "1" and "is on probation" in facts["target_out"], log
+        # install.sh had the new shim write deploy's rule, through visudo.
+        assert RULE in facts["sudoers_after_hop"].splitlines(), log
     else:
         # install.sh failed: the upgrade stops before the swap.
         assert facts["hop_rc"] == "1", log
@@ -199,3 +220,22 @@ def test_old_shim_hop_leaves_a_working_shim(
         assert facts["VERSION_RECORD"] == f"{installed}+abc1234", log
         # Upgrades still run: this one gets as far as the (absent) download.
         assert "Failed to download bundle" in facts["run_out"], log
+
+
+def test_v0_11_7_hop_installs_check_and_guide_sudo_rule(bundle: Path, image: str) -> None:
+    """A box on 0.11.7 is the one every box upgrades from, by its 0.11.7 shim:
+    deploy may sudo `check` and `guide` (upgrade-check, upgrade-howto) once
+    the hop is done, and that comes from install.sh alone."""
+    facts = _hop(bundle, image, "ok", "boxmunge-upgrade-v0.11.7", "0.11.7")
+    log = facts["log"]
+    assert facts["hop_rc"] == "0" and facts["SHIM_IS"] == "boxmunge-upgrade", log
+    # The 0.11.7 shim rewrote the rule as it knows it, early in its upgrade.
+    before = [line for line in facts["sudoers_before_install_sh"].splitlines()
+              if line.startswith("deploy ")]
+    assert before == [f"deploy ALL=(root) NOPASSWD: {SHIM} auto, {SHIM} target *, "
+                      f"{SHIM} repair-deps"], log
+    # install.sh had the new shim write this release's rule: nothing else in it.
+    after = [line for line in facts["sudoers_after_hop"].splitlines()
+             if line and not line.startswith("#")]
+    assert after == [RULE], log
+    assert f"{SHIM} check *" in after[0] and f"{SHIM} guide *" in after[0], log
