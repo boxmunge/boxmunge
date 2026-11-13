@@ -9,7 +9,8 @@ from boxmunge.backup_evidence import (
     deployed_projects, record_sync_not_expected, record_sync_run, record_synced,
     reporting_unwritten,
 )
-from boxmunge.config import ConfigError, load_config
+from boxmunge.config import ConfigError
+from boxmunge.host_config_alert import load_for_job
 from boxmunge.log import log_error, log_operation
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
@@ -33,11 +34,12 @@ def run_backup_sync(paths: BoxPaths, project_name: str | None = None) -> int:
 
 def _sync(paths: BoxPaths, project_name: str | None) -> int:
     try:
-        config = load_config(paths)
+        config = load_for_job(paths, "backup-sync", reads=("backup_remote",))
     except ConfigError as e:
         # Nothing is recorded: no alert can be sent without the config, and
         # the snapshots keep waiting for their copy, which backup-freshness
         # and the 50-hour alert report once it can be read.
+        log_error("backup-sync", f"Config error: {e}", paths)
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
 

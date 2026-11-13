@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 
 from boxmunge import bind_sources, chown_hold, checked_start, compose_references
 from boxmunge import compose_resolve
-from boxmunge import docker_containers, start_alerts
+from boxmunge import docker_containers, host_config_alert, start_alerts
 from boxmunge import compose_up_steps as up_steps
 from boxmunge.bind_sources import BindSourceError
 from boxmunge.checked_start import CheckedStart
@@ -74,9 +74,11 @@ def _refused(paths: BoxPaths, project_name: str, component: str, reason: str,
     if not start_alerts.alerted_recently(paths, project_name, reason, now):
         hint = (" If you did not make this change, a container may have tampered with "
                 "the project's files: inspect it before redeploying." if tampering else "")
-        notify(paths, f"{project_name}: start refused", message + hint,
-               component=component, project=project_name, priority=1)
-        start_alerts.record(paths, project_name, reason, now)
+        # Only a delivered alert starts the quiet interval: one Pushover did
+        # not take is tried again at the next refusal.
+        if notify(paths, f"{project_name}: start refused", message + hint,
+                  component=component, project=project_name, priority=1):
+            start_alerts.record_or_warn(paths, project_name, reason, now, component)
     return ComposeRefused(message)
 
 
@@ -204,6 +206,7 @@ def check_start(
 
     Raises ComposeRefused.
     """
+    host_config_alert.report_at_start(paths, component)
     if staging:
         if compose_files is not None or txn is not None or earlier is not None:
             raise ValueError("a staging start runs the slot's own files and no install "
@@ -400,6 +403,7 @@ def check_containers_start(paths: BoxPaths, project_name: str, names: list[str],
     to start (`names`) must run as the users record says. Raises
     ComposeRefused, also while an install transaction is open (no install
     resumes by restarting stopped containers), as check_start does."""
+    host_config_alert.report_at_start(paths, component)
     _refuse_if_install_open(paths, project_name, component, None)
     project_dir = paths.project_dir(project_name)
     try:

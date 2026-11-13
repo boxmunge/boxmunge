@@ -4,7 +4,10 @@
 # version_check) take
 # the defaults in src/boxmunge/config.py until set, kev takes those in
 # src/boxmunge/cve/kev.py, and webhooks are off until set. Edited by hand,
-# as root.
+# as root. Every value is checked: `health` lists a setting of the wrong
+# type or out of range under host-config, the commands you run by hand
+# refuse until it is corrected, and a timer's job refuses only if it reads
+# that setting.
 
 hostname: __HOSTNAME__
 ssh_port: 922
@@ -74,7 +77,9 @@ version_check:
 
 # Optional webhooks: a JSON POST (event, project, timestamp, hostname,
 # details) to each url whose events list the event. Events: deploy, stage,
-# promote, unstage, rollback. Delivery is best-effort; a failure is logged.
+# promote, unstage, rollback. One event may be given on its own
+# (`events: deploy`). Delivery is best-effort; a failure is logged. A hook
+# that is not of this form is skipped, and the others still fire.
 # webhooks:
 #   - url: https://hooks.example.com/boxmunge
 #     events: [deploy, promote, rollback]
