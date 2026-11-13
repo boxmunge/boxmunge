@@ -547,8 +547,11 @@ an `ERROR:` line and exit 1, where `status` used to show the row with `-` placeh
 does not rewrite an existing record, and lifting the quarantine needs the restart policies it
 holds, so repair the file or restore it from a backup.
 `check-all` exits at least 1, and records an unreadable manifest in the project's health state so
-the normal threshold alert fires with the cause. `check-all` also reports an unreadable host
-config (`boxmunge.yml`), since alerts cannot be sent without it, and still runs the checks.
+the normal threshold alert fires with the cause. `check-all` also reports a host config
+(`boxmunge.yml`) that cannot be loaded at all (missing, not YAML, no `hostname`), exits at least 1
+for it since alerts cannot be sent without it, and still runs the checks. A config that loads but
+holds a wrong setting does not change its exit code: see
+[A wrong setting in boxmunge.yml](#a-wrong-setting-in-boxmungeyml).
 
 The project registry, `state/projects.txt`, holds one project name per line. Every line is checked
 as a project name when it is read. A line that is not one (`../etc`, a reserved name such as `caddy`
@@ -1289,8 +1292,9 @@ confirms every file boxmunge reads (the compose files, the manifest,
 extends or names in `env_file`/`label_file`) still hashes to what deploy
 recorded. When a check fails, nothing is started or recreated, the running
 containers are left alone, and a high-priority alert names the reason. The
-alert for one project and reason repeats at most once a day (so a timer
-does not page every run); the refusal is logged every time:
+alert for one project and reason repeats at most once a day once it has
+been delivered (so a timer does not page every run); one Pushover did not
+take is sent again at the next refusal. The refusal is logged every time:
 
 - **"an install of <ref> ... is open at phase <phase>"** — a deploy or
   rollback stopped part-way, so the project directory may hold a
@@ -1640,7 +1644,8 @@ unless `health` also ran past its budget before the upgrade.
 | `project-containers`, `lifecycle` | a deployed project has no running containers, or is quarantined or stopped by the health monitor, or its state cannot be read (warning; the detail names the file and the fix) | `check <project>`, `logs <project>`, `recover <project>` |
 | `config-drift` | a project's Caddy site config differs from what its manifest generates, or its manifest cannot be read | redeploy the project; `validate <project>` names a manifest problem |
 | `recent-errors` | more than 10 errors in the log in the last 24 hours, or torn lines in the log that may have been errors | `log --level error --since 24h --all` (`log --since 24h` lists torn lines) |
-| `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
+| `alerts` | Pushover is not configured, or `boxmunge.yml` cannot be loaded, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
+| `host-config` | a setting in `boxmunge.yml` is of the wrong type or out of range (warning; the detail names each setting, never its value) | see [A wrong setting in boxmunge.yml](#a-wrong-setting-in-boxmungeyml) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
 | `backup-freshness` | a deployed project with a backup configured has no snapshot yet or none within 26 hours, its last scheduled backup failed, it has snapshots dated ahead of the clock (they stop pruning); with `backup_remote` set, no sync has copied its snapshots yet or one has waited over 26 hours for its copy, or the all-projects sync is failing; a backup record cannot be read, or `state/backup/` looks unwritable | the detail names the project and the cause; fix it, then `backup <project>` or `backup-sync`. See [When a backup fails or goes stale](#when-a-backup-fails-or-goes-stale) |
 | `platform-updates` | a security or break-fix release cannot be installed automatically, or the version-check service has given no usable answer for 48 hours. A release that needs a manual upgrade is added to the detail with the status unchanged | see [Upgrading the Platform](#upgrading-the-platform) |
@@ -1817,6 +1822,35 @@ pushover:
 ```
 
 Then run `test-alert` to confirm a notification arrives.
+
+`alerts` also warns when `boxmunge.yml` cannot be loaded at all, or `pushover` is not a mapping:
+no alert can be sent until that is corrected. A wrong value in any other setting stops no alert.
+
+### A wrong setting in boxmunge.yml
+
+Every setting is checked for its type and range (`ssh_port` a whole number from 1 to 65535,
+`health.alert_threshold` a whole number of at least 1, `container_updates.enabled` true or false,
+and so on). What a wrong one costs depends on who reads the file:
+
+- **Commands you run by hand refuse**, naming each wrong setting: `doctor` (as a failed
+  "Config file loads"), `test-alert` and the user-namespace migration's preflight. `help` and the dashboard still open, and show the same lines.
+- **Timer jobs refuse only over a setting they read.** `container-update` refuses over
+  `container_updates`, `backup-sync` over `backup_remote`, the KEV refresh over `kev`,
+  auto-update over `auto_update` and `version_check`, the `platform.info` API action over
+  `hostname`; the health monitor uses the default `alert_threshold` (3) while that one is wrong.
+  Each webhook is judged on its own: one that is wrong (named by its place in the list, as
+  `webhooks[1].events`) is not fired, and the others are. A wrong
+  value anywhere else stops none of them: `check-all`, platform upgrades, project starts,
+  rollbacks and every alert carry on.
+- **You are told once.** The first job to meet the wrong settings logs a warning and sends one
+  alert, "boxmunge.yml needs correcting", naming them. It repeats at most once a day while they
+  stay, whichever jobs run, and again when the set of wrong settings changes; an alert Pushover
+  did not take is tried again hourly. `health` shows them under `host-config` for as long
+  as they last, with or without Pushover.
+
+No log line, alert, error or API message quotes a setting's value, since the file holds secrets:
+each names the setting, what it must be, and the kind of thing found (`found a string`). Correct
+the file as the supervisor user; nothing needs restarting.
 
 ### OS security updates
 

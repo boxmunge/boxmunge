@@ -91,7 +91,9 @@ report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.envir
 # notify_via <python> <title> <message> [priority]: send a Pushover alert
 # through that venv's python, its title prefixed with [<hostname>]. Returns 0
 # when sent, 3 when Pushover is not configured, anything else when it could
-# not be sent.
+# not be sent. A bare load_config stops over no setting the alert does not
+# use, in any release: an older shim still in memory during the hop calls it
+# exactly like this.
 notify_via() {
     local python="$1" title="$2" message="$3" priority="${4:-0}"
     BM_TITLE="$title" BM_MESSAGE="$message" BM_PRIORITY="$priority" "$python" -c "
@@ -105,7 +107,7 @@ if not (po.get('user_key') and po.get('app_token')):
     sys.exit(3)
 # Every alert's title starts with the box's hostname (boxmunge.notify does the
 # same for the rest), so an operator with several boxes knows which one it is.
-title = '[' + config['hostname'] + '] ' + os.environ['BM_TITLE']
+title = '[%s] %s' % (config['hostname'], os.environ['BM_TITLE'])
 sys.exit(0 if send_notification(po['user_key'], po['app_token'], title, os.environ['BM_MESSAGE'],
                                 int(os.environ['BM_PRIORITY'])) else 1)
 " 2>/dev/null

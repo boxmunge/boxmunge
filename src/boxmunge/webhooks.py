@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from boxmunge.config import ConfigError, load_config
+from boxmunge.config_values import hook_events, hook_problems
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
 
@@ -36,9 +37,15 @@ def build_payload(event: str, project: str, hostname: str,
 
 
 def _matching_urls(event: str, config: dict[str, Any]) -> list[str]:
+    """The URLs subscribed to `event`. A hook that is not what it must be
+    (config_values) is skipped, and the hooks beside it still fire."""
+    hooks = config.get("webhooks", [])
+    if not isinstance(hooks, list):
+        return []
     return [
-        hook.get("url", "") for hook in config.get("webhooks", [])
-        if event in hook.get("events", [])
+        hook["url"] for hook in hooks
+        if isinstance(hook, dict) and isinstance(hook.get("url"), str) and hook["url"]
+        and event in (hook_events(hook) or [])
     ]
 
 
@@ -91,7 +98,7 @@ def webhook_safe(
 
     Returns None when no hook subscribes to the event or config could not
     be loaded. ConfigError and OSError from loading config are logged as
-    warnings; programming errors propagate so they surface during
+    warnings, and so is a hook that is skipped for being malformed; programming errors propagate so they surface during
     development instead of being silently dropped.
     """
     try:
@@ -100,6 +107,12 @@ def webhook_safe(
         log_warning("webhook", f"failed to fire {event} webhook: {e}",
                     paths, project=name)
         return None
+    skipped = hook_problems(config.get("webhooks", []))
+    if skipped:
+        said = "; ".join(f"'{setting}' must be {must_be}, found {kind}"
+                         for setting, must_be, kind in skipped)
+        log_warning("webhook", f"{event}: a webhook in {paths.config_file} that is not what "
+                    f"it must be is not fired; the others are: {said}", paths, project=name)
     if not _matching_urls(event, config):
         return None
     thread = threading.Thread(

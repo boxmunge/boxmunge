@@ -1,0 +1,34 @@
+{
+ "version": "0.11.9",
+ "no_project_action": false,
+ "entries": [
+  {
+   "id": "0.11.9-host-config-checked",
+   "scope": "box",
+   "when": "after",
+   "kind": "recommended",
+   "title": "Correct any setting in boxmunge.yml that the new checks report",
+   "change": "Every setting in /opt/boxmunge/config/boxmunge.yml is now checked for type and range: ssh_port (whole number 1-65535); backup_remote and the pushover keys (strings); the health and logging counts (unquoted whole numbers of at least 1); reboot.auto_reboot, container_updates.enabled (true or false); container_updates.strategy; each block a mapping; each webhook a url with a list of event names, or one event name.\nA wrong setting does not stop the upgrade, project starts, rollbacks, the health check or alerts. Commands run by hand (doctor, test-alert, the userns migration preflight) refuse while any setting is wrong. Scheduled jobs refuse only over a setting they read: container-update over container_updates, backup-sync over backup_remote. A wrong webhook is skipped; the others fire.\nThe operator is told by one Pushover alert, 'boxmunge.yml needs correcting', repeated daily, and by a host-config warning in health. No message shows a value. Edit the file as root; nothing needs restarting.",
+   "verify": "Run `health`: the host-config check is ok and says every setting in boxmunge.yml is valid. `doctor` passes 'Config file loads'.",
+   "files": [],
+   "superseded_by": null,
+   "refs": [
+    "#214"
+   ]
+  },
+  {
+   "id": "0.11.9-host-config-readers",
+   "scope": "box",
+   "when": "after",
+   "kind": "fact",
+   "title": "What the KEV refresh, auto-update and platform.info do over a wrong boxmunge.yml",
+   "change": "These read the host config and react to a wrong setting as follows. The known-exploited-vulnerabilities refresh (security scan) and auto-update do not stop over a wrong setting elsewhere in boxmunge.yml: they run, and the operator is told by the one 'boxmunge.yml needs correcting' alert. The refresh still refuses a kev source that is not an https:// URL, naming the setting. The platform.info API action reads only hostname and fails, naming it, only if hostname is wrong. A file that cannot be loaded at all (missing, not YAML, no hostname or admin_email) still stops all three.",
+   "verify": "Run `health`: the host-config check lists any wrong setting by name. A wrong setting never shows its value.",
+   "files": [],
+   "superseded_by": null,
+   "refs": [
+    "#214"
+   ]
+  }
+ ]
+}

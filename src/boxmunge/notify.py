@@ -99,6 +99,8 @@ def notify(
 ) -> bool:
     """Send a Pushover notification. True only if it was delivered."""
     try:
+        # Not strict: an alert goes out whatever another setting holds,
+        # and with whatever of `pushover` can be used.
         config = load_config(paths)
         user_key, app_token = pushover_credentials(config)
     except ConfigError as e:

@@ -30,7 +30,7 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
 
     # Config file
     try:
-        config = load_config(paths)
+        config = load_config(paths, strict=True)
         check("Config file loads", True)
     except ConfigError as e:
         check("Config file loads", False, str(e))

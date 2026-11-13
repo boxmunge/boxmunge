@@ -84,7 +84,7 @@ def _lifecycle(paths: BoxPaths, inv: Inventory, r: Report, *, forward: bool) -> 
                           f"the health timer's check-probation finishes it within minutes; "
                           f"migrate after that")
     try:
-        if forward and not load_config(paths).get("backup_remote"):
+        if forward and not load_config(paths, strict=True).get("backup_remote"):
             r.refusals.append("backup_remote is not configured; the migration syncs a fresh "
                               "backup of every project off-site before any downtime")
     except ConfigError as e:

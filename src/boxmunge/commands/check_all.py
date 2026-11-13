@@ -9,14 +9,14 @@ import functools
 import sys
 from typing import TYPE_CHECKING
 
-from boxmunge import compose_inventory
+from boxmunge import compose_inventory, host_config_alert
 from boxmunge.commands import check
 from boxmunge.commands.argv import parse_args
 from boxmunge.commands.check_holds import tick_hold
 from boxmunge.commands.health_state import (
     is_monitor_stopped, record_still_stopped, update_health_state,
 )
-from boxmunge.config import ConfigError, load_config
+from boxmunge.config import ConfigError
 from boxmunge.fileutil import project_lock, LockError
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.lifecycle import BlockReason, is_blocked
@@ -43,7 +43,7 @@ def run_check_all(paths: BoxPaths, *, read_only: bool) -> int:
 
     A project whose inputs cannot be read (manifest, state files) is
     reported on stderr and in the log, and the loop carries on with the
-    rest. An unusable host config is reported the same way.
+    rest. A host config that cannot be loaded is reported the same way.
 
     Returns the worst per-project status (0 ok, 1 warning, 2 critical),
     at least 1 if any project could not be checked, and 2 if docker-userns
@@ -95,9 +95,12 @@ def run_check_all(paths: BoxPaths, *, read_only: bool) -> int:
 
 
 def _host_config_usable(paths: BoxPaths) -> bool:
-    """Report an unusable host config loudly. Alerts depend on it."""
+    """Report a host config that cannot be loaded loudly: no alert can be
+    sent without it. One that loads with a wrong setting is the operator's
+    to correct, not this tick's failure: host_config_alert tells them once,
+    and the `host-config` health check keeps saying so."""
     try:
-        load_config(paths)
+        host_config_alert.report(paths, "check-all")
     except ConfigError as e:
         print(f"ERROR: check-all: alerts cannot be sent: {e}", file=sys.stderr)
         log_error("check-all", f"alerts cannot be sent: {e}", paths)
