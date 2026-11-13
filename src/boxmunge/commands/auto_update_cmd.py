@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """boxmunge auto-update — check for and apply automatic platform releases.
 
-Security releases are always applied. Break-fix releases (critical
-non-security fixes) are applied unless boxmunge.yml sets
+Security releases are always applied. Break-fix releases (important
+fixes that prevent issues) are applied unless boxmunge.yml sets
 ``auto_update.breakfix: false``. Feature releases are never applied here,
 and neither is any release across a breaking release or into a new major
 version. When such a security or break-fix release is all there is, the
@@ -26,6 +26,36 @@ from boxmunge.log import log_operation, log_error, log_warning
 from boxmunge.paths import BoxPaths
 
 _SCOPE = {"breakfix": "security and break-fix", "security": "security"}
+# How long discovery waits for upgrade.lock. A readiness check (deploy's
+# `upgrade-check`) holds it for at most about ten minutes, and the next one
+# starts ten minutes after that one ends, so waiting this long means no
+# check can hold off an update. A lock held past it is counted, and every
+# LOCK_SKIPS_ALERT runs in a row (12 h) said as an error, as check-probation
+# does for its own skips.
+LOCK_WAIT_SECS = 900
+LOCK_SKIPS_ALERT = 2
+_LOCK_SKIPS_FILE = "auto-update-lock-skips"
+
+
+def _lock_skipped(paths: BoxPaths) -> None:
+    """Count a run that waited LOCK_WAIT_SECS for upgrade.lock in vain."""
+    from boxmunge.fileutil import atomic_write_bytes
+    skips = paths.upgrade_root / _LOCK_SKIPS_FILE
+    try:
+        count = int(skips.read_text())
+    except (FileNotFoundError, ValueError):
+        count = 0
+    count += 1
+    atomic_write_bytes(skips, f"{count}\n".encode(), 0o600, (os.geteuid(), os.getegid()), refuse_link=True)
+    print(f"An upgrade is in progress (upgrade.lock held for over {LOCK_WAIT_SECS // 60} minutes); "
+          "skipping this check.")
+    if count % LOCK_SKIPS_ALERT:
+        log_warning("auto-update", "Skipped: upgrade.lock held for the whole wait", paths,
+                    detail={"in_a_row": count})
+        return
+    log_error("auto-update", f"auto-update could not take upgrade.lock {count} times in a row "
+              f"(waiting {LOCK_WAIT_SECS // 60} minutes each time), so no update is installed. "
+              "Find the holder as supervisor: sudo lslocks | grep upgrade.lock", paths)
 
 
 def run_auto_update(paths: BoxPaths) -> int:
@@ -36,6 +66,7 @@ def run_auto_update(paths: BoxPaths) -> int:
     """
     from boxmunge.blocked_update import record_blocked
     from boxmunge.discovery_freshness import record_discovery
+    from boxmunge.manual_update import record_manual
     from boxmunge.os_update_alert import record_os_updates
     from boxmunge.os_updates import inspect_os_updates
     from boxmunge.upgrade_discovery import auto_update_mode, discover_update
@@ -60,13 +91,13 @@ def run_auto_update(paths: BoxPaths) -> int:
     print(f"Checking for {scope} updates...")
     # Discover under upgrade.lock so a check never runs against a half-swapped
     # venv or a blocklist the shim is writing. The lock is released before
-    # exec: the shim takes it again itself.
+    # exec: the shim takes it again itself (`run` waits for it as this does).
     try:
-        with upgrade_lock(paths):
+        with upgrade_lock(paths, wait=LOCK_WAIT_SECS):
+            (paths.upgrade_root / _LOCK_SKIPS_FILE).unlink(missing_ok=True)
             result = discover_update(paths, mode=mode)
     except UpgradeInProgress:
-        print("An upgrade is in progress; skipping this check.")
-        log_operation("auto-update", "Skipped: upgrade in progress", paths)
+        _lock_skipped(paths)
         return 0
     except UpgradeStateError as e:
         print(f"ERROR: {e}", file=sys.stderr)
@@ -74,6 +105,8 @@ def run_auto_update(paths: BoxPaths) -> int:
         return 1
     action = result.get("action")
     record_discovery(paths, result)
+    if action in ("upgrade", "up_to_date", "blocklisted"):
+        record_manual(paths, result)
 
     if result.get("endpoint_error"):
         print(f"WARNING: version-check endpoint not used ({result['endpoint_error']}); "

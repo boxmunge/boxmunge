@@ -19,6 +19,10 @@ def _run(*args: str) -> subprocess.CompletedProcess:
                           capture_output=True, text=True, check=False)
 
 
+def _notes_args(files: dict) -> tuple[str, ...]:
+    return "--notes-dir", str(files["notes"]), "--floor-module", str(files["floor"])
+
+
 class TestCheck:
     @pytest.mark.parametrize("cls,marker", [
         ("security", "[security]"), ("breakfix", "[breakfix]"), ("feature", None),
@@ -42,6 +46,11 @@ class TestCheck:
             release = {"name": plan.title, "body": plan.notes}
             assert github_release_class(release) == cls
             assert lint.classify_release(plan.title, plan.notes) == cls
+
+    def test_breakfix_preamble_says_prevention_not_urgency(self):
+        text = lint.PREAMBLE["breakfix"]
+        assert "prevents issues" in text and "fall behind" in text
+        assert "critical" not in text.lower() and "cannot wait" not in text.lower()
 
     def test_unlisted_version_fails(self, tmp_path):
         files = write_tree(tmp_path, "0.11.2", [("0.11.1", "feature")])
@@ -248,7 +257,7 @@ class TestCli:
         files = write_tree(tmp_path, "0.11.1", [("0.11.1", "breakfix")])
         out, notes = tmp_path / "gh_output", tmp_path / "notes.md"
         proc = _run("check", "--tag", "v0.11.1", "--releases", str(files["releases"]),
-                    "--pyproject", str(files["pyproject"]),
+                    "--pyproject", str(files["pyproject"]), *_notes_args(files),
                     "--github-output", str(out), "--notes-out", str(notes))
         assert proc.returncode == 0, proc.stderr
         assert "class=breakfix" in out.read_text()
@@ -259,7 +268,7 @@ class TestCli:
     def test_check_failure_is_loud(self, tmp_path):
         files = write_tree(tmp_path, "0.11.2", [("0.11.1", "feature")])
         proc = _run("check", "--tag", "v0.11.2", "--releases", str(files["releases"]),
-                    "--pyproject", str(files["pyproject"]),
+                    "--pyproject", str(files["pyproject"]), *_notes_args(files),
                     "--github-output", str(tmp_path / "o"), "--notes-out", str(tmp_path / "n"))
         assert proc.returncode == 1
         assert proc.stderr.startswith("ERROR:")
@@ -285,7 +294,7 @@ class TestCli:
         files = write_tree(tmp_path, "0.12.0", [("0.12.0", "feature", True)])
         out = tmp_path / "gh_output"
         proc = _run("check", "--tag", "v0.12.0", "--releases", str(files["releases"]),
-                    "--pyproject", str(files["pyproject"]),
+                    "--pyproject", str(files["pyproject"]), *_notes_args(files),
                     "--github-output", str(out), "--notes-out", str(tmp_path / "n"))
         assert proc.returncode == 0, proc.stderr
         assert "breaking=true" in out.read_text()

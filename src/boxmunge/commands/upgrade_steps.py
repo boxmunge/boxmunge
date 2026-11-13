@@ -3,8 +3,8 @@
 
 migrate manifests and regenerate configs (upgrade_exclusions.apply_projects,
 per project under its lock) -> (Caddy reload) -> restart projects.
-upgrade_cmd sequences these for --apply and the full flow; check_upgrade is
-the write-nothing rendering behind --dry-run.
+upgrade_cmd sequences these for --apply and the full flow; the dry run
+renders them without writing (commands.upgrade_report).
 """
 
 import os
@@ -14,15 +14,14 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from boxmunge import unresolved_stage
-from boxmunge.caddy import generate_caddy_config, override_refusal, prepare_caddy_config
+from boxmunge.caddy import override_refusal, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.upgrade_offline import (
-    PutBackError, UnreadableRecord, in_memory_line, offline_dry_run_line, offline_exit,
-    regenerate_offline, render_overlay, unreadable_record,
+    PutBackError, UnreadableRecord, offline_exit, regenerate_offline, unreadable_record,
 )
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_validate import validate_user_compose, ComposeSecurityError
-from boxmunge.user_entries import USER_ENTRIES, split_user_entries
+from boxmunge.user_entries import USER_ENTRIES
 from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.release_txn import InstallTxn, load_txn, stale_reason, start_refusal
@@ -30,10 +29,8 @@ from boxmunge.docker import DockerError
 from boxmunge.fileutil import atomic_write_text, project_lock, LockError
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_error, log_warning
-from boxmunge.manifest import (
-    CURRENT_SCHEMA_VERSION, ManifestError, load_manifest_as_written, validate_manifest,
-)
-from boxmunge.git_layout import relink_advice, repo_ownership_advice, unlinked_files
+from boxmunge.manifest import CURRENT_SCHEMA_VERSION, ManifestError, validate_manifest
+from boxmunge.git_layout import repo_ownership_advice
 from boxmunge.migration import migrate_manifest, MigrationError
 from boxmunge.pause import render_maintenance_caddy_config
 from boxmunge.redeploy_hint import redeploy_command
@@ -312,22 +309,6 @@ def _regenerate_offline(paths: BoxPaths, name: str, manifest: dict[str, Any], re
     regen.processed.append(name)
 
 
-def _left_as_is_line(paths: BoxPaths, name: str) -> str | None:
-    """The dry run's line for a project the apply will exclude, or None. Its
-    files are neither rendered nor checked, so such a project can never fail
-    the dry run."""
-    why = exclusion(paths, name)
-    if why is None:
-        return None
-    if isinstance(why, InstallTxn):
-        line = f"{name}: an install ({why.ref}, {why.phase}) is open; the project will be left as is"
-        unreadable = _unreadable_release_files(paths, name, why)[1]
-        return line if unreadable is None else f"{line} ({unreadable})"
-    if isinstance(why, UnreadableRecord):
-        return f"{name}: the project will be left as is: {why.text}"
-    return f"{name}: {why}; the project will be left as is"
-
-
 def git_ownership_warnings(paths: BoxPaths) -> list[str]:
     """The apply's warning for each git project whose repo/ the deploy user,
     who runs its git, does not own (logged; the upgrade goes on)."""
@@ -338,60 +319,6 @@ def git_ownership_warnings(paths: BoxPaths) -> list[str]:
             log_warning("upgrade", advice, paths, project=project_dir.name)
             found.append(advice)
     return found
-
-
-def check_upgrade(paths: BoxPaths) -> list[str]:
-    """Dry run of migrate + regenerate: everything is rendered in memory and
-    nothing is written, locked or logged. Raises on anything that would make
-    --apply fail. Returns one report line per project."""
-    report = []
-    project_dirs = list(_project_dirs(paths))
-    refuse_unresolved_stages(paths, [project_dir.name for project_dir in project_dirs])
-    for project_dir in project_dirs:
-        name = project_dir.name
-        owner = repo_ownership_advice(project_dir)
-        if owner is not None:
-            report.append(f"WARNING {owner}")
-        left = _left_as_is_line(paths, name)
-        if left is not None:
-            report.append(left)
-            continue
-        manifest = load_manifest_as_written(require_manifest(project_dir))
-        migrated = _migrated(project_dir, manifest)
-        unlinked = unlinked_files(project_dir, manifest)
-        if unlinked:
-            report.append(f"WARNING {relink_advice(project_dir, unlinked)}")
-        if migrated is not None:
-            written = manifest.get("schema_version")
-            if _links_into_repository(project_dir):
-                report.append(in_memory_line(name, written))
-            else:
-                report.append(f"{name}: migration OK (schema v{written or 1} "
-                              f"-> v{CURRENT_SCHEMA_VERSION})")
-            manifest = migrated
-        manifest = split_user_entries(manifest)  # as loading does
-        block = is_blocked(name, paths)
-        if block and manifest.get("hosts"):
-            render_maintenance_caddy_config(manifest["hosts"])
-        refusal = compose_refusal(paths, name, manifest)
-        if refusal is not None:
-            report.append(f"{name}: would be refused by this release's compose "
-                          f"validator and left on its current configs and "
-                          f"containers, not restarted: {refusal}")
-            continue
-        if block:
-            report.append(offline_dry_run_line(paths, name, manifest, block.reason.value))
-            continue
-        refusal = override_refusal(paths, name)
-        if refusal is not None:
-            report.append(f"{name}: would be left on its current configs and containers, "
-                          f"not restarted: {refusal}")
-            continue
-        if not paths.project_caddy_override(name).exists():
-            generate_caddy_config(manifest)
-        render_overlay(paths, name, manifest)
-        report.append(f"{name}: configs render OK")
-    return report
 
 
 @dataclass

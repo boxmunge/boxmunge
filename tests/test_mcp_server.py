@@ -3,6 +3,8 @@
 
 from unittest.mock import patch
 
+import pytest
+
 
 class TestToolRegistration:
     """Test that _tool_* wrappers correctly delegate to run_* functions."""
@@ -130,7 +132,7 @@ class TestToolDefinitions:
 
     def test_tool_count(self) -> None:
         from boxmunge.mcp_server import _TOOL_DEFS
-        assert len(_TOOL_DEFS) == 21
+        assert len(_TOOL_DEFS) == 23
 
     def test_unique_tool_names(self) -> None:
         from boxmunge.mcp_server import _TOOL_DEFS
@@ -145,6 +147,21 @@ class TestToolDefinitions:
 
 
 class TestNewToolsRegistered:
+    @pytest.mark.parametrize("name", ["upgrade_howto", "upgrade_check"])
+    def test_mcp_lists_upgrade_howto_and_upgrade_check_with_version_and_as_json(
+            self, name: str) -> None:
+        from boxmunge.mcp_server import _TOOL_DEFS
+        defn = next(d for d in _TOOL_DEFS if d["name"] == name)
+        props = defn["inputSchema"]["properties"]
+        assert props == {"version": {"type": "string", "description": props["version"]["description"]},
+                         "as_json": {"type": "boolean", "description": props["as_json"]["description"]}}
+        assert not defn["inputSchema"].get("required")
+
+    def test_upgrade_check_says_it_takes_minutes(self) -> None:
+        from boxmunge.mcp_server import _TOOL_DEFS
+        defn = next(d for d in _TOOL_DEFS if d["name"] == "upgrade_check")
+        assert "several minutes" in defn["description"]
+
     def test_project_add_tool_registered(self) -> None:
         from boxmunge.mcp_server import _TOOL_DEFS
         names = [t["name"] for t in _TOOL_DEFS]

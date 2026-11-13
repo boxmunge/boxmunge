@@ -49,6 +49,7 @@ release() {
     echo "1.5.0 ops" > "$RELEASE/boxmunge/on-server/OPERATIONS.md"
     tar czf "$RELEASE/boxmunge-1.5.0.tar.gz" -C "$RELEASE" boxmunge
     echo "0000  boxmunge-1.5.0.tar.gz" > "$RELEASE/SHA256SUMS"
+    release_notes "$RELEASE" 1.5.0
     touch "$RELEASE/SHA256SUMS.sig" "$RELEASE/SHA256SUMS.cert"
 }
 

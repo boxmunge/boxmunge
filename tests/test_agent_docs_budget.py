@@ -21,7 +21,7 @@ ORIENTATION_BUDGET = 3500   # bytes
 RULES_WITHIN = 1200         # the outage rules must start this early
 TOPIC_TLDR_WITHIN = 800     # a short topic's TL;DR must start this early
 SHORT_TOPIC_BUDGET = 5000   # bytes, for topics meant to be read in one go
-SHORT_TOPICS = {"images"}
+SHORT_TOPICS = {"images", "upgrade"}
 
 
 def test_orientation_fits_its_budget() -> None:

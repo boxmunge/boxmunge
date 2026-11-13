@@ -47,6 +47,8 @@ self-test            exercise deploy, backup and restore on a canary project
 security [<project>] container security and CVE state
 security scan [<p>]  run a CVE scan now
 upgrade              upgrade the boxmunge platform
+upgrade-howto        what to change before and after a platform upgrade
+upgrade-check        is the box ready for the upgrade? (PASS/BLOCKED/CAN'T VERIFY)
 ```
 
 ---

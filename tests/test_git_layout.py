@@ -16,7 +16,7 @@ import pytest
 import yaml
 
 from boxmunge.commands.check import run_check
-from boxmunge.commands.upgrade_steps import check_upgrade
+from boxmunge.commands.upgrade_report import check_upgrade
 from boxmunge.fileutil import project_lock
 from boxmunge.git_layout import relink_advice, unlinked_files, unlinked_projects
 from boxmunge.manifest import CURRENT_SCHEMA_VERSION, ManifestError, write_manifest
@@ -102,7 +102,7 @@ class TestDetection:
 class TestUpgradeReports:
     def test_dry_run_warns(self, paths: BoxPaths, project: Path) -> None:
         _damage(project)
-        report = check_upgrade(paths)
+        report = [line.text for line in check_upgrade(paths)]
         assert any(line.startswith("WARNING") and "ln -sfn repo/manifest.yml" in line
                    for line in report)
 

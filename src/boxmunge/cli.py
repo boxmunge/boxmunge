@@ -41,9 +41,12 @@ from boxmunge.commands.bundle_cmd import cmd_bundle
 from boxmunge.commands.health_cmd import cmd_health
 from boxmunge.commands.self_test_cmd import cmd_self_test
 from boxmunge.commands.upgrade_cmd import cmd_upgrade
+from boxmunge.commands.upgrade_check_cmd import cmd_upgrade_check
+from boxmunge.commands.upgrade_howto_cmd import cmd_upgrade_howto
 from boxmunge.commands.auto_update_cmd import cmd_auto_update
 from boxmunge.commands.container_update_cmd import cmd_container_update
 from boxmunge.commands.discover_update_cmd import cmd_discover_update
+from boxmunge.commands.readiness_cmd import cmd_upgrade_readiness
 from boxmunge.commands.mcp_serve_cmd import cmd_mcp_serve
 from boxmunge.commands.project_cmd import cmd_project_add, cmd_project_list
 from boxmunge.commands.handshake_cmd import cmd_handshake
@@ -93,9 +96,12 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "health": cmd_health,
     "self-test": cmd_self_test,
     "upgrade": cmd_upgrade,
+    "upgrade-howto": cmd_upgrade_howto,
+    "upgrade-check": cmd_upgrade_check,
     "auto-update": cmd_auto_update,
     "container-update": cmd_container_update,
     "_discover-update": cmd_discover_update,
+    "upgrade-readiness": cmd_upgrade_readiness,
     "mcp-serve": cmd_mcp_serve,
     "project-add": cmd_project_add,
     "project-list": cmd_project_list,

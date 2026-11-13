@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.commands.upgrade_cmd import run_upgrade
-from boxmunge.commands.upgrade_steps import check_upgrade
+from boxmunge.commands.upgrade_report import check_upgrade
 from boxmunge.git_layout import repo_ownership_advice
 from tests.test_commands.test_upgrade_git_manifest import NAME, git_project  # noqa: F401
 
@@ -24,14 +24,14 @@ def test_a_repo_deploy_owns_needs_nothing(git_project, monkeypatch) -> None:  # 
     repo = paths.project_dir(NAME) / "repo"
     _deploy_is(monkeypatch, repo.stat().st_uid)
     assert repo_ownership_advice(paths.project_dir(NAME)) is None
-    assert not any("deploy user" in line for line in check_upgrade(paths))
+    assert not any("deploy user" in line.text for line in check_upgrade(paths))
 
 
 def test_the_dry_run_names_a_repo_deploy_does_not_own(git_project, monkeypatch) -> None:  # noqa: F811
     paths, _ = git_project
     repo = paths.project_dir(NAME) / "repo"
     _deploy_is(monkeypatch, repo.stat().st_uid + 1)
-    lines = [line for line in check_upgrade(paths) if "deploy user" in line]
+    lines = [line.text for line in check_upgrade(paths) if "deploy user" in line.text]
     assert len(lines) == 1                      # one line for the project
     assert lines[0].startswith(f"WARNING {NAME}: {repo}")
     assert f"chown -R deploy:deploy {repo}" in lines[0]
