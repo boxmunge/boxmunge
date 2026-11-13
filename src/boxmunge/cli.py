@@ -10,7 +10,8 @@ from boxmunge.commands.usage import usage_for
 from boxmunge.commands.add_git_project_cmd import cmd_add_git_project
 from boxmunge.commands.inbox_cmd import cmd_inbox
 from boxmunge.commands.console import cmd_console
-from boxmunge.commands.backup_cmd import cmd_backup, cmd_backup_all, cmd_backup_sync
+from boxmunge.commands.backup_cmd import cmd_backup, cmd_backup_all
+from boxmunge.commands.backup_sync_cmd import cmd_backup_sync
 from boxmunge.commands.caddy_status import cmd_caddy_status
 from boxmunge.commands.check import cmd_check
 from boxmunge.commands.check_all import cmd_check_all
@@ -124,7 +125,7 @@ UNWIND_ON_SIGTERM = frozenset({
     "prod-deploy", "stage", "promote", "unstage", "rollback", "project-delete", "data",
     "add-git-project", "pause", "resume", "recover", "staging-teardown-all",
     "backup", "backup-all", "restore", "test-restore", "self-test",
-    "check-all", "security", "container-update", "upgrade", "auto-update", "userns",
+    "check", "check-all", "security", "container-update", "upgrade", "auto-update", "userns",
 })
 
 

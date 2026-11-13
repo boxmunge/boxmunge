@@ -162,7 +162,7 @@ def test_a_failed_snapshot_refuses_and_changes_nothing(
 
 def test_a_backup_that_writes_nothing_refuses(paths, monkeypatch, capsys) -> None:
     _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
-    monkeypatch.setattr(backup_cmd, "backup_locked", lambda *a, **kw: 0)
+    monkeypatch.setattr(backup_cmd, "snapshot_locked", lambda *a, **kw: backup_cmd.BackupResult(0))
     with pytest.raises(data_cmd.DataError, match="not taken"):
         data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
     assert calls == []
@@ -170,7 +170,7 @@ def test_a_backup_that_writes_nothing_refuses(paths, monkeypatch, capsys) -> Non
 
 def test_type_none_skips_the_snapshot_and_says_so(paths, monkeypatch, capsys) -> None:
     _project_dir, calls = _setup(paths, monkeypatch)
-    monkeypatch.setattr(backup_cmd, "backup_locked", lambda *a, **kw: pytest.fail("backed up"))
+    monkeypatch.setattr(backup_cmd, "snapshot_locked", lambda *a, **kw: pytest.fail("backed up"))
     data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
     assert "backup.type is none" in capsys.readouterr().out
     assert calls[0][:2] == ["docker", "stop"]
@@ -179,7 +179,7 @@ def test_type_none_skips_the_snapshot_and_says_so(paths, monkeypatch, capsys) ->
 
 def test_no_snapshot_goes_on_without_one_and_says_so(paths, monkeypatch, capsys) -> None:
     _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
-    monkeypatch.setattr(backup_cmd, "backup_locked", lambda *a, **kw: pytest.fail("backed up"))
+    monkeypatch.setattr(backup_cmd, "snapshot_locked", lambda *a, **kw: pytest.fail("backed up"))
     data_cmd.chown_locked(paths, "shop", "app", (10001, 10001), no_snapshot=True)
     assert "a rollback of the next deploy then cannot restore data" in capsys.readouterr().out
     assert pending(paths, "shop") is None
@@ -202,7 +202,7 @@ def test_a_second_chown_keeps_the_first_snapshot_while_the_service_stays_stopped
     _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
     monkeypatch.setattr(data_cmd, "_running", lambda p, s: [])
     first = _earlier_chown(paths, monkeypatch, StartState("app", False, LONG_AGO))
-    monkeypatch.setattr(backup_cmd, "backup_locked", lambda *a, **kw: pytest.fail("backed up"))
+    monkeypatch.setattr(backup_cmd, "snapshot_locked", lambda *a, **kw: pytest.fail("backed up"))
     data_cmd.chown_locked(paths, "shop", "app", (10001, 10001))
     assert "No new one is taken" in capsys.readouterr().out
     assert pending(paths, "shop")["name"] == first

@@ -83,7 +83,7 @@ def take_safety_snapshot(
         out = paths.project_backups(project_name) / backup_filename(project_name, BackupKind.PRERESTORE)
         encrypt_file(raw, out, paths)
     except (BackupError, FileNotFoundError) as e:
-        raise RestoreError(f"pre-restore safety snapshot could not be encrypted: {e}") from e
+        raise RestoreError(f"pre-restore safety snapshot failed: {e}") from e
     finally:
         raw.unlink(missing_ok=True)
     return out

@@ -60,7 +60,7 @@ def _backup(paths, kind=BackupKind.PREDEPLOY) -> int:
         out.write_text(src.read_text())
     with patch.object(backup_cmd, "execute_dump", dump), \
             patch.object(backup_cmd._backup, "encrypt_file", encrypt):
-        return backup_cmd._run_backup_inner(P, paths, "cat /data", "web", kind, 5)
+        return backup_cmd._run_backup_inner(P, paths, "cat /data", "web", kind, 5).rc
 
 
 @pytest.fixture

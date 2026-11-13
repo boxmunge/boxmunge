@@ -32,6 +32,7 @@ from boxmunge import (
     bind_mounts, bind_sources, compose_up_steps, data_dirs, fs_nofollow, overlay_users, pause,
     release, release_txn, run_as, staged_release, unresolved_stage, upgrade_state, user_drift,
 )
+from boxmunge.backup_evidence import project_evidence, sync_evidence
 from boxmunge.bind_sources import read_record
 from boxmunge.blocked_update import read_blocked_state
 from boxmunge.commands.security_scan_inputs import project_suppressions_path
@@ -41,6 +42,7 @@ from boxmunge.cve import (
     suppressions,
 )
 from boxmunge.discovery_freshness import stale_discovery_warning
+from boxmunge.health_checks.backup_freshness import check_backup_freshness
 from boxmunge.health_checks.container_updates import check_container_updates
 from boxmunge.notify import _unconfigured_logged_recently
 from boxmunge.os_update_alert import read_os_update_state
@@ -88,6 +90,13 @@ def _live_ref(paths: BoxPaths) -> Any:
 def _previous_release(paths: BoxPaths) -> Any:
     release.previous_dir(paths, P).mkdir(parents=True, exist_ok=True)
     return release.load_previous_release(paths, P)
+
+
+def _backup_freshness(paths: BoxPaths) -> str:
+    """The check reads the records of deployed projects only."""
+    paths.project_dir(P).mkdir(parents=True, exist_ok=True)
+    paths.project_manifest(P).write_text("project: myapp\n")
+    return check_backup_freshness(paths).detail
 
 
 def _alerted(paths: BoxPaths) -> bool:
@@ -177,6 +186,14 @@ READERS = [
     # yet", which would rebuild it from the project directories.
     Reader("project registry", lambda p: p.state / "projects.txt", f"{P}\n",
            lambda p: sorted(read_registry(p).names)),
+    Reader("backup evidence", lambda p: p.project_backup_state(P),
+           {"snapshot": "myapp-s.tar.gz.age", "snapshot_at": ISO},
+           lambda p: project_evidence(p, P)),
+    Reader("backup sync evidence", lambda p: p.backup_sync_state, {"synced_at": ISO},
+           sync_evidence),
+    Reader("health backup_freshness", lambda p: p.project_backup_state(P),
+           {"snapshot": "myapp-s.tar.gz.age", "snapshot_at": ISO}, _backup_freshness,
+           dangling=lambda o, _p: o[0] == "value" and "Cannot read state file" in o[1]),
 ]
 
 

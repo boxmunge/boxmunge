@@ -15,7 +15,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from boxmunge.backup import BackupKind, prune_backups
+from boxmunge.backup import BackupKind, dated_ahead, prune_backups
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
 from boxmunge.pending_snapshot import pending
@@ -45,18 +45,37 @@ def paired_snapshots(paths: BoxPaths, project: str) -> set[str]:
 
 
 def prune_unpaired(paths: BoxPaths, project: str, kind: BackupKind,
-                   retention: int) -> list[Path]:
-    """prune_backups, sparing every paired snapshot. When a pairing record
-    cannot be read nothing is pruned (a paired snapshot cannot be told
-    apart), and that is said: the record's own readers report it too."""
+                   retention: int, *, published: str | None) -> list[Path]:
+    """prune_backups, sparing every paired snapshot and ``published``, the
+    snapshot the caller has just written (None: it wrote none).
+
+    Retention orders by the timestamp in the name. While any snapshot of
+    the project is named for a time ahead of the clock (the clock ran ahead
+    when it was taken, or has stepped back since) that order is not the
+    order they were taken in: each night's snapshot would sort as the
+    oldest and be the one removed. So nothing is pruned, and that is said.
+    Nothing is pruned either when a pairing record cannot be read (a paired
+    snapshot cannot be told apart); the record's own readers report it too.
+    """
+    backups_dir = paths.project_backups(project)
+    ahead = dated_ahead(backups_dir, project)
+    if ahead:
+        return _not_pruning(paths, project, kind, (
+            f"{len(ahead)} snapshot(s) are dated ahead of the clock (the latest: "
+            f"{ahead[-1].name}), so the names no longer say which are oldest. Pruning "
+            f"resumes when the clock passes them, or once they are moved out of "
+            f"{backups_dir}"))
     try:
-        keep = paired_snapshots(paths, project)
+        keep = paired_snapshots(paths, project) | ({published} if published else set())
     except (ReleaseStateError, StateError) as e:
-        message = (f"Not pruning old {kind.value} backups of {project}: which snapshot a "
-                   f"rollback is paired with cannot be read ({e}). Fix or remove that "
-                   f"record; the next backup prunes them")
-        print(f"  WARN: {message}.", file=sys.stderr)
-        log_warning("backup", message, paths, project=project)
-        return []
-    return prune_backups(paths.project_backups(project), project, kind, retention,
-                         keep=keep)
+        return _not_pruning(paths, project, kind, (
+            f"which snapshot a rollback is paired with cannot be read ({e}). Fix or "
+            f"remove that record; the next backup prunes them"))
+    return prune_backups(backups_dir, project, kind, retention, keep=keep)
+
+
+def _not_pruning(paths: BoxPaths, project: str, kind: BackupKind, why: str) -> list[Path]:
+    message = f"Not pruning old {kind.value} backups of {project}: {why}"
+    print(f"  WARN: {message}.", file=sys.stderr)
+    log_warning("backup", message, paths, project=project)
+    return []

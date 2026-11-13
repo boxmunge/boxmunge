@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from boxmunge import docker_containers
+from boxmunge.container_update_tags import restore_and_report
 from boxmunge.container_update_targets import UpdateTarget, persist_result
 from boxmunge.compose_guard import ComposeRefused, compose_up_checked, compose_up_platform
 from boxmunge.deployed_inventory import (
@@ -257,6 +258,8 @@ def _new_result(target: UpdateTarget) -> dict[str, Any]:
         "previous_digests": {},
         "current_digests": {},
         "reason": None,
+        # Image references an aborted update could not point back (_abort).
+        "tags_not_restored": [],
     }
 
 
@@ -349,18 +352,19 @@ def _update_locked(
     before = display_images(running)
     result["previous_digests"] = before
 
-    # Step 2: Pull
+    # Step 2: Pull. From here until the recreate, a pull may have moved
+    # tags to images nothing runs yet: every exit puts them back (_abort).
     try:
         compose_pull(target.project_dir, compose_files=target.compose_files,
                      project_name=target.name, services=sorted(services))
     except DockerError as e:
-        return _fail(paths, target, result, f"pull_failed: {e}", before=before)
+        return _abort(paths, target, result, f"pull_failed: {e}", services, running)
 
     # Step 3: Detect what changed (pulled local image vs running image, by ID)
     try:
         changed = detect_image_changes(services, running)
     except (UpdateError, DockerError) as e:
-        return _fail(paths, target, result, f"inventory_failed: {e}", before=before)
+        return _abort(paths, target, result, f"inventory_failed: {e}", services, running)
     if not changed:
         result["status"] = "no_change"
         result["current_digests"] = before
@@ -370,21 +374,17 @@ def _update_locked(
 
     # Step 3b: a service that runs as its image's own user would change who
     # writes its data with the new image; only a deploy decides that
-    # (user_drift). The project is not updated at all: every changed tag
-    # goes back, or the next restart of any kind would run the new images.
+    # (user_drift). The project is not updated at all.
     if not target.is_caddy:
         refs = {svc: str(services[svc].image) for svc in changed}
         old = {svc: running[svc].image_id for svc in changed}
         try:
             drift = guard_pull(paths, target.name, refs, old, component="container-update")
-            if drift:
-                for svc in changed.keys() - drift.keys():
-                    tag_image(old[svc], refs[svc])
         except (DockerError, RunAsError) as e:
-            return _fail(paths, target, result, f"inventory_failed: {e}", before=before)
+            return _abort(paths, target, result, f"inventory_failed: {e}", services, running)
         if drift:
-            return _fail(paths, target, result, "user_changed: " + "; ".join(
-                f"{svc}: {why}" for svc, why in drift.items()), before=before)
+            return _abort(paths, target, result, "user_changed: " + "; ".join(
+                f"{svc}: {why}" for svc, why in drift.items()), services, running)
 
     # Step 4: Pre-update backup, only now that a recreate will happen. Pulling
     # leaves running containers untouched, so this still captures the data
@@ -392,15 +392,15 @@ def _update_locked(
     if target.has_backup:
         rc = backup_locked(target.name, paths, kind=BackupKind.PREUPDATE)
         if rc != 0:
-            return _fail(paths, target, result, "backup_failed", before=before,
-                         message=f"Backup failed for {target.name}, aborting update")
+            return _abort(paths, target, result, "backup_failed", services, running,
+                          message=f"Backup failed for {target.name}, aborting update")
 
     # Step 5: Recreate
     try:
         _recreate(paths, target)
     except ComposeRefused as e:
         # Nothing was recreated, so there is nothing to roll back.
-        return _fail(paths, target, result, f"refused: {e}", before=before)
+        return _abort(paths, target, result, f"refused: {e}", services, running)
     except DockerError as e:
         result["status"] = "failed"
         result["reason"] = f"recreate_failed: {e}"
@@ -457,6 +457,18 @@ def _current_images(
         if container.service in services:
             current.setdefault(container.service, container.image_ref)
     return current
+
+
+def _abort(
+    paths: "BoxPaths", target: UpdateTarget, result: dict[str, Any], reason: str,
+    services: dict[str, DeployedService], running: dict[str, ProjectContainer],
+    *, message: str | None = None,
+) -> dict[str, Any]:
+    """Record a failed run that pulled but recreated nothing. The tags the
+    pull moved go back first, or the next restart of any kind would run the
+    new images; one that cannot go back is part of the failure."""
+    reason = restore_and_report(paths, target.name, result, reason, services, running)
+    return _fail(paths, target, result, reason, before=display_images(running), message=message)
 
 
 def _fail(

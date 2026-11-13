@@ -24,14 +24,19 @@ from boxmunge.paths import BoxPaths
 def _dry_run_target(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
     """Pull and report what WOULD change for this target. No recreate.
 
-    Returns a result dict with status='would_change' or 'no_change' or 'failed'.
+    The pull only caches the new images' layers and feeds the report. Every
+    tag it moved is pointed back at the image the target's containers were
+    created from, whatever the outcome, so nothing that recreates them later
+    (a restart, a resume) starts an image that no update put through its
+    backup, user and health gates.
+
+    Returns a result dict with status='would_change' or 'no_change' or
+    'failed'. A tag that could not be pointed back makes it 'failed', with
+    the reason and `tags_not_restored` of an aborted update.
     """
-    from boxmunge.container_update import (
-        UpdateError, detect_image_changes, display_images, image_services,
-        running_images,
-    )
+    from boxmunge.container_update import UpdateError, image_services, running_images
+    from boxmunge.container_update_tags import restore_and_report
     from boxmunge.deployed_inventory import InventoryError
-    from boxmunge.docker import compose_pull, DockerError
     try:
         services = image_services(target)
         running = running_images(services)
@@ -44,6 +49,21 @@ def _dry_run_target(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
     if not services:
         return {"name": target.name, "status": "no_change",
                 "previous_digests": {}, "current_digests": {}}
+    result = _pull_and_compare(paths, target, services, running)
+    reason = restore_and_report(paths, target.name, result, result.get("reason", ""),
+                                services, running)
+    if result["tags_not_restored"]:
+        result["status"], result["reason"] = "failed", reason
+    return result
+
+
+def _pull_and_compare(
+    paths: BoxPaths, target: UpdateTarget, services: dict[str, Any], running: dict[str, Any],
+) -> dict[str, Any]:
+    """The dry run's pull and its report. The pull moves tags to the new
+    images; the caller (_dry_run_target) points them back after any return."""
+    from boxmunge.container_update import UpdateError, detect_image_changes, display_images
+    from boxmunge.docker import compose_pull, DockerError
     before = display_images(running)
     try:
         compose_pull(target.project_dir, compose_files=target.compose_files,
@@ -129,7 +149,8 @@ def _update_project_locked(paths: BoxPaths, target: UpdateTarget,
     # the project is intentionally stopped, not paused for resume).
     #
     # Paused projects DO get a dry-run pre-fetch so resume time stays short
-    # and the operator sees pending updates in the log.
+    # and the operator sees pending updates in the log. It caches layers
+    # only: the tags stay on the images the stopped containers came from.
     block = is_blocked(target.name, paths)
     if block and block.reason is BlockReason.MIGRATING:
         log_operation("container-update", block.skip_message, paths, project=target.name)
@@ -152,8 +173,15 @@ def _update_project_locked(paths: BoxPaths, target: UpdateTarget,
 
 
 def _prefetch_paused(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
-    """Dry-run pull for a paused project: nothing is recreated. Failures
-    are non-fatal (e.g. registry outage): this is best-effort visibility."""
+    """Dry-run pull for a paused project: nothing is recreated, and the
+    pull only caches layers and reports the pending updates. The tags are
+    pointed back (_dry_run_target), so a resume that does not pull starts
+    the images the project was paused on, not ones no update has gated.
+
+    Failures are non-fatal (e.g. registry outage): this is best-effort
+    visibility. A tag that could not be pointed back is not one of those:
+    the result stays failed, so the run alerts with the command that fixes
+    it."""
     if pause_incomplete(target.name, paths):
         # Its containers may still be serving on the current images, and
         # nothing here updates them: say so rather than call it paused.
@@ -169,6 +197,8 @@ def _prefetch_paused(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
             "reason": f"dry_run_exception: {e}",
             "previous_digests": {}, "current_digests": {},
         }
+    if result.get("tags_not_restored"):
+        return result
     pending = sorted((result.get("current_digests") or {}).keys()
                      if result.get("status") == "would_change" else [])
     checked = result.get("status") != "failed"
@@ -216,8 +246,9 @@ def run_container_update(
     """Run the container update flow. Returns 0 on full success, 1 on any failure.
 
     When dry_run is True, captures digests and pulls but does NOT recreate
-    containers. Reports which targets WOULD change. The pulled images remain
-    in local Docker storage (harmless — they'll be used the next real run).
+    containers. Reports which targets WOULD change. The pulled images'
+    layers remain in local Docker storage, ready for the next real run; the
+    image tags are pointed back at the images the containers run.
     """
     # Caddy too: no target may be recreated while the daemon is migrating.
     from boxmunge.lifecycle import migration_refusal

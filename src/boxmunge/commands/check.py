@@ -1,17 +1,19 @@
 """boxmunge check <project> — run health checks."""
 
 import json
-import subprocess
 import sys
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
 from boxmunge import compose_inventory
 from boxmunge.commands.argv import parse_args, require_project_name
-from boxmunge.commands.smoke_result import SmokeResult, interpret_smoke_result
-from boxmunge.docker_run import docker_env
+from boxmunge.commands.smoke_result import (
+    SmokeResult, cannot_run, interpret_smoke_result, smoke_command,
+)
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
+from boxmunge.service_exec import UNREAPED, ServiceCommandTimeout, run_in_container
 
 if TYPE_CHECKING:
     from boxmunge.compose_inventory import RunningInventory
@@ -24,31 +26,66 @@ if TYPE_CHECKING:
 # In the smoke's environment on check-all's tick only: every other smoke run
 # gates something, so an alert-only check runs under this (PROJECT_CONVENTIONS.md).
 PERIODIC_ENV = "BOXMUNGE_CHECK=periodic"
+# Seconds one container's smoke script may run.
+SMOKE_TIMEOUT = 60
 
 
 def _smoke_one(container: str, script: str, svc_name: str,
                periodic: bool = False) -> SmokeResult:
-    env = ["-e", PERIODIC_ENV] if periodic else []
-    cmd = ["docker", "exec", *env, container, "sh", script, svc_name]
+    """One container's smoke. A script that overruns (or is running when
+    boxmunge is interrupted) is killed inside the container, where killing
+    the docker client alone would leave it running, one more on every tick."""
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60,
-                                env=docker_env())
-    except subprocess.TimeoutExpired:
+        result = run_in_container(
+            container, smoke_command(script, svc_name), timeout=SMOKE_TIMEOUT,
+            env=[PERIODIC_ENV] if periodic else [], capture_output=True, text=True)
+    except ServiceCommandTimeout as e:
+        # Nothing in the message that differs from tick to tick (a process
+        # group, say): the monitor alerts again whenever the message changes.
+        if e.stopped_group is None:
+            outcome = f"and stopping it there FAILED ({e.stop_error}), so it may still be running"
+        elif e.unreaped:
+            outcome = f"and was killed there; {UNREAPED}"
+        else:
+            outcome = "and was stopped there"
         return SmokeResult(
             status="warning",
-            message=f"Smoke test for {svc_name} timed out (60s)",
+            message=(f"Smoke test for {svc_name} timed out ({SMOKE_TIMEOUT}s) in container "
+                     f"{container} {outcome}"),
         )
     except OSError as e:
         return SmokeResult(status="warning", message=f"Smoke test for {svc_name}: {e}")
-    return interpret_smoke_result(result.returncode, result.stderr)
+    return interpret_smoke_result(result.returncode, result.stdout, result.stderr)
 
 
-def _cannot_run(message: str) -> SmokeResult:
-    """A smoke that could not be run says nothing about the app's health."""
-    return SmokeResult(
-        status="warning",
-        message=f"smoke could not run (infrastructure, not app): {message}",
-    )
+def _smoke_results(smoke_services: dict[str, str], targets: dict[str, list[str]],
+                   compose_project: str, periodic: bool) -> Iterator[tuple[str, SmokeResult]]:
+    """(service, result) of each smoke as it is asked for: one per running
+    container of each service, or that the service has none to run it in."""
+    for svc_name, smoke in smoke_services.items():
+        script = f"/boxmunge-scripts/{Path(smoke).name}"
+        containers = targets.get(svc_name, [])
+        if not containers:
+            yield svc_name, cannot_run(
+                f"service {svc_name!r} has no running container in compose "
+                f"project {compose_project!r}"
+            )
+        for container in containers:
+            yield svc_name, _smoke_one(container, script, svc_name, periodic)
+
+
+def _most_severe(results: Iterable[tuple[str, SmokeResult]]) -> tuple[str, SmokeResult] | None:
+    """The first critical result, which ends the run: nothing after it can
+    change the verdict. Without one, the first warning once every smoke has
+    run, so that a warning never hides a critical behind it. None when all
+    passed."""
+    first_warning = None
+    for svc_name, sr in results:
+        if sr.status == "critical":
+            return svc_name, sr
+        if sr.status != "ok" and first_warning is None:
+            first_warning = (svc_name, sr)
+    return first_warning
 
 
 def _logs_through(target: "ComposeTarget | None") -> Callable[[str], str] | None:
@@ -94,7 +131,8 @@ def run_smoke_in_container(
     ``tick`` is check-all's listing of the whole box, taken once per tick;
     without it the project's own containers are listed.
 
-    Returns the first failing result, or ok if all pass.
+    Returns the most severe result with the message that caused it (see
+    _most_severe), or ok if all pass.
     """
     from boxmunge.docker_run import DockerError
 
@@ -115,32 +153,17 @@ def run_smoke_in_container(
             # it has no container.
             targets = listed()
     except DockerError as e:
-        return _cannot_run(f"cannot list the containers of {compose_project}: {e}")
+        return cannot_run(f"cannot list the containers of {compose_project}: {e}")
 
-    for svc_name, smoke in smoke_services.items():
-        script = f"/boxmunge-scripts/{Path(smoke).name}"
-        containers = targets.get(svc_name)
-        if not containers:
-            sr = _cannot_run(
-                f"service {svc_name!r} has no running container in compose "
-                f"project {compose_project!r}"
-            )
-        else:
-            sr = SmokeResult(status="ok", message="")
-            for container in containers:
-                sr = _smoke_one(container, script, svc_name, periodic)
-                if sr.status != "ok":
-                    break
-
-        if sr.status != "ok":
-            from boxmunge.writable_diagnostics import smoke_failure_message
-            message = smoke_failure_message(sr.message, project_dir, manifest, svc_name,
-                                            _logs_through(logs_target))
-            extra = hint(svc_name) if hint is not None else None
-            return SmokeResult(status=sr.status,
-                               message=f"{message}\n{extra}" if extra else message)
-
-    return SmokeResult(status="ok", message="")
+    failed = _most_severe(_smoke_results(smoke_services, targets, compose_project, periodic))
+    if failed is None:
+        return SmokeResult(status="ok", message="")
+    svc_name, sr = failed
+    from boxmunge.writable_diagnostics import smoke_failure_message
+    message = smoke_failure_message(sr.message, project_dir, manifest, svc_name,
+                                    _logs_through(logs_target))
+    extra = hint(svc_name) if hint is not None else None
+    return SmokeResult(status=sr.status, message=f"{message}\n{extra}" if extra else message)
 
 
 def should_downgrade_smoke_failure(project_name: str, paths: BoxPaths) -> bool:
