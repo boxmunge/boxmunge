@@ -8,6 +8,8 @@ written. These records hold what no snapshot shows.
 state/backup/<project>.json, for each project:
   snapshot, snapshot_at     the newest snapshot a backup published (the
                             off-site sync goes by it);
+  unbacked_since            when a project due a backup was first seen with
+                            no snapshot and no record of one
   excused_at                when a scheduled backup last rightly took none
                             (the project was paused, quarantined or
                             mid-migration, or has no backup configured);
@@ -54,7 +56,7 @@ from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths, InvalidProjectName
 from boxmunge.state import StateError, read_state, write_state
 
-_TIMES = ("snapshot_at", "excused_at", "failing_since", "failed_at", "synced_at",
+_TIMES = ("snapshot_at", "excused_at", "unbacked_since", "failing_since", "failed_at", "synced_at",
           "unsynced_since", "expected_since")
 _TEXTS = ("snapshot", "failure")
 _FIELDS = (*_TIMES, *_TEXTS, "alerted")
@@ -76,6 +78,7 @@ class Evidence:
     snapshot: str | None = None
     snapshot_at: datetime | None = None
     excused_at: datetime | None = None
+    unbacked_since: datetime | None = None
     failing_since: datetime | None = None
     failed_at: datetime | None = None
     failure: str | None = None
@@ -276,6 +279,7 @@ def record_snapshot(paths: BoxPaths, project: str, name: str,
 
     def change(record: dict[str, Any]) -> None:
         record["snapshot"], record["snapshot_at"] = name, at
+        record.pop("unbacked_since", None)
         record.setdefault("unsynced_since", at)
         _clear_failure(record)
     _update(paths, project, f"the snapshot {name}", change)
@@ -287,6 +291,7 @@ def record_excused(paths: BoxPaths, project: str, now: datetime | None = None) -
 
     def change(record: dict[str, Any]) -> None:
         record["excused_at"] = at
+        record.pop("unbacked_since", None)
         _clear_failure(record)
     _update(paths, project, "that tonight's backup was rightly skipped", change)
 
@@ -338,6 +343,14 @@ def record_sync_not_expected(paths: BoxPaths) -> None:
         record.pop("expected_since", None)
         _clear_failure(record)
     _update(paths, None, "the sync with no remote", change)
+
+
+def start_unbacked_clock(paths: BoxPaths, project: str, now: datetime) -> None:
+    """A project due a backup has none and no record of one: the 50-hour
+    alert measures from now. Raises OSError when that cannot be written."""
+    def change(record: dict[str, Any]) -> None:
+        record.setdefault("unbacked_since", now.isoformat())
+    _change(paths, project, change)
 
 
 def claim(paths: BoxPaths, project: str | None, alert: str, ref: str) -> None:

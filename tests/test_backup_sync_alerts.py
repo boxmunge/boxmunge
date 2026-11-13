@@ -14,7 +14,7 @@ import pytest
 import boxmunge.system_container as sc
 from boxmunge.backup_alerts import deliver
 from boxmunge.backup_evidence import (
-    Evidence, project_evidence, record_snapshot, record_sync_run, record_synced,
+    Evidence, project_evidence, record_excused, record_snapshot, record_sync_run, record_synced,
     sync_evidence,
 )
 from boxmunge.commands import backup_sync_cmd
@@ -166,8 +166,8 @@ def test_with_no_remote_no_off_site_copy_is_expected(box) -> None:
 def test_a_remote_set_later_starts_the_clock_at_its_first_scheduled_sync(box) -> None:
     """A box that ran for months with no remote has old snapshots with no
     copy: setting backup_remote must not alert for each of them at once."""
-    record_snapshot(box, P, FIRST, now=T0 - timedelta(hours=500))
-    record_snapshot(box, P, SECOND, now=T0 + timedelta(hours=40))
+    backed_up_at(box, P, T0 - timedelta(hours=500))
+    record_excused(box, P, now=T0 + timedelta(hours=40))   # keeps the 50-hour backup alert out of this
     alerts = Alerts()
     deliver(box, alerts, now=T0)                # remote set, no sync has run with it
     record_sync_run(box, "rclone copy to offsite:bucket failed", now=T0)

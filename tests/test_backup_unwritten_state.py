@@ -255,3 +255,58 @@ def test_a_change_drops_only_the_entries_of_a_record_that_are_wrong(paths, proje
     after = project_evidence(paths, P)
     assert (after.excused_at, after.synced_at, after.alerted) == (T0, T0, {"stale": "x"})
     assert (after.failing_since, after.failure) == (T0 + timedelta(hours=24), CAUSE)
+
+
+def test_a_project_that_was_never_backed_up_gets_the_fifty_hour_alert(paths, project) -> None:
+    """No snapshot, no failure, no night skipped: nothing to measure from,
+    so it was silent for ever. The clock starts when it is first seen."""
+    alerts = Alerts()
+    deliver(paths, alerts, now=T0)
+    assert alerts.sent == []
+    deliver(paths, alerts, now=T0 + timedelta(hours=49))
+    assert alerts.sent == []
+    deliver(paths, alerts, now=T0 + timedelta(hours=51))
+    deliver(paths, alerts, now=T0 + timedelta(hours=75))
+    assert alerts.titles == [STALE]
+    assert "No snapshot is on disk." in alerts.sent[0][1]
+
+
+def test_the_tick_starts_that_clock_too_and_a_first_backup_ends_it(paths, project) -> None:
+    ticked = Alerts()
+    with patch.object(backup_alerts, "notify", ticked):
+        alert_backups(paths, now=T0)
+        alert_backups(paths, now=T0 + timedelta(hours=51))
+    assert ticked.titles == [STALE]
+    assert _nightly(paths, Alerts(), _dump_works) == 0
+    assert check_backup_freshness(paths).status == "ok"
+    assert project_evidence(paths, P).unbacked_since is None
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")
+def test_a_never_backed_up_project_whose_clock_cannot_start_is_held_and_named(
+        paths, project) -> None:
+    paths.backup_state.mkdir(parents=True)
+    paths.backup_state.chmod(0o500)
+    try:
+        with patch.object(backup_alerts, "notify", Alerts()):
+            alert_backups(paths, now=T0)
+    finally:
+        paths.backup_state.chmod(0o700)
+    assert "no backup yet" in check_backup_freshness(paths, now=T0).detail
+
+
+def test_a_temporary_file_that_cannot_be_removed_is_named_not_called_a_flush_failure(
+        paths, project, capsys) -> None:
+    unlink = Path.unlink
+
+    def stuck(self, *a, **k):
+        if self.name.startswith(".encrypt-"):
+            raise OSError(1, "Operation not permitted")
+        return unlink(self, *a, **k)
+
+    with patch.object(backup.Path, "unlink", stuck):
+        with patch.object(backup_cmd, "execute_dump", _dump_works):
+            assert run_backup(P, paths) == 1
+    err = capsys.readouterr().err
+    assert "is in place, but its temporary file" in err and "flushed" not in err
+    assert len(list_snapshots(paths, P)) == 1

@@ -709,6 +709,7 @@ How fresh a project's backups are is read from the snapshots in its `backups/` d
 |---|---|
 | `backup-all` (the 02:00 timer, or run by hand) could not back up a project | a Pushover alert naming the project and the cause, once for as long as it keeps failing. A good backup, also `backup <project>` by hand, ends it; a later failure alerts again |
 | a project with a backup configured has no snapshot at all | `health` warns (`backup-freshness`): `<project>: no backup yet` |
+| a project with a backup configured has never had a snapshot | the same warning, and a priority-1 alert once it has been seen that way for over 50 hours (the clock starts at the first `backup-all` or health check that sees it) |
 | the newest snapshot of a project is over 26 hours old | `health` warns (`backup-freshness`) |
 | it is over 50 hours old (two missed nights) | a priority-1 alert, once, with the cause if the scheduled backup is failing |
 | the all-projects `backup-sync` (the 03:00 timer, or run by hand) failed | an alert with rclone's error, once for as long as it keeps failing |

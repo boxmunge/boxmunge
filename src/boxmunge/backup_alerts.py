@@ -30,12 +30,12 @@ nightly run goes on without it.
 from __future__ import annotations
 
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from boxmunge.backup_evidence import (
-    ALERTS_LOCK, Evidence, Send, claim, deployed_projects, report_unwritten, sync_evidence,
-    withdraw,
+    ALERTS_LOCK, Evidence, Send, claim, deployed_projects, report_unwritten,
+    start_unbacked_clock, sync_evidence, withdraw,
 )
 from boxmunge.backup_standing import (
     ALERT_AFTER, Standing, awaiting_copy_since, newest_snapshot, remote_configured,
@@ -66,8 +66,9 @@ def _project_alerts(s: Standing, sync: Evidence | None, now: datetime) -> list[A
             "failing", e.failing_since.isoformat(), f"{project}: scheduled backup failed",
             f"{e.failure}\n{newest_snapshot(s)}\n"
             f"Fix the cause, then run: boxmunge backup {project}", 0))
-    # Before any good snapshot, the clock starts at the first failure.
-    good = s.last_good or (e.failing_since if s.failing else None)
+    # Before any good snapshot, the clock starts at the first failure, or
+    # at the first time the project was seen with none.
+    good = s.last_good or (e.failing_since if s.failing else None) or e.unbacked_since
     if s.due and good is not None and now - good > ALERT_AFTER:
         why = (f"The scheduled backup has failed since {stamp(e.failing_since)}: {e.failure}"
                if s.failing else
@@ -131,6 +132,20 @@ def _send_due(paths: BoxPaths, send: Send, project: str | None, alerted: dict[st
                            f"that the alert '{alert.title}' was not delivered", e, held)
 
 
+def _start_clock(paths: BoxPaths, s: Standing, now: datetime, held: list[str] | None) -> Standing:
+    """A project due a backup that has never had one has nothing to measure
+    the 50 hours from: the first run to see it starts the clock."""
+    if not (s.due and s.last_good is None and not s.failing and s.unreadable is None
+            and s.record.unbacked_since is None):
+        return s
+    try:
+        start_unbacked_clock(paths, s.project, now)
+    except OSError as e:
+        _unwritten(paths, s.project, "when it was first seen with no backup", e, held)
+        return s
+    return replace(s, record=replace(s.record, unbacked_since=now))
+
+
 def _expected_sync(paths: BoxPaths) -> Evidence | None:
     """The sync's record when off-site copies are expected, else None. With
     a config that cannot be read nothing can be sent either (notify logs
@@ -160,6 +175,7 @@ def _deliver(paths: BoxPaths, send: Send, now: datetime, held: list[str] | None)
                 log_error("backup", f"Backup alerts for {project} were not checked: {e}",
                           paths, project=project)
                 continue
+            s = _start_clock(paths, s, now, held)
             _send_due(paths, send, project, s.record.alerted,
                       _project_alerts(s, sync, now), held)
         if sync is not None:

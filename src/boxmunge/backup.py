@@ -272,6 +272,13 @@ def publish_new(tmp_path: Path, path: Path) -> None:
         ) from e
     try:
         tmp_path.unlink()
+    except OSError as e:
+        raise SnapshotUnconfirmed(
+            f"The snapshot {path.name} is in place, but its temporary file {tmp_path} "
+            f"could not be removed: {e}. Remove that file by hand; the snapshot is "
+            f"complete."
+        ) from e
+    try:
         fsync_dir(path.parent)
     except OSError as e:
         raise SnapshotUnconfirmed(
@@ -313,6 +320,8 @@ def encrypt_file(input_path: Path, output_path: Path, paths: BoxPaths) -> None:
             # age wrote the temp from another container; sync it before it
             # gets its name, or a power cut could leave an empty backup.
             publish_new(tmp_path, output_path)
+        except SnapshotUnconfirmed:
+            raise   # the snapshot is stored; the message says what is left over
         except BaseException:
             tmp_path.unlink(missing_ok=True)
             raise
