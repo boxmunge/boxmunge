@@ -43,7 +43,6 @@ from boxmunge.staging_cleanup import _production_sources
 from boxmunge.staging_compose import generate_staging_compose_base
 from boxmunge.staging_isolation import _refuse_other_files, _without_read_files
 from boxmunge.staging_prepare import require_read_files
-from boxmunge.tui.project_detail import ProjectDetailScreen
 from tests.test_commands.test_diff_cmd import _place_bundle, _setup_project
 from tests.test_root_state_reads import _outcome
 
@@ -121,22 +120,27 @@ def _diff(paths: BoxPaths) -> None:
     _place_bundle(paths)
 
 
+def _detail() -> Any:
+    from boxmunge.tui.project_detail import ProjectDetailScreen
+    return ProjectDetailScreen
+
+
 def _screen(paths: BoxPaths) -> Any:
     shown: dict[str, str] = {}
     widget = lambda sel: SimpleNamespace(update=lambda text: shown.__setitem__(sel, text))  # noqa: E731
     return SimpleNamespace(
         paths=paths, project_name=P, shown=shown, query_one=lambda sel, _cls=None: widget(sel),
-        _caddy_text=lambda: ProjectDetailScreen._caddy_text(SimpleNamespace(paths=paths, project_name=P)))
+        _caddy_text=lambda: _detail()._caddy_text(SimpleNamespace(paths=paths, project_name=P)))
 
 
 def _tui_manifest(paths: BoxPaths) -> str:
     screen = _screen(paths)
-    ProjectDetailScreen._load_config(screen)
+    _detail()._load_config(screen)
     return screen.shown["#manifest-view"]
 
 
 def _tui_site(paths: BoxPaths) -> str:
-    return ProjectDetailScreen._caddy_text(SimpleNamespace(paths=paths, project_name=P))
+    return _detail()._caddy_text(SimpleNamespace(paths=paths, project_name=P))
 
 
 def _showing_refusal(outcome: Outcome) -> bool:
@@ -216,6 +220,8 @@ def _baseline(row: Row, paths: BoxPaths) -> tuple[Path, Outcome]:
 
 @pytest.fixture(params=ROWS, ids=IDS)
 def row(request) -> Row:
+    if request.param.name.startswith("tui"):
+        pytest.importorskip("textual")  # the integration tier has none
     return request.param
 
 

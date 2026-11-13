@@ -206,15 +206,15 @@ def test_pull_false_is_inherited_through_extends_under_another_name(paths) -> No
 
 
 def test_each_compose_file_is_read_once(paths, monkeypatch) -> None:
-    from pathlib import Path
+    from boxmunge import project_yaml
     _compose(paths, "include:\n  - parts/tools.yml\nservices:\n  web:\n    build: .\n")
     (paths.project_dir("app") / "parts").mkdir()
     (paths.project_dir("app") / "parts" / "tools.yml").write_text(
         "services:\n  tool:\n    build:\n      context: .\n      pull: false\n")
     reads: list[str] = []
-    real = Path.read_text
-    monkeypatch.setattr(Path, "read_text",
-                        lambda self, *a, **kw: reads.append(self.name) or real(self, *a, **kw))
+    real = project_yaml.read_project_bytes  # a project's YAML is read through here
+    monkeypatch.setattr(project_yaml, "read_project_bytes",
+                        lambda path, *a, **kw: reads.append(path.name) or real(path, *a, **kw))
     deploy_build.local_base_builds(production_target(paths, "app"))
     assert sorted(reads) == ["compose.yml", "tools.yml"]
 
