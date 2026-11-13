@@ -449,11 +449,10 @@ def manifest_in_force(paths: BoxPaths, project: str) -> dict[str, Any] | None:
 
 def lift_after_deploy(paths: BoxPaths, project: str, ref: str, clearance: Clearance, *,
                       txn: str | None, component: str) -> int:
-    """The release is live and its smoke test passed: check that every
-    container runs a scanned image, then lift the quarantine (checking again
-    once the lift's start is done, and putting the quarantine back if that
-    start moved a container onto an unscanned image). Returns 0, or 1 with
-    the failure reported (the quarantine stays)."""
+    """The release is live and its smoke test passed: check that every container
+    runs a scanned image, then lift the quarantine (checking again once the lift's
+    start is done, and putting the quarantine back if that start moved a container
+    onto an unscanned image). Returns 0, or 1 with the failure reported (it stays)."""
     def recheck() -> None:
         try:
             verify_started(paths, clearance, component)
@@ -462,15 +461,18 @@ def lift_after_deploy(paths: BoxPaths, project: str, ref: str, clearance: Cleara
             raise
 
     try:
-        policies = _release_policies(paths, project,
-                                     _verify_running(paths, clearance, component))
-        site = read_text_nofollow(paths.project_caddy_site(project),
-                                  limit=MAX_SITE_BYTES)
+        policies = _release_policies(paths, project, _verify_running(paths, clearance, component))
+        site_path = paths.project_caddy_site(project)
+        try:
+            site = read_text_nofollow(site_path, limit=MAX_SITE_BYTES)
+        except UnicodeDecodeError as e:
+            raise QuarantineError(
+                f"{site_path} is not valid UTF-8 text. Delete it and run `boxmunge security resume "
+                f"{project}` (or deploy) to regenerate it; routing for this site is down until then") from e
         lift_quarantine(project, paths, project_caddy_site_content=site,
                         compose_files=["compose.yml", "compose.boxmunge.yml"],
                         restore=policies, txn=txn, component=component, after_start=recheck)
-    except (QuarantineError, DockerError, ComposeResolveError, OSError,
-            UnicodeDecodeError) as e:
+    except (QuarantineError, DockerError, ComposeResolveError, OSError, UnicodeDecodeError) as e:
         print(f"ERROR: {ref} is deployed, but lifting the quarantine ({clearance.cve_id}) "
               f"failed: {e}. The quarantine stays in place and the next scan re-asserts it; "
               f"run `boxmunge security resume {project}` once the cause is fixed.",
