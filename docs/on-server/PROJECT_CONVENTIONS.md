@@ -261,6 +261,8 @@ below.
 
 boxmunge validates `manifest.yml` on every deploy and rejects invalid manifests with a clear error. The rules are:
 
+`manifest.yml` is read up to 1 MiB and a larger file is refused; a bundle's manifest is capped lower, at 256 KiB.
+
 1. **`schema_version`**, when present, must be an unquoted integer from 1 to the newest version this boxmunge supports (currently 3). Absent means 1. An older schema is migrated to the current one when boxmunge reads the manifest; an upgrade also rewrites a bundle project's file, but never a git project's, which you update in the repository.
 2. **`id` is required** (a ULID). Generated automatically by `boxmunge bundle` if missing from the source manifest. boxmunge does not check its format, but a deploy is refused when the id differs from the one the project first deployed with, or when another project already uses it.
 3. **`project` is required** and must exactly match the project's directory name. A mismatch is an error. Project names are lowercase letters, digits, and hyphens (1-63 characters, starting with a letter or digit). Names ending in `-staging` are reserved, because boxmunge runs a project's staging copy as `<project>-staging`; `caddy` and `system` are reserved for the platform's own containers. A project created under such a name before it was reserved cannot be managed; fleet commands (`check-all`, `health`, `status`, container updates, upgrades) report it as an error and carry on with the other projects. Recreate it under another name.

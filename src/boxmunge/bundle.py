@@ -6,6 +6,7 @@ Installing a checked tree into a project lives in boxmunge.release.
 """
 from __future__ import annotations
 
+import errno
 import gzip
 import os
 import posixpath
@@ -278,10 +279,15 @@ def _open_archive(bundle_path: Path) -> Iterator[tarfile.TarFile]:
     if not bundle_path.exists():
         raise BundleError(f"Bundle not found: {bundle_path}")
     try:
-        with gzip.open(bundle_path, "rb") as raw, \
-                tarfile.open(fileobj=_LimitedStream(raw), mode="r:",
-                             tarinfo=_CheckedTarInfo) as tar:
-            yield tar
+        with gzip.open(bundle_path, "rb") as raw:
+            limited = _LimitedStream(raw)
+            with tarfile.open(fileobj=limited, mode="r:", tarinfo=_CheckedTarInfo) as tar:
+                yield tar
+            # tarfile stops at the archive's end marker, short of the gzip
+            # trailer (CRC and length). Read on, under the same limits, so a
+            # truncated or corrupt stream is refused rather than trusted.
+            while limited.read(1 << 20):
+                pass
     except BundleError:
         raise
     except (tarfile.TarError, EOFError, OSError, zlib.error) as e:
@@ -338,7 +344,15 @@ def extract_bundle(bundle_path: Path, dest: Path) -> Path:
         found = _inspect(tar)
         # The "data" filter re-checks links against the real filesystem
         # as it extracts: defence in depth behind _check_members.
-        tar.extractall(path=dest, members=found.members, filter="data")
+        try:
+            tar.extractall(path=dest, members=found.members, filter="data")
+        except OSError as e:
+            if e.errno in (errno.ENOSPC, errno.EDQUOT):
+                raise BundleError(
+                    f"Out of disk space while extracting {bundle_path.name} "
+                    f"({e.strerror}). Free some space on the server and retry."
+                ) from e
+            raise
 
     project = dest / found.top
     if project.is_symlink() or not project.is_dir():

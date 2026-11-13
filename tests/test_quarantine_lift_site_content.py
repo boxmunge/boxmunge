@@ -59,3 +59,32 @@ def test_a_site_name_the_lift_cannot_write_is_a_failed_lift_not_a_crash(tmp_path
         quarantine_lift._start(paths, "demo", {"project": "demo"}, "security-scan")
 
     assert root_only.read_text() == "a secret only root can read\n"
+
+
+def test_a_site_file_that_is_not_text_is_named_in_the_failed_lift(tmp_path, monkeypatch, capsys) -> None:
+    """The decode error alone names no file; the operator is told which
+    one it is, that it is not valid text, and what to do."""
+    from unittest.mock import MagicMock
+
+    from boxmunge.commands import quarantine_gate
+
+    paths = make_box(tmp_path, services=("web",))
+    site = paths.project_caddy_site("demo")
+    site.parent.mkdir(parents=True, exist_ok=True)
+    site.write_bytes(b"demo.example.com {\n\xff\xfe\n}\n")
+    monkeypatch.setattr(quarantine_gate, "_verify_running", lambda *a, **k: None)
+    monkeypatch.setattr(quarantine_gate, "_release_policies", lambda *a, **k: {})
+    monkeypatch.setattr(quarantine_gate, "lift_quarantine",
+                        lambda *a, **k: pytest.fail("lifted with an unreadable site"))
+    clearance = MagicMock(cve_id="CVE-2099-0001")
+
+    rc = quarantine_gate.lift_after_deploy(paths, "demo", "v2", clearance,
+                                           txn=None, component="deploy")
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert str(site) in err
+    assert "not valid UTF-8 text" in err
+    assert "Delete it and run `boxmunge security resume demo` (or deploy) to regenerate it" in err
+    assert "routing for this site is down until then" in err
+    assert "codec can't decode" not in err
