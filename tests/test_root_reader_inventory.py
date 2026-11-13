@@ -118,7 +118,7 @@ def _goes_around_the_helpers(call: ast.Call) -> bool:
 # match when convenient.
 RAW_READS: dict[str, int] = {
     "api/dev/fixture_host.py": 3, "api/jobs.py": 2, "backup.py": 1,
-    "bind_mounts.py": 1, "commands/bundle_cmd.py": 1, "commands/caddy_status.py": 1,
+    "bind_mounts.py": 1, "commands/auto_update_cmd.py": 1, "commands/bundle_cmd.py": 1, "commands/caddy_status.py": 1,
     "commands/diff_cmd.py": 2, "commands/doctor.py": 1, "commands/health_cmd.py": 1,
     "commands/help.py": 1, "commands/logs.py": 1,
     "commands/stage_cmd.py": 1,
@@ -127,7 +127,8 @@ RAW_READS: dict[str, int] = {
     "health_checks/projects.py": 1, "health_checks/sshd.py": 2, "health_checks/userns.py": 1,
     "manifest.py": 1, "secrets.py": 1, "staging_cleanup.py": 1, "staging_compose.py": 1,
     "staging_isolation.py": 2, "staging_prepare.py": 1, "system_container.py": 1,
-    "tui/project_detail.py": 2, "upgrade_discovery.py": 1, "upgrade_floor.py": 1,
+    "readiness.py": 1, "tui/project_detail.py": 2, "upgrade_discovery.py": 1, "upgrade_floor.py": 1,
+    "upgrade_notes.py": 1, "upgrade_target.py": 1,
     "userns/marker.py": 1,
     "userns/offset.py": 6, "userns/preflight.py": 1, "userns/shift.py": 1, "userns/steps.py": 1,
     "version.py": 1,

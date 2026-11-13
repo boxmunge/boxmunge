@@ -47,7 +47,7 @@ from boxmunge.os_update_alert import read_os_update_state
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import read_registry, unfinished_removals
 from boxmunge.project_alerts import alert_state, alert_once
-from boxmunge import start_alerts
+from boxmunge import manual_update, start_alerts
 from boxmunge.state import StateError, read_state
 
 P = "myapp"
@@ -148,6 +148,8 @@ READERS = [
            read_blocked_state),
     Reader("os_update", lambda p: p.os_update_state,
            {"checked_at": ISO, "problems": [], "alerted": None}, read_os_update_state),
+    Reader("manual_update", lambda p: p.platform_manual_update,
+           {"version": "0.12.0", "alerted_at": ISO}, manual_update.read_manual),
     Reader("discovery", lambda p: p.update_discovery_state,
            {"answered_at": "2000-01-01T00:00:00+00:00", "failing_since": None,
             "last_error": None},

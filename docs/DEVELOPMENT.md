@@ -147,6 +147,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `project_registry.py` | `_read_text` | `projects.txt`, the registry. Cap: 1 MiB (`REGISTRY_LIMIT_BYTES`) | `state/` |
 | `blocked_update.py` | `read_blocked_state` | `platform-updates.json` | `state/` |
 | `os_update_alert.py` | `read_os_update_state` | `os-updates.json` | `state/` |
+| `manual_update.py` | `read_manual` | `platform-manual-update.json` | `state/` |
 | `discovery_freshness.py` | `_read` | `update-discovery.json` | `state/` |
 | `notify.py` | `_unconfigured_logged_recently` | `alerts-unconfigured.json` | `state/` |
 | `project_alerts.py` | `_already_alerted` | a project's alert throttle | `state/` |
