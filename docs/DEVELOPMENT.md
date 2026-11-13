@@ -123,6 +123,115 @@ MCP still keep their own tables, so adding a command means touching several plac
 
 `src/boxmunge/paths.py` is the source of truth for every path.
 
+## Reader and lock inventory
+
+The `deploy` user can put anything at a name under `state/`, `projects/<p>/`, `inbox/` or
+`upgrade-state/`: a symlink to a file elsewhere, a link to nothing, a FIFO, a huge file. Root reads
+those names from timers (health, scan, auto-update), so every such read goes through
+`fs_nofollow`, and every lock file keeps one identity for as long as anything might hold it.
+
+### Readers
+
+`read_text_nofollow_or_none`, `read_text_nofollow` and `read_bytes_nofollow` open without following
+a link, never wait on a FIFO, and refuse a file past their cap. Only "nothing at the name" reads as
+no record: use `read_text_nofollow_or_none` for that, never `Path.exists()`, which follows a link.
+Most JSON state is read through `state.read_state`, which wraps the helper; its callers aren't
+listed.
+
+Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_LIMIT_BYTES`
+(64 MiB) unless a row says otherwise.
+
+| Module | Functions | Reads | Under |
+|---|---|---|---|
+| `state.py` | `read_state` | any JSON state record its callers name (deploy, health, paused and more) | `state/` |
+| `project_registry.py` | `_read_text` | `projects.txt`, the registry. Cap: 1 MiB (`REGISTRY_LIMIT_BYTES`) | `state/` |
+| `blocked_update.py` | `read_blocked_state` | `platform-updates.json` | `state/` |
+| `os_update_alert.py` | `read_os_update_state` | `os-updates.json` | `state/` |
+| `manual_update.py` | `read_manual` | `platform-manual-update.json` | `state/` |
+| `discovery_freshness.py` | `_read` | `update-discovery.json` | `state/` |
+| `notify.py` | `_unconfigured_logged_recently` | `alerts-unconfigured.json` | `state/` |
+| `project_alerts.py` | `_already_alerted` | a project's alert throttle | `state/` |
+| `start_alerts.py` | `alerted_recently`, `record` | `start-refused/<p>.json` | `state/` |
+| `container_update_targets.py` | `read_target_state` | `container-updates/<target>.json` | `state/` |
+| `health_checks/container_updates.py` | `check_container_updates` | the same, for the health check | `state/` |
+| `cve/breaker.py` | `read_held`, `alert_pending` | `cve-breaker.json` | `state/` |
+| `cve/kev.py` | `load_kev` | `kev/catalog.json` | `state/` |
+| `cve/kev_withdrawals.py` | `_entries` | `kev/withdrawn.json` | `state/` |
+| `cve/kev_source_history.py` | `_entries` | `kev/sources.json` | `state/` |
+| `cve/quarantine.py` | `read_quarantine_state` | `deploy/<p>.quarantined.json` | `state/` |
+| `cve/scan_state.py` | `scan_problem` | `scans/<p>.json` | `state/` |
+| `bind_sources.py` | `_load_record` | a project's bind-source record | `state/` |
+| `run_as.py` | `read_users` | a project's users record | `state/` |
+| `user_drift.py` | `held_back` | a project's user-drift record | `state/` |
+| `cve/suppressions.py` | `load_suppressions`, `_load_history` | `security/suppressions.yml` and its history | `projects/<p>/` (the host's list is in `config/`) |
+| `release.py` | `_read_meta` | `.releases/live.json`, `previous.json` | `projects/<p>/` |
+| `release_keep.py` | `_reads_as` | `.releases/previous.json`, compared before it is rewritten | `projects/<p>/` |
+| `release_txn.py` | `load_txn`, `_sha` | `.releases/install.json` | `projects/<p>/` |
+| `staged_release.py` | `load_slot` | the staging slot's `meta.json` | `projects/<p>/` |
+| `data_dirs.py` | `_load_record` | `.releases/data-dirs.json` | `projects/<p>/` |
+| `unresolved_stage.py` | `_state_active`, `_records` | a stage state file from 0.10.1 or earlier, `legacy-stages.json` | `state/` |
+| `bind_mounts.py` | `_services` | a compose file, when the caller asks for no-follow | `projects/<p>/` |
+| `compose_up_steps.py` | `restore_build_names` | the generated compose overlay | `projects/<p>/` |
+| `overlay_users.py` | `_overlay_users` | the generated compose overlay | `projects/<p>/` |
+| `upgrade_state.py` | `_read_json` | `probation.json`, `blocklist.json` | `upgrade-state/` |
+| `health_checks/upgrade_slot.py` | `check_upgrade_slot` | `active-slot` | `upgrade-state/` |
+| `commands/quarantine_gate.py` | `lift_after_deploy` | `<p>.conf`, the site a lift republishes (capped at the size of a site file) | `caddy/sites/` |
+
+These open a no-follow, non-blocking descriptor themselves (`open_regular_nofollow` or
+`open_resolved_nofollow`, read-only) and read from it, so each sets its own bound:
+
+| Module | Functions |
+|---|---|
+| `backup.py` | `publish_new` |
+| `bind_sources.py` | `_hash_file` |
+| `caddy.py` | `read_override` |
+| `compose_images.py` | `_read_dockerfile` |
+| `fileutil.py` | `durable_rename` |
+| `log_rotation.py` | `first_entry_day`, `_archive` |
+| `restore_safety.py` | `verify_plaintext` |
+| `stash.py` | `_open_archive` |
+| `commands/log_cmd.py` | `parse_log_file` |
+| `commands/restore.py` | `_run_restore_command` |
+| `commands/upgrade_offline.py` | `_read` |
+| `commands/userns_cmd.py` | `_held_on` |
+| `health_checks/userns.py` | `_alert_state` |
+
+An uploaded bundle in `inbox/` is the other deploy-written input. `bundle.inspect_bundle` is its
+one bounded reader, shared by reception and extraction (the limits are at the top of `bundle.py`).
+
+**Adding a reader.** Use a helper, add a row to `READERS` in `tests/test_root_state_reads.py` (its
+link, FIFO and dangling-link tests then run on your reader), and add a row above.
+`tests/test_root_reader_inventory.py` fails until all three are done. It also counts the reads
+that go around the helpers (`open()`, `Path.read_text()` and the like) per module, so a new one
+fails until you either use a helper or record the new count. That count is a baseline taken at
+0.11.9, not a review of each existing read.
+
+### Lock files
+
+`flock` locks an inode, not a name. If a lock file is unlinked while a process holds it or is about
+to take it, the next process creates a new file under the same name and both hold "the" lock. So a
+lock file is never removed while anything can still take it, not even when the thing it guards is
+removed: `project-delete` and `project-forget` leave the project's lock files behind, and a project
+added again under the same name reuses them. Create a new lock under `state/` with
+`fileutil.open_shared_lockfile` (no-follow, mode 0660, group `deploy`).
+
+| Lock file | Taken with | Guards | Lifetime |
+|---|---|---|---|
+| `state/<project>.lock` | `fileutil.project_lock` (doesn't wait: `LockError`) | every command that changes the project | kept for good, after `project-delete` and `project-forget` too |
+| `state/secrets-locks/<project>.lock` | `SecretsFile.locked` | writes of the project's secrets file | kept for good, as above |
+| `state/secrets-locks/.host.lock` | `SecretsFile.locked` | writes of the host secrets file | kept for good |
+| `state/.registry.lock` | `fileutil.registry_lock` | read, change and save of `projects.txt` | kept for good |
+| `state/.caddy.lock` | `docker.caddy_config_lock` | writing Caddy site config and reloading | kept for good |
+| `state/.legacy-stages.lock` | nothing since 0.11.7: `legacy-stage` took it, up to 0.11.6 | (the legacy-stage records) | left on a box where an older release made it |
+| `state/container-updates/.lock` | `commands/container_update_cmd.py` (doesn't wait) | one container-update run at a time | kept for good |
+| `logs/.<log name>.lock` | `log_rotation` (doesn't wait) | rotating that log | kept for good |
+| `upgrade-root/upgrade.lock` | the upgrade shim, `upgrade_state.upgrade_lock` (doesn't wait: `UpgradeInProgress`) | one platform upgrade at a time | kept for good |
+| `upgrade-state/upgrade.lock` | the same, together with the one above | upgrades started by a shim from 0.10.1 or earlier | kept while such a shim can still run; the shim replaces one that isn't root's (`acquire_lock` in `scripts/boxmunge-upgrade.d/state.sh`) |
+| `state/.cve-grace.lock` | nothing: retired | (the v0.6 grace window) | deleted by the CVE scan where an old release left it |
+
+`upgrade-root/` is root-only, so `deploy` can't replace the upgrade lock. The others are in
+directories `deploy` can write: they serialise honest writers and aren't a defence against `deploy`.
+
 ## Testing
 
 Four tiers, fastest first.

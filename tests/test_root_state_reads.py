@@ -10,7 +10,10 @@ the same record behind a symlink must then not give the same answer, and a
 FIFO there must not block. A link whose target is gone is not "no record":
 each reader refuses it, or does what it does with a record it cannot read
 (see `dangling` on each row), never what it does when nothing is there
-(fs_nofollow.read_text_nofollow_or_none is the one existence rule)."""
+(fs_nofollow.read_text_nofollow_or_none is the one existence rule).
+
+test_root_reader_inventory.py keeps the rows complete: every call of a
+read helper in src/ is exercised by a row here or named there."""
 from __future__ import annotations
 
 import json
@@ -26,8 +29,8 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge import (
-    bind_sources, data_dirs, fs_nofollow, pause, release, release_txn, run_as,
-    staged_release, unresolved_stage, upgrade_state, user_drift,
+    bind_mounts, bind_sources, compose_up_steps, data_dirs, fs_nofollow, overlay_users, pause,
+    release, release_txn, run_as, staged_release, unresolved_stage, upgrade_state, user_drift,
 )
 from boxmunge.backup_evidence import project_evidence, sync_evidence
 from boxmunge.bind_sources import read_record
@@ -44,9 +47,9 @@ from boxmunge.health_checks.container_updates import check_container_updates
 from boxmunge.notify import _unconfigured_logged_recently
 from boxmunge.os_update_alert import read_os_update_state
 from boxmunge.paths import BoxPaths
-from boxmunge.project_registry import unfinished_removals
+from boxmunge.project_registry import read_registry, unfinished_removals
 from boxmunge.project_alerts import alert_state, alert_once
-from boxmunge import start_alerts
+from boxmunge import manual_update, start_alerts
 from boxmunge.state import StateError, read_state
 
 P = "myapp"
@@ -71,7 +74,7 @@ def _logged_unreadable(outcome: Outcome, paths: BoxPaths, value: Any) -> bool:
 class Reader:
     name: str
     path: Callable[[BoxPaths], Path]
-    record: Any                       # what a valid file there holds
+    record: Any                       # what a valid file there holds: text, or JSON of it
     read: Callable[[BoxPaths], Any]   # the reader, as root calls it
     # Whether its outcome with a dangling link at the name is the specified one.
     dangling: Callable[[Outcome, BoxPaths], bool] = _refused
@@ -154,6 +157,8 @@ READERS = [
            read_blocked_state),
     Reader("os_update", lambda p: p.os_update_state,
            {"checked_at": ISO, "problems": [], "alerted": None}, read_os_update_state),
+    Reader("manual_update", lambda p: p.platform_manual_update,
+           {"version": "0.12.0", "alerted_at": ISO}, manual_update.read_manual),
     Reader("discovery", lambda p: p.update_discovery_state,
            {"answered_at": "2000-01-01T00:00:00+00:00", "failing_since": None,
             "last_error": None},
@@ -177,6 +182,10 @@ READERS = [
            dangling=lambda o, _p: o == ("value", False)),
     Reader("project_alerts", lambda p: alert_state(p, P, "production-down"), {"key": {"k": 1}},
            _alerted, dangling=lambda o, p: _logged_unreadable(o, p, True)),
+    # Text, one name per line. A dangling link must not read as "no registry
+    # yet", which would rebuild it from the project directories.
+    Reader("project registry", lambda p: p.state / "projects.txt", f"{P}\n",
+           lambda p: sorted(read_registry(p).names)),
     Reader("backup evidence", lambda p: p.project_backup_state(P),
            {"snapshot": "myapp-s.tar.gz.age", "snapshot_at": ISO},
            lambda p: project_evidence(p, P)),
@@ -196,6 +205,8 @@ def _outcome(fn: Callable[[], Any], fifo: Path | None = None, seconds: float = 5
     def run() -> None:
         try:
             out["v"] = ("value", fn())
+        except (AttributeError, NameError) as e:  # the row names what is not there
+            out["v"] = ("broken", repr(e))
         except Exception as e:  # noqa: BLE001 - the outcome is compared
             out["v"] = ("raised", type(e).__name__)
     worker = threading.Thread(target=run, daemon=True)
@@ -206,12 +217,14 @@ def _outcome(fn: Callable[[], Any], fifo: Path | None = None, seconds: float = 5
         os.close(os.open(fifo, os.O_RDWR | os.O_NONBLOCK))
         worker.join(seconds)
         pytest.fail(f"the reader blocked on the FIFO at {fifo}")
+    if out["v"][0] == "broken":
+        pytest.fail(f"the call is broken, which is not a reader's refusal: {out['v'][1]}")
     return out["v"]
 
 
 def _write(path: Path, record: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(record))
+    path.write_text(record if isinstance(record, str) else json.dumps(record))
 
 
 @pytest.fixture(params=READERS, ids=[r.name for r in READERS])
@@ -266,6 +279,13 @@ DANGLING_ONLY: list[tuple[str, Callable[[BoxPaths], Path], Callable[[BoxPaths], 
     ("bind record control", lambda p: p.project_bind_record(P),
      lambda p: bind_sources.control_file_unchanged(p.project_dir(P), p.project_bind_record(P),
                                                    "compose.yml")),
+    ("overlay users", lambda p: p.project_compose_override(P),
+     lambda p: overlay_users._overlay_users(p.project_compose_override(P))),
+    ("overlay build names", lambda p: p.project_compose_override(P),
+     lambda p: compose_up_steps.restore_build_names(p, P, P, p.project_compose_override(P), "t")),
+    ("compose binds", lambda p: p.project_compose(P),
+     lambda p: bind_mounts.bind_mounted_dirs(p.project_compose(P), p.project_dir(P),
+                                             nofollow=True)),
 ]
 
 
@@ -345,3 +365,15 @@ def test_read_state_reports_a_link_as_a_state_error(paths, tmp_path) -> None:
 
 def test_read_state_of_a_missing_file_is_the_default(paths) -> None:
     assert read_state(paths.project_deploy_state(P), {"a": 1}) == {"a": 1}
+
+
+def test_a_refused_start_is_recorded_over_a_link(paths, tmp_path) -> None:
+    """start_alerts.record rewrites its throttle: a link at the name is
+    replaced by the record, never written or read through."""
+    path = paths.state / "start-refused" / f"{P}.json"
+    path.parent.mkdir(parents=True)
+    path.symlink_to(tmp_path / "gone.json")
+    start_alerts.record(paths, P, "r", NOW)
+    assert not path.is_symlink() and not (tmp_path / "gone.json").exists()
+    assert start_alerts.alerted_recently(paths, P, "r", NOW)
+

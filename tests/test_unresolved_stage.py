@@ -108,6 +108,18 @@ class TestEachKind:
         state.write_text("not json")
         assert "shop: a release staged by boxmunge 0.10.1 is unresolved" in _refusal(box)
 
+    def test_a_stage_state_file_that_is_a_link_is_a_stage_and_is_not_followed(
+            self, box, tmp_path):
+        """Deploy can write state/staging: a link there to a file that says
+        inactive is not read as that file."""
+        _project(box, "shop")
+        elsewhere = tmp_path / "inactive.json"
+        elsewhere.write_text(json.dumps({"active": False}))
+        state = box.state / "staging" / "shop.json"
+        state.parent.mkdir(parents=True)
+        state.symlink_to(elsewhere)
+        assert "shop: a release staged by boxmunge 0.10.1 is unresolved" in _refusal(box)
+
     def test_an_inactive_stage_state_file_is_no_stage(self, box):
         _project(box, "shop")
         state = box.state / "staging" / "shop.json"

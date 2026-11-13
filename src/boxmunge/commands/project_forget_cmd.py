@@ -4,7 +4,7 @@ project directory is gone.
 
 A project-delete that did not finish, or a directory removed by hand, leaves
 the name in the registry with nothing behind it. This removes the entry and
-the project's leftover state files. It refuses while the project directory
+the project's leftover state files, never its lock files. It refuses while the project directory
 exists (project-delete is the way to remove a project) or while containers
 of the project do. Operator-only: run it as root, as boxmunge-server.
 """
@@ -62,10 +62,10 @@ def run_project_forget(project: str, paths: BoxPaths) -> int:
         print(f"ERROR: {e} Its state files were removed; nothing else to do.",
               file=sys.stderr)
         return 1
-    # Only now: unlinking a lock file in use would let a second opener lock a
-    # fresh inode beside the holder (project-delete leaves it for that reason).
-    for lock in (paths.project_lock_file(project), paths.secrets_locks / f"{project}.lock"):
-        lock.unlink(missing_ok=True)
+    # The project and secrets lock files stay, as project-delete leaves them:
+    # another command may have one open, or take it the moment this one lets
+    # go, and a name unlinked then gives the next opener a second lock on a
+    # fresh inode. A lock file's identity outlives the project it guards.
     log_operation("project-forget", "Registry entry dropped (no project directory)",
                   paths, project=project)
     print(f"Project '{project}' forgotten: removed from the registry, with its "

@@ -2,8 +2,10 @@
 """Project registry — allowlist of known project names on this server.
 
 Storage: /opt/boxmunge/state/projects.txt (one name per line, deploy-writable).
-Being deploy-writable, a line can hold anything; every line is validated as
-a project name on read, never trusted.
+Being deploy-writable, anything can be at that name and a line can hold
+anything. Root's timers read it, so it is read without following a link or
+waiting on a FIFO, up to REGISTRY_LIMIT_BYTES, and every line is validated
+as a project name, never trusted.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from boxmunge.fileutil import registry_lock
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 from boxmunge.paths import InvalidProjectName, validate_project_name
 from boxmunge.state import StateError
 
@@ -21,8 +24,29 @@ if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 
+# A name is at most 63 bytes, so this holds over sixteen thousand projects.
+REGISTRY_LIMIT_BYTES = 1024 * 1024
+
+
 def _registry_path(paths: BoxPaths) -> Path:
     return paths.state / "projects.txt"
+
+
+def _read_text(registry: Path) -> str | None:
+    """The registry's text, or None when nothing is at its name. Anything
+    else there (a link, dangling or not, a FIFO, a file past the cap, bytes
+    that are not text) is a ProjectRegistryError: its names are unknown, so
+    no caller may carry on as if it were empty or not yet written."""
+    try:
+        return read_text_nofollow_or_none(registry, limit=REGISTRY_LIMIT_BYTES)
+    except (OSError, UnicodeDecodeError) as e:
+        raise ProjectRegistryError(
+            f"Cannot read the project registry {registry}: {e}\n"
+            "It must be a regular file holding one project name per line. As "
+            f"root, remove what is there (`sudo rm {registry}`): the next "
+            "command rebuilds the registry from the deployed projects, and "
+            "`project-add <name>` registers again any project not yet deployed."
+        ) from e
 
 
 def _auto_migrate(paths: BoxPaths, registry: Path) -> None:
@@ -63,8 +87,9 @@ def _save(registry: Path, names: set[str], unparsed: tuple[str, ...]) -> None:
 
 
 class ProjectRegistryError(StateError):
-    """projects.txt has lines that are not valid project names, and the
-    caller lists the registry, so they would otherwise go unseen."""
+    """projects.txt cannot be read as a registry (_read_text); or it has
+    lines that are not valid project names and the caller lists the
+    registry, so they would otherwise go unseen."""
 
 
 @dataclass(frozen=True)
@@ -83,16 +108,17 @@ def read_registry(paths: BoxPaths) -> RegistryRead:
     A bad line can never equal a valid name, so membership checks use
     `names` and carry on: one bad line must not stop every project. Fleet
     loops report `problems`; listings call load_registered_projects.
+    Raises ProjectRegistryError when the file itself cannot be read.
     """
     registry = _registry_path(paths)
-    if not registry.exists():
+    text = _read_text(registry)
+    if text is None:
         _auto_migrate(paths, registry)
-        if not registry.exists():
-            return RegistryRead(frozenset(), (), ())
+        text = _read_text(registry) or ""
     names: set[str] = set()
     unparsed: list[str] = []
     problems: list[str] = []
-    for lineno, line in enumerate(registry.read_text().splitlines(), 1):
+    for lineno, line in enumerate(text.splitlines(), 1):
         name = line.strip()
         if not name:
             continue

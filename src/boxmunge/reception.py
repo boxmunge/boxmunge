@@ -4,12 +4,13 @@
 from __future__ import annotations
 
 import shutil
-import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import yaml
+
+from boxmunge.bundle import inspect_bundle
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -18,40 +19,23 @@ if TYPE_CHECKING:
 def peek_manifest_from_bundle(bundle_path: Path) -> dict[str, Any]:
     """Read and parse manifest.yml from inside a tar.gz bundle without extracting.
 
-    The bundle must contain exactly one top-level directory with a manifest.yml.
-    Returns the parsed manifest dict.
+    The archive is read through the bounded inspection extraction uses
+    (bundle.inspect_bundle), so an upload over a limit, or laid out as no
+    deploy would accept, is refused here, and the manifest is capped before
+    YAML parses it. Returns the parsed manifest dict.
     Raises ValueError if the bundle is invalid or manifest is missing.
     """
-    if not bundle_path.exists():
-        raise ValueError(f"Bundle not found: {bundle_path}")
-
+    found = inspect_bundle(bundle_path)
+    if found.manifest is None:
+        raise ValueError(
+            f"No manifest.yml found in bundle: {bundle_path}. "
+            f"Expected <project>/manifest.yml at the top level."
+        )
     try:
-        valid = tarfile.is_tarfile(bundle_path)
-    except (EOFError, OSError):
-        valid = False
-    if not valid:
-        raise ValueError(f"Not a valid tar.gz file: {bundle_path}")
-
-    with tarfile.open(bundle_path, "r:gz") as tar:
-        # Find manifest.yml — expect it at <project>/manifest.yml
-        manifest_member = None
-        for member in tar.getmembers():
-            parts = Path(member.name).parts
-            if len(parts) == 2 and parts[1] == "manifest.yml":
-                manifest_member = member
-                break
-
-        if manifest_member is None:
-            raise ValueError(
-                f"No manifest.yml found in bundle: {bundle_path}. "
-                "Expected <project>/manifest.yml at the top level."
-            )
-
-        f = tar.extractfile(manifest_member)
-        if f is None:
-            raise ValueError(f"Cannot read manifest.yml from bundle: {bundle_path}")
-
-        data = yaml.safe_load(f)
+        data = yaml.safe_load(found.manifest)
+    except (yaml.YAMLError, RecursionError) as e:  # RecursionError: nesting too deep
+        raise ValueError(f"manifest.yml is not valid YAML in: {bundle_path}: "
+                         f"{type(e).__name__}: {e}") from e
 
     if not isinstance(data, dict):
         raise ValueError(f"manifest.yml is not a YAML mapping in: {bundle_path}")
@@ -81,6 +65,11 @@ def receive_bundle(source_path: Path, paths: BoxPaths) -> Path:
     if not project_name:
         raise ValueError(
             f"Bundle manifest is missing 'project' field: {source_path}"
+        )
+    if not isinstance(project_name, str):
+        raise ValueError(
+            f"Bundle manifest's 'project' must be a project name, not "
+            f"{project_name!r}: {source_path}"
         )
 
     from boxmunge.paths import validate_project_name

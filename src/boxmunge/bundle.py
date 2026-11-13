@@ -1,5 +1,7 @@
-"""Bundle extraction and the bundle content policy.
+"""Bundle inspection, extraction and the bundle content policy.
 
+Reception (an upload arriving) and extraction (a deploy unpacking it) read
+a bundle's archive through one bounded inspection, inspect_bundle.
 Installing a checked tree into a project lives in boxmunge.release.
 """
 from __future__ import annotations
@@ -9,6 +11,10 @@ import os
 import posixpath
 import shutil
 import tarfile
+import zlib
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
@@ -22,7 +28,7 @@ class BundleError(ValueError):
 # under the project's incoming workspace, into millions of entries whose
 # headers tarfile holds in memory, or into extended (PAX, GNU long-name)
 # headers that tarfile reads into memory whole. So each entry is checked as
-# its header arrives (_read_members), each extended header before its body
+# its header arrives (_limited_members), each extended header before its body
 # is read and a sparse member (whose map tarfile holds in memory) outright
 # (_CheckedTarInfo), and the decompressed stream refuses any position past
 # what those limits allow (_LimitedStream), whatever else a header makes
@@ -38,6 +44,10 @@ MAX_EXTENDED_TOTAL_BYTES = 128 * 1024 ** 2
 # Archive bytes per entry beyond its contents and extended headers: its
 # header block and its padding to a 512-byte block.
 HEADER_ALLOWANCE = 1024
+# A manifest is a few KB of YAML, and YAML parses it whole, in memory: it
+# gets its own small cap, checked on its header before any of it is read.
+MANIFEST_NAME = "manifest.yml"
+MAX_MANIFEST_BYTES = 256 * 1024
 _SHRINK = ("Leave build output, dependencies and data out of the bundle (list them in "
            ".boxmungeignore), then bundle and upload it again.")
 _GNU_SPARSE = tarfile.GNUTYPE_SPARSE
@@ -129,15 +139,15 @@ class _CheckedTarInfo(tarfile.TarInfo):
         raise _sparse(next.name)
 
 
-def _read_members(tar: tarfile.TarFile) -> list[tarfile.TarInfo]:
-    """Every member, each header checked against the limits as it arrives:
-    at most MAX_MEMBERS entries, no file over MAX_MEMBER_BYTES, and at most
-    MAX_TOTAL_BYTES in all."""
-    members: list[tarfile.TarInfo] = []
+def _limited_members(tar: tarfile.TarFile) -> Iterator[tarfile.TarInfo]:
+    """Every member in archive order, each header checked against the
+    limits as it arrives: at most MAX_MEMBERS entries, no file over
+    MAX_MEMBER_BYTES, and at most MAX_TOTAL_BYTES in all."""
+    count = 0
     total = 0
     for m in tar:
-        members.append(m)
-        if len(members) > MAX_MEMBERS:
+        count += 1
+        if count > MAX_MEMBERS:
             raise BundleError(f"Bundle has more than {MAX_MEMBERS} entries; a bundle may "
                               f"have at most {MAX_MEMBERS}. {_SHRINK}")
         if m.size > MAX_MEMBER_BYTES:
@@ -148,7 +158,7 @@ def _read_members(tar: tarfile.TarFile) -> list[tarfile.TarInfo]:
             raise BundleError(f"Bundle expands to more than {_size(MAX_TOTAL_BYTES)}; a "
                               f"bundle may expand to at most {_size(MAX_TOTAL_BYTES)}. "
                               f"{_SHRINK}")
-    return members
+        yield m
 
 
 def _member_parts(name: str) -> list[str]:
@@ -251,6 +261,71 @@ def check_extracted_links(project: Path) -> None:
                 )
 
 
+@dataclass(frozen=True)
+class Inspection:
+    """What the one bounded pass over a bundle's archive found."""
+
+    top: str                         # its single top-level directory
+    members: list[tarfile.TarInfo]   # every entry, within the limits and checked
+    manifest: bytes | None           # <top>/manifest.yml, when it is a regular file
+
+
+@contextmanager
+def _open_archive(bundle_path: Path) -> Iterator[tarfile.TarFile]:
+    """A bundle's archive, opened the one bounded way (_LimitedStream,
+    _CheckedTarInfo). Whatever gzip or tarfile cannot read, here or in the
+    caller's block, is a BundleError."""
+    if not bundle_path.exists():
+        raise BundleError(f"Bundle not found: {bundle_path}")
+    try:
+        with gzip.open(bundle_path, "rb") as raw, \
+                tarfile.open(fileobj=_LimitedStream(raw), mode="r:",
+                             tarinfo=_CheckedTarInfo) as tar:
+            yield tar
+    except BundleError:
+        raise
+    except (tarfile.TarError, EOFError, OSError, zlib.error) as e:
+        raise BundleError(f"Not a valid tar.gz bundle: {bundle_path.name}: {e}") from e
+
+
+def _read_manifest(tar: tarfile.TarFile, m: tarfile.TarInfo) -> bytes:
+    if m.size > MAX_MANIFEST_BYTES:
+        raise BundleError(f"Bundle's {m.name} is {_size(m.size)}; a manifest may be at "
+                          f"most {_size(MAX_MANIFEST_BYTES)}.")
+    stream = tar.extractfile(m)
+    if stream is None:  # tarfile's answer for a non-file; _inspect passes only files
+        raise BundleError(f"Cannot read {m.name} from the bundle")
+    return stream.read()
+
+
+def _inspect(tar: tarfile.TarFile) -> Inspection:
+    """The one inspection of a bundle's archive, for reception and
+    extraction alike. A single forward pass: each header is checked against
+    the limits as it arrives (_limited_members) and the manifest is read,
+    capped, as it is passed, so nothing seeks back (which, in a gzip stream,
+    decompresses from the start again). Then the entries are checked as a
+    whole (_check_members). A name can appear twice in an archive, and the
+    last entry is the one extraction leaves on disk: the manifest kept is
+    the last, and none if a later entry of that name is not a regular file
+    (a link, a directory), since no earlier file is then what a deploy reads."""
+    members: list[tarfile.TarInfo] = []
+    manifest: bytes | None = None
+    for m in _limited_members(tar):
+        members.append(m)
+        parts = _member_parts(m.name)
+        if len(parts) == 2 and parts[1] == MANIFEST_NAME:
+            manifest = _read_manifest(tar, m) if m.isfile() else None
+    return Inspection(_check_members(members), members, manifest)
+
+
+def inspect_bundle(bundle_path: Path) -> Inspection:
+    """Inspect a tar.gz bundle without writing anything: what reception runs
+    on an upload, and exactly what extract_bundle checks before it extracts.
+    Raises BundleError (a ValueError), as extract_bundle does."""
+    with _open_archive(bundle_path) as tar:
+        return _inspect(tar)
+
+
 def extract_bundle(bundle_path: Path, dest: Path) -> Path:
     """Extract a tar.gz bundle into dest and return the project directory.
 
@@ -259,27 +334,17 @@ def extract_bundle(bundle_path: Path, dest: Path) -> Path:
     top-level directory, special files, or links that resolve outside the
     project.
     """
-    if not bundle_path.exists():
-        raise BundleError(f"Bundle not found: {bundle_path}")
-    try:
-        with gzip.open(bundle_path, "rb") as raw, \
-                tarfile.open(fileobj=_LimitedStream(raw), mode="r:",
-                             tarinfo=_CheckedTarInfo) as tar:
-            members = _read_members(tar)
-            top = _check_members(members)
-            # The "data" filter re-checks links against the real filesystem
-            # as it extracts: defence in depth behind _check_members.
-            tar.extractall(path=dest, members=members, filter="data")
-    except BundleError:
-        raise
-    except (tarfile.TarError, EOFError, OSError) as e:
-        raise BundleError(f"Not a valid tar.gz bundle: {bundle_path.name}: {e}") from e
+    with _open_archive(bundle_path) as tar:
+        found = _inspect(tar)
+        # The "data" filter re-checks links against the real filesystem
+        # as it extracts: defence in depth behind _check_members.
+        tar.extractall(path=dest, members=found.members, filter="data")
 
-    project = dest / top
+    project = dest / found.top
     if project.is_symlink() or not project.is_dir():
         raise BundleError(
             f"Bundle must contain exactly one top-level directory; "
-            f"'{top}' is not a directory"
+            f"'{found.top}' is not a directory"
         )
     check_extracted_links(project)
     return project
