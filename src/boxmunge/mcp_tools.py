@@ -148,6 +148,23 @@ def _tool_upgrade(version: str | None = None) -> dict:
     return run_subprocess_tool(shim_command(_get_paths(), target=version))
 
 
+def _server_command(command: str, version: str | None, as_json: bool) -> list[str]:
+    return (["boxmunge-server", command] + (["--version", version] if version is not None else [])
+            + (["--json"] if as_json else []))
+
+
+def _tool_upgrade_howto(version: str | None = None, as_json: bool = False) -> dict:
+    """As the deploy shell's `upgrade-howto`: it fetches the signed notes
+    through the shim's guide verb itself."""
+    return run_subprocess_tool(_server_command("upgrade-howto", version, as_json))
+
+
+def _tool_upgrade_check(version: str | None = None, as_json: bool = False) -> dict:
+    """As the deploy shell's `upgrade-check`: it runs the shim's check verb
+    itself, which can take several minutes."""
+    return run_subprocess_tool(_server_command("upgrade-check", version, as_json))
+
+
 def _tool_self_test(as_json: bool = False) -> dict:
     from boxmunge.commands.self_test_cmd import run_self_test
     paths = _get_paths()

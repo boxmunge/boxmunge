@@ -41,7 +41,7 @@ from boxmunge.userns.journal import (
     FORWARD, Journal, State, finish_hint, load_journal, save_journal, state,
 )
 from boxmunge.userns.preflight import PreflightRefused, preflight
-from boxmunge.userns.shift import Direction, scan_tree, shift_tree
+from boxmunge.userns.shift import Direction, ShiftRefused, scan_tree, shift_tree
 from boxmunge.userns.switch import (
     CADDYFILE_MODE, MigrationError, back_to_prior, caddyfile_mode, create_identity,
     daemon_json_owner,
@@ -75,13 +75,17 @@ def shift_journalled(j: Journal, tree: Path, direction: Direction, save: Save,
     """Journal the tree's setuid list, then shift it (shift.py's docstring).
     `seed` is the key of the same tree's earlier shift the other way, whose
     list holds a mode a kill inside it may have cleared. Ids already in the
-    target range are accepted only once a shift of this tree has begun.
-    Entries an inverse shift left alone (ids in neither range: there is no
-    owner to give them back) are journalled under `left:<key>`, for the
-    rollback's result and alert (steps.left_alone)."""
+    target range are accepted only once a shift of this tree has begun, and
+    the journalled list is that mark: a first scan that refuses journals
+    nothing, so the next run scans the tree as strictly. Entries an inverse
+    shift left alone (ids in neither range: there is no owner to give them
+    back) are journalled under `left:<key>`, for the rollback's result and
+    alert (steps.left_alone)."""
     resumed = key in j.setid
-    # One scan: its list is journalled first, whatever it refuses, as it always was.
+    # One scan: the shift refuses on it, and its list is journalled before the shift.
     scan = scan_tree(tree, j.offset, direction, resumed=resumed)
+    if scan.problems and not resumed:
+        raise ShiftRefused(tree, scan.problems)
     setid = {**j.setid.get(seed or "", {}), **scan.setid, **j.setid.get(key, {})}
     if not resumed or setid != j.setid[key]:
         j.setid[key] = setid  # also the mark that this tree's shift has begun

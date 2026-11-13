@@ -12,7 +12,8 @@ import pytest
 import yaml
 
 from boxmunge.commands.upgrade_cmd import run_upgrade
-from boxmunge.commands.upgrade_steps import UpgradeGateError, check_upgrade
+from boxmunge.commands.upgrade_report import check_upgrade
+from boxmunge.commands.upgrade_steps import UpgradeGateError
 from boxmunge.compose import ComposeError
 from boxmunge.docker_run import DockerError
 from boxmunge.upgrade_exclusions import apply_projects
@@ -157,10 +158,10 @@ class TestDryRunWritesNothing:
         paths = _setup(tmp_path)
         _project(paths, "paused")
         _pause(paths, "paused")
-        assert check_upgrade(paths) == [
+        assert [line.text for line in check_upgrade(paths)] == [
             "paused: paused; keeps its maintenance page, overlay renders OK"]
         paths.project_users_record("paused").write_text("not json\n")
-        [line] = check_upgrade(paths)
+        [line] = [line.text for line in check_upgrade(paths)]
         assert line.startswith("paused: paused; keeps its maintenance page; would be refused")
         assert "cannot read the users record" in line
         assert run_upgrade(paths, dry_run=True) == 0
@@ -250,7 +251,7 @@ class TestOfflineOverlayRefused:
         target.unlink(missing_ok=True)
         target.symlink_to(secret)
         paths.project_users_record("alpha").write_text('{"web": "not an entry"}\n')
-        [line] = check_upgrade(paths)
+        [line] = [line.text for line in check_upgrade(paths)]
         assert "would be refused" in line and "is a symlink" in line
         regen = apply_projects(paths)[1]
         # Refused by the check of its files against the record (D-02), before

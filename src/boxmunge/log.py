@@ -11,6 +11,8 @@ Also logs to stderr for interactive use (human-readable format).
 import json
 import logging
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -106,6 +108,22 @@ def get_logger(paths: BoxPaths) -> logging.Logger:
 
     _logger = logger
     return logger
+
+
+@contextmanager
+def no_log_file(paths: BoxPaths) -> Iterator[None]:
+    """Write nothing to the operational log file while the block runs; its
+    entries still reach stderr. For a command that must write nothing
+    (upgrade-readiness, which the upgrade check runs read-only)."""
+    logger = get_logger(paths)
+    files = [h for h in logger.handlers if isinstance(h, SharedLogFileHandler)]
+    for handler in files:
+        logger.removeHandler(handler)
+    try:
+        yield
+    finally:
+        for handler in files:
+            logger.addHandler(handler)
 
 
 def _log(

@@ -105,6 +105,18 @@ class TestAllowedCommands:
                      "add-project"]:
             assert cmd not in ALLOWED_COMMANDS, f"{cmd} should not be allowed"
 
+    def test_shell_allows_upgrade_howto_and_upgrade_check(self) -> None:
+        assert {"upgrade-howto", "upgrade-check"} <= ALLOWED_COMMANDS
+
+    @patch("boxmunge.shell.subprocess.run")
+    def test_upgrade_howto_and_check_run_as_deploy_not_through_sudo(
+            self, mock_run: MagicMock) -> None:
+        """They reach the shim themselves, for its check and guide verbs only."""
+        mock_run.return_value = MagicMock(returncode=0)
+        run_command("upgrade-check", ["--version", "0.12.0", "--json"])
+        mock_run.assert_called_once_with(
+            ["boxmunge-server", "upgrade-check", "--version", "0.12.0", "--json"])
+
     def test_auto_update_is_root_only(self) -> None:
         """It takes upgrade.lock in root-only upgrade-root/, so from the deploy
         shell it could only ever fail (after writing state as deploy)."""
@@ -139,6 +151,8 @@ class TestAllowedCommands:
             "userns",            # Root-only: the userns migration, through the upgrade shim.
             "auto-update",       # Root-only: its lock is in root-only upgrade-root/ (`upgrade`
                                  # is the deploy shell's way to update).
+            "upgrade-readiness",  # Operator-only: agents use upgrade-check, which runs the
+                                  # target release's copy through the upgrade shim.
         }
 
         for cmd in COMMANDS:
