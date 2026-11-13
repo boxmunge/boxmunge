@@ -124,7 +124,7 @@ UNWIND_ON_SIGTERM = frozenset({
     "prod-deploy", "stage", "promote", "unstage", "rollback", "project-delete", "data",
     "add-git-project", "pause", "resume", "recover", "staging-teardown-all",
     "backup", "backup-all", "restore", "test-restore", "self-test",
-    "check-all", "security", "container-update", "upgrade", "auto-update", "userns",
+    "check", "check-all", "security", "container-update", "upgrade", "auto-update", "userns",
 })
 
 

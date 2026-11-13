@@ -564,7 +564,8 @@ Smoke tests are **per-service**. Each service that declares a `smoke` field in t
 - **`localhost:PORT` works naturally** — the script runs in the same network namespace as the service.
 - **The script must only use tools available inside the container.** boxmunge does not install anything. If your smoke script uses `curl`, your Dockerfile must install `curl`. If the container is Python-based, use Python's `urllib` instead. Alpine images have `wget`. Plan accordingly.
 - Scripts live in `boxmunge-scripts/` on the host and are bind-mounted into the container at `/boxmunge-scripts/`; boxmunge runs `/boxmunge-scripts/<file name of smoke>`.
-- Every running container of the service (each replica) is tested. A script that runs longer than 60 seconds counts as a warning.
+- Every running container of every service that declares `smoke` (each replica) is tested, and the most severe result is the project's. A warning does not skip the containers after it; a critical result ends the check.
+- A script that runs longer than 60 seconds counts as a warning, and boxmunge kills it, and every process it started, inside the container. The warning says so if it could not confirm that. In a container that runs without an init process (`init: false` in its compose file), nothing collects the killed processes: they no longer run, but their entries stay until the container restarts and count toward its pids limit, and the warning says that too.
 - Scripts are invoked via `sh` with the **service name as `$1`** (e.g., `web`, `api`). This lets a shared smoke script branch on which service it is testing.
 - Use `#!/bin/sh` shebangs (not `#!/bin/bash`) unless you know bash is in the container.
 - The periodic health check (`check-all`, every 5 minutes) alone runs the script with `BOXMUNGE_CHECK=periodic` in its environment. Every other smoke run gates an operation (deploy, recover, a quarantine lift, resume, userns bring-up), so a check that should only ever alert, and never hold one up, runs only when that is set, and exits `1`, never `2`.
@@ -574,7 +575,7 @@ Smoke tests are **per-service**. Each service that declares a `smoke` field in t
 | Exit code | Meaning | boxmunge action |
 |---|---|---|
 | `0` | Healthy. Also clears any prior failure state. | None; deployment proceeds or monitor resets. |
-| `1` (or any non-zero code but `2`) | Warning or degraded. | Alert after configurable threshold of consecutive failures (`health.alert_threshold`, default 3). |
+| `1` (or any non-zero code but `2`) | Warning or degraded. `126` and `127` are reported as the script's own status (below). | Alert after configurable threshold of consecutive failures (`health.alert_threshold`, default 3). |
 | `2` | Critical. | Alert immediately; stop all project containers; enter `critical_stopped` state. |
 
 ### Stderr Protocol
@@ -585,8 +586,17 @@ boxmunge reads one message from stderr and uses it in alerts and logs:
 - **Multiple non-blank lines** on stderr: collapsed to `"Manual failure analysis required (smoke script produced multiple lines)"`.
 - **No output** on stderr: a generic message is used (`"Smoke check failed (no detail provided)"`).
 
-A smoke that could not run at all (the container is gone or not running, or `sh` cannot open the
-script) is reported as a warning, never as critical, whatever its exit code.
+A smoke that could not run at all (the container is gone or not running, the script is missing
+from the container or not readable by its user, or `docker exec` cannot start it) is reported as a
+warning, "smoke could not run (infrastructure, not app)", never as critical. boxmunge tells this by
+whether the script was started: the command it runs in the container prints a marker on stdout
+once the script is there to run, just before handing over to it. Neither the exit status nor the
+wording on stderr decides it: `docker exec` exits `1` for a container that is gone or stopped and
+`126` or `127` when it cannot start the command, and all of these are "could not run"; a script
+that was started and exits `2` is critical whatever it prints. A script that itself exits `126` or
+`127` (a shell's statuses for a command that cannot be run or is not found, for instance when the
+script's last command is missing from the image) is a warning that names that status as the
+script's own.
 
 In `prod-deploy` and `promote`, any failing smoke test fails the command (the new release
 stays running), except on a project's first deploy, where it is downgraded to a warning (secrets

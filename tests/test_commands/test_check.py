@@ -8,11 +8,15 @@ from unittest.mock import patch, MagicMock
 
 from boxmunge.commands.check import run_check, run_smoke_in_container
 from boxmunge.commands.smoke_result import (
+    STARTED,
     SmokeResult,
     interpret_smoke_result,
     parse_smoke_stderr,
+    smoke_command,
 )
 from boxmunge.paths import BoxPaths
+
+RAN = STARTED + "\n"  # what the platform's command prints before the script starts
 
 
 class TestParseSmokeStderr:
@@ -35,47 +39,36 @@ class TestParseSmokeStderr:
 
 class TestInterpretSmokeResult:
     def test_exit_zero_is_healthy(self) -> None:
-        result = interpret_smoke_result(0, "")
+        result = interpret_smoke_result(0, RAN, "")
         assert result.status == "ok"
 
     def test_exit_one_is_warning(self) -> None:
-        result = interpret_smoke_result(1, "Low disk space\n")
+        result = interpret_smoke_result(1, RAN, "Low disk space\n")
         assert result.status == "warning"
         assert result.message == "Low disk space"
 
     def test_exit_two_is_critical(self) -> None:
-        result = interpret_smoke_result(2, "Security breach detected\n")
+        result = interpret_smoke_result(2, RAN, "Security breach detected\n")
         assert result.status == "critical"
         assert result.message == "Security breach detected"
 
     def test_other_exit_code_is_warning(self) -> None:
-        result = interpret_smoke_result(127, "command not found\n")
-        assert result.status == "warning"
-
-    def test_script_not_openable_is_not_critical(self) -> None:
-        """`sh` exits 2 when it cannot open the smoke script — the same exit
-        code an app uses to signal a genuine critical. That collision let a
-        severed bind mount (script missing inside a still-running prod
-        container) escalate to CRITICAL and stop prod. A can't-open-script
-        failure is a harness problem, never app-critical."""
-        result = interpret_smoke_result(
-            2, "sh: 0: cannot open /boxmunge-scripts/smoke.sh: No such file\n",
-        )
-        assert result.status != "critical"
+        result = interpret_smoke_result(127, RAN, "command not found\n")
         assert result.status == "warning"
 
     def test_container_gone_is_not_critical(self) -> None:
         """A missing/renamed container while a stage is active is expected —
         it means the smoke could not be run, not that the app is unhealthy."""
         result = interpret_smoke_result(
-            1, "Error response from daemon: No such container: engine-engine-1\n",
+            1, "", "Error response from daemon: No such container: engine-engine-1\n",
         )
         assert result.status == "warning"
+        assert result.message.startswith("smoke could not run (infrastructure, not app)")
 
     def test_real_app_critical_still_critical(self) -> None:
         """A genuine app-reported critical (exit 2, app's own message) must
         still escalate — the harness guard must not mask real failures."""
-        result = interpret_smoke_result(2, "Security breach detected\n")
+        result = interpret_smoke_result(2, RAN, "Security breach detected\n")
         assert result.status == "critical"
 
 
@@ -109,7 +102,7 @@ class TestRunSmokeInContainer:
         result = run_smoke_in_container(tmp_path, manifest, ["compose.yml"])
         assert result.status == "ok"
 
-    @patch("boxmunge.commands.check.subprocess.run")
+    @patch("boxmunge.service_exec.subprocess.run")
     def test_successful_smoke(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.return_value = MagicMock(returncode=0, stderr="")
         result = run_smoke_in_container(
@@ -119,21 +112,20 @@ class TestRunSmokeInContainer:
         # Uses docker exec directly (not docker compose exec)
         call_args = mock_run.call_args[0][0]
         assert call_args[0:2] == ["docker", "exec"]
-        assert "myapp-web-1" in call_args
-        assert "/boxmunge-scripts/smoke.sh" in call_args
-        # Service name passed as $1
-        assert call_args[-1] == "web"
+        assert call_args[2] == "myapp-web-1"
+        # The script is run with the service name as $1
+        assert call_args[-1] == smoke_command("/boxmunge-scripts/smoke.sh", "web")
 
-    @patch("boxmunge.commands.check.subprocess.run")
+    @patch("boxmunge.service_exec.subprocess.run")
     def test_failed_smoke(self, mock_run: MagicMock, tmp_path: Path) -> None:
-        mock_run.return_value = MagicMock(returncode=1, stderr="Connection refused\n")
+        mock_run.return_value = MagicMock(returncode=1, stdout=RAN, stderr="Connection refused\n")
         result = run_smoke_in_container(
             tmp_path, self.MANIFEST, ["compose.yml", "compose.boxmunge.yml"],
         )
         assert result.status == "warning"
         assert "Connection refused" in result.message
 
-    @patch("boxmunge.commands.check.subprocess.run")
+    @patch("boxmunge.service_exec.subprocess.run")
     def test_staging_container_name(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.return_value = MagicMock(returncode=0, stderr="")
         run_smoke_in_container(
@@ -144,7 +136,7 @@ class TestRunSmokeInContainer:
         call_args = mock_run.call_args[0][0]
         assert "myapp-staging-web-1" in call_args
 
-    @patch("boxmunge.commands.check.subprocess.run")
+    @patch("boxmunge.service_exec.subprocess.run")
     def test_timeout_returns_warning(self, mock_run: MagicMock, tmp_path: Path) -> None:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd="docker", timeout=60)
         result = run_smoke_in_container(
@@ -153,7 +145,7 @@ class TestRunSmokeInContainer:
         assert result.status == "warning"
         assert "timed out" in result.message
 
-    @patch("boxmunge.commands.check.subprocess.run")
+    @patch("boxmunge.service_exec.subprocess.run")
     def test_multiple_services(self, mock_run: MagicMock, tmp_path: Path) -> None:
         """Each service with smoke gets its own docker exec."""
         mock_run.return_value = MagicMock(returncode=0, stderr="")
@@ -177,41 +169,7 @@ class TestRunSmokeInContainer:
         assert "myapp-web-1" in containers
         assert "myapp-api-1" in containers
 
-    @patch("boxmunge.commands.check.subprocess.run")
-    def test_stops_on_first_failure(self, mock_run: MagicMock, tmp_path: Path) -> None:
-        """If the first service fails, don't run the rest."""
-        mock_run.return_value = MagicMock(
-            returncode=1, stderr="Backend down\n", stdout="",
-        )
-        manifest = {
-            "project": "myapp",
-            "services": {
-                "web": {
-                    "port": 8080, "routes": [{"path": "/"}],
-                    "smoke": "boxmunge-scripts/smoke-web.sh",
-                },
-                "api": {
-                    "port": 9000, "routes": [{"path": "/api/*"}],
-                    "smoke": "boxmunge-scripts/smoke-api.sh",
-                },
-            },
-        }
-        result = run_smoke_in_container(tmp_path, manifest, ["compose.yml"])
-        assert result.status == "warning"
-        # Only one smoke command should fire (the failing web service's),
-        # not the api's. Filter by the docker-exec smoke shape because
-        # v0.9 enrichment may also invoke `docker compose logs` to scan
-        # for read-only-fs hints, which we ignore here.
-        smoke_calls = [
-            c for c in mock_run.call_args_list
-            if c[0][0][:2] == ["docker", "exec"]
-        ]
-        assert len(smoke_calls) == 1
-        # The single smoke call targets web, not api.
-        assert smoke_calls[0][0][0][2] == "myapp-web-1"
-
-
-    @patch("boxmunge.commands.check.subprocess.run")
+    @patch("boxmunge.service_exec.subprocess.run")
     def test_custom_container_name_is_found_by_label(self, mock_run, tmp_path) -> None:
         self.containers.remove("myapp")
         self.containers.run("myapp", "web", _IMG, name="my-custom-web")
@@ -219,20 +177,20 @@ class TestRunSmokeInContainer:
         assert run_smoke_in_container(tmp_path, self.MANIFEST, ["compose.yml"]).status == "ok"
         assert mock_run.call_args[0][0][2] == "my-custom-web"
 
-    @patch("boxmunge.commands.check.subprocess.run")
+    @patch("boxmunge.service_exec.subprocess.run")
     def test_every_running_replica_is_tested(self, mock_run, tmp_path) -> None:
         self.containers.run("myapp", "web", _IMG, name="myapp-web-2")
         self.containers.run("myapp", "web", _IMG, name="myapp-web-3", running=False)
         self.containers.run("myapp", "web", _IMG, name="myapp-web-run-x", oneoff=True)
         mock_run.side_effect = [MagicMock(returncode=0, stderr=""),
-                                MagicMock(returncode=1, stderr="replica 2 down\n"),
+                                MagicMock(returncode=1, stdout=RAN, stderr="replica 2 down\n"),
                                 MagicMock(returncode=0, stdout="", stderr="")]  # log scan
         result = run_smoke_in_container(tmp_path, self.MANIFEST, ["compose.yml"])
         execs = [c[0][0][2] for c in mock_run.call_args_list if c[0][0][:2] == ["docker", "exec"]]
         assert execs == ["myapp-web-1", "myapp-web-2"]
         assert result.status == "warning" and "replica 2 down" in result.message
 
-    @patch("boxmunge.commands.check.subprocess.run")
+    @patch("boxmunge.service_exec.subprocess.run")
     def test_no_running_container_is_an_infrastructure_warning(self, mock_run, tmp_path) -> None:
         """Never critical: a smoke that could not run says nothing about the app."""
         self.containers.remove("myapp")

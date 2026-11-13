@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from boxmunge.commands.smoke_result import STARTED
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state, write_state
 from tests.deploy_helpers import mark_deployed
@@ -60,12 +61,12 @@ class _Smoke:
         assert cmd[:2] == ["docker", "exec"], cmd
         self.calls += 1
         rc, stderr = self.results.pop(0) if len(self.results) > 1 else self.results[0]
-        return subprocess.CompletedProcess(cmd, rc, stdout="", stderr=stderr)
+        return subprocess.CompletedProcess(cmd, rc, stdout=STARTED + "\n", stderr=stderr)
 
 
 def _tick(paths: BoxPaths, smoke: _Smoke, down, push) -> int:
     from boxmunge.commands.check_all import run_check_all
-    with patch("boxmunge.commands.check.subprocess.run", smoke), \
+    with patch("boxmunge.service_exec.subprocess.run", smoke), \
          patch("boxmunge.commands.health_state.compose_down", down), \
          patch("boxmunge.notify.send_notification", push):
         return run_check_all(paths, read_only=False)
@@ -145,7 +146,7 @@ class TestStickyCriticalStop:
         _tick(paths, _Smoke((2, "db unreachable")), MagicMock(), MagicMock(return_value=True))
         before = paths.project_health_state(NAME).read_text()
         smoke = _Smoke((1, NO_CONTAINER))
-        with patch("boxmunge.commands.check.subprocess.run", smoke):
+        with patch("boxmunge.service_exec.subprocess.run", smoke):
             assert run_check_all(paths, read_only=True) == 2
         assert smoke.calls == 0
         assert paths.project_health_state(NAME).read_text() == before

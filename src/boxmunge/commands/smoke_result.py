@@ -1,11 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""What a smoke test's exit code and stderr mean, per the boxmunge contract.
+"""The smoke contract: the command run in the container, and what its
+output and exit status mean.
 
-Pure interpretation, split from commands.check, which runs the smoke
-scripts inside the containers.
+Split from commands.check, which runs it in every container. Whether a
+smoke could not be run, or ran and failed, is told by whether the script
+was started: the command says so on stdout once the script is there to run
+and before it is given control, so only a script that ran has a verdict.
+What the script writes on stderr is its message and never changes the
+verdict: an app that exits 2 saying "cannot open database" is critical.
 """
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass
 
 
@@ -13,6 +19,46 @@ from dataclasses import dataclass
 class SmokeResult:
     status: str  # "ok", "warning", "critical"
     message: str
+
+
+# The first line of stdout of a smoke whose script was started. The script's
+# own output comes after it, so nothing the script prints can take it away,
+# and nothing but the command below prints it first.
+STARTED = "boxmunge-smoke-started"
+
+# A shell's statuses for a command that cannot be invoked (126) or is not
+# found (127). `docker exec` and the command below exit with them for a
+# smoke that was never started; from a script that ran, they are its own.
+COMMAND_NOT_RUN_STATUSES = (126, 127)
+
+# `sh` exits 2, the app-critical status, on a script it cannot open (a
+# severed bind mount, say), so the script is checked before sh is given it.
+_SMOKE_COMMAND = r"""
+s={script}
+[ -f "$s" ] || {{ echo "smoke script $s is not in the container" >&2; exit 127; }}
+[ -r "$s" ] || {{ echo "smoke script $s is not readable by the container's user" >&2; exit 126; }}
+echo {started}
+exec sh "$s" {service}
+"""
+
+
+def smoke_command(script: str, service: str) -> str:
+    """The sh command that runs a service's smoke script in its container:
+    STARTED on stdout and then ``sh <script> <service>``, or neither when
+    the script is missing or unreadable (sh reads it, so it needs no
+    execute bit)."""
+    return _SMOKE_COMMAND.format(script=shlex.quote(script), service=shlex.quote(service),
+                                 started=STARTED)
+
+
+def cannot_run(message: str) -> SmokeResult:
+    """A smoke that could not be run says nothing about the app's health: a
+    warning, so the operator hears of it, and never the critical that stops
+    the project."""
+    return SmokeResult(
+        status="warning",
+        message=f"smoke could not run (infrastructure, not app): {message}",
+    )
 
 
 def parse_smoke_stderr(stderr: str) -> str:
@@ -26,48 +72,19 @@ def parse_smoke_stderr(stderr: str) -> str:
     return "Manual failure analysis required (smoke script produced multiple lines)"
 
 
-# Stderr signatures that mean the smoke test could not be RUN — the container
-# is gone/renamed/not running, or `sh` could not open the script — as opposed
-# to the app's smoke test running and reporting a problem. These are harness /
-# infrastructure failures: they carry no signal about app health, so they must
-# never escalate to CRITICAL (which stops+removes the container via the health
-# monitor). Note `sh` exits 2 when it cannot open a script — colliding with the
-# app-critical exit code — so exit code alone cannot distinguish them.
-_HARNESS_FAILURE_SIGNATURES = (
-    "no such container",
-    "is not running",
-    "is restarting",
-    "cannot open",
-    "can't open",
-    "exec failed",
-    "executable file not found",
-    "oci runtime",
-)
+def interpret_smoke_result(exit_code: int, stdout: str, stderr: str) -> SmokeResult:
+    """Interpret what smoke_command's run exited with and wrote.
 
-
-def _is_harness_failure(stderr: str) -> bool:
-    """True if stderr indicates the smoke could not be run (not app-critical)."""
-    low = stderr.lower()
-    return any(sig in low for sig in _HARNESS_FAILURE_SIGNATURES)
-
-
-def interpret_smoke_result(exit_code: int, stderr: str) -> SmokeResult:
-    """Interpret a smoke test exit code and stderr into a SmokeResult."""
-    message = parse_smoke_stderr(stderr)
-
+    A failure without STARTED is docker's, or a script that was not there
+    to run: never the app's verdict, whatever the status."""
     if exit_code == 0:
         return SmokeResult(status="ok", message="")
-    # A failure whose stderr shows the smoke could not even run (container
-    # gone, script unopenable) is downgraded to WARNING regardless of exit
-    # code: it is an infrastructure fault, not evidence the app is unhealthy,
-    # and must not trip the CRITICAL -> compose_down path that takes prod
-    # offline. Surfaced (not silenced) so the operator still gets an alert.
-    if exit_code != 0 and _is_harness_failure(stderr):
-        return SmokeResult(
-            status="warning",
-            message=f"smoke could not run (infrastructure, not app): {message}",
-        )
+    message = parse_smoke_stderr(stderr)
+    if stdout.split("\n", 1)[0] != STARTED:
+        return cannot_run(message)
     if exit_code == 2:
         return SmokeResult(status="critical", message=message)
-    else:
-        return SmokeResult(status="warning", message=message)
+    if exit_code in COMMAND_NOT_RUN_STATUSES:
+        message = (f"smoke script ran and exited {exit_code}, as a shell does for a command "
+                   f"that is not found or cannot be run: {message}")
+    return SmokeResult(status="warning", message=message)
