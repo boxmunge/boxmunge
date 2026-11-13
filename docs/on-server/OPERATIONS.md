@@ -1615,7 +1615,7 @@ unless `health` also ran past its budget before the upgrade.
 | `recent-errors` | more than 10 errors in the log in the last 24 hours, or torn lines in the log that may have been errors | `log --level error --since 24h --all` (`log --since 24h` lists torn lines) |
 | `alerts` | Pushover is not configured, so nothing on this box can alert you | see [Alerts not configured](#alerts-not-configured) |
 | `container-updates` | the daily container update failed for a target (also when a service it updates has no container, so its running image is unknown), or has not run for 48 hours | `log --component container-update`; the entry ends with the command's own error output |
-| `platform-updates` | a security or break-fix release cannot be installed automatically, or the version-check service has given no usable answer for 48 hours | see [Upgrading the Platform](#upgrading-the-platform) |
+| `platform-updates` | a security or break-fix release cannot be installed automatically, or the version-check service has given no usable answer for 48 hours. A release that needs a manual upgrade is added to the detail with the status unchanged | see [Upgrading the Platform](#upgrading-the-platform) |
 | `upgrade-probation` | a platform upgrade's probation expired more than 30 minutes ago and the health timer has not promoted it, or `probation.json` cannot be read | the supervisor user runs `sudo /opt/boxmunge/bin/boxmunge-upgrade check-probation` to see why; `sudo rm /opt/boxmunge/upgrade-state/probation.json` accepts the release, as does `backup <project>` from the deploy shell when it can read the file |
 | `upgrade-slot` | `upgrade-state/active-slot` does not agree with root's `env-active` symlink outside an interrupted swap, so every upgrade and `check-probation` refuses to run (the refusal is also in `log --level error`) | unless an upgrade is running, the supervisor user puts back the slot `env-active` names, as the warning shows: `echo a \| sudo tee /opt/boxmunge/upgrade-state/active-slot` |
 | `docker-userns` | Docker does not remap user namespaces yet, remaps them with another identity, or a source cannot be read on a box boxmunge has not remapped (warning; deploys go on); or the record or `daemon.json` claims boxmunge's remap and a source disagrees, or a remapped box's `caddy/Caddyfile` is not a world-readable regular file (error, alerted once a day) | see [User-namespace remapping](#user-namespace-remapping) |
@@ -1717,7 +1717,10 @@ sudo /opt/boxmunge/bin/boxmunge-upgrade userns-commit            # after the 48-
 ```
 
 `--check` changes nothing and always exits 0; its last line is the verdict (what stops it, such as a
-daemon that does not answer, is a refusal too). Each `REFUSED:` line names one offender and what to
+daemon that does not answer, is a refusal too). After a migration that stopped before its daemon
+switch, it first names the commands that resume or undo it, then runs the checks the resume runs
+again (images included); if the switch itself was interrupted, the resume puts the old daemon back
+before its checks, so `--check` says so instead. Each `REFUSED:` line names one offender and what to
 do. It refuses, among others: Docker older than 28.0; a `daemon.json` with another `data-root`,
 `storage-driver`, `userns-remap` or `containerd-snapshotter: true`, with `containerd-namespace`, or
 with a `containerd` socket other than the system one; a containerd image store on a containerd other
@@ -1877,7 +1880,7 @@ install without you:
 | Class | Applied automatically? |
 |---|---|
 | `security` | Always. |
-| `breakfix` (a critical non-security fix) | Yes, unless `auto_update.breakfix` is `false` in `boxmunge.yml`. |
+| `breakfix` (an important fix that prevents issues; you shouldn't fall behind on it) | Yes, unless `auto_update.breakfix` is `false` in `boxmunge.yml`. |
 | `feature` | Never. Run `upgrade` when ready. |
 
 Every release is also marked breaking or not. A breaking release changes an
@@ -1906,6 +1909,18 @@ for that reason, the box does not fall behind quietly:
 Read the notes of the breaking release, make the changes they describe, then
 run `upgrade`. The state behind both lives in
 `/opt/boxmunge/state/platform-updates.json`.
+
+The blocked-update alert also says: "Ask your agent to run `upgrade-howto`, then
+`upgrade-check --version X`, for what each project needs."
+
+When the newest release is one auto-update will not install and it is not a
+blocked security or break-fix release (a feature or breaking release such as
+0.12.0), auto-update says so once per version with one low-priority alert
+(never a priority-1): "0.12.0 is available and needs a manual upgrade: ask your
+agent to run `upgrade-howto`". An alert Pushover did not accept is retried on
+the next run. `health` keeps `platform-updates` as it was and appends the same
+sentence to the detail until the release is installed. The state lives in
+`/opt/boxmunge/state/platform-manual-update.json`.
 
 To take security releases only, set this in
 `/opt/boxmunge/config/boxmunge.yml`:
@@ -2133,6 +2148,49 @@ validator would refuse, as `<project>: would be refused by this release's compos
 The dry run writes nothing and sends no alert. The upgrade shim runs it as a pre-flight check
 against the new release before touching anything, so `upgrade --dry-run` run by hand
 reports against the installed release.
+
+### Agent-led upgrades
+
+You, or an agent, can prepare a box and its projects for an upgrade from the deploy shell or
+MCP (`agent-help upgrade` is the agents' page):
+
+- `upgrade-howto [--version X.Y.Z]` prints what the target release (by default the newest)
+  asks of the box and of each project, before and after the upgrade, with a checklist per
+  project file. It is composed on the box from the release's `upgrade-notes.json`, which the
+  upgrade shim's `guide` verb downloads and verifies against the release's signed
+  `SHA256SUMS`, as an upgrade verifies its bundle; notes that name another release are
+  refused. Nothing about the box's projects is sent anywhere.
+- `upgrade-check [--version X.Y.Z]` runs the target release's own readiness check through
+  the shim's `check` verb, as root. The shim downloads and verifies the release, runs its
+  prerequisite scripts, and builds it a scratch venv in `/opt/boxmunge/upgrade-check/`
+  (400 MB free needed there; removed afterwards). It then runs the release's
+  `upgrade-readiness --json` and `upgrade --dry-run` against the live box as the deploy
+  user, confined by `systemd-run` so they can write nothing. The result is PASS, BLOCKED
+  (with every finding and its fix, per project) or CAN'T VERIFY. The check changes no
+  upgrade state: the blocklist, the slots, probation and the stash stay as they are.
+- `upgrade-readiness [--json]` (operator only, as `boxmunge-server`) checks the box against
+  the installed release's own rules. `upgrade-check` runs the target release's copy.
+
+CAN'T VERIFY means the check could not run or finish, never that the box passed. The
+causes: a check already running; one started less than 10 minutes after the last one ended
+(the rate limit, whose refusal names the time to retry from); an upgrade, rollback or
+probation in progress; a download or venv build that failed; a time limit reached on a busy
+box; or a target release without the readiness command. The reason says what to do.
+
+With `version_check.enabled: false` neither command asks boxmunge.dev which release is
+newest: both need `--version`. The release's files come from GitHub, as an upgrade's do.
+
+From 0.11.8 on, an upgrade that crosses a breaking release (as the target's signed notes
+say, not the version-check service) runs the same prerequisites and readiness check before
+it changes anything, and refuses unless they pass. Nothing is changed, the release is not
+blocklisted, and the alert names `upgrade-check --version X.Y.Z`. Security and break-fix
+releases are never breaking, so they install without it. The operator's override skips the
+check: `sudo /opt/boxmunge/bin/boxmunge-upgrade force-target X.Y.Z`.
+
+From the upgrade to 0.11.9 on, once the new release is installed its readiness check runs
+again, and one low-priority alert lists each project's to-do findings: what its next deploy
+needs (run `validate <project>` before deploying each). It never fails or rolls back the
+upgrade.
 
 ### What boxmunge sends home
 

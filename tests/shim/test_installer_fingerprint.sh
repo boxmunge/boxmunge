@@ -51,6 +51,7 @@ for name in boxmunge-upgrade boxmunge-sftp; do printf '#!/usr/bin/env bash\necho
 printf '#!/usr/bin/env bash\necho "install.sh ran: $*" >> "$BOXMUNGE_ROOT/calls"\nexit 0\n' > "$RELEASE/boxmunge/install.sh"
 tar czf "$RELEASE/boxmunge-1.5.0.tar.gz" -C "$RELEASE" boxmunge
 (cd "$RELEASE" && sha256sum boxmunge-1.5.0.tar.gz > SHA256SUMS)
+release_notes "$RELEASE" 1.5.0
 touch "$RELEASE/SHA256SUMS.sig" "$RELEASE/SHA256SUMS.cert"
 # The fingerprint install.sh records for that bundle (the pipeline both use).
 BUNDLE_HASH="$( (cd "$RELEASE/boxmunge" && find . \( -path ./install.sh -o -path './bootstrap/*' -o -path './src/boxmunge/sshd/*' -o -path './system/*' -o -path './systemd/*' -o -path ./caddy/compose.yml -o -path './caddy/maintenance/*' \) -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) | sha256sum | awk '{print $1}')"

@@ -59,6 +59,7 @@ for v in 1.5.0 1.6.0; do
     tar czf "$RELEASE/boxmunge-$v.tar.gz" -C "$RELEASE" boxmunge
     (cd "$RELEASE" && sha256sum "boxmunge-$v.tar.gz") >> "$RELEASE/SHA256SUMS"
 done
+release_notes "$RELEASE" 1.5.0
 touch "$RELEASE/SHA256SUMS.sig" "$RELEASE/SHA256SUMS.cert"
 
 # box <installed version>: slot a live, running that version; its python

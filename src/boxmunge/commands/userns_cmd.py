@@ -23,13 +23,13 @@ from boxmunge.paths import BoxPaths
 from boxmunge.userns import offset as uo
 from boxmunge.userns.daemon_config import DaemonConfigError
 from boxmunge.userns.images import IMAGES_DIR, ImageError
-from boxmunge.userns.inventory import take_inventory
+from boxmunge.userns.inventory import Inventory, take_inventory
 from boxmunge.userns.journal import (
     FORWARD, JournalError, State, finish_hint, load_journal, state,
 )
 from boxmunge.userns.preflight import PreflightRefused, Report, preflight
 from boxmunge.userns.shift import ShiftRefused
-from boxmunge.userns.switch import MigrationError, host_ids
+from boxmunge.userns.switch import MigrationError, host_ids, switch_interrupted
 from boxmunge.userns.volumes import VolumeError
 
 _SUBCOMMANDS = ("check", "migrate", "rollback", "commit")
@@ -66,17 +66,32 @@ def require_upgrade_lock_held(paths: BoxPaths, fd: int = SHIM_LOCK_FD) -> None:
 
 def run_check(paths: BoxPaths) -> int:
     """One read-only pass that always ends with a verdict and exits 0: what
-    stops it (the journal, the subid files, the daemon) is a refusal row."""
+    stops it (the journal, the subid files, the daemon) is a refusal row.
+    A migration stopped before its switch resumes through phase 0's checks
+    (engine._phase0), so those run here as the resume will run them."""
     try:
         journal = load_journal(paths)
-        if state(journal) not in (State.NONE, State.ROLLED_BACK):  # those two start from phase 0
-            print(f"VERDICT: {finish_hint(journal, _SHIM + ' ')}")
+        at, hint = state(journal), finish_hint(journal, _SHIM + " ")
+        if at is State.MIGRATING and not journal.reached("switched"):
+            if switch_interrupted(paths, journal.daemon_json):
+                print("the switch to the remapped daemon was interrupted: the resume puts the "
+                      "old daemon back on its prior config before it runs its checks, so they "
+                      "cannot run here")
+                print(f"VERDICT: {hint}")
+                return 0
+            print(hint)
+            s, inv = journal.offset, take_inventory(paths)
+            if journal.inventory:
+                inv = inv.with_running_from(Inventory.from_json(journal.inventory))
+        elif at in (State.NONE, State.ROLLED_BACK):  # those two start from phase 0
+            s, inv = uo.allocate_offset(uo.ETC, host_ids()), take_inventory(paths)
+        else:
+            print(f"VERDICT: {hint}")
             return 0
-        s = uo.allocate_offset(uo.ETC, host_ids())
-        report = preflight(paths, take_inventory(paths), direction=FORWARD, offset=s,
-                           images_dir=IMAGES_DIR)
+        report = preflight(paths, inv, direction=FORWARD, offset=s, images_dir=IMAGES_DIR)
         print(f"remap offset: {s}")
-    except (JournalError, uo.RemapError, DockerError, OSError, ValueError) as e:
+    except (JournalError, uo.RemapError, DockerError, DaemonConfigError, OSError,
+            ValueError) as e:
         report = Report(refusals=[f"the check could not run to the end: {e}"])
     print(report.text())
     return 0  # a report, never a failed upgrade

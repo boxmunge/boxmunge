@@ -1,6 +1,7 @@
 """Commit: only after the soak, only healthy, per prior store, verified."""
 from __future__ import annotations
 
+import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -115,19 +116,81 @@ def test_graph_driver_store_is_removed_and_verified(paths, tmp_path, monkeypatch
 
 def test_a_commit_resumed_after_a_crash_measures_against_the_first_size(
         paths, tmp_path, monkeypatch, remapped) -> None:
-    (tmp_path / "overlay2").mkdir()
+    """The first run journalled the store's size, deleted nearly all of it,
+    then died. What is left is under 10% of the journalled size, but all of
+    the store as measured now: only the journalled figure lets it pass."""
+    (tmp_path / "overlay2" / "layer").mkdir(parents=True)
+    (tmp_path / "overlay2" / "layer" / "f").write_bytes(b"x" * 5_000)
+    monkeypatch.setattr(cm, "remove_docker_tree", lambda root: None)
     _journal(paths, tmp_path, {"driver_type": "", "store_root": str(tmp_path / "overlay2"),
-                               "size": 100000})
+                               "size": 1_000_000})
     j = load_journal(paths)
-    j.items["commit-before"] = "100000"  # the first run deleted the layers, then died
+    j.items["commit-before"] = "1000000"
     save_journal(paths, j)
     assert cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img").phase == "committed"
 
 
+def test_commit_completes_after_the_store_shrank_since_the_first_run(
+        paths, tmp_path, remapped) -> None:
+    """Phase 0 journals the store's size on the migration's first run only;
+    images pruned before a resume (to make room, say) leave less to delete.
+    Judged against that stale size, the commit deleted the store and then
+    refused on every run, with no rollback left."""
+    (tmp_path / "overlay2" / "layer").mkdir(parents=True)
+    (tmp_path / "overlay2" / "layer" / "f").write_bytes(b"x" * 20_000)
+    _journal(paths, tmp_path, {"driver_type": "", "store_root": str(tmp_path / "overlay2"),
+                               "size": 100_000})  # measured before the prune
+    assert cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img").phase == "committed"
+    assert not (tmp_path / "overlay2").exists()
+
+
+def test_a_commit_wedged_by_a_shrunk_store_completes(paths, tmp_path, remapped) -> None:
+    """As a 0.11.7 commit left it: the old store deleted, the journal still
+    `applied` with the commit's start journalled."""
+    _journal(paths, tmp_path, {"driver_type": "", "store_root": str(tmp_path / "overlay2"),
+                               "size": 100_000})
+    j = load_journal(paths)
+    j.items["commit-before"] = "20480"
+    save_journal(paths, j)
+    assert cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img").phase == "committed"
+
+
+def test_commit_rerun_after_an_interrupted_deletion_completes(
+        paths, tmp_path, monkeypatch, remapped, alerts) -> None:
+    """The first run journals the store's size and dies part-way through
+    deleting it; the rerun deletes the rest and commits."""
+    store = tmp_path / "overlay2"
+    for layer in ("a", "b"):
+        (store / layer).mkdir(parents=True)
+        (store / layer / "f").write_bytes(b"x" * 50_000)
+    size = cm.store_size({"driver_type": ""}, tmp_path)
+    _journal(paths, tmp_path, {"driver_type": "", "store_root": str(store), "size": size})
+    real = cm.remove_docker_tree
+
+    def killed(root: Path) -> None:
+        shutil.rmtree(root / "a")
+        monkeypatch.setattr(cm, "remove_docker_tree", real)
+        raise RuntimeError("killed mid-deletion")
+    monkeypatch.setattr(cm, "remove_docker_tree", killed)
+    with pytest.raises(RuntimeError, match="killed"):
+        cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
+    assert int(load_journal(paths).items["commit-before"]) == size and (store / "b").is_dir()
+    assert cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img").phase == "committed"
+    assert not store.exists() and alerts[-1] == ("userns migration committed", 0)
+
+
+def _undeleted(monkeypatch, tmp_path) -> None:
+    """An old store the commit's deletion leaves as it was."""
+    (tmp_path / "overlay2" / "layer").mkdir(parents=True)
+    (tmp_path / "overlay2" / "layer" / "f").write_bytes(b"x" * 50_000)
+    monkeypatch.setattr(cm, "remove_docker_tree", lambda root: None)
+
+
 def test_a_store_that_did_not_shrink_is_loud(paths, tmp_path, monkeypatch, remapped) -> None:
+    _undeleted(monkeypatch, tmp_path)
     _journal(paths, tmp_path, {"driver_type": "", "store_root": str(tmp_path / "overlay2"),
                                "size": 10**9})
-    with pytest.raises(cm.MigrationError, match="only 0 bytes were freed"):
+    with pytest.raises(cm.MigrationError, match="only 0 of the [0-9]+ bytes"):
         cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
     assert load_journal(paths).phase == "applied"
 
@@ -315,9 +378,10 @@ def test_a_commit_alerts_how_it_went(paths, tmp_path, remapped, alerts) -> None:
 
 def test_a_failure_once_the_commit_began_alerts(paths, tmp_path, monkeypatch, remapped,
                                                 alerts) -> None:
+    _undeleted(monkeypatch, tmp_path)
     _journal(paths, tmp_path, {"driver_type": "", "store_root": str(tmp_path / "overlay2"),
                                "size": 10**9})
-    with pytest.raises(cm.MigrationError, match="only 0 bytes were freed"):
+    with pytest.raises(cm.MigrationError, match="only 0 of the"):
         cm.commit(paths, now=SOAKED, images_dir=tmp_path / "img")
     assert alerts == [("userns commit stopped", 1)]
 
@@ -350,7 +414,7 @@ def test_the_prior_store_is_the_containerd_the_daemon_reports(tmp_path, address,
 
 
 def test_commit_measures_the_old_store_as_phase_0_recorded_it(tmp_path) -> None:
-    """One measure: what commit must free is what phase 0 journalled."""
+    """One measure, phase 0's and the commit's: the old store's own trees."""
     from boxmunge.userns.preflight_checks import dir_size
     from boxmunge.userns.switch import prior_store
     for sub in ("overlay2/layer", "image", "volumes/v/_data"):

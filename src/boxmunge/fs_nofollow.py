@@ -185,6 +185,32 @@ def read_text_nofollow_or_none(path: Path, *, limit: int = READ_LIMIT_BYTES) -> 
         return None
 
 
+def read_bytes_following(path: Path, *, limit: int = READ_LIMIT_BYTES) -> bytes:
+    """A file's bytes through any links, as Path.read_bytes reads them (a
+    git project's manifest.yml links into its checkout), but never by
+    opening anything other than a regular file: a FIFO, a device or a
+    directory is refused from its stat, unopened, and the open is
+    non-blocking and checked again, so a name swapped in between cannot
+    stall the reader. Refused past ``limit`` bytes. Where a link must not be
+    followed, use read_bytes_nofollow. Raises OSError (FileNotFoundError
+    when nothing is there, a dangling link included)."""
+    def refused(st: os.stat_result) -> OSError:
+        return OSError(errno.EINVAL, f"{path} is not a regular file (mode "
+                       f"{oct(st.st_mode)}); refusing to open it")
+    st = os.stat(path)
+    if not stat.S_ISREG(st.st_mode):
+        raise refused(st)
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as f:
+        st = os.fstat(f.fileno())
+        if not stat.S_ISREG(st.st_mode):
+            raise refused(st)
+        data = f.read(limit + 1)
+    if len(data) > limit:
+        raise OSError(errno.EFBIG, f"{path} is larger than {limit} bytes; refusing to read it")
+    return data
+
+
 def chmod_nofollow(path: Path, mode: int | None = None, add: int = 0) -> None:
     """chmod that refuses a symlink rather than following it.
 

@@ -17,7 +17,7 @@ command.""",
 Usage: boxmunge agent-help [topic]
 
 AI agent orientation. Topics: architecture, operations, conventions, rules,
-security, cve, cve-incident, writable, images.""",
+security, cve, cve-incident, writable, images, upgrade.""",
     "init-host": """\
 Usage: boxmunge init-host
 
@@ -300,6 +300,40 @@ boxmunge-upgrade target VERSION, or boxmunge-upgrade repair-deps.
   --dry-run         Check migrations and config regeneration; change nothing
   --apply           Migrate/regenerate/restart only (called by the shim)
   --skip-self-test  Skip the post-upgrade self-test""",
+    "upgrade-howto": """\
+Usage: boxmunge upgrade-howto [--version X.Y.Z] [--json]
+
+What to change before and after a platform upgrade, on the box and in each
+project, from the target release's signed upgrade notes. Exit 0 a guide was
+printed (also when the box is up to date), 1 the notes could not be fetched
+or verified, 2 usage.
+  --version X.Y.Z  The release to upgrade to (default: the newest; required
+                   when version_check.enabled is false)
+  --json           One JSON object: the sections as data, and the guide text""",
+    "upgrade-check": """\
+Usage: boxmunge upgrade-check [--version X.Y.Z] [--json]
+
+Run the target release's own readiness check against this box and every
+project, through the root upgrade shim. It can take several minutes, and a
+check starts at least 10 minutes after the last one ended. Exit 0 PASS, 1
+BLOCKED or CAN'T VERIFY, 2 usage or nothing to check. Do not upgrade unless
+the result is PASS.
+  --version X.Y.Z  The release to check (default: the newest; required when
+                   version_check.enabled is false)
+  --json           The check's JSON verdict""",
+    "upgrade-readiness": """\
+Usage: boxmunge upgrade-readiness [--json]
+
+Check this box and every project against the rules of the release this code
+is: what blocks an upgrade to it, and what each project's next deploy needs,
+each with its fix. Exit 0 pass, 1 blocked.
+  --json  One JSON object, the stable contract the upgrade check reads
+It takes no lock and changes nothing, but run unconfined, resolving a
+project's compose.yml may briefly create, then remove, an empty placeholder
+for an env file the file names and the project lacks.
+Not in the deploy shell: there, upgrade-check runs the target release's own
+copy as the deploy user, confined so it can write nothing. By hand, run it as
+boxmunge-server (as root, or as the deploy user).""",
     "userns": """\
 Usage: boxmunge userns {check|migrate|rollback|commit}
        (on the server: boxmunge-server userns ..., as the shim runs it)

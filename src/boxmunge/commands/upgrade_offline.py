@@ -128,21 +128,19 @@ def in_memory_line(name: str, written: object) -> str:
             f"it in the repository)")
 
 
-def offline_dry_run_line(paths: BoxPaths, name: str, manifest: dict[str, Any],
-                         reason: str) -> str:
-    """The dry run's line for the project: the refusal the apply would make,
+def offline_refusal(paths: BoxPaths, name: str, manifest: dict[str, Any]) -> str | None:
+    """For the dry run: why the apply would refuse the project, or None;
     never a failed dry run. (The start checks the apply records through
     are not run: they write.)"""
-    refused = f"{name}: {reason}; keeps its maintenance page; would be refused:"
     try:
         _previous(paths, name)
     except OSError as e:
-        return f"{refused} {_unreadable(e)}"
+        return _unreadable(e)
     try:
         render_overlay(paths, name, manifest)
     except Exception as e:  # noqa: BLE001 — the apply refuses on any failure
-        return f"{refused} its compose overlay could not be regenerated ({e})"
-    return f"{name}: {reason}; keeps its maintenance page, overlay renders OK"
+        return f"its compose overlay could not be regenerated ({e})"
+    return None
 
 
 def offline_exit(paths: BoxPaths, name: str) -> str:

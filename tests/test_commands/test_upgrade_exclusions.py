@@ -7,7 +7,8 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.commands.upgrade_cmd import _run_apply, _run_dry
-from boxmunge.commands.upgrade_steps import check_upgrade, restart_projects
+from boxmunge.commands.upgrade_report import check_upgrade
+from boxmunge.commands.upgrade_steps import restart_projects
 from boxmunge.fileutil import project_lock
 from boxmunge.manifest import ManifestError
 from boxmunge.release_txn import open_txn
@@ -77,7 +78,7 @@ def test_install_and_busy_exclusions_are_alerted(paths) -> None:
 def test_dry_run_reports_an_open_install_and_leaves_it(paths) -> None:
     _deployed(paths)
     txn = _open_install(paths)
-    report = check_upgrade(paths)
+    report = [line.text for line in check_upgrade(paths)]
     assert report == [f"myapp: an install (myapp-x, {txn.phase}) is open; the project "
                       f"will be left as is"]
 
@@ -163,8 +164,25 @@ def test_one_decision_names_why_a_project_is_left(paths) -> None:
     assert isinstance(exclusion(paths, "myapp"), InstallTxn)
     txn_path(paths, "myapp").write_text("{not json")
     assert isinstance(exclusion(paths, "myapp"), ReleaseStateError)
-    assert check_upgrade(paths)[0].endswith("; the project will be left as is")
+    assert check_upgrade(paths)[0].text.endswith("; the project will be left as is")
     assert "Cannot read" in apply_projects(paths)[2].install["myapp"]
+
+
+def test_an_open_install_with_an_unreadable_pause_record_is_left_as_is(paths, capsys) -> None:
+    """Whether the pause was handed on cannot be told, so rollback is not
+    offered; the dry run and the apply still leave the project as is and
+    report it, instead of failing on the record."""
+    from boxmunge.release_txn import rollback_refused
+    _deployed(paths)
+    txn = _open_install(paths)
+    paths.project_paused_state("myapp").write_text("{not json")
+    assert rollback_refused(paths, "myapp") is True
+    assert _run_dry(paths) == 0
+    assert (f"  myapp: an install (myapp-x, {txn.phase}) is open; the project will be "
+            f"left as is\n") in capsys.readouterr().out
+    _m, regen, excluded = apply_projects(paths)
+    assert excluded.install["myapp"].startswith("an install of myapp-x (bundle) is open")
+    assert "rollback myapp" not in excluded.install["myapp"] and regen.processed == []
 
 
 def test_no_migrations_line_says_left_projects_are_not_migrated(paths, capsys) -> None:

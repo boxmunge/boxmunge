@@ -99,6 +99,37 @@ def pulled_services(inventory: DeployedInventory) -> dict[str, DeployedService]:
     }
 
 
+def _models(project_dir: Path, compose_files: list[str], project_name: str,
+            what: str) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    """Every service of the deployed model (every profile), and the names of
+    those `up` starts. Raises ComposeResolveError, or InventoryError for a
+    malformed model."""
+    every = _services(resolve_deployed_config(
+        project_dir, compose_files, project_name, all_profiles=True), what)
+    # With no profiled service, `up` starts every service, and Compose
+    # need not be asked again. Otherwise it must be: COMPOSE_PROFILES (in
+    # the project's .env or the environment) activates profiles the
+    # model does not show.
+    active = every if not any(svc.get("profiles") for svc in every.values()) else (
+        _services(resolve_deployed_config(project_dir, compose_files, project_name), what))
+    return every, {name for name, svc in every.items()
+                   if name in active and not _scaled_to_zero(svc)}
+
+
+def started_images(project_dir: Path, compose_files: list[str],
+                   project_name: str) -> dict[str, str]:
+    """{service: startup_image_ref} for each service `up` starts, from the
+    deployed model alone: Compose resolves it client-side and no container
+    is listed, so the daemon is not asked. Raises ComposeResolveError when
+    Compose cannot resolve the model, InventoryError when it is malformed."""
+    every, started = _models(project_dir, compose_files, project_name,
+                             f"compose project {project_name!r}")
+    return {name: startup_image_ref(project_name, DeployedService(
+                name=name, image=svc.get("image"), buildable="build" in svc,
+                expected=True, containers=()))
+            for name, svc in every.items() if name in started}
+
+
 def load_deployed_inventory(
     project_dir: Path, compose_files: list[str], project_name: str,
 ) -> DeployedInventory:
@@ -109,14 +140,7 @@ def load_deployed_inventory(
     """
     what = f"compose project {project_name!r}"
     try:
-        every = _services(resolve_deployed_config(
-            project_dir, compose_files, project_name, all_profiles=True), what)
-        # With no profiled service, `up` starts every service, and Compose
-        # need not be asked again. Otherwise it must be: COMPOSE_PROFILES (in
-        # the project's .env or the environment) activates profiles the
-        # model does not show.
-        active = every if not any(svc.get("profiles") for svc in every.values()) else (
-            _services(resolve_deployed_config(project_dir, compose_files, project_name), what))
+        every, started = _models(project_dir, compose_files, project_name, what)
         containers = docker_containers.project_containers(project_name)
     except (ComposeResolveError, DockerError) as e:
         raise InventoryError(f"{what}: {e}") from e
@@ -126,8 +150,7 @@ def load_deployed_inventory(
     services = {
         name: DeployedService(
             name=name, image=svc.get("image"), buildable="build" in svc,
-            expected=name in active and not _scaled_to_zero(svc),
-            containers=tuple(by_service.pop(name, ())),
+            expected=name in started, containers=tuple(by_service.pop(name, ())),
         )
         for name, svc in every.items()
     }
