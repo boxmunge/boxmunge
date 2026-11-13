@@ -31,6 +31,7 @@ from boxmunge.compose_build import is_local_ref
 from boxmunge.compose_mounts import BindEntry, bind_entries, path_within, project_rel
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.docker import staging_compose_project
+from boxmunge.project_yaml import load_project_yaml
 from boxmunge.staged_release import ComposeTarget, has_slot, staging_target
 
 if TYPE_CHECKING:
@@ -251,7 +252,7 @@ def _without_read_files(compose: Path, dest: Path) -> Path:
     2.35 refuses to resolve even with --no-env-resolution, and they name no
     resource the comparison looks at. Every relative path in it resolves
     against --project-directory, wherever the copy lies."""
-    doc = yaml.safe_load(compose.read_text())
+    doc = load_project_yaml(compose, compose.parent)
     for svc in _mapping(_mapping(doc).get("services")).values():
         if isinstance(svc, dict):
             svc.pop("env_file", None)
@@ -265,7 +266,7 @@ def _refuse_other_files(compose: Path) -> None:
     --project-directory, so an include: or extends: file: would be read
     from production's current files, not the candidate's: the proof would
     compare the wrong model. Refused rather than proved wrongly."""
-    doc = _mapping(yaml.safe_load(compose.read_text()))
+    doc = _mapping(load_project_yaml(compose, compose.parent))
     services = _mapping(doc.get("services")).values()
     if "include" in doc or any(isinstance(svc, dict) and isinstance(svc.get("extends"), dict)
                                and "file" in svc["extends"] for svc in services):

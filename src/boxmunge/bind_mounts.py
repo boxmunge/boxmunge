@@ -15,7 +15,7 @@ from typing import Any
 import yaml
 
 from boxmunge.compose_mounts import project_rel, service_bind_entries
-from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.project_yaml import load_project_yaml
 
 
 class BindMountError(ValueError):
@@ -33,8 +33,7 @@ def _top_dir(source: str, project_dir: Path) -> str | None:
 def _services(compose_path: Path, nofollow: bool = False) -> dict[str, Any]:
     """The file's services, each one's volumes a list of strings and mappings."""
     try:
-        text = read_text_nofollow(compose_path) if nofollow else compose_path.read_text()
-        doc = yaml.safe_load(text)
+        doc = load_project_yaml(compose_path, None if nofollow else compose_path.parent)
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as e:
         raise BindMountError(f"cannot read {compose_path}: {e}") from e
     if not isinstance(doc, dict):
@@ -58,14 +57,15 @@ def _services(compose_path: Path, nofollow: bool = False) -> dict[str, Any]:
 def bind_mounted_dirs(compose_path: Path, project_dir: Path, *,
                       nofollow: bool = False) -> dict[str, bool]:
     """Map each bind-mounted top-level project dir to True if any mount of it
-    is read-write. A missing compose file mounts nothing. ``nofollow``
-    reads the file without following a link or blocking on a FIFO
-    (fs_nofollow.read_text_nofollow), refusing anything but a regular file.
+    is read-write. A missing compose file mounts nothing; a link to nothing
+    is not missing. It is read by project_yaml's rules: a link out of its
+    directory, a FIFO or an oversized file is refused. ``nofollow`` (a file
+    that is never a link, a staged release's) refuses a link at all.
 
     Raises BindMountError if the file exists but cannot be classified: a
     guess here decides whether live data is deleted.
     """
-    if not (os.path.lexists(compose_path) if nofollow else compose_path.exists()):
+    if not os.path.lexists(compose_path):
         return {}
     dirs: dict[str, bool] = {}
     for name, svc in _services(compose_path, nofollow).items():

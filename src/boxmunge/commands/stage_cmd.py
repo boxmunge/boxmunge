@@ -16,6 +16,7 @@ exactly that SHA.
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +24,7 @@ from boxmunge.commands.unstage_cmd import teardown_staging_locked
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import LockError, discard_dir, durable_rename_dir, project_lock
+from boxmunge.fs_nofollow import open_regular_nofollow
 from boxmunge.git_slot import (
     GitRefError, fetch, materialise, require_regular_control_files, resolve_ref,
 )
@@ -55,7 +57,8 @@ if TYPE_CHECKING:
 
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as f:
+    # inbox/ is deploy-writable: no link followed, no FIFO waited on
+    with os.fdopen(open_regular_nofollow(path, os.O_RDONLY), "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()

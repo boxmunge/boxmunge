@@ -25,7 +25,8 @@ from boxmunge import built_images, docker_containers
 from boxmunge.compose_images import built_image_name, describe_image
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import discard_dir
-from boxmunge.fs_nofollow import read_text_nofollow
+from boxmunge.fs_nofollow import read_text_nofollow, read_text_nofollow_or_none
+from boxmunge.project_yaml import PROJECT_YAML_LIMIT_BYTES
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
 from boxmunge.staged_release import SlotError, clear_production_stopped
@@ -171,7 +172,8 @@ def sweep_live_scripts(paths: BoxPaths, project_name: str, component: str) -> No
         return
     try:
         overlay = paths.project_compose_override(project_name)
-        if overlay.exists() and LIVE_SCRIPTS_SOURCE in overlay.read_text():
+        text = read_text_nofollow_or_none(overlay, limit=PROJECT_YAML_LIMIT_BYTES)
+        if text is not None and LIVE_SCRIPTS_SOURCE in text:
             return
         roots = {str(live), os.path.realpath(live)}
         if any(src == root or src.startswith(root + os.sep)

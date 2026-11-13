@@ -170,12 +170,28 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `staged_release.py` | `load_slot` | the staging slot's `meta.json` | `projects/<p>/` |
 | `data_dirs.py` | `_load_record` | `.releases/data-dirs.json` | `projects/<p>/` |
 | `unresolved_stage.py` | `_state_active`, `_records` | a stage state file from 0.10.1 or earlier, `legacy-stages.json` | `state/` |
-| `bind_mounts.py` | `_services` | a compose file, when the caller asks for no-follow | `projects/<p>/` |
 | `compose_up_steps.py` | `restore_build_names` | the generated compose overlay | `projects/<p>/` |
 | `overlay_users.py` | `_overlay_users` | the generated compose overlay | `projects/<p>/` |
 | `upgrade_state.py` | `_read_json` | `probation.json`, `blocklist.json` | `upgrade-state/` |
 | `health_checks/upgrade_slot.py` | `check_upgrade_slot` | `active-slot` | `upgrade-state/` |
+| `project_yaml.py` | `read_project_bytes` | a project's YAML file (`manifest.yml`, `compose.yml` and the files it includes; the staging base and a release tree's): see below. Cap: 1 MiB | `projects/<p>/` |
+| `health_checks/projects.py` | `_drifted` | `<p>.conf`, compared with the generated site (capped at the size of a site file) | `caddy/sites/` |
+| `commands/diff_cmd.py` | `run_diff` | `<p>.conf` and `compose.boxmunge.yml`, compared (the site cap; 1 MiB) | `caddy/sites/`, `projects/<p>/` |
+| `commands/caddy_status.py` | `run_caddy_status` | each `<p>.conf`'s first line (the site cap) | `caddy/sites/` |
+| `tui/project_detail.py` | `_caddy_text` | `<p>.conf`, shown (the site cap) | `caddy/sites/` |
+| `compose_up_steps.py` | `sweep_live_scripts` | the generated compose overlay, searched for one string (1 MiB) | `projects/<p>/` |
+| `secrets.py` | `_parse` | a project's `secrets.env`. Cap: 1 MiB | `projects/<p>/` |
+| `commands/logs.py` | `_show_boxmunge_logs` | `boxmunge.log` and its archives | `logs/` |
 | `commands/quarantine_gate.py` | `lift_after_deploy` | `<p>.conf`, the site a lift republishes (capped at the size of a site file) | `caddy/sites/` |
+
+A project's YAML files go through `project_yaml.load_project_yaml` (`read_project_bytes` for the
+bytes), as the `caddy.read_override` rules: a git project's `manifest.yml` and `compose.yml` are
+links into `repo/`, so a link is followed when it resolves inside the project and no component of the
+resolved path is swapped before the open. A release tree's files, never links, are read with no link
+allowed. The parse is from a stream, so an error carries the parser's problem and line number and
+never a line of the file (`yaml.safe_load` of a string quotes one, which would print a root-only
+file's content for a link to it). Root's `docker compose config` follows the same links on its own;
+that is for 0.12.
 
 These open a no-follow, non-blocking descriptor themselves (`open_regular_nofollow` or
 `open_resolved_nofollow`, read-only) and read from it, so each sets its own bound:
@@ -192,6 +208,7 @@ These open a no-follow, non-blocking descriptor themselves (`open_regular_nofoll
 | `stash.py` | `_open_archive` |
 | `commands/log_cmd.py` | `parse_log_file` |
 | `commands/restore.py` | `_run_restore_command` |
+| `commands/stage_cmd.py` | `_sha256` |
 | `commands/upgrade_offline.py` | `_read` |
 | `commands/userns_cmd.py` | `_held_on` |
 | `health_checks/userns.py` | `_alert_state` |

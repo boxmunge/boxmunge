@@ -30,6 +30,7 @@ from boxmunge.bundle import BOXMUNGE_ENTRIES
 from boxmunge.compose import ComposeError
 from boxmunge.compose_build import is_local_ref
 from boxmunge.compose_mounts import is_bind_entry, project_rel, volume_source
+from boxmunge.project_yaml import load_project_yaml
 from boxmunge.staged_release import STAGING_BASE, STAGING_OVERLAY
 
 STAGING_FILES = [STAGING_BASE, STAGING_OVERLAY]
@@ -206,7 +207,7 @@ def generate_staging_compose_base(compose_path: Path, box_state: set[str],
     other files this rewrite cannot reach, so those are refused rather
     than staged with production's mounts.
     """
-    doc = yaml.safe_load(Path(compose_path).read_text())
+    doc = load_project_yaml(Path(compose_path), Path(compose_path).parent)  # a git slot's links into its clone
     if not isinstance(doc, dict):
         raise ComposeError(
             f"compose.yml must be a YAML mapping at the top level "

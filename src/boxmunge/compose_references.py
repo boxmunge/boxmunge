@@ -28,6 +28,7 @@ from typing import Any
 import yaml
 
 from boxmunge.compose_mounts import has_env_substitution, host_path_forms, outside_roots
+from boxmunge.project_yaml import home_of, load_project_yaml
 
 MAX_INCLUDE_DEPTH = 2
 ALLOWED_INCLUDES = (
@@ -170,7 +171,10 @@ class _ReferenceWalk:
     def _parsed(self, path: Path) -> Any:
         if path not in self.documents:
             try:
-                doc = yaml.safe_load(path.read_text())
+                doc = load_project_yaml(path, home_of(path, self.roots))
+            except OSError as e:
+                self.problems.append(f"{path.name}: cannot read: {e}")
+                return None
             except yaml.YAMLError as e:
                 self.problems.append(f"{path.name}: cannot parse: {e}")
                 return None

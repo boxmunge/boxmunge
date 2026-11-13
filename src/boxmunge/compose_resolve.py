@@ -28,6 +28,7 @@ from boxmunge import docker
 from boxmunge.compose_mounts import has_env_substitution, host_path_forms, outside_roots
 from boxmunge.compose_references import ComposeSources, env_file_paths, walk_sources
 from boxmunge.fs_nofollow import open_dir_beneath
+from boxmunge.project_yaml import load_project_yaml
 
 
 class ComposeResolveError(Exception):
@@ -174,7 +175,7 @@ def declared_read_only(compose_path: Path) -> dict[str, bool]:
     environment, and the opt-out must be unambiguous.
     """
     try:
-        doc = yaml.safe_load(compose_path.read_text())
+        doc = load_project_yaml(compose_path, compose_path.parent)
     except (OSError, yaml.YAMLError) as e:
         raise ComposeResolveError(f"cannot read {compose_path.name} as written: {e}") from e
     if not isinstance(doc, dict):

@@ -26,6 +26,7 @@ from boxmunge.compose_own_files import own_file_problems
 from boxmunge.compose_service_rules import namespace_refusals, pull_policy_problem, service_findings
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
+from boxmunge.project_yaml import home_of, load_project_yaml
 from boxmunge.published_ports import declared_ports
 from boxmunge.run_as import compose_user_problems, unmappable_users
 from boxmunge.user_entries import entries_missing_from
@@ -339,15 +340,11 @@ def validate_user_compose(
     roots = (base_dir, paths.project_dir(project_name))
 
     try:
-        raw = compose_path.read_text()
+        doc = load_project_yaml(compose_path, home_of(compose_path, roots))
     except OSError as e:
-        raise ComposeSecurityError(
-            f"could not parse compose.yml: cannot read {compose_path}: {e}"
-        ) from e
-
-    try:
-        doc = yaml.safe_load(raw)
-    except yaml.YAMLError as e:
+        raise ComposeSecurityError(f"could not parse compose.yml: cannot read {compose_path}: {e}"
+                                   ) from e
+    except yaml.YAMLError as e:  # the problem and its line, never a line of the file
         raise ComposeSecurityError(f"could not parse compose.yml: {e}") from e
 
     if doc is None:

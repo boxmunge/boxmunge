@@ -16,7 +16,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from unittest.mock import patch
 
-from boxmunge import docker, docker_run
+from boxmunge import docker, docker_run, project_yaml
 
 SLOT = "/.releases/staged/"
 # Resolved ambiguity 8: the meta (status summaries) and the staged
@@ -55,6 +55,7 @@ def _text(value) -> str | None:
 def reads():
     seen = Seen()
     real_open, real_os_open, real_config = builtins.open, os.open, docker.compose_config
+    real_project_bytes = project_yaml.read_project_bytes
 
     def note(into: list[str], *values) -> None:
         into.extend(t for t in map(_text, values) if t is not None)
@@ -66,6 +67,12 @@ def reads():
     def o_open(path, *a, **k):
         note(seen.opened, path)
         return real_os_open(path, *a, **k)
+
+    def project_bytes(path, within=None, **k):
+        # A link-tolerant read opens its resolved path one directory at a
+        # time (os.open with a dir_fd), so the name it was given is noted here.
+        note(seen.opened, path)
+        return real_project_bytes(path, within, **k)
 
     def run(cmd, cwd=None, **k):
         note(seen.docker, *cmd, cwd or "")
@@ -89,6 +96,7 @@ def reads():
         for seam in (patch("builtins.open", b_open), patch("io.open", b_open),
                      patch("os.open", o_open), patch("tarfile.bltn_open", b_open),
                      patch("subprocess.Popen", spawn),
+                     patch.object(project_yaml, "read_project_bytes", project_bytes),
                      patch.object(docker, "compose_config", config), *seams):
             stack.enter_context(seam)
         yield seen

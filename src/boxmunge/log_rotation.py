@@ -68,7 +68,7 @@ def log_files(active: Path, since: datetime | None = None) -> list[Path]:
         p for day, p in _archives(active)
         if since is None or day >= since.date() - timedelta(days=1)
     ]
-    if active.exists():
+    if os.path.lexists(active):  # a link to nothing is read, and refused, not skipped
         files.append(active)
     return files
 
