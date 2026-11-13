@@ -345,7 +345,8 @@ install -d -m 755 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" \
     "${BOXMUNGE_ROOT}/state/kev" \
     "${BOXMUNGE_ROOT}/state/start-refused" \
     "${BOXMUNGE_ROOT}/state/project-alerts" \
-    "${BOXMUNGE_ROOT}/state/secrets-locks"
+    "${BOXMUNGE_ROOT}/state/secrets-locks" \
+    "${BOXMUNGE_ROOT}/state/backup"
 
 install -d -m 755 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" "${BOXMUNGE_ROOT}/inbox"
 install -d -m 755 -o "${DEPLOY_USER}" -g "${DEPLOY_USER}" "${BOXMUNGE_ROOT}/inbox/.tmp"

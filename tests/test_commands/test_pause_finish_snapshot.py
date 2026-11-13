@@ -17,6 +17,7 @@ import pytest
 
 from boxmunge import docker_containers
 from boxmunge.backup import BackupKind
+from boxmunge.commands.backup_cmd import BackupResult
 from boxmunge.commands import pause_cmd
 from boxmunge.docker_containers import StartState
 from boxmunge.docker_run import DockerError
@@ -29,18 +30,18 @@ _SECONDS = itertools.count(10)
 
 
 def _backups(paths, *, service_running: bool):
-    """backup_locked writing a snapshot of its kind under a new name each
+    """The backup core writing a snapshot of its kind under a new name each
     time, or failing as a dump in a stopped service does."""
-    def backup_locked(project, paths_, kind=BackupKind.MANUAL, manifest=None, **_kw):
+    def snapshot_locked(project, paths_, kind=BackupKind.MANUAL, manifest=None, **_kw):
         if not service_running:
             print("ERROR: service web is not running")
-            return 1
+            return BackupResult(1, cause="service web is not running")
         name = f"{project}-2026-11-01T1000{next(_SECONDS)}-{kind.value}.tar.gz.age"
         bdir = paths_.project_backups(project)
         bdir.mkdir(parents=True, exist_ok=True)
         (bdir / name).write_text(kind.value)
-        return 0
-    return patch("boxmunge.commands.backup_cmd.backup_locked", backup_locked)
+        return BackupResult(0, snapshot=bdir / name)
+    return patch("boxmunge.commands.backup_cmd.snapshot_locked", snapshot_locked)
 
 
 def _pause(paths, *, stop_fails: bool = False, service_running: bool = True) -> int:

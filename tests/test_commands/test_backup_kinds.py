@@ -99,6 +99,7 @@ class TestKindedBackup:
 class TestBackupAllIsNightly:
     def test_backup_all_takes_nightly_snapshots(self, paths) -> None:
         _project(paths)
-        with patch.object(backup_cmd, "backup_locked", return_value=0) as rb:
+        with patch.object(backup_cmd, "snapshot_locked",
+                          return_value=backup_cmd.BackupResult(0)) as rb:
             assert run_backup_all(paths) == 0
         assert rb.call_args.kwargs["kind"] is BackupKind.NIGHTLY

@@ -57,6 +57,8 @@ def run_check_all(paths: BoxPaths, *, read_only: bool) -> int:
         from boxmunge.health_checks.userns import alert_docker_userns
         if alert_docker_userns(paths).status == "error":
             worst = 2
+        from boxmunge.backup_alerts import alert_backups
+        alert_backups(paths)
     projects_dir = paths.projects
     if not projects_dir.exists():
         print("No projects directory.")

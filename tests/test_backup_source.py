@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.backup_source import backup_source
-from boxmunge.commands.backup_cmd import backup_locked
+from boxmunge.commands.backup_cmd import BackupResult, backup_locked
 from boxmunge.release import mark_live
 from boxmunge.release_txn import advance, open_txn
 from tests.bundle_helpers import manifest_text
@@ -83,7 +83,8 @@ def test_backup_locked_uses_the_running_release(paths, project) -> None:
     _txn(paths, "previous_kept")
     paths.backup_key.parent.mkdir(parents=True, exist_ok=True)
     paths.backup_key.write_text("key")
-    with patch("boxmunge.commands.backup_cmd._run_backup_inner", return_value=0) as inner:
+    with patch("boxmunge.commands.backup_cmd._run_backup_inner",
+               return_value=BackupResult(0)) as inner:
         assert backup_locked(P, paths) == 0
     assert inner.call_args.args[2] == "dump-old.sh"
 
@@ -119,8 +120,8 @@ def test_a_git_install_backs_up_with_the_replaced_commits_manifest(paths, tmp_pa
     git_project(paths, tmp_path, backup="postgres")
     commit(tmp_path / "work", {"manifest.yml": git_manifest(tmp_path / "origin.git",
                                                             backup="none")}, "B")
-    with staging_docker_off(), patch("boxmunge.commands.backup_cmd.backup_locked",
-                                     return_value=1):
+    with staging_docker_off(), patch("boxmunge.commands.backup_cmd.snapshot_locked",
+                                     return_value=BackupResult(1, cause="the dump failed")):
         assert crash_at(f"txn.{phase}", lambda: run_deploy("myapp", paths)) == 137
     source = backup_source(paths, "myapp")
     assert source.manifest["backup"]["type"] == "postgres" and source.compose_file is None

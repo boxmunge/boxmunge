@@ -262,6 +262,7 @@ Operational state is stored as JSON files under `/opt/boxmunge/state/`:
 
 - `state/health/<project>.json` -- last check time, status, consecutive failure count, alert state, failure reason
 - `state/deploy/<project>.json` -- current ref (the bundle name, e.g. `myapp-2026-10-13T101500123456`, or the git commit), deploy timestamp, pre-deploy snapshot filename, recent history, a `data chown` snapshot pending for the next deploy, and the restart policies `data chown` holds at "no" until boxmunge starts the service again
+- `state/backup/<project>.json`, `state/backup-sync.json` -- what the snapshots on disk do not show: a continuing backup or sync failure and its cause, a night a project was rightly skipped, the last off-site copy, and which alerts the operator was sent (freshness itself is read from the snapshot names in `backups/`)
 - `<project>/.releases/staged/meta.json` -- the staged release (id, ref, state); there is none while nothing is staged
 
 All state writes are atomic: the new content is written to a temporary file in the same directory, then renamed into place with `os.rename()`. This prevents partial reads if a check or deploy runs concurrently.
@@ -280,7 +281,7 @@ Backup flow:
 
 1. Run the dump command from the manifest, with a 10-minute limit (on overrun or interruption its processes are killed inside the container). Its output goes to a private (0600) `.dump-*` file in the project's `backups/` directory: the plaintext touches disk until step 2 finishes
 2. Encrypt with age using the backup key, then remove the plaintext dump (also on any failure or timeout)
-3. Write atomically to `<project>/backups/<project>-<YYYY-MM-DDTHHMMSS>-<kind>.tar.gz.age` (UTC), where kind is `nightly`, `predeploy`, `preupdate`, `manual`, `prerestore` (restore's safety snapshot), `premigrate` (before a user-namespace migration) `prechown` (`data chown`, before it stops the service) or `prepause` (`pause`, before it stops the project)
+3. Publish as `<project>/backups/<project>-<YYYY-MM-DDTHHMMSS>-<unique>-<kind>.tar.gz.age` (UTC; `<unique>` is eight random hex digits), by linking the finished file to that name, which fails rather than replace a stored snapshot. Kind is `nightly`, `predeploy`, `preupdate`, `manual`, `prerestore` (restore's safety snapshot), `premigrate` (before a user-namespace migration) `prechown` (`data chown`, before it stops the service) or `prepause` (`pause`, before it stops the project)
 4. Prune local archives of the same kind beyond that kind's retention count (see OPERATIONS.md)
 5. Log the backup
 

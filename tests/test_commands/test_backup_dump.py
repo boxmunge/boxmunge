@@ -120,7 +120,7 @@ def test_backup_sweeps_dumps_a_killed_backup_left(project: BoxPaths) -> None:
         raise BackupError("stop here")
     with patch.object(backup_cmd, "execute_dump", side_effect=dump):
         assert backup_cmd._run_backup_inner(
-            "myapp", project, "dump", "db", BackupKind.MANUAL, 5) == 1
+            "myapp", project, "dump", "db", BackupKind.MANUAL, 5).rc == 1
     assert seen == [[]], "the stale dump was still there when the new one started"
     assert "Removed stale plaintext dump .dump-killed.tar.gz" in project.log_file.read_text()
 

@@ -178,7 +178,7 @@ def test_staging_copies_are_given_to_the_new_user_too(paths, monkeypatch) -> Non
 
 def test_staging_alone_changes_nothing_of_productions(paths, monkeypatch, capsys) -> None:
     _project_dir, calls = _setup(paths, monkeypatch, backup="postgres")
-    monkeypatch.setattr(backup_cmd, "backup_locked", lambda *a, **kw: pytest.fail("backed up"))
+    monkeypatch.setattr(backup_cmd, "snapshot_locked", lambda *a, **kw: pytest.fail("backed up"))
     monkeypatch.setattr(data_cmd, "staging_copies",
                         lambda *a: [StagingCopy("bind", "uploads-staging")])
     monkeypatch.setattr(data_cmd, "chown_staging_copies",

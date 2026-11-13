@@ -90,6 +90,7 @@ def _redeploy(box, seen):
 
 
 def _rollback(box, seen):
+    from boxmunge.commands.backup_cmd import BackupResult
     from boxmunge.commands.deploy import run_deploy
     from boxmunge.commands.rollback import rollback_locked
     place_bundle(box.paths, timestamp=V3, files=PROD)
@@ -99,9 +100,9 @@ def _rollback(box, seen):
         assert "POISON" not in str(manifest)
         snapshot.parent.mkdir(parents=True, exist_ok=True)
         snapshot.write_text("snapshot")
-        return 0
+        return BackupResult(0, snapshot=snapshot)
 
-    with staging_docker_off(), patch("boxmunge.commands.backup_cmd.backup_locked", backup), \
+    with staging_docker_off(), patch("boxmunge.commands.backup_cmd.snapshot_locked", backup), \
             patch("boxmunge.commands.rollback.restore_locked", return_value=0) as restore:
         assert run_deploy("myapp", box.paths, ref=V3) == 0
         assert rollback_locked("myapp", box.paths) == 0
