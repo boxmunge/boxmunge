@@ -75,17 +75,25 @@ expect() {
 
 FAKEBIN="$(mktemp -d)"
 if ! command -v flock >/dev/null 2>&1; then
-    # `flock -n <fd>`, the one form the shim uses. A flock(2) lock belongs to
-    # the open file description, which Python shares with its caller, so the
-    # lock is held, and contended, exactly as with util-linux flock.
+    # `flock -n <fd>` and `flock -w <secs> <fd>`, the forms the shim uses. A
+    # flock(2) lock belongs to the open file description, which Python shares
+    # with its caller, so the lock is held, and contended, exactly as with
+    # util-linux flock.
     cat > "$FAKEBIN/flock" <<'EOF'
 #!/usr/bin/env bash
-[[ "$#" -eq 2 && "$1" == -n ]] || { echo "flock stand-in: only 'flock -n <fd>'" >&2; exit 64; }
-exec python3 -c 'import fcntl, sys
-try:
-    fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)
-except BlockingIOError:
-    sys.exit(1)' "$2"
+wait=0
+if [[ "$#" -eq 3 && "$1" == -w ]]; then wait="$2"; shift 2; elif [[ "$#" -eq 2 && "$1" == -n ]]; then shift; else
+    echo "flock stand-in: only 'flock -n <fd>' or 'flock -w <secs> <fd>'" >&2; exit 64; fi
+exec python3 -c 'import fcntl, sys, time
+deadline = time.monotonic() + float(sys.argv[2])
+while True:
+    try:
+        fcntl.flock(int(sys.argv[1]), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        break
+    except BlockingIOError:
+        if time.monotonic() >= deadline:
+            sys.exit(1)
+        time.sleep(0.1)' "$1" "$wait"
 EOF
 fi
 if ! command -v sha256sum >/dev/null 2>&1; then
@@ -140,9 +148,125 @@ BUSYLOCK="$(mktemp -d)"
 printf '#!/usr/bin/env bash\nexit 1\n' > "$BUSYLOCK/flock"
 chmod +x "$BUSYLOCK/flock"
 
+# SYSTEMD_RUN_STUB, on PATH for every test (no test may reach the host's
+# systemd): a systemd-run that runs the unit's command here, as systemd 257 does (checked on Debian 13), and the systemctl
+# that reports how it ended. systemd-run records its argv in
+# $BOXMUNGE_ROOT/calls. The command gets a clean environment: the --setenv
+# variables (STUB_UNIT_PATH is put in front of PATH, for the test's own
+# stand-ins), INVOCATION_ID, LANG and SYSTEMD_EXEC_PID, USER, and for a
+# User= HOME (/home/<user>), LOGNAME and SHELL. It honours
+# --working-directory, StandardOutput= and StandardError= (truncate:<file>,
+# null, inherit), LimitFSIZE= and RuntimeMaxSec= (cut to STUB_MAX_SECS when
+# that is lower): at the limit, SIGTERM to every process of the unit, then
+# SIGKILL TimeoutStopSec later (default 90). It ends as `systemd-run --wait`
+# does: the command's exit code, 255 for a signal, 1 for Result=timeout; a
+# unit that failed stays loaded for `systemctl show` until `systemctl
+# reset-failed`, as a transient unit does without --collect.
+SYSTEMD_RUN_STUB="$(mktemp -d)"
+cat > "$SYSTEMD_RUN_STUB/systemd-run" <<'EOF'
+#!/usr/bin/env bash
+echo "systemd-run $*" >> "$BOXMUNGE_ROOT/calls"
+unit="" secs="" stop=90 dir="" user=root fsize="" out=inherit err=inherit envs=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --) shift; break ;;
+        --unit=*) unit="${1#--unit=}" ;;
+        --setenv=PATH=*) envs+=("PATH=${STUB_UNIT_PATH:+$STUB_UNIT_PATH:}${1#--setenv=PATH=}") ;;
+        --setenv=*) envs+=("${1#--setenv=}") ;;
+        --working-directory=*) dir="${1#--working-directory=}" ;;
+        -p) shift
+            case "$1" in
+                RuntimeMaxSec=*) secs="${1#*=}" ;;
+                TimeoutStopSec=*) stop="${1#*=}" ;;
+                User=*) user="${1#*=}" ;;
+                LimitFSIZE=*) fsize="${1#*=}" ;;
+                StandardOutput=*) out="${1#*=}" ;;
+                StandardError=*) err="${1#*=}" ;;
+            esac ;;
+        --quiet|--wait) ;;
+        *) echo "systemd-run stand-in: unexpected argument $1" >&2; exit 64 ;;
+    esac
+    shift
+done
+[[ -n "$unit" && -n "$secs" && -n "$dir" && $# -gt 0 ]] || { echo "systemd-run stand-in: no unit, limit, directory or command" >&2; exit 64; }
+mkdir -p "$BOXMUNGE_ROOT/units"
+[[ ! -e "$BOXMUNGE_ROOT/units/$unit" ]] || { echo "Failed to start transient service unit: Unit $unit.service was already loaded" >&2; exit 1; }
+[[ -z "${STUB_MAX_SECS:-}" || "$secs" -le "$STUB_MAX_SECS" ]] || secs="$STUB_MAX_SECS"
+envs+=("INVOCATION_ID=stand-in" "LANG=C.UTF-8" "SYSTEMD_EXEC_PID=$$" "USER=$user")
+[[ "$user" == root ]] || envs+=("HOME=/home/$user" "LOGNAME=$user" "SHELL=/bin/sh")
+cd "$dir"
+rc=0
+python3 -c 'import os, resource, signal, subprocess, sys
+secs, stop, fsize, out, err = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5]
+def stream(spec, inherit):
+    if spec.startswith("truncate:"):
+        return open(spec[len("truncate:"):], "wb")
+    return subprocess.DEVNULL if spec == "null" else inherit
+stdout = stream(out, None)
+stderr = stream(err, subprocess.STDOUT if stdout is not None else None)
+def limits():
+    if fsize:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (int(fsize), int(fsize)))
+p = subprocess.Popen(sys.argv[6:], stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr,
+                     start_new_session=True, preexec_fn=limits)
+try:
+    rc = p.wait(timeout=secs)
+except subprocess.TimeoutExpired:
+    os.killpg(p.pid, signal.SIGTERM)
+    try:
+        p.wait(timeout=stop)
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)
+        p.wait()
+    sys.exit(200)
+sys.exit(201 if rc < 0 else rc)' "$secs" "$stop" "$fsize" "$out" "$err" env -i "${envs[@]}" "$@" || rc=$?
+case "$rc" in
+    0) exit 0 ;;
+    200) echo timeout > "$BOXMUNGE_ROOT/units/$unit"; exit 1 ;;
+    201) echo signal > "$BOXMUNGE_ROOT/units/$unit"; exit 255 ;;
+    *) echo exit-code > "$BOXMUNGE_ROOT/units/$unit"; exit "$rc" ;;
+esac
+EOF
+cat > "$SYSTEMD_RUN_STUB/systemctl" <<'EOF'
+#!/usr/bin/env bash
+echo "systemctl $*" >> "$BOXMUNGE_ROOT/calls"
+state="$BOXMUNGE_ROOT/units/${*: -1}"
+state="${state%.service}"
+case "$1" in
+    show) if [[ -f "$state" ]]; then printf 'LoadState=loaded\nResult=%s\n' "$(cat "$state")"; else printf 'LoadState=not-found\nResult=success\n'; fi ;;
+    reset-failed) [[ -f "$state" ]] || { echo "Unit ${*: -1} not loaded." >&2; exit 1; }; rm -f "$state" ;;
+    *) echo "systemctl stand-in: unexpected $*" >&2; exit 64 ;;
+esac
+EOF
+chmod +x "$SYSTEMD_RUN_STUB"/*
+export PATH="$SYSTEMD_RUN_STUB:$PATH"
+
+# BUILT_SHIM: the shim under test as a release ships it (built, when it is
+# the source shim). new_root installs it as the box's bin/boxmunge-upgrade,
+# which an upgrade runs once it has self-updated (install-sudoers).
+BUILT_SHIM="$SHIM"
+if grep -q '^# >>> boxmunge-upgrade.d:' "$SHIM"; then
+    BUILT_SHIM="$FAKEBIN.built-shim"
+    python3 "$REPO_DIR/scripts/build-shim.py" "$SHIM" "$BUILT_SHIM"
+fi
+
+# with_shim_functions <cmd...>: run <cmd> in a subshell that has every
+# constant and function of the shim under test and has run none of its
+# commands.
+SHIM_FUNCTIONS=""
+with_shim_functions() {
+    if [[ -z "$SHIM_FUNCTIONS" ]]; then
+        SHIM_FUNCTIONS="$(mktemp)"
+        awk 'index($0, "case \"${1:-}\" in") == 1 { exit } { print }' "$BUILT_SHIM" > "$SHIM_FUNCTIONS"
+    fi
+    # shellcheck source=/dev/null
+    ( source "$SHIM_FUNCTIONS"; "$@" )
+}
+
 # new_root [slot]: fresh BOXMUNGE_ROOT whose active slot is <slot> (default a),
-# with a mock boxmunge-server and python in both slots and a consistent
-# active-slot file and env-active symlink.
+# with a mock boxmunge-server and python in both slots, a consistent
+# active-slot file and env-active symlink, and the shim under test (built)
+# in bin/.
 new_root() {
     local slot="${1:-a}"
     BOXMUNGE_ROOT="$(mktemp -d)"
@@ -158,10 +282,31 @@ new_root() {
     done
     echo "$slot" > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
     ln -s "$BOXMUNGE_ROOT/env-$slot" "$BOXMUNGE_ROOT/env-active"
+    cp "$BUILT_SHIM" "$BOXMUNGE_ROOT/bin/boxmunge-upgrade"
+    chmod 0755 "$BOXMUNGE_ROOT/bin/boxmunge-upgrade"
     # The stash a rollback restores when no upgrade recorded one.
     mkdir -m 0770 "$BOXMUNGE_ROOT/stashes"
     : > "$BOXMUNGE_ROOT/stashes/$OLD_STASH"
     chmod 0600 "$BOXMUNGE_ROOT/stashes/$OLD_STASH"
+}
+
+# release_notes <dir> <version> [<breaking version>...]: <version>'s
+# upgrade-notes.json in release directory <dir> (format 1; its releases table
+# holds <version>, not breaking, and each breaking one named), and its line
+# appended to <dir>/SHA256SUMS. Call it once SHA256SUMS is written.
+release_notes() {
+    python3 - "$@" <<'PY'
+import hashlib, json, sys
+directory, version, breaking = sys.argv[1], sys.argv[2], sys.argv[3:]
+releases = {v: {"class": "feature", "breaking": True} for v in breaking}
+releases.setdefault(version, {"class": "breakfix", "breaking": False})
+data = json.dumps({"format": 1, "release": version, "floor": "0.11.0", "bridge": "0.11.6",
+                   "releases": releases, "no_action": [version], "entries": []}).encode()
+with open(f"{directory}/upgrade-notes.json", "wb") as f:
+    f.write(data)
+with open(f"{directory}/SHA256SUMS", "a") as f:
+    f.write(f"{hashlib.sha256(data).hexdigest()}  upgrade-notes.json\n")
+PY
 }
 
 # OLD_STASH: the stash new_root leaves in stashes/.
@@ -245,7 +390,9 @@ age_swap() {
 drop_root() { rm -rf "$BOXMUNGE_ROOT"; unset BOXMUNGE_ROOT; }
 
 finish() {
-    rm -rf "$FAKEBIN" "$FAILVISUDO" "$BUSYLOCK"
+    rm -rf "$FAKEBIN" "$FAILVISUDO" "$BUSYLOCK" "$SYSTEMD_RUN_STUB"
+    [[ "$BUILT_SHIM" == "$SHIM" ]] || rm -f "$BUILT_SHIM"
+    [[ -z "$SHIM_FUNCTIONS" ]] || rm -f "$SHIM_FUNCTIONS"
     echo ""
     echo "Results: $PASS passed, $FAIL failed"
     [[ "$FAIL" -eq 0 ]]

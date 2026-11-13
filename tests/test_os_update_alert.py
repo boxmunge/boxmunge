@@ -132,7 +132,7 @@ def test_auto_update_run_checks_os_updates_before_discovery(paths, monkeypatch):
     with patch("boxmunge.os_update_alert.notify", notify), \
             patch("boxmunge.upgrade_discovery.discover_update") as discover:
         discover.return_value = {"action": "up_to_date", "current_version": "0.3.5",
-                                 "blocked": None, "source": "endpoint"}
+                                 "blocked": None, "manual": None, "source": "endpoint"}
         assert run_auto_update(paths) == 0
     assert len(notify.calls) == 1
     assert read_os_update_state(paths)["problems"] == ["stamp:stale"]

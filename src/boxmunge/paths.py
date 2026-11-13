@@ -149,6 +149,9 @@ class BoxPaths:
         # Last auto-update discovery that installed nothing: any security or
         # break-fix release it could not install, and the alert sent for it.
         self.platform_update_state = self.state / "platform-updates.json"
+        # The release needing a manual upgrade that auto-update last said so
+        # about (boxmunge.manual_update).
+        self.platform_manual_update = self.state / "platform-manual-update.json"
         # When auto-update's discovery last got a usable answer from the
         # version-check service, and since when it has been failing.
         self.update_discovery_state = self.state / "update-discovery.json"

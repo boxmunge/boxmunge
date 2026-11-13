@@ -42,6 +42,8 @@ NOT_DOCKER = {
     ("commands/auto_update_cmd.py", "run_auto_update", "?"): "execs the upgrade shim, whose boxmunge-server scrubs its own docker calls",
     ("commands/doctor.py", "run_doctor", "systemctl"): "reads timer state",
     ("commands/logs.py", "_show_host_logs", "journalctl"): "reads the journal",
+    ("commands/upgrade_check_cmd.py", "_check", "?"): "sudo to the upgrade shim's check verb",
+    ("commands/upgrade_howto_cmd.py", "_fetch_notes", "?"): "sudo to the upgrade shim's guide verb",
     ("cve/scanner.py", "refresh_db", "trivy"): "trivy DB download; never reads project compose files, needs HOME for its cache",
     ("cve/scanner.py", "scan_image", "trivy"): "trivy scans an image from the daemon; never reads project compose files",
     ("health_checks/hardening.py", "_run", "?"): "host hardening probes (ufw, systemctl, sshd) with an sbin PATH",

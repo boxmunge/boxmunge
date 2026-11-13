@@ -19,11 +19,12 @@ blocklist() { printf '{"%s": {"reason": "apply", "failed_at": "x"}}\n' "$1" \
 new_root a
 run_shim install-sudoers
 expect 0 "Wrote deploy sudo rule" "install-sudoers writes the rule"
-expected_rule="deploy ALL=(root) NOPASSWD: $BOXMUNGE_ROOT/bin/boxmunge-upgrade auto, $BOXMUNGE_ROOT/bin/boxmunge-upgrade target *, $BOXMUNGE_ROOT/bin/boxmunge-upgrade repair-deps"
+shim="$BOXMUNGE_ROOT/bin/boxmunge-upgrade"
+expected_rule="deploy ALL=(root) NOPASSWD: $shim auto, $shim target *, $shim repair-deps, $shim check *, $shim guide *"
 rules="$(grep -v '^#' "$BOXMUNGE_SUDOERS_FILE")"
-[[ "$rules" == "$expected_rule" ]] && pass "sudoers grants exactly auto, target and repair-deps (no arguments)" \
+[[ "$rules" == "$expected_rule" ]] && pass "sudoers grants exactly auto, target, repair-deps, check and guide" \
     || fail "unexpected sudoers rule: $rules"
-for forbidden in "upgrade run" "check-probation" "clear-blocklist" "force-target" "install-sudoers"; do
+for forbidden in "upgrade run" "check-probation" "clear-blocklist" "force-target" "install-sudoers" "_check-run"; do
     grep -v "^#" "$BOXMUNGE_SUDOERS_FILE" | grep -q -- "$forbidden" && fail "sudoers mentions $forbidden" \
         || pass "sudoers does not grant $forbidden"
 done
@@ -88,6 +89,27 @@ expect 1 "failed visudo" "a release outranks its pre-releases"
 rm "$BOXMUNGE_ROOT/config/version"
 run_shim target 1.5.0
 expect 1 "No installed version" "target refuses when the installed version is unknown"
+drop_root
+
+# --- check and guide (reachable by deploy) ---------------------------------
+# Exactly one semver argument, checked before anything else: sudo's `check *`
+# and `guide *` would otherwise let extra words through.
+
+new_root a
+echo "1.4.0" > "$BOXMUNGE_ROOT/config/version"
+for verb in check guide; do
+    for args in "" "1.5.0 --force" "1.5.0 1.6.0" "1.5.0;id" "../1.5.0"; do
+        # shellcheck disable=SC2086  # the words are the point
+        run_shim "$verb" $args
+        expect 2 "Usage: boxmunge-upgrade $verb <version>" "$verb refuses arguments '$args' (exit 2)"
+    done
+done
+[[ ! -e "$BOXMUNGE_ROOT/upgrade-root" ]] && pass "a usage error touches nothing" \
+    || fail "a usage error made $(ls -A "$BOXMUNGE_ROOT/upgrade-root")"
+run_shim _check-run 1.5.0
+expect 1 "Usage: boxmunge-upgrade _check-run <version> <installed>" "_check-run takes exactly two versions"
+run_shim _check-run 1.5.0 1.4.0
+expect 1 "holds no checked release; run: boxmunge-upgrade check 1.5.0" "_check-run alone, with no check, refuses"
 drop_root
 
 # --- force-target (operator only) ----------------------------------------

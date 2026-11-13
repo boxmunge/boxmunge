@@ -22,7 +22,7 @@ MIN_COMPOSE_VERSION = (2, 35, 0)
 # never guessed at.
 _WHITESPACE = " \t\r\n\v\f"
 _VERSION_RE = re.compile(r"v?([0-9]+)\.([0-9]+)\.([0-9]+)(?:[-+][^ \t\r\n\v\f]*)?")
-_UPGRADE = "apt-get install --only-upgrade docker-compose-plugin"
+UPGRADE_COMMAND = "apt-get install --only-upgrade docker-compose-plugin"
 
 
 def compose_version_problem() -> str | None:
@@ -48,5 +48,5 @@ def compose_version_problem() -> str | None:
     if found < MIN_COMPOSE_VERSION:
         return (f"Docker Compose {match.group(0)} is older than {want}, which "
                 f"boxmunge needs to pass secrets to containers unchanged. "
-                f"Upgrade it: {_UPGRADE}")
+                f"Upgrade it: {UPGRADE_COMMAND}")
     return None

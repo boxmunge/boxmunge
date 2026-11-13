@@ -8,13 +8,14 @@
 # deploy's sudo rule. Owned here so install.sh and every upgrade write the
 # same text; a box whose rule predates a tightening is fixed on its next
 # upgrade. sudo matches the whole argument string against each pattern, so
-# `target *` cannot reach force-target or any other subcommand, and `auto`
+# `target *`, `check *` and `guide *` cannot reach force-target, _check-run
+# or any other subcommand (each verb takes exactly one version), and `auto`
 # and `repair-deps` take no further words.
 # ---------------------------------------------------------------------------
 sudoers_rule() {
     cat <<EOF
 # Managed by boxmunge-upgrade install-sudoers; rewritten on every install and upgrade.
-deploy ALL=(root) NOPASSWD: $BIN_DIR/boxmunge-upgrade auto, $BIN_DIR/boxmunge-upgrade target *, $BIN_DIR/boxmunge-upgrade repair-deps
+deploy ALL=(root) NOPASSWD: $BIN_DIR/boxmunge-upgrade auto, $BIN_DIR/boxmunge-upgrade target *, $BIN_DIR/boxmunge-upgrade repair-deps, $BIN_DIR/boxmunge-upgrade check *, $BIN_DIR/boxmunge-upgrade guide *
 EOF
 }
 
@@ -153,6 +154,20 @@ self_update_shim() {
             bm_log error upgrade "wrapper self-update skipped: bash -n failed" "{\"name\": \"$name\"}"
         fi
     done
+}
+
+# new_shim_sudoers <previous shim> <version> <from_version>: the shim just
+# self-updated writes deploy's sudo rule (the one written earlier was the
+# running shim's), so the rule follows the shim. If it cannot, <version>
+# fails its pre-flight, with the shim the box ran before put back first: a
+# shim that cannot write the rule refuses every later upgrade, force-target
+# included.
+new_shim_sudoers() {
+    "$BIN_DIR/boxmunge-upgrade" install-sudoers && return 0
+    install_by_rename "$1" "$BIN_DIR/boxmunge-upgrade" \
+        || log "ERROR: could not put the previous shim back from $1; reinstall the installed release (sudo bash boxmunge-install.sh)"
+    preflight_fail "$2" "$3" "preflight_failed: install_sudoers" \
+        "The new shim could not write deploy's sudo rule; the previous shim is back in place"
 }
 
 # ---------------------------------------------------------------------------

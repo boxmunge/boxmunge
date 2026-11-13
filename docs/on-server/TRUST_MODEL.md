@@ -319,10 +319,10 @@ On a host with no deploy user the hook is not run and the deploy fails, saying s
 
 ### What deploy may ask root to do
 
-`/etc/sudoers.d/boxmunge-deploy` grants deploy exactly three shim invocations:
+`/etc/sudoers.d/boxmunge-deploy` grants deploy exactly five shim invocations:
 
 ```text
-deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmunge/bin/boxmunge-upgrade target *, /opt/boxmunge/bin/boxmunge-upgrade repair-deps
+deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmunge/bin/boxmunge-upgrade target *, /opt/boxmunge/bin/boxmunge-upgrade repair-deps, /opt/boxmunge/bin/boxmunge-upgrade check *, /opt/boxmunge/bin/boxmunge-upgrade guide *
 ```
 
 - `auto` discovers the latest release and upgrades to it.
@@ -330,23 +330,95 @@ deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmun
   version that is blocklisted on this box and any version below the installed
   one (`config/version`, which deploy cannot write). Reinstalling the installed
   version is allowed.
+- An upgrade that crosses a breaking release, by `auto`, `target` or the
+  auto-update timer's `run`, must first pass the target's own readiness check.
+  - **Which upgrades are gated:** whether an upgrade crosses a breaking release
+    is read only from the target's `upgrade-notes.json`, never from the
+    unsigned discovery answer. That file must have its own line in the
+    release's cosign-signed `SHA256SUMS`. A release whose signed notes are
+    missing, mismatched or unreadable fails its pre-flight and is blocklisted,
+    like a bad bundle.
+  - **Class does not matter, only crossing:** an upgrade that crosses no
+    breaking release installs ungated, as every security and break-fix update
+    within a minor line does. One that crosses a breaking release is gated
+    whatever its class.
+  - **What the gate runs:**
+    1. The target's prerequisite scripts, as root and confined like `check`'s,
+       before its venv is built.
+    2. Its `upgrade-readiness --json`, as deploy and confined like `check`'s,
+       against the standby it has built. This runs before the release's own
+       `upgrade --dry-run`.
+  - **A box that is not ready** is refused before anything changes: the
+    standby is removed, and nothing is blocklisted or reported. A dry run that
+    refuses after the readiness check has passed is still a pre-flight failure.
+  - **After any upgrade,** the new release's readiness check lists each
+    project's to-dos in one low-priority alert.
+  - **Override:** the operator's root-only `force-target` skips the gate.
+  - **Not a security boundary:** the gate stops a careless agent, not a hostile
+    deploy user. The readiness check runs as deploy, so deploy can tamper with
+    that process and make it answer pass. deploy can already reach the Docker
+    socket, so this gives it nothing it lacked.
 - `repair-deps` takes no argument. It installs the hash-pinned dependencies of
   the installed release (`config/version` again) into the live venv, from that
   release's bundle, verified like an upgrade's; it refuses if the live venv
   runs another version. It builds, swaps and removes no venv, so it is allowed
   during probation.
+- `check <version>` runs a newer release's own readiness check against the box
+  and prints one JSON answer. It changes no upgrade state: the blocklist, the
+  slots, the interruption, pip and cosign counts, probation and the stash stay
+  byte-identical whatever happens. The one exception is what every taker of
+  the upgrade lock does: it may create the lock files, make the legacy
+  `upgrade-state/upgrade.lock` 0600, and replace one deploy owns. It first
+  refuses a version that is not newer than the installed one, predates the
+  check (0.11.8), or is blocklisted, and any check while an upgrade or rollback
+  is unfinished, during a probation (`probation.json` is only read, never acted
+  on), during a stopped userns migration, or within ten minutes of the start or
+  the end of the last check. As root it then downloads the release and
+  verifies it like an upgrade, without the lock and without touching the
+  cosign count, into `/opt/boxmunge/upgrade-check/`, which is root's (0755; the
+  bundle and results inside are 0700) and removed when the check ends. The
+  bundle's listed prerequisite scripts (`bootstrap/prerequisites`) run as
+  root, and a scratch venv is built from its hash-pinned requirements (outside
+  the A/B slots). Each runs inside `systemd-run` with `ProtectSystem=strict`,
+  no capabilities, devices or namespaces, the `@system-service` system calls
+  and a time limit. Last, holding the upgrade lock, the release's
+  `upgrade-readiness --json` and `upgrade --dry-run` run **as deploy**,
+  confined the same way with nothing writable. deploy starts the check and
+  reads its findings, so running them as root would let a link deploy plants
+  in a project make root read a file into a finding. They can do only what
+  deploy can do:
+  - reach the network, abstract Unix sockets and deploy's own processes;
+  - use the Docker socket, which the readiness rules use to inspect;
+  - write their private `/tmp` and `/dev/shm`, but nothing of root's and no
+    upgrade state.
+
+  Every run's output goes to files that systemd opens, so nothing a run does
+  can keep the shim waiting. A run is stopped at its limit and killed 5 s
+  later. So the lock is held for at most 610 s: 300 s for each run, plus 5 s
+  each. Auto-update waits up to 15 minutes for the lock rather than skipping,
+  and a check stamps the ten-minute limit again as it ends, so checks cannot
+  hold off an update. The stamp (`upgrade-root/check-last`) and the
+  one-at-a-time lock (`upgrade-root/check.lock`) are root-only, so deploy
+  cannot reset either.
+- `guide <version>` prints a newer release's `upgrade-notes.json` exactly as
+  published, and only once its own line in the release's cosign-signed
+  `SHA256SUMS` verifies it (at most 1 MiB). It runs no release code, takes no
+  lock and changes nothing.
 
 Everything else is root-only: `run` (the auto-update timer), `check-probation`
 (the health timer), `clear-blocklist`, `install-sudoers`, `install-docs`, the
-`userns-*` commands, and `force-target <version>`, the operator override that
-skips the blocklist and the downgrade floor. sudo matches the whole
-argument string, so `target *` cannot reach `force-target`, and `auto` and
-`repair-deps` take no further words. The auto-update timer's
-`run` applies the same downgrade floor and skips blocklisted versions.
+`userns-*` commands, `_check-run` (the part of `check` that holds the upgrade
+lock), and `force-target <version>`, the operator override that skips the
+blocklist and the downgrade floor. sudo matches the whole argument string, so
+`target *`, `check *` and `guide *` cannot reach `force-target` or
+`_check-run`, each of them takes exactly one version, and `auto` and
+`repair-deps` take no further words. The auto-update timer's `run` applies the
+same downgrade floor and skips blocklisted versions.
 
 The rule text lives in the shim (`boxmunge-upgrade install-sudoers`). install.sh
-calls it, and so does every upgrade before it installs anything, after checking
-the new file with `visudo -c`. A box carrying an older or wider rule is tightened
+calls it, and so does every upgrade, twice: the running shim before it installs
+anything, and the new shim once the upgrade has installed it, each checking the
+new file with `visudo -c`. A box carrying an older or wider rule is tightened
 on its next upgrade, and a hand-edited rule is put back.
 
 ## Explicitly Out of Scope
@@ -449,7 +521,7 @@ prints the same report with no side effects.
 ## Security and Break-fix Releases
 
 Every release has a class recorded in the version-check service's
-`releases.json`: `security`, `breakfix` (a critical non-security fix), or
+`releases.json`: `security`, `breakfix` (an important fix that prevents issues; you shouldn't fall behind on it), or
 `feature`. Security releases are applied automatically within 12 hours.
 Break-fix releases are applied the same way unless the box sets
 `auto_update.breakfix: false` in `boxmunge.yml`. Feature releases are never
@@ -545,18 +617,21 @@ compromise of any single one cannot silently propagate.
    The SBOM enumerates exactly the versions verified in steps 4–6.
 
 8. **Artifact signing.** The workflow calls `cosign sign-blob --yes` on
-   `SHA256SUMS` (which itself covers the install script and every
-   tarball) and on `boxmunge-install.sh`. Keyless signing produces a
+   `SHA256SUMS` (which itself covers the install script, every
+   tarball and `upgrade-notes.json`) and on `boxmunge-install.sh`. Keyless signing produces a
    Fulcio certificate proving the signature was produced by this exact
    workflow on this exact tag, with the OIDC issuer being GitHub
    Actions. The signature is published as `SHA256SUMS.sig` +
    `SHA256SUMS.cert`. Signing has no fallback: if cosign cannot be
    installed or signing fails, the workflow fails and nothing is
-   published.
+   published. The `publish` job builds `upgrade-notes.json` itself, from
+   the tag's `upgrade-notes/` files with stdlib-only code, just before
+   computing `SHA256SUMS`: nothing `build` ran can shape it.
 
 9. **Release publication.** `softprops/action-gh-release` (SHA-pinned)
    attaches the install script, the tarball(s), `SHA256SUMS`, the
-   cosign signature and cert, and the SBOM to a draft GitHub release
+   cosign signature and cert, the SBOM and `upgrade-notes.json` to a
+   draft GitHub release
    (every file is required). The draft's title and notes are checked
    against the release's class in `releases.json`, then it is published.
 
@@ -573,6 +648,11 @@ compromise of any single one cannot silently propagate.
 
 12. **Checksum verification.** The shim then runs `sha256sum -c` against
     the signed `SHA256SUMS` to confirm the tarball's contents.
+    `upgrade-howto` verifies `upgrade-notes.json` the same way, through
+    the shim, before composing a guide from it: the file must have its
+    own line in the signed `SHA256SUMS`. Agents with deploy rights act
+    on that text, so it reaches a box only on the signed path, never
+    from the version-check service.
 
 13. **Installation.** Only after both signature and checksum verify does
     the shim extract the bundle and install it into the standby venv.

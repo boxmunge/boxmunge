@@ -64,6 +64,24 @@ class TestUpgradeTool:
         assert set(props) == {"version"}
 
 
+class TestUpgradeGuideAndCheckTools:
+    @pytest.mark.parametrize("tool,command", [("upgrade_howto", "upgrade-howto"),
+                                              ("upgrade_check", "upgrade-check")])
+    @patch("boxmunge.mcp_tools.subprocess.run")
+    def test_run_the_deploy_shells_command_as_a_subprocess(
+            self, mock_run: MagicMock, tool: str, command: str) -> None:
+        """As deploy: the command itself reaches the shim's check or guide verb."""
+        from boxmunge import mcp_tools
+        mock_run.return_value = subprocess.CompletedProcess([], 1, stdout="Result: BLOCKED\n")
+        result = getattr(mcp_tools, f"_tool_{tool}")()
+        assert mock_run.call_args[0][0] == ["boxmunge-server", command]
+        assert mock_run.call_args[1]["stdin"] is subprocess.DEVNULL
+        assert result["exit_code"] == 1 and result["messages"] == ["Result: BLOCKED"]
+        getattr(mcp_tools, f"_tool_{tool}")(version="0.12.0", as_json=True)
+        assert mock_run.call_args[0][0] == ["boxmunge-server", command, "--version",
+                                            "0.12.0", "--json"]
+
+
 @pytest.mark.parametrize("tool,module,func", [
     ("restore", "boxmunge.commands.restore", "run_restore"),
     ("rollback", "boxmunge.commands.rollback", "run_rollback"),
