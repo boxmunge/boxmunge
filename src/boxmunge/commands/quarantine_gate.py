@@ -464,8 +464,12 @@ def lift_after_deploy(paths: BoxPaths, project: str, ref: str, clearance: Cleara
     try:
         policies = _release_policies(paths, project,
                                      _verify_running(paths, clearance, component))
-        site = read_text_nofollow(paths.project_caddy_site(project),
-                                  limit=MAX_SITE_BYTES)
+        site_path = paths.project_caddy_site(project)
+        try:  # the decode error alone names no file
+            site = read_text_nofollow(site_path, limit=MAX_SITE_BYTES)
+        except UnicodeDecodeError as e:
+            raise QuarantineError(f"{site_path} is not valid UTF-8 text (byte {e.start}); "
+                                  f"delete it so the next deploy regenerates it") from e
         lift_quarantine(project, paths, project_caddy_site_content=site,
                         compose_files=["compose.yml", "compose.boxmunge.yml"],
                         restore=policies, txn=txn, component=component, after_start=recheck)
