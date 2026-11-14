@@ -83,14 +83,19 @@ def is_monitor_stopped(project_name: str, paths: BoxPaths) -> bool:
     project again (deploy state ``last_started_at`` newer than the stop's
     ``stopped_at``); the next tick then judges the project afresh.
     """
-    try:
-        state = read_health_record(paths.project_health_state(project_name))
-    except StateError:
-        # A damaged record cannot say whether a stop stands. The tick then
-        # judges the project afresh, and update_health_state applies the
-        # damaged-record policy (a critical verdict is still enforced).
-        return False
+    state = read_health_record(paths.project_health_state(project_name))
     return _stop_stands(state, project_name, paths)
+
+
+def tick_sees_stop(project_name: str, paths: BoxPaths) -> bool:
+    """is_monitor_stopped for the health tick. A damaged record cannot say
+    whether a stop stands, so the tick judges the project afresh (False) and
+    update_health_state applies the damaged-record policy: a critical verdict
+    is still enforced. Every other caller lets the StateError surface."""
+    try:
+        return is_monitor_stopped(project_name, paths)
+    except StateError:
+        return False
 
 
 def _send_alert(

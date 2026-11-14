@@ -95,9 +95,9 @@ def test_a_damaged_project_does_not_stop_later_projects_in_the_tick(
     assert read_state(box.project_health_state("bbb"))["status"] == "ok"
 
 
-def test_a_damaged_record_does_not_hide_a_standing_stop_check(box) -> None:
-    """is_monitor_stopped cannot tell: it answers False so the tick judges the
-    project afresh (and update_health_state then applies the policy)."""
-    from boxmunge.commands.health_state import is_monitor_stopped
+def test_the_tick_judges_afresh_but_other_callers_see_the_damage(box) -> None:
+    from boxmunge.commands.health_state import is_monitor_stopped, tick_sees_stop
     _damage(box, "aaa", {"status": "critical_stopped", "consecutive_failures": "x"})
-    assert is_monitor_stopped("aaa", box) is False
+    assert tick_sees_stop("aaa", box) is False
+    with pytest.raises(StateError, match="consecutive_failures"):
+        is_monitor_stopped("aaa", box)
