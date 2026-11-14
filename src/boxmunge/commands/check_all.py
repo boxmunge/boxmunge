@@ -14,7 +14,7 @@ from boxmunge.commands import check
 from boxmunge.commands.argv import parse_args
 from boxmunge.commands.check_holds import tick_hold
 from boxmunge.commands.health_state import (
-    is_monitor_stopped, record_still_stopped, update_health_state,
+    record_still_stopped, tick_sees_stop, update_health_state,
 )
 from boxmunge.config import ConfigError
 from boxmunge.fileutil import project_lock, LockError
@@ -164,7 +164,7 @@ def _check_one(name: str, paths: BoxPaths, read_only: bool,
     # result. Running smoke now would only report "No such container" and
     # overwrite the real stop reason; the stop stands until recover or a
     # successful deploy (audit C-04).
-    if is_monitor_stopped(name, paths):
+    if tick_sees_stop(name, paths):
         print(f"{name}: CRITICAL (stopped by the health monitor; "
               f"run 'boxmunge recover {name}' or redeploy)")
         if not read_only:
