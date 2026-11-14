@@ -5,7 +5,7 @@ that they are told before it runs.
 NOTICE is the one canonical short text. It is derived from "What boxmunge
 sends home" in docs/on-server/OPERATIONS.md and is repeated verbatim in
 docs/on-server/AGENT_RULES.md (agent-help rules) and in the CLI's server-setup
-(cli/src/boxmunge_cli/server_setup/version_check_notice.py).
+(the CLI package's server_setup/version_check_notice.py).
 tests/test_version_check_notice.py keeps the copies identical and checks
 the facts against OPERATIONS.md, so change all of them together.
 """

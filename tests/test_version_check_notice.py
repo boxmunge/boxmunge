@@ -3,7 +3,6 @@
 and matches the documented facts."""
 import importlib.util
 import re
-import json
 from pathlib import Path
 
 from boxmunge.commands.help import AGENT_HELP_TOPICS

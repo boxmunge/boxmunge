@@ -136,6 +136,7 @@ RAW_READS: dict[str, int] = {
     "userns/marker.py": 1,
     "userns/offset.py": 6, "userns/preflight.py": 1, "userns/shift.py": 1, "userns/steps.py": 1,
     "version.py": 1,
+    "version_check_optout.py": 1,  # boxmunge.yml is root-owned: deploy cannot swap it
 }
 
 
