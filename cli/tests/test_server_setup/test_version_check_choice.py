@@ -55,3 +55,10 @@ def test_explanation_is_shown_with_yes_too(monkeypatch, capsys) -> None:
     assert run_server_setup(parse_args([*BASE, "--yes", "--no-version-check"])) == 1
     out = capsys.readouterr().out
     assert NOTICE in out and "Version check: OFF" in out
+
+
+def test_old_installer_rejecting_the_flag_gets_a_clear_message(monkeypatch, capsys) -> None:
+    from boxmunge_cli.server_setup import install
+    script = "echo 'Unknown argument: --no-version-check' >&2; exit 1"
+    assert install.run_with_progress(["bash", "-c", script]) == 1
+    assert "predates --no-version-check" in capsys.readouterr().err

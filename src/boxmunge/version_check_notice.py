@@ -20,14 +20,17 @@ When an upgrade fails, it also reports the version it tried, the version it
 came from, the step that failed and a short reason. No hostname, machine ID or
 project names. Like any connection, both carry the box's IP address.
 
-What it keeps: the network prefix the request came from (IPv4 /24, IPv6 /48),
-never the full address, with the version and the date (a failure report is
-kept with the prefix and the time it arrived), for 90 days. A prefix is
-not anonymous: a /48 is often one household or company. The request logs of
-the web server and of the service itself keep full IP addresses until they
-rotate.
+What it keeps: in its database, the network prefix the request came from
+(IPv4 /24, IPv6 /48), not the full address, with the version and the date (a
+failure report is kept with the prefix and the time it arrived), deleted after
+90 days; and a daily count of checks per version. A prefix is not anonymous: a
+/48 is often one household or company. Elsewhere full IP addresses are kept:
+the request logs of the web server and of the service itself, until they
+rotate, and encrypted database backups until they expire (the oldest hold full
+addresses of failure reporters).
 
-Why: so the maintainer can see which networks still run an old release.
+Why: so the maintainer can see which networks still run an old release, and
+can hold a release when upgrades to it fail on several networks.
 
 If you decline: with version_check.enabled: false the box discovers no
 releases, so security and break-fix releases are not installed automatically.

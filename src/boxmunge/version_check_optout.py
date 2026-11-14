@@ -34,7 +34,9 @@ def version_checks_off(paths: BoxPaths) -> bool:
 NOT_CHOSEN = ("boxmunge.yml has no version_check setting, so nobody recorded a choice and the "
               "default (checks on) applies. Tell the operator what the version check sends "
               "(`agent-help rules`), ask whether to keep it, then set version_check.enabled "
-              "to true or false in boxmunge.yml (as root)")
+              "to true or false: as root, add `version_check:` and `  enabled: true` (or false) "
+              "as two lines to /opt/boxmunge/config/boxmunge.yml. Only `doctor` reports this, "
+              "not `health`")
 
 
 def version_check_unchosen(paths: BoxPaths) -> bool:

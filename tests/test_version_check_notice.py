@@ -2,6 +2,7 @@
 """The version-check explanation is one text, reaches agents and the operator,
 and matches the documented facts."""
 import importlib.util
+import re
 import json
 from pathlib import Path
 
@@ -43,6 +44,21 @@ def test_notice_states_the_documented_facts():
                  "upgrade --target X.Y.Z"):
         assert fact in _flat(NOTICE) and fact in section, fact
     assert "version_check.enabled: false" in NOTICE
+    site = _flat((ROOT / "services/version-check/static/index.html").read_text())
+    site = re.sub(r"<[^>]+>|&nbsp;", " ", site)
+    site = _flat(site)
+    for claim in ("A daily count of checks per version", "deleted after 90 days",
+                  "Encrypted backups of the database can keep copies",
+                  "A prefix is not anonymous", "Both logs are rotated by size"):
+        assert claim in site, claim
+    flat = _flat(NOTICE)
+    assert "a daily count of checks per version" in flat
+    assert "encrypted database backups until they expire" in flat
+    assert "the oldest hold full addresses of failure reporters" in flat
+    assert "hold a release when upgrades to it fail on several networks" in flat
+    assert "never" not in flat.lower()
+    alert = (ROOT / "services/version-check/failure_alert.py").read_text()
+    assert "holds one by hand" in alert.replace("the maintainer decides, and ", "") or "hold" in alert
 
 
 def test_install_records_the_choice():
