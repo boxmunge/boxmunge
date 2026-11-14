@@ -36,7 +36,7 @@ def _dry_run_target(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
     the reason and `tags_not_restored` of an aborted update.
     """
     from boxmunge.container_update import UpdateError, image_services, running_images
-    from boxmunge.container_update_tags import restore_and_report
+    from boxmunge.container_update_tags import restore_after_interrupt, restore_and_report
     from boxmunge.deployed_inventory import InventoryError
     try:
         services = image_services(target)
@@ -50,7 +50,17 @@ def _dry_run_target(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
     if not services:
         return {"name": target.name, "status": "no_change",
                 "previous_digests": {}, "current_digests": {}}
-    result = _pull_and_compare(paths, target, services, running)
+    # Every exit of the pull puts the tags back: exceptions become the failed
+    # result, interruptions propagate with any restore failure noted on them.
+    try:
+        result = _pull_and_compare(paths, target, services, running)
+    except Exception as e:
+        result = {"name": target.name, "status": "failed",
+                  "reason": f"exception: {type(e).__name__}: {e}",
+                  "previous_digests": {}, "current_digests": {}}
+    except BaseException as e:
+        restore_after_interrupt(paths, target.name, e, services, running)
+        raise
     reason = restore_and_report(paths, target.name, result, result.get("reason", ""),
                                 services, running)
     if result["tags_not_restored"]:
