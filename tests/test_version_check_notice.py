@@ -54,7 +54,7 @@ def test_notice_states_the_documented_facts():
     assert "a daily count of checks per version" in flat
     assert "encrypted database backups until they expire" in flat
     assert "the oldest hold full addresses of failure reporters" in flat
-    assert "hold a release when upgrades to it fail on several networks" in flat
+    assert "hold a release if failures are observed" in flat
     assert "never" not in flat.lower()
     alert = (ROOT / "services/version-check/failure_alert.py").read_text()
     assert "holds one by hand" in alert.replace("the maintainer decides, and ", "") or "hold" in alert

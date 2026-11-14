@@ -29,8 +29,9 @@ the request logs of the web server and of the service itself, until they
 rotate, and encrypted database backups until they expire (the oldest hold full
 addresses of failure reporters).
 
-Why: so the maintainer can see which networks still run an old release, and
-can hold a release when upgrades to it fail on several networks.
+Why: so the maintainer can see which networks still run an old release, to
+keep upgrade paths clean and tested, and can hold a release if failures are
+observed.
 
 If you decline: with version_check.enabled: false the box discovers no
 releases, so security and break-fix releases are not installed automatically.
