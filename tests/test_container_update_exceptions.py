@@ -7,9 +7,9 @@ from __future__ import annotations
 
 import pytest
 
-from boxmunge import backup_dump
 from boxmunge import container_update as cu
 from boxmunge import container_update_tags
+from boxmunge.commands import backup_cmd
 from boxmunge.commands.container_update_cmd import _dry_run_target
 from tests.test_container_update import _NEW, _OLD
 from tests.test_container_update_abort import (
@@ -17,25 +17,42 @@ from tests.test_container_update_abort import (
 )
 
 
+def _real_backup(paths, monkeypatch):
+    """backup_locked runs for real, from the project's manifest; the update
+    module's own stub (_project) is taken out."""
+    monkeypatch.setattr(cu, "backup_locked", backup_cmd.backup_locked)
+    paths.backup_key.parent.mkdir(parents=True, exist_ok=True)
+    paths.backup_key.write_text("AGE-SECRET-KEY-test")
+
+
 def _stale_removal_fails(paths, monkeypatch, docker):
-    monkeypatch.setattr(backup_dump, "remove_stale_dumps", _raiser(PermissionError("denied")))
-    monkeypatch.setattr(cu, "backup_locked", lambda name, paths_, **kw: (
-        backup_dump.remove_stale_dumps(paths_, name), 0)[1])
+    _real_backup(paths, monkeypatch)
+    monkeypatch.setattr(backup_cmd, "remove_stale_dumps", _raiser(PermissionError("denied")))
 
 
 def _backup_dir_is_a_file(paths, monkeypatch, docker):
-    monkeypatch.setattr(cu, "backup_locked", lambda name, paths_, **kw: (
-        backup_dump.remove_stale_dumps(paths_, name),
-        backup_dump.tempfile.mkstemp(dir=paths_.project_backups(name)), 0)[2])
+    _real_backup(paths, monkeypatch)
     paths.project_backups(docker.project).write_text("not a directory")
 
 
 def _pruning_fails(paths, monkeypatch, docker):
-    monkeypatch.setattr(cu, "backup_locked", _raiser(OSError("read-only file system")))
+    _real_backup(paths, monkeypatch)
+    dump = paths.project_backups(docker.project) / "dump.tar.gz"
+    paths.project_backups(docker.project).mkdir(exist_ok=True)
+    dump.write_text("x")
+    monkeypatch.setattr(backup_cmd, "execute_dump", lambda *a, **kw: dump)
+    monkeypatch.setattr(backup_cmd._backup, "encrypt_file",
+                        lambda src, dst, paths_: dst.write_text("enc"))
+    monkeypatch.setattr(backup_cmd, "prune_unpaired",
+                        _raiser(OSError("read-only file system")))
 
 
-@pytest.mark.parametrize("prepare", [_stale_removal_fails, _backup_dir_is_a_file, _pruning_fails])
-def test_backup_exception_puts_the_tags_back(prepare, paths, monkeypatch, fake_containers) -> None:
+@pytest.mark.parametrize("prepare, expected", [
+    (_stale_removal_fails, "PermissionError: denied"),
+    (_backup_dir_is_a_file, "NotADirectoryError"),
+    (_pruning_fails, "read-only file system"),
+])
+def test_backup_exception_puts_the_tags_back(prepare, expected, paths, monkeypatch, fake_containers) -> None:
     docker, target = _project(paths, monkeypatch, fake_containers)
     prepare(paths, monkeypatch, docker)
 
@@ -43,6 +60,7 @@ def test_backup_exception_puts_the_tags_back(prepare, paths, monkeypatch, fake_c
 
     assert result["status"] == "failed" and result["reason"].startswith("exception: ")
     assert result["tags_not_restored"] == [] and docker.ups == 0
+    assert result["reason"].count(expected) == 1
     assert docker.tags == {"nginx:1.25": _OLD, "postgres:17": _OLD}
     assert _restart(docker) == _ALL_OLD
 
@@ -102,7 +120,8 @@ def test_dry_run_exception_puts_the_tags_back(paths, monkeypatch, fake_container
 
     result = _dry_run_target(paths, target)
 
-    assert result["status"] == "failed" and "disk error" in result["reason"]
+    assert result["status"] == "failed"
+    assert result["reason"] == "exception: OSError: disk error"
     assert result["tags_not_restored"] == [] and _restart(docker) == _ALL_OLD
 
 
