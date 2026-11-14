@@ -11,7 +11,8 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge import service_exec
-from boxmunge.bounded_run import OutputBudgetExceeded, run_bounded
+from boxmunge import bounded_run
+from boxmunge.bounded_run import OutputBudgetExceeded, OutputNotClosed, run_bounded
 from boxmunge.commands import check
 from boxmunge.service_exec import Stop
 
@@ -43,6 +44,28 @@ def test_a_stream_past_its_budget_kills_the_command() -> None:
     with pytest.raises(OutputBudgetExceeded) as e:
         _run("head -c 4194304 /dev/zero >&2; sleep 30", capture_output=True, budget=1 << 20)
     assert e.value.stream == "stderr"
+
+
+def test_a_plain_timeout_kills_and_raises() -> None:
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_bounded([*SH, "sleep 30"], timeout=0.5, keep=10, budget=100, capture_output=True)
+
+
+def test_a_grandchild_holding_the_pipe_fails_noisily_instead_of_hanging(monkeypatch) -> None:
+    monkeypatch.setattr(bounded_run, "DRAIN_GRACE", 0.5)
+    with pytest.raises(OutputNotClosed) as e:
+        _run("sleep 5 & exit 2", capture_output=True)
+    assert "left stdout open" in e.value.reason
+
+
+def test_a_drain_that_fails_is_raised(monkeypatch) -> None:
+    monkeypatch.setattr(bounded_run, "_CHUNK", "not a size")  # the read raises in the thread
+    with pytest.raises(TypeError):
+        _run("echo hi", capture_output=True)
+
+
+def test_text_translates_newlines_as_text_mode_did() -> None:
+    assert _run("printf 'a\\r\\nb\\rc'", capture_output=True, text=True).stdout == "a\nb\nc"
 
 
 def test_a_stream_that_is_not_captured_is_not_bounded(tmp_path: Path) -> None:

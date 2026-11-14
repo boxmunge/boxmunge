@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from boxmunge.bounded_run import OutputBudgetExceeded, run_bounded
+from boxmunge.bounded_run import OutputBudgetExceeded, OutputError, run_bounded
 from boxmunge.docker_run import docker_env
 
 _LOGGER = logging.getLogger("boxmunge")
@@ -144,13 +144,13 @@ class ServiceCommandTimeout(Exception):
 
 
 class ServiceCommandOutputLimit(ServiceCommandTimeout):
-    """The command wrote more than OUTPUT_BUDGET bytes on a captured stream
-    and was stopped, as for a timeout."""
+    """The command wrote more than OUTPUT_BUDGET bytes on a captured stream,
+    or left one open after it ended, and was stopped, as for a timeout."""
 
-    def __init__(self, over: OutputBudgetExceeded, timeout: float, stop: Stop) -> None:
+    def __init__(self, over: OutputError, timeout: float, stop: Stop) -> None:
         super().__init__(
             timeout, stop.group, stop.error, stop.unreaped,
-            reason=f"wrote more than {over.budget} bytes on {over.stream}")
+            reason=over.reason)
 
 
 def _service_exec(project_dir: Path, project_name: str, service: str,
@@ -180,8 +180,8 @@ def _stop(exec_into: list[str], pid_name: str, cwd: Path | None = None) -> Stop:
                              keep=OUTPUT_KEEP, budget=OUTPUT_BUDGET)
     except subprocess.TimeoutExpired:
         return Stop(None, f"the stop did not finish in {_STOP_TIMEOUT}s")
-    except OutputBudgetExceeded:
-        return Stop(None, "the stop wrote more output than expected")
+    except OutputError:
+        return Stop(None, "the stop's output could not be collected")
     except OSError as e:
         return Stop(None, f"docker could not be run ({e.strerror or type(e).__name__})")
     group, *rest = result.stdout.split() or [""]
@@ -210,7 +210,7 @@ def _run(exec_into: list[str], where: str, command: str, *, timeout: float,
                            keep=OUTPUT_KEEP, budget=OUTPUT_BUDGET, **run_kwargs)
     except subprocess.TimeoutExpired as e:
         raise ServiceCommandTimeout(timeout, *_stop(exec_into, pid_name, cwd)) from e
-    except OutputBudgetExceeded as e:
+    except OutputError as e:
         raise ServiceCommandOutputLimit(e, timeout, _stop(exec_into, pid_name, cwd)) from e
     except OSError:
         raise  # nothing started
