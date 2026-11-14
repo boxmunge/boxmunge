@@ -11,7 +11,6 @@ from boxmunge import backup_dump
 from boxmunge import container_update as cu
 from boxmunge import container_update_tags
 from boxmunge.commands.container_update_cmd import _dry_run_target
-from boxmunge.docker import DockerError
 from tests.test_container_update import _NEW, _OLD
 from tests.test_container_update_abort import (
     _ALL_OLD, _docker_tag_fails_for_db, _project, _raiser, _restart,
