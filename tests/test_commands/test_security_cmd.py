@@ -9,6 +9,7 @@ import yaml
 
 from tests.test_commands.cve_helpers import render_site
 from boxmunge.commands.security_cmd import cmd_security
+from boxmunge.cve.alerting import Transitions
 from boxmunge.commands.security_suppress_targets import utc_today
 from boxmunge.manifest import CURRENT_SCHEMA_VERSION
 from tests.deploy_helpers import mark_deployed
@@ -2084,7 +2085,7 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
     captured: dict = {}
     def fake_emit(**kwargs):
         captured.update(kwargs)
-        return ()
+        return Transitions(alerts=())
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.emit_scan_alerts", fake_emit,
     )
@@ -2143,7 +2144,7 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
     captured_runs: list[dict] = []
     def fake_emit(**kwargs):
         captured_runs.append(kwargs)
-        return ()
+        return Transitions(alerts=())
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.emit_scan_alerts", fake_emit,
     )
@@ -2213,7 +2214,7 @@ def test_first_fleet_scan_quarantines_and_alerts(
     emit_called: list = []
     monkeypatch.setattr(
         "boxmunge.commands.security_scan_core.emit_scan_alerts",
-        lambda **kw: emit_called.append(kw) or (),
+        lambda **kw: emit_called.append(kw) or Transitions(alerts=()),
     )
     rc = cmd_security_scan([], paths)
     assert rc == 0
@@ -2695,7 +2696,7 @@ def test_host_suppression_applies_during_scan_disposition(
         "    added: 2026-01-01\n"
     )
 
-    scan_one_project(paths, "demo")
+    scan_one_project(paths, "demo", alerts=[])
 
     # Quarantine must NOT have fired.
     assert quarantine_calls == [], (
@@ -2778,7 +2779,7 @@ def test_kev_listed_cve_quarantines_via_scan_flow(
         lambda: date(2026, 7, 1),
     )
 
-    headline = scan_one_project(paths, "demo", kev=kev).headline
+    headline = scan_one_project(paths, "demo", kev=kev, alerts=[]).headline
 
     assert headline is not None, (
         "KEV-listed CVE should quarantine even when otherwise informational"

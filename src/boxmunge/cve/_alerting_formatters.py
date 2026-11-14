@@ -180,7 +180,8 @@ def format_fixable_alert(project: str, hits: Sequence[Hit]) -> Alert:
         "redeploy. See CVE_POLICY.md, \"Base images and the build cache\" and",
         "\"Shipping a fix the upstream image does not have yet\".",
     ])
-    return Alert(kind="fix_available", title=title, body=body, priority=0)
+    return Alert(kind="fix_available", title=title, body=body, priority=0,
+                 project=project, hits=tuple(hits))
 
 
 def format_awaiting_fix_alert(project: str, hits: Sequence[Hit]) -> Alert:
@@ -200,7 +201,8 @@ def format_awaiting_fix_alert(project: str, hits: Sequence[Hit]) -> Alert:
         "You will not be alerted again for these until that changes.",
         f"Details: boxmunge security {project}",
     ])
-    return Alert(kind="awaiting_fix", title=title, body=body, priority=0)
+    return Alert(kind="awaiting_fix", title=title, body=body, priority=0,
+                 project=project, hits=tuple(hits))
 
 
 def format_hardening_upcoming_alert(project: str, hits: Sequence[Hit]) -> Alert:
@@ -218,7 +220,8 @@ def format_hardening_upcoming_alert(project: str, hits: Sequence[Hit]) -> Alert:
         "",
         f"Details: boxmunge security {project}",
     ])
-    return Alert(kind="hardening_upcoming", title=title, body=body, priority=0)
+    return Alert(kind="hardening_upcoming", title=title, body=body, priority=0,
+                 project=project, hits=tuple(hits))
 
 
 def format_new_findings_alert(project: str, hits: Sequence[Hit]) -> Alert:
@@ -234,7 +237,8 @@ def format_new_findings_alert(project: str, hits: Sequence[Hit]) -> Alert:
         lines += _lines(hit)
         lines.append(f"    {hit.disposition.explanation}")
     lines += ["", f"All findings: boxmunge security {project}"]
-    return Alert(kind="informational", title=title, body="\n".join(lines), priority=0)
+    return Alert(kind="informational", title=title, body="\n".join(lines), priority=0,
+                 project=project, hits=tuple(hits))
 
 
 def format_suppression_expired_alert(

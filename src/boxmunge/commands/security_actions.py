@@ -17,6 +17,9 @@ from boxmunge.commands.security_fleet_enforce import apply_held, apply_new_quara
 from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project
 from boxmunge.cve.breaker import BreakerError
 from boxmunge.cve.alerting import (
+    Alert,
+    format_scan_digest,
+    is_low_urgency,
     format_host_suppression_expired_alert,
     format_scan_failure_alert,
     format_scan_unrecorded_alert,
@@ -112,6 +115,8 @@ class FleetRun:
     unrecorded: dict[str, str] = field(default_factory=dict)
     # Held by the circuit breaker: project → its held CVEs.
     held: dict[str, frozenset[str]] = field(default_factory=dict)
+    # Low-urgency alerts held back for the one digest sent at the end.
+    digest: list[Alert] = field(default_factory=list)
 
 
 # FleetRun.problems key for a damaged project registry: a fleet-level
@@ -203,9 +208,12 @@ def _scan_each(
     """
     run = FleetRun()
     scanned: dict[str, ScanResult] = {}  # Trivy results by exact image ref
+    batch = len(targets) > 1  # a lone project has no fleet to batch with
     for name in targets:
+        collected: list[Alert] = []
         try:
-            scan = scan_one_project(paths, name, kev=kev, defer_new=True, scanned=scanned)
+            scan = scan_one_project(paths, name, kev=kev, defer_new=True,
+                                    scanned=scanned, alerts=collected)
         except LockError:
             # Audit A-2: another operation holds the project lock. Skip and
             # warn; the next cron tick will re-attempt.
@@ -229,6 +237,8 @@ def _scan_each(
             )
             run.problems[name] = [str(e)]
             continue
+        finally:
+            _deliver(paths, run, collected, batch=batch)
         run.scans[name] = scan  # enforced and alerted even if unrecorded
         if scan.record_error:
             print(f"{name}: ERROR — {scan.record_error}")
@@ -249,6 +259,20 @@ def _scan_each(
             print(f"{name}: INCOMPLETE — {len(run.problems[name])} image(s) "
                   f"or service(s) not scanned")
     return run
+
+
+def _deliver(paths: BoxPaths, run: FleetRun, collected: list[Alert], *,
+             batch: bool) -> None:
+    """Urgent alerts go out now; low-urgency ones wait for the digest when
+    the run covers several projects. Delivery is best-effort."""
+    now = [a for a in collected if not (batch and is_low_urgency(a))]
+    run.digest.extend(a for a in collected if batch and is_low_urgency(a))
+    if not now:
+        return
+    try:
+        send_alerts(tuple(now), paths)
+    except Exception as e:  # noqa: BLE001 — alerting must never block scan
+        log_warning("cve-scan", f"alert delivery failed: {e}", paths)
 
 
 def _enforce_fleet(paths: BoxPaths, run: FleetRun) -> None:
@@ -285,8 +309,9 @@ def _cmd_apply_held(paths: BoxPaths) -> int:
 
 
 def _alert_fleet(paths: BoxPaths, run: FleetRun) -> None:
-    """Once-per-run alerts: scan failures (audit B-11) and expired
-    host-scope suppressions (once, not once per project — B-14)."""
+    """Once-per-run alerts: scan failures (audit B-11), expired host-scope
+    suppressions (once, not once per project — B-14) and the digest of the
+    low-urgency findings."""
     alerts = []
     if run.problems:
         alerts.append(format_scan_failure_alert(run.problems))
@@ -302,6 +327,8 @@ def _alert_fleet(paths: BoxPaths, run: FleetRun) -> None:
     host_expired = {s.cve_id: s for scan in run.scans.values() for s in scan.host_expired}
     if host_expired:
         alerts.append(format_host_suppression_expired_alert(list(host_expired.values())))
+    if run.digest:
+        alerts.append(format_scan_digest(run.digest))
     if not alerts:
         return
     try:

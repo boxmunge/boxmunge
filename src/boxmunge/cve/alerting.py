@@ -25,6 +25,11 @@ Design properties
 Module layout
 -------------
 * ``Alert`` / ``AlertKind`` / ``Hit`` live in ``_alerting_types``.
+* Fleet digest (``_alerting_digest``): the low-urgency kinds are not sent
+  per project. A fleet scan collects them and sends ONE quiet digest; urgent
+  kinds are always immediate. At relaxed and balanced the purely
+  informational new-findings alert is dropped (still in ``security status``
+  and the log): those postures only act on what needs acting on.
 * Per-project formatters live in ``_alerting_formatters``; fleet-level
   ones (KEV, scan failure, host suppression expiry) in
   ``_alerting_fleet``. Both are re-exported here.
@@ -61,8 +66,13 @@ from boxmunge.cve._alerting_formatters import (
     lift_reason,
 )
 from boxmunge.cve._alerting_types import Alert, AlertKind, Hit
-from boxmunge.cve.policy import Disposition, ProjectDecision
+from boxmunge.cve._alerting_digest import (
+    format_scan_digest,
+    is_low_urgency,
+)
+from boxmunge.cve.policy import Disposition, Posture, ProjectDecision
 from boxmunge.cve.suppressions import SCOPE_HOST, Suppression
+from boxmunge.log import log_operation
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 
@@ -91,6 +101,8 @@ __all__ = [
     "format_scan_failure_alert",
     "format_scan_unrecorded_alert",
     "detect_transitions",
+    "format_scan_digest",
+    "is_low_urgency",
     "send_alerts",
     "emit_scan_alerts",
 ]
@@ -126,6 +138,13 @@ class Transitions:
 
     alerts: tuple[Alert, ...]
     host_expired: tuple[Suppression, ...] = ()
+    # Informational alerts this posture does not send (logged by the caller).
+    dropped: tuple[Alert, ...] = ()
+
+
+# Postures at or below balanced act only on what needs acting on: a finding
+# below the gate with no change to make is not worth a push.
+_QUIET_INFORMATIONAL = frozenset({Posture.RELAXED, Posture.BALANCED})
 
 
 def findings_by_key(
@@ -165,6 +184,7 @@ def _scan_date(decisions: Sequence[ProjectDecision]) -> date | None:
 def detect_transitions(
     *,
     project_name: str,
+    posture: Posture,
     current: Sequence[ProjectDecision],
     prior: Sequence[ProjectDecision],
     suppressions: tuple[Suppression, ...],
@@ -191,6 +211,10 @@ def detect_transitions(
     nothing needs doing. Its next alert is the change — a fix landing (the
     fix_available alert, with the rebuild advice) or a KEV listing (the
     quarantine alert).
+
+    At relaxed and balanced the informational (new below-the-gate findings)
+    alert is dropped into ``Transitions.dropped``; awaiting_fix, fixable and
+    hardening_upcoming are kept, as they name a change the operator may act on.
 
     Order: kev_at_risk, kev_fix_pending, still_running, suppression_expired,
     fix_available, awaiting_fix, hardening_upcoming, informational.
@@ -241,6 +265,7 @@ def detect_transitions(
                 (host_expired if sup.scope == SCOPE_HOST else project_expired).append(sup)
 
     alerts: list[Alert] = []
+    dropped: list[Alert] = []
     if kev_at_risk:
         alerts.append(format_kev_at_risk_alert(project_name, kev_at_risk))
     if kev_fix_pending:
@@ -256,8 +281,10 @@ def detect_transitions(
     if new_upcoming:
         alerts.append(format_hardening_upcoming_alert(project_name, new_upcoming))
     if new_info:
-        alerts.append(format_new_findings_alert(project_name, new_info))
-    return Transitions(alerts=tuple(alerts), host_expired=tuple(host_expired))
+        info = format_new_findings_alert(project_name, new_info)
+        (dropped if posture in _QUIET_INFORMATIONAL else alerts).append(info)
+    return Transitions(alerts=tuple(alerts), host_expired=tuple(host_expired),
+                       dropped=tuple(dropped))
 
 
 # ---------- delivery ----------
@@ -281,21 +308,30 @@ def send_alerts(alerts: tuple[Alert, ...], paths: BoxPaths) -> int:
 def emit_scan_alerts(
     *,
     project_name: str,
+    posture: Posture,
     current: Sequence[ProjectDecision],
     prior: Sequence[ProjectDecision],
     suppressions: tuple[Suppression, ...],
     paths: BoxPaths,
-) -> tuple[Suppression, ...]:
-    """detect_transitions + send_alerts for one project.
+) -> Transitions:
+    """detect_transitions for one project, with nothing sent.
 
-    Returns the host-scope suppressions that expired, for the caller to
-    alert once per fleet run.
+    The caller owns delivery: a fleet scan sends the urgent alerts at once
+    and batches the low-urgency ones into one digest. Alerts the posture
+    drops are logged here, so the finding stays visible.
     """
     transitions = detect_transitions(
         project_name=project_name,
+        posture=posture,
         current=current,
         prior=prior,
         suppressions=suppressions,
     )
-    send_alerts(transitions.alerts, paths)
-    return transitions.host_expired
+    for alert in transitions.dropped:
+        log_operation(
+            "cve-alert",
+            f"not alerted at {posture.value} posture: {alert.title}",
+            paths, project=project_name,
+            detail={"kind": alert.kind, "findings": len(alert.hits)},
+        )
+    return transitions

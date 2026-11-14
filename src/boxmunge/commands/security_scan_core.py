@@ -36,7 +36,7 @@ from boxmunge.commands.security_enforce import (
     raise_enforcement_error,
 )
 from boxmunge.compose_images import image_phrase
-from boxmunge.cve.alerting import emit_scan_alerts
+from boxmunge.cve.alerting import Alert, emit_scan_alerts
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
     FindingDisposition,
@@ -152,8 +152,13 @@ def scan_one_project(
     kev: KevCatalog | None = None,
     defer_new: bool = False,
     scanned: dict[str, ScanResult] | None = None,
+    alerts: list[Alert] | None = None,
 ) -> ProjectScan:
     """Scan a single project, persist state, take quarantine action.
+
+    Sends no alerts: appends the transition alerts to ``alerts`` (required
+    unless ``audit_only``), before any enforcement error is raised, for the
+    caller to deliver (the fleet scan digests the low-urgency ones).
 
     ``ProjectScan.headline`` is the first (decision, finding) pair that
     requires quarantine, or None if nothing quarantines.
@@ -182,7 +187,7 @@ def scan_one_project(
     with project_lock(project, paths):
         return scan_one_project_locked(
             paths, project, audit_only=audit_only, kev=kev, defer_new=defer_new,
-            scanned=scanned,
+            scanned=scanned, alerts=alerts,
         )
 
 
@@ -337,8 +342,11 @@ def scan_one_project_locked(
     audit_only: bool = False,
     defer_new: bool = False,
     scanned: dict[str, ScanResult] | None = None,
+    alerts: list[Alert] | None = None,
 ) -> ProjectScan:
     """Inner scan body. Caller MUST hold the per-project lock."""
+    if alerts is None and not audit_only:
+        raise ValueError("scan_one_project needs an `alerts` list unless audit_only")
     meta = load_project_meta(paths, project)
     dangerously = meta.dangerously
     _check_declared_runtimes(project, meta)
@@ -420,8 +428,8 @@ def scan_one_project_locked(
     if not audit_only:
         if outcome.landed:
             announce_quarantine(paths, project, decisions)
-        host_expired = _emit_transition_alerts(
-            paths, project, decisions, prior_decisions, supps,
+        host_expired = _collect_transition_alerts(
+            paths, project, meta.posture, decisions, prior_decisions, supps, alerts,
         )
     raise_enforcement_error(outcome.error, record_error)
 
@@ -464,27 +472,28 @@ def _enforce(
     )
 
 
-def _emit_transition_alerts(
-    paths: BoxPaths, project: str,
+def _collect_transition_alerts(
+    paths: BoxPaths, project: str, posture: Posture,
     decisions: list[ProjectDecision],
     prior_decisions: tuple[ProjectDecision, ...],
     supps: tuple[Suppression, ...],
+    sink: list[Alert],
 ) -> tuple[Suppression, ...]:
-    """Best-effort transition alerts — failures never fail the scan.
-
-    Returns the expired host-scope suppressions for the fleet to alert once.
-    """
+    """Best-effort transition alerts, appended to ``sink`` for the caller to
+    deliver; failures never fail the scan. Returns the expired host-scope
+    suppressions for the fleet to alert once."""
     try:
-        return emit_scan_alerts(
+        transitions = emit_scan_alerts(
             project_name=project,
+            posture=posture,
             current=decisions,
             prior=prior_decisions,
             suppressions=supps,
             paths=paths,
         )
     except Exception as e:  # noqa: BLE001 — alerting must never block scan
-        log_warning(
-            "cve-scan", f"alert emission failed for {project}: {e}",
-            paths, project=project, detail={"error": str(e)},
-        )
+        log_warning("cve-scan", f"alert emission failed for {project}: {e}",
+                    paths, project=project, detail={"error": str(e)})
         return ()
+    sink.extend(transitions.alerts)
+    return transitions.host_expired

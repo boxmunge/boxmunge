@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from boxmunge.commands import security_scan_core
-from boxmunge.commands.security_scan_core import scan_one_project
+from tests.test_commands.cve_helpers import scan_and_send
 from boxmunge.commands.security_suppress import cmd_security_suppress
 from boxmunge.commands.security_suppress_targets import utc_today
 from boxmunge.cve import kev as kev_module
@@ -51,13 +51,13 @@ def test_kev_listing_after_suppression_reactivates_with_priority_1_alert(
     pushover = Pushover(monkeypatch, box)
     _suppress(box)
 
-    scan = scan_one_project(box, "demo", kev=_kev())
+    scan = scan_and_send(box, "demo", kev=_kev())
     assert scan.decisions[0].findings[0].disposition is Disposition.SUPPRESSED
     assert not is_quarantined("demo", box)
     assert pushover.sent == []
 
     # CISA lists the CVE after the operator reviewed it.
-    scan = scan_one_project(box, "demo", kev=_kev(_CVE))
+    scan = scan_and_send(box, "demo", kev=_kev(_CVE))
     fd = scan.decisions[0].findings[0]
     assert fd.disposition is Disposition.QUARANTINE
     assert fd.kev_listed is True
@@ -71,7 +71,7 @@ def test_kev_listing_after_suppression_reactivates_with_priority_1_alert(
 
 def test_kev_listed_flag_round_trips_through_scan_state(box, monkeypatch):
     Docker(monkeypatch)
-    scan_one_project(box, "demo", kev=_kev(_CVE))
+    scan_and_send(box, "demo", kev=_kev(_CVE))
     state = read_scan_state(box.project_scan_state("demo"))
     prior = decisions_from_scan_state(state, project_name="demo")
     assert prior[0].findings[0].kev_listed is True
@@ -153,7 +153,7 @@ def test_kev_on_opted_out_project_keeps_running_and_alerts_every_scan(
     pushover = Pushover(monkeypatch, paths)
     for _ in range(2):
         pushover.clear()
-        scan = scan_one_project(paths, "demo", kev=_kev(_CVE))
+        scan = scan_and_send(paths, "demo", kev=_kev(_CVE))
         fd = scan.decisions[0].findings[0]
         assert fd.disposition is Disposition.STILL_RUNNING_AT_RISK and fd.kev_listed
         assert not is_quarantined("demo", paths) and docker.calls == []
