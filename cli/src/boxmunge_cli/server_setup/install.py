@@ -95,5 +95,10 @@ def run_with_progress(argv: list[str]) -> int:
     if proc.returncode != 0:
         print("\nERROR: Server setup failed. Full log:\n", file=sys.stderr)
         print("\n".join(log_buffer), file=sys.stderr)
+        if any("Unknown argument: --no-version-check" in line for line in log_buffer):
+            print("\nERROR: this boxmunge release predates --no-version-check. Install a "
+                  "release that has it (--release vX.Y.Z), or install without the flag "
+                  "and set version_check.enabled: false in boxmunge.yml as root.",
+                  file=sys.stderr)
         return 1
     return 0

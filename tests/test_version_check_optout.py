@@ -110,3 +110,37 @@ class TestReports:
         run_doctor(box, as_json=True)
         names = {r["name"] for r in json.loads(capsys.readouterr().out)}
         assert "Update discovery" not in names
+
+
+class TestNobodyChose:
+    @pytest.fixture(autouse=True)
+    def _docker(self, docker_down):
+        """doctor probes the docker CLI."""
+
+    def _doctor(self, box, capsys):
+        from boxmunge.commands.doctor import run_doctor
+        code = run_doctor(box, as_json=True)
+        return code, {r["name"]: r for r in json.loads(capsys.readouterr().out)}
+
+    def test_doctor_warns_when_the_key_is_absent(self, box, capsys):
+        box.config_file.write_text(BASE)
+        _, results = self._doctor(box, capsys)
+        assert results["Version check choice"]["status"] == "WARN"
+        assert "agent-help rules" in results["Version check choice"]["detail"]
+
+    @pytest.mark.parametrize("value", ["true", "false"])
+    def test_doctor_is_quiet_once_chosen(self, box, capsys, value):
+        box.config_file.write_text(BASE + f"version_check:\n  enabled: {value}\n")
+        _, results = self._doctor(box, capsys)
+        assert "Version check choice" not in results
+
+    def test_the_note_is_a_warning_not_a_failure(self, box, capsys):
+        """A FAIL here would count against an upgrade's probation."""
+        box.config_file.write_text(BASE)
+        _, results = self._doctor(box, capsys)
+        assert results["Version check choice"]["status"] != "FAIL"
+
+    def test_an_unchosen_box_still_checks(self, box):
+        from boxmunge.version_check_optout import version_checks_off
+        box.config_file.write_text(BASE)
+        assert version_checks_off(box) is False

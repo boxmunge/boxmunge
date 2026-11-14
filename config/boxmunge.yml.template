@@ -61,6 +61,8 @@ auto_update:
 # the box then discovers no releases, so security releases are NOT
 # installed automatically, and `health` and `doctor` say so. Install a
 # release by hand with `upgrade --target X.Y.Z`. Must be true or false.
+# Install writes this key (`--no-version-check` writes false); a box
+# without it was never asked, and `doctor` warns.
 version_check:
   enabled: true
 

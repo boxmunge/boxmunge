@@ -30,6 +30,7 @@ from boxmunge_cli.server_setup.release import (
     fetch_verified_installer,
 )
 from boxmunge_cli.server_setup.remote import Target, default_known_hosts
+from boxmunge_cli.server_setup.version_check_notice import NOTICE
 from boxmunge_cli.server_setup.ssh_key import SSHKeyError, detect_ssh_key
 
 
@@ -44,6 +45,7 @@ def installer_args(setup_args: ServerSetupArgs, hostname: str, ssh_key: str) -> 
     for flag, enabled in (("--no-aide", setup_args.no_aide),
                           ("--no-crowdsec", setup_args.no_crowdsec),
                           ("--no-auto-updates", setup_args.no_auto_updates),
+                          ("--no-version-check", setup_args.no_version_check),
                           ("--self-signed-tls", setup_args.self_signed_tls)):
         if enabled:
             args.append(flag)
@@ -99,6 +101,9 @@ def run_server_setup(setup_args: ServerSetupArgs, known_hosts: Path | None = Non
         return 1
     print(f"Key to authorise for the deploy and supervisor users: {public_key.describe()}")
 
+    print(f"\n{NOTICE}")
+    print("Version check: " + ("OFF (--no-version-check)" if setup_args.no_version_check
+                               else "on (pass --no-version-check to turn it off)") + "\n")
     if not setup_args.yes:
         print(f"This will turn [{setup_args.host}] into a boxmunge server.")
         if not _confirm("Are you sure? [y/N] "):
