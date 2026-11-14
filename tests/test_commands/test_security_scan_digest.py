@@ -88,3 +88,18 @@ def test_no_digest_when_balanced_drops_the_only_content(fleet):
     paths, pushover = fleet("balanced", [finding("CVE-2026-0001", sev=Severity.LOW)])
     cmd_security_scan([], paths)
     assert not [t for t in pushover.titles() if "Nightly CVE scan" in t]
+
+
+def test_digest_still_sent_when_the_scan_loop_dies_midway(fleet, monkeypatch):
+    from boxmunge.cve.scanner import TrivyNotInstalledError
+    paths, pushover = fleet("strict", [finding("CVE-2026-0001", sev=Severity.LOW)])
+    real = security_scan_core.scan_image
+
+    def scan(ref, timeout):
+        if ref.startswith("bbb"):
+            raise TrivyNotInstalledError("trivy gone")
+        return real(ref, timeout)
+    monkeypatch.setattr(security_scan_core, "scan_image", scan)
+    assert cmd_security_scan([], paths) == 1
+    [(title, body, priority)] = pushover.sent
+    assert priority == -1 and "aaa: 1 new" in body and "bbb" not in body

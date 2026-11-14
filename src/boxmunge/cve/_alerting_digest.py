@@ -46,7 +46,7 @@ def format_scan_digest(alerts: Sequence[Alert]) -> Alert:
     title = f"Nightly CVE scan: new findings in {n} project{'s' if n != 1 else ''}"
     body = "\n".join([
         *lines, "",
-        "Nothing is quarantined and nothing needs doing now.",
+        "None of these quarantines a site, and none needs doing now.",
         "Details: boxmunge security status",
     ])
     return Alert(kind="scan_digest", title=title, body=body,

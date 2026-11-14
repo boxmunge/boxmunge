@@ -200,13 +200,12 @@ def _orphaned(missing: list[str]) -> dict[str, list[str]]:
 
 
 def _scan_each(
-    paths: BoxPaths, targets: list[str], *, kev: KevCatalog,
-) -> FleetRun:
+    paths: BoxPaths, targets: list[str], *, kev: KevCatalog, run: FleetRun,
+) -> None:
     """Scan every target; one project's failure never stops the others.
 
     Raises TrivyNotInstalledError — no project can be scanned without it.
     """
-    run = FleetRun()
     scanned: dict[str, ScanResult] = {}  # Trivy results by exact image ref
     batch = len(targets) > 1  # a lone project has no fleet to batch with
     for name in targets:
@@ -258,7 +257,6 @@ def _scan_each(
             run.problems[name] = scan.incomplete_reasons()
             print(f"{name}: INCOMPLETE — {len(run.problems[name])} image(s) "
                   f"or service(s) not scanned")
-    return run
 
 
 def _deliver(paths: BoxPaths, run: FleetRun, collected: list[Alert], *,
@@ -273,6 +271,20 @@ def _deliver(paths: BoxPaths, run: FleetRun, collected: list[Alert], *,
         send_alerts(tuple(now), paths)
     except Exception as e:  # noqa: BLE001 — alerting must never block scan
         log_warning("cve-scan", f"alert delivery failed: {e}", paths)
+
+
+def _send_digest(paths: BoxPaths, run: FleetRun) -> None:
+    """Send the collected low-urgency alerts as one digest. Runs even when
+    the scan loop dies midway: those projects' state is already recorded, so
+    their findings would never be alerted again."""
+    if not run.digest:
+        return
+    digest = format_scan_digest(run.digest)
+    run.digest.clear()
+    try:
+        send_alerts((digest,), paths)
+    except Exception as e:  # noqa: BLE001 — alerting must never block scan
+        log_warning("cve-scan", f"scan digest delivery failed: {e}", paths)
 
 
 def _enforce_fleet(paths: BoxPaths, run: FleetRun) -> None:
@@ -310,8 +322,7 @@ def _cmd_apply_held(paths: BoxPaths) -> int:
 
 def _alert_fleet(paths: BoxPaths, run: FleetRun) -> None:
     """Once-per-run alerts: scan failures (audit B-11), expired host-scope
-    suppressions (once, not once per project — B-14) and the digest of the
-    low-urgency findings."""
+    suppressions (once, not once per project — B-14)."""
     alerts = []
     if run.problems:
         alerts.append(format_scan_failure_alert(run.problems))
@@ -327,8 +338,6 @@ def _alert_fleet(paths: BoxPaths, run: FleetRun) -> None:
     host_expired = {s.cve_id: s for scan in run.scans.values() for s in scan.host_expired}
     if host_expired:
         alerts.append(format_host_suppression_expired_alert(list(host_expired.values())))
-    if run.digest:
-        alerts.append(format_scan_digest(run.digest))
     if not alerts:
         return
     try:
@@ -399,11 +408,14 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
     _retire_grace_marker(paths)
 
     start = time.monotonic()
+    run = FleetRun()
     try:
-        run = _scan_each(paths, targets, kev=kev)
+        _scan_each(paths, targets, kev=kev, run=run)
     except TrivyNotInstalledError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
+    finally:
+        _send_digest(paths, run)
     _report_registry_problems(paths, run, registry_problems)
     for name, reasons in orphans.items():
         print(f"{name}: ERROR — {reasons[0]}")
