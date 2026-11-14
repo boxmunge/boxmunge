@@ -1122,7 +1122,8 @@ several findings are involved the title names the worst and adds
 | `[boxmunge:<project>] <N> CVE findings with no fix yet — site stays up, nothing to do now` (`balanced`, `AWAITING_FIX`, once per finding) | normal |
 | `[boxmunge:<project>] Quarantine lifted — back online (<CVE>)` (a scan cleared it; `still down` for a paused or monitor-stopped project, or `smoke test FAILED` at priority-1) | normal |
 | `[boxmunge:<project>] <N> CVE findings will quarantine from 0.12 (warning only)` (once per finding) | normal |
-| `[boxmunge:<project>] <N> new CVE findings (informational)` (digest, top 5 listed) | normal |
+| `[boxmunge:<project>] <N> new CVE findings (informational)` (digest, top 5 listed; `strict` and `paranoid` only — `relaxed` and `balanced` log it instead) | normal |
+| `[<hostname>] Nightly CVE scan: new findings in <N> projects` (one line per project; replaces the per-project "new findings", "no fix yet", "fixable" and "will quarantine from 0.12" pushes of a multi-project scan, which a single-project `security scan <p>` still sends at once) | quiet (no sound) |
 | `[boxmunge:<project>] Suppression expired — <CVE>` | priority-1 |
 | `[<hostname>] Host suppression expired — <CVE>` (once per fleet scan) | priority-1 |
 | `[<hostname>] CVE policy enforcement begins in <N>h` (one-time) | priority-1 |

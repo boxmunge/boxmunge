@@ -9,7 +9,7 @@ import yaml
 
 from boxmunge.commands import security_actions, security_scan_core
 from boxmunge.commands.security_actions import cmd_security_scan
-from boxmunge.commands.security_scan_core import scan_one_project
+from tests.test_commands.cve_helpers import scan_and_send
 from boxmunge.cve.policy import ProjectDecision
 from boxmunge.cve.scan_state import write_scan_state
 from boxmunge.cve.scanner import Severity
@@ -54,12 +54,12 @@ def test_mixed_dispositions_alert_once_across_daily_scans(tmp_path, monkeypatch,
     pushover = Pushover(monkeypatch, paths)
     _scan_returns(monkeypatch, [finding("CVE-2026-57433", pkg="libperl5.36"),
                                 finding("CVE-2026-57433", pkg="perl-base")])
-    scan_one_project(paths, "demo")
+    scan_and_send(paths, "demo")
     day1 = [p for _, _, p in pushover.sent]
     assert day1.count(1) == 1
     for _ in range(2):
         pushover.clear()
-        scan_one_project(paths, "demo")
+        scan_and_send(paths, "demo")
         assert pushover.sent == []
 
 
@@ -69,11 +69,11 @@ def test_digest_change_does_not_re_alert(tmp_path, monkeypatch, stubs):
     pushover = Pushover(monkeypatch, paths)
     _scan_returns(monkeypatch, [finding(f"CVE-2026-1{i:04d}", sev=Severity.LOW)
                                 for i in range(40)])
-    scan_one_project(paths, "demo")
+    scan_and_send(paths, "demo")
     assert len(pushover.sent) == 1  # one digest on the first scan
     pushover.clear()
     stubs("b")
-    scan_one_project(paths, "demo")
+    scan_and_send(paths, "demo")
     assert pushover.sent == []
 
 
@@ -104,10 +104,10 @@ def test_quarantined_project_rescan_is_silent(tmp_path, monkeypatch, stubs):
     paths = make_box(tmp_path)
     pushover = Pushover(monkeypatch, paths)
     _scan_returns(monkeypatch, [finding()])
-    scan_one_project(paths, "demo")
+    scan_and_send(paths, "demo")
     assert [p for _, _, p in pushover.sent] == [1]
     pushover.clear()
     seed_quarantine(paths)
-    scan_one_project(paths, "demo")
+    scan_and_send(paths, "demo")
     assert pushover.sent == []
 

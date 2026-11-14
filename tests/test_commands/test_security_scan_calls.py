@@ -82,7 +82,7 @@ def test_a_failed_trivy_run_is_retried_by_the_next_project(fleet, monkeypatch) -
 def test_a_shared_result_is_used_even_after_the_budget_is_spent(fleet, monkeypatch) -> None:
     paths, trivy = fleet
     monkeypatch.setattr(security_scan_core, "_PROJECT_BUDGET_SECONDS", 0)
-    scan = scan_one_project(paths, "aaa", scanned={_SHARED: scan_result(_SHARED)})
+    scan = scan_one_project(paths, "aaa", scanned={_SHARED: scan_result(_SHARED)}, alerts=[])
     assert trivy == []
     assert scan.skipped_images == ("aaa-web:1",)
     assert [d.image_ref for d in scan.decisions] == [_SHARED]
@@ -96,11 +96,11 @@ def test_an_image_one_project_skipped_for_budget_is_scanned_by_the_next(
     paths, trivy = fleet
     scanned: dict = {}
     monkeypatch.setattr(security_scan_core, "_PROJECT_BUDGET_SECONDS", 0)
-    first = scan_one_project(paths, "aaa", scanned=scanned)
+    first = scan_one_project(paths, "aaa", scanned=scanned, alerts=[])
     assert sorted(first.skipped_images) == sorted(["aaa-web:1", _SHARED])
     assert scanned == {} and trivy == []
     monkeypatch.setattr(security_scan_core, "_PROJECT_BUDGET_SECONDS", 600)
-    second = scan_one_project(paths, "bbb", scanned=scanned)
+    second = scan_one_project(paths, "bbb", scanned=scanned, alerts=[])
     assert second.complete and sorted(trivy) == sorted(["bbb-web:1", _SHARED])
 
 
@@ -112,7 +112,7 @@ def test_a_project_scan_resolves_compose_twice_and_lists_containers_once(
     paths, _ = fleet
     compose = _counting(monkeypatch, docker, "compose_config")
     containers = _counting(monkeypatch, docker_containers, "project_containers")
-    scan_one_project(paths, "aaa")
+    scan_one_project(paths, "aaa", alerts=[])
     assert len(compose) == 2
     assert [kw.get("all_profiles", False) for _, kw in compose] == [False, True]
     assert len(containers) == 1
@@ -129,7 +129,7 @@ def test_a_profiled_service_has_compose_say_which_services_are_active(
     model["services"]["worker"] = {"image": "aaa-worker:1", "profiles": ["jobs"]}
     compose_file.write_text(yaml.safe_dump(model))
     compose = _counting(monkeypatch, docker, "compose_config")
-    scan = scan_one_project(paths, "aaa")
+    scan = scan_one_project(paths, "aaa", alerts=[])
     assert [kw.get("all_profiles", False) for _, kw in compose] == [False, True, False]
     assert "worker" in "".join(scan.warnings)  # not started: nothing to scan
 
@@ -146,7 +146,7 @@ def test_kev_freshness_is_judged_once_per_scan_not_per_finding(
         judged.clear()
         monkeypatch.setattr(security_scan_core, "scan_image",
                             lambda ref, timeout: scan_result(ref, findings))
-        scan_one_project(paths, "demo", kev=kev, defer_new=True)
+        scan_one_project(paths, "demo", kev=kev, defer_new=True, alerts=[])
         return len(judged)
 
     many = [finding(f"CVE-2026-{n:04d}") for n in range(1, 9)]

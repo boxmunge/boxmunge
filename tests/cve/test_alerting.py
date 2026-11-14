@@ -22,6 +22,7 @@ from boxmunge.cve.alerting import (
 from boxmunge.cve.policy import (
     Disposition,
     FindingDisposition,
+    Posture,
     ProjectDecision,
 )
 from boxmunge.cve.scanner import Finding, Severity
@@ -113,11 +114,12 @@ _DAY1 = datetime(2026, 5, 5, tzinfo=timezone.utc)
 _DAY2 = datetime(2026, 5, 6, tzinfo=timezone.utc)
 
 
-def _alerts(current, prior=(), suppressions=()) -> tuple[Alert, ...]:
+def _alerts(current, prior=(), suppressions=(),
+            posture: Posture = Posture.STRICT) -> tuple[Alert, ...]:
     current = current if isinstance(current, tuple) else (current,)
     prior = prior if isinstance(prior, tuple) else (prior,)
     return detect_transitions(
-        project_name="demo", current=current, prior=prior,
+        project_name="demo", posture=posture, current=current, prior=prior,
         suppressions=suppressions,
     ).alerts
 
@@ -358,7 +360,8 @@ def test_host_suppression_expiry_is_returned_not_alerted() -> None:
     sup = _suppression("CVE-2026-5555", scope=SCOPE_HOST)
     prior = _decision(when=datetime(2026, 7, 31, tzinfo=timezone.utc))
     current = _decision(when=datetime(2026, 8, 2, tzinfo=timezone.utc))
-    result = detect_transitions(project_name="demo", current=(current,),
+    result = detect_transitions(project_name="demo", posture=Posture.STRICT,
+                                current=(current,),
                                 prior=(prior,), suppressions=(sup,))
     assert result.alerts == ()
     assert result.host_expired == (sup,)
@@ -479,14 +482,15 @@ def test_emit_scan_alerts_integration(monkeypatch, tmp_path) -> None:
                effective=Severity.CRITICAL,
                disposition=Disposition.STILL_RUNNING_AT_RISK)
     current = _decision(fd, when=datetime(2026, 5, 6, tzinfo=timezone.utc))
-    host_expired = emit_scan_alerts(
-        project_name="demo",
+    result = emit_scan_alerts(
+        project_name="demo", posture=Posture.BALANCED,
         current=(current,), prior=(), suppressions=(),
         paths=paths,
     )
-    assert host_expired == ()
-    assert len(sent_titles) == 1
-    assert any("CVE-2026-9999" in t for t in sent_titles)
+    assert result.host_expired == ()
+    assert [a.kind for a in result.alerts] == ["still_running"]
+    assert "CVE-2026-9999" in result.alerts[0].title
+    assert sent_titles == []  # collected, not sent: the caller delivers
 
 
 # ---------- decisions_from_scan_state (round-trip) ----------

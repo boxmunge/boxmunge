@@ -31,7 +31,15 @@ AlertKind = Literal[
     "hardening_upcoming",
     "awaiting_fix",
     "quarantine_lifted",
+    "scan_digest",
 ]
+
+
+class Hit(NamedTuple):
+    """One finding's disposition and the image it was found in."""
+
+    disposition: FindingDisposition
+    image_ref: str
 
 
 @dataclass(frozen=True)
@@ -41,11 +49,8 @@ class Alert:
     kind: AlertKind
     title: str
     body: str
-    priority: int  # 0 = normal, 1 = high (bypasses quiet hours)
-
-
-class Hit(NamedTuple):
-    """One finding's disposition and the image it was found in."""
-
-    disposition: FindingDisposition
-    image_ref: str
+    priority: int  # -1 = quiet (no sound), 0 = normal, 1 = high (bypasses quiet hours)
+    # Set on the low-urgency per-project kinds, so the fleet digest can
+    # summarise them: the project and the findings the alert lists.
+    project: str = ""
+    hits: tuple[Hit, ...] = ()
