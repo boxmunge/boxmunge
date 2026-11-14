@@ -12,14 +12,17 @@ From where each project's backups stand (backup_standing):
   priority 1; and the all-projects sync failed, priority 0.
 
 Each goes out once per continuing condition. `alerted` in the record holds
-when the condition began: it is claimed before the alert is sent and
-withdrawn if the alert was not delivered, so an undelivered one is tried
-again on the next run. backup-all and backup-sync deliver when they
+when the condition began, and is written only once a notifier accepted
+the alert. Before sending, the condition is recorded as `pending`; a
+pending attempt older than PENDING_LEASE (backup_evidence) was abandoned
+(interrupted) and is sent again; a refused one is cleared and retried next
+run. So an alert whose delivery cannot be recorded repeats at most once per lease. A duplicate
+after an uncertain send is preferred to a lost alert. backup-all and backup-sync deliver when they
 finish; check-all (the health timer) every five minutes, which is what
 sends a 50-hour alert on time and retries.
 
-When the claim cannot be written the same alert would go out on every run.
-check-all's five-minute tick therefore sends nothing it cannot claim: it
+When the pending record cannot be written the same alert would go out on every run.
+check-all's five-minute tick therefore sends nothing it cannot record: it
 logs why, and backup-freshness reports the unwritable state. A nightly run
 sends it unclaimed (once a night at most) and reports the unwritten state
 with its other unwritten changes (backup_evidence.reporting_unwritten).
@@ -34,8 +37,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from boxmunge.backup_evidence import (
-    ALERTS_LOCK, Evidence, Send, claim, deployed_projects, report_unwritten,
-    start_unbacked_clock, sync_evidence, withdraw,
+    ALERTS_LOCK, Evidence, Send, clear_pending, deployed_projects, mark_delivered, mark_pending, pending_live, report_unwritten,
+    start_unbacked_clock, sync_evidence,
 )
 from boxmunge.backup_standing import (
     ALERT_AFTER, Standing, awaiting_copy_since, newest_snapshot, remote_configured,
@@ -110,15 +113,16 @@ def _send(paths: BoxPaths, send: Send, project: str | None, alert: Alert) -> boo
                 priority=alert.priority)
 
 
-def _send_due(paths: BoxPaths, send: Send, project: str | None, alerted: dict[str, str],
-              alerts: list[Alert], held: list[str] | None) -> None:
+def _send_due(paths: BoxPaths, send: Send, project: str | None, record: Evidence,
+              alerts: list[Alert], held: list[str] | None, now: datetime) -> None:
     """`held` is None for a scheduled run, which sends an alert it cannot
     claim; for the tick it gathers the ones it did not send for that."""
     for alert in alerts:
-        if alerted.get(alert.kind) == alert.ref:
+        if record.alerted.get(alert.kind) == alert.ref or pending_live(
+                record, alert.kind, alert.ref, now):
             continue
         try:
-            claim(paths, project, alert.kind, alert.ref)
+            mark_pending(paths, project, alert.kind, alert.ref, now)
         except OSError as e:
             _unwritten(paths, project, f"that the alert '{alert.title}' was sent", e, held)
             if held is None:
@@ -126,10 +130,16 @@ def _send_due(paths: BoxPaths, send: Send, project: str | None, alerted: dict[st
             continue
         if not _send(paths, send, project, alert):
             try:
-                withdraw(paths, project, alert.kind, alert.ref)
-            except OSError as e:
-                _unwritten(paths, project,
-                           f"that the alert '{alert.title}' was not delivered", e, held)
+                clear_pending(paths, project, alert.kind, alert.ref)
+            except OSError as e:   # then it waits out the lease
+                _unwritten(paths, project, f"that the alert '{alert.title}' was refused", e, held)
+            continue
+        try:
+            mark_delivered(paths, project, alert.kind, alert.ref)
+        except OSError as e:
+            _unwritten(paths, project,
+                       f"that the alert '{alert.title}' was delivered (it will be sent "
+                       f"again)", e, held)
 
 
 def _start_clock(paths: BoxPaths, s: Standing, now: datetime, held: list[str] | None) -> Standing:
@@ -160,7 +170,7 @@ def _expected_sync(paths: BoxPaths) -> Evidence | None:
 def _deliver(paths: BoxPaths, send: Send, now: datetime, held: list[str] | None) -> None:
     with ExitStack() as locked:
         try:
-            # Held across the sends: a second run waits, then finds them claimed.
+            # Held across the sends: a second run waits, then finds them delivered.
             locked.enter_context(exclusive_lock(paths.backup_state / ALERTS_LOCK))
         except OSError as e:
             if held is not None:
@@ -176,10 +186,10 @@ def _deliver(paths: BoxPaths, send: Send, now: datetime, held: list[str] | None)
                           paths, project=project)
                 continue
             s = _start_clock(paths, s, now, held)
-            _send_due(paths, send, project, s.record.alerted,
-                      _project_alerts(s, sync, now), held)
+            _send_due(paths, send, project, s.record,
+                      _project_alerts(s, sync, now), held, now)
         if sync is not None:
-            _send_due(paths, send, None, sync.alerted, _sync_alerts(sync), held)
+            _send_due(paths, send, None, sync, _sync_alerts(sync), held, now)
 
 
 def deliver(paths: BoxPaths, send: Send, *, now: datetime | None = None) -> None:
@@ -193,7 +203,7 @@ def deliver(paths: BoxPaths, send: Send, *, now: datetime | None = None) -> None
 
 def alert_backups(paths: BoxPaths, *, now: datetime | None = None) -> None:
     """For check-all (root's health timer): send every backup alert that is
-    due, was not delivered yet, and can be claimed."""
+    due, was not delivered yet, and whose pending record can be written."""
     held: list[str] = []
     try:
         _deliver(paths, notify, now or datetime.now(timezone.utc), held)

@@ -13,6 +13,8 @@ from boxmunge.cve.quarantine import (
 )
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.paths import BoxPaths
+from boxmunge.manifest import ManifestError
+from boxmunge.project_inventory import Inventory, classify, damaged_detail, project_dir_names
 from boxmunge.pause import awaiting_deploy, is_paused, pause_incomplete
 from boxmunge.state import StateError, read_state
 
@@ -75,18 +77,17 @@ def collect_status(paths: BoxPaths) -> StatusSnapshot:
     if not projects_dir.exists():
         return StatusSnapshot(projects_dir_exists=False)
 
-    deployed = sorted(
-        p.name for p in projects_dir.iterdir()
-        if p.is_dir() and (p / "manifest.yml").exists()
-    )
+    deployed = project_dir_names(paths)
     pre_registered = sorted(
         p.name for p in projects_dir.iterdir()
-        if p.is_dir() and not (p / "manifest.yml").exists()
+        if p.is_dir() and p.name not in deployed
     )
 
     snapshot = StatusSnapshot(projects_dir_exists=True)
     for name in deployed:
         try:
+            if classify(name, paths) is Inventory.DAMAGED:
+                raise ManifestError(damaged_detail(name))
             snapshot.rows.append(_project_row(name, paths))
         except PROJECT_INPUT_ERRORS as e:
             snapshot.failures.append((name, e))

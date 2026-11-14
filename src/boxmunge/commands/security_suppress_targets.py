@@ -15,6 +15,8 @@ from boxmunge.cve.kev import load_kev
 from boxmunge.cve.policy import Disposition
 from boxmunge.cve.scan_state import read_scan_state, stored_enum
 from boxmunge.cve.scanner import Severity
+from boxmunge.project_inventory import Inventory, classify, damaged_detail
+from boxmunge.manifest import ManifestError
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
 from boxmunge.log import log_error
 from boxmunge.paths import BoxPaths
@@ -94,9 +96,11 @@ def all_currently_quarantining_cves(paths: BoxPaths) -> tuple[list[str], list[st
     seen: dict[str, dict[str, Any]] = {}
     left_out: list[str] = []
     for proj_dir in sorted(paths.projects.iterdir()):
-        if not proj_dir.is_dir() or not (proj_dir / "manifest.yml").exists():
+        if not proj_dir.is_dir() or classify(proj_dir.name, paths) is Inventory.AWAITING:
             continue
         try:
+            if classify(proj_dir.name, paths) is Inventory.DAMAGED:
+                raise ManifestError(f"{proj_dir.name}: {damaged_detail(proj_dir.name)}")
             findings = current_quarantine_cves(paths, proj_dir.name)
         except PROJECT_INPUT_ERRORS as e:
             report_project_failure("cve-suppress", proj_dir.name, e, paths)

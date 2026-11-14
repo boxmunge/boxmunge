@@ -26,6 +26,7 @@ from boxmunge.manifest import ManifestError
 from boxmunge.manifest_fields import retention_problem
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
+from boxmunge.project_inventory import project_dir_names
 from boxmunge.probation import clear_probation_if_active
 from boxmunge.release import ReleaseStateError
 from boxmunge.snapshot_pairings import prune_unpaired
@@ -367,10 +368,7 @@ def _backup_all(paths: BoxPaths) -> int:
         print("No projects directory.")
         return 0
 
-    projects = sorted(
-        p.name for p in projects_dir.iterdir()
-        if p.is_dir() and (p / "manifest.yml").exists()
-    )
+    projects = project_dir_names(paths)
 
     if not projects:
         print("No projects to backup.")
