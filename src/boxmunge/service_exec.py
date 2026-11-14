@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from boxmunge.bounded_run import OutputBudgetExceeded, OutputError, run_bounded
+from boxmunge.bounded_run import OutputError, run_bounded
 from boxmunge.docker_run import docker_env
 
 _LOGGER = logging.getLogger("boxmunge")
