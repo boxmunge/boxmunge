@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """The nightly fleet scan's low-urgency digest.
 
-Nothing in these alert kinds needs doing tonight (new informational
-findings, a finding awaiting its fix, a fix to apply, a hardening
-warning), so a fleet scan sends them as ONE quiet message, one line per
+These alert kinds are not urgent (new informational findings, a finding
+awaiting its fix, a fix to apply, a hardening warning). Some may be worth
+acting on, but none quarantines a site tonight, so a fleet scan sends them as ONE quiet message, one line per
 project, instead of one push per project. Everything else stays immediate.
 """
 
@@ -46,7 +46,7 @@ def format_scan_digest(alerts: Sequence[Alert]) -> Alert:
     title = f"Nightly CVE scan: new findings in {n} project{'s' if n != 1 else ''}"
     body = "\n".join([
         *lines, "",
-        "None of these quarantines a site, and none needs doing now.",
+        "None of these quarantines a site.",
         "Details: boxmunge security status",
     ])
     return Alert(kind="scan_digest", title=title, body=body,
