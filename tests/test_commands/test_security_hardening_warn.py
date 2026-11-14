@@ -23,7 +23,7 @@ import yaml
 
 from boxmunge.commands import quarantine_gate as gate
 from boxmunge.commands import security_scan_core
-from boxmunge.commands.security_scan_core import scan_one_project
+from tests.test_commands.cve_helpers import scan_and_send
 from boxmunge.commands.security_views import _format_findings_block
 from boxmunge.cve import hardening
 from boxmunge.cve.kev import KevCatalog
@@ -56,7 +56,7 @@ def _scan_box(tmp_path, monkeypatch, db: dict, posture: str = "strict", found=LO
 
 
 def _scan(paths):
-    return scan_one_project(paths, "demo", kev=_kev())
+    return scan_and_send(paths, "demo", kev=_kev())
 
 
 def test_a_compose_only_writable_db_warns_and_does_not_quarantine(tmp_path, monkeypatch) -> None:

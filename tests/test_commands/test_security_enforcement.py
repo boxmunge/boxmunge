@@ -48,11 +48,11 @@ def test_failed_quarantine_step_is_retried_until_complete(
     docker.fail[failing] = 1
 
     with pytest.raises(RuntimeError, match="quarantine action failed"):
-        scan_one_project(paths, "demo")
+        scan_one_project(paths, "demo", alerts=[])
     assert q.is_quarantined("demo", paths)
     assert not q.quarantine_action_complete("demo", paths)
 
-    scan_one_project(paths, "demo")
+    scan_one_project(paths, "demo", alerts=[])
     assert docker.calls.count("compose_stop") == (2 if failing == "compose_stop" else 1)
     assert q.quarantine_action_complete("demo", paths)
 
@@ -69,7 +69,7 @@ def test_quarantine_is_reasserted_even_when_findings_are_gone(
     paths = make_box(tmp_path)
     seed_quarantine(paths, action_complete=False)
     _scan_returns(monkeypatch, [])
-    scan_one_project(paths, "demo", kev=KevCatalog(frozenset(), None, None, None))
+    scan_one_project(paths, "demo", kev=KevCatalog(frozenset(), None, None, None), alerts=[])
     assert docker.calls == ["caddy_reload", "compose_stop"]
     assert q.quarantine_action_complete("demo", paths)
 
@@ -85,7 +85,7 @@ def test_quarantine_is_reasserted_when_every_image_fails(
 
     monkeypatch.setattr(security_scan_core, "scan_image", boom)
     with pytest.raises(RuntimeError, match="All images failed"):
-        scan_one_project(paths, "demo")
+        scan_one_project(paths, "demo", alerts=[])
     assert docker.calls == ["caddy_reload", "compose_stop"]
     assert q.quarantine_action_complete("demo", paths)
 
@@ -95,7 +95,7 @@ def test_complete_quarantine_is_reasserted_to_undo_drift(tmp_path, monkeypatch, 
     paths = make_box(tmp_path)
     seed_quarantine(paths)
     _scan_returns(monkeypatch, [CRIT])
-    scan_one_project(paths, "demo")
+    scan_one_project(paths, "demo", alerts=[])
     assert docker.calls == ["caddy_reload", "compose_stop"]
 
 
@@ -122,8 +122,8 @@ def test_deferred_scan_reasserts_existing_quarantine_but_fires_no_new_one(
     paths = make_box(tmp_path, projects=("aaa", "bbb"))
     seed_quarantine(paths, "aaa", action_complete=False)
     _scan_returns(monkeypatch, [CRIT])
-    scan_one_project(paths, "aaa", defer_new=True)
-    scan_one_project(paths, "bbb", defer_new=True)
+    scan_one_project(paths, "aaa", defer_new=True, alerts=[])
+    scan_one_project(paths, "bbb", defer_new=True, alerts=[])
     assert q.quarantine_action_complete("aaa", paths)
     assert not q.is_quarantined("bbb", paths)
 
@@ -141,10 +141,10 @@ def test_first_enforcing_scan_after_a_deferred_one_alerts(tmp_path, monkeypatch,
     paths = make_box(tmp_path)
     pushover = Pushover(monkeypatch, paths)
     _scan_returns(monkeypatch, [CRIT])
-    scan_one_project(paths, "demo", defer_new=True)
+    scan_one_project(paths, "demo", defer_new=True, alerts=[])
     assert _quarantined_alerts(pushover) == [] and not q.is_quarantined("demo", paths)
 
-    scan_one_project(paths, "demo")
+    scan_one_project(paths, "demo", alerts=[])
     assert q.is_quarantined("demo", paths)
     [(title, body, priority)] = _quarantined_alerts(pushover)
     assert priority == 1
@@ -158,12 +158,12 @@ def test_completing_a_partial_quarantine_alerts_once(tmp_path, monkeypatch, dock
     _scan_returns(monkeypatch, [CRIT])
     docker.fail["compose_stop"] = 1
     with pytest.raises(RuntimeError):
-        scan_one_project(paths, "demo")
+        scan_one_project(paths, "demo", alerts=[])
     assert _quarantined_alerts(pushover) == []
 
-    scan_one_project(paths, "demo")
+    scan_one_project(paths, "demo", alerts=[])
     assert len(_quarantined_alerts(pushover)) == 1
     pushover.clear()
-    scan_one_project(paths, "demo")
+    scan_one_project(paths, "demo", alerts=[])
     assert pushover.sent == []
 

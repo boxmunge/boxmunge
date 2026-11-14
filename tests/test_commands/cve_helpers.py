@@ -200,3 +200,15 @@ def render_site(paths: BoxPaths, manifest: dict) -> str:
     content = f"{manifest['project']}.example.com {{}}\n"
     site.write_text(content)
     return content
+
+
+def scan_and_send(paths, project, **kwargs):
+    """scan_one_project, then deliver every collected alert at once: what a
+    single-project `security scan <p>` does."""
+    from boxmunge.commands.security_scan_core import scan_one_project
+    from boxmunge.cve.alerting import send_alerts
+    collected: list = []
+    try:
+        return scan_one_project(paths, project, alerts=collected, **kwargs)
+    finally:
+        send_alerts(tuple(collected), paths)
