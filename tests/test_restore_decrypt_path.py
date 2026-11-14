@@ -126,7 +126,8 @@ class TestRestore:
              patch("boxmunge.commands.restore.compose_down"), \
              patch("boxmunge.compose_guard.compose_up") as up, \
              patch("boxmunge.commands.restore.time.sleep"), \
-             patch("boxmunge.commands.restore.subprocess.run") as run:
+             patch("boxmunge.commands.restore.subprocess.run") as run, \
+             patch("boxmunge.service_exec.run_bounded", run):
             run.return_value = subprocess.CompletedProcess([], 0, stdout="running healthy", stderr="")
             assert project_dir.exists()
             yield up, run

@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from unittest.mock import patch
 
 from boxmunge import built_images, compose_inventory, docker, docker_containers, docker_run
-from boxmunge import restart_hold
+from boxmunge import restart_hold, service_exec
 from boxmunge.userns import offset
 from tests.real_docker_guard import _program
 
@@ -107,6 +107,13 @@ def docker_calls(answer=None):
             return real_run(cmd, *a, **k)
         return run(cmd, **k)
 
+    real_bounded = service_exec.run_bounded
+
+    def spawn_bounded(cmd, **k):
+        if _program(cmd) != "docker":
+            return real_bounded(cmd, **k)
+        return run(cmd, **{n: v for n, v in k.items() if n not in ("keep", "budget")})
+
     def query(owner, name):
         real = getattr(owner, name)
 
@@ -122,6 +129,7 @@ def docker_calls(answer=None):
         for seam in (patch.object(docker, "compose_config", config),
                      patch.object(offset, "docker_info", info),
                      patch.object(subprocess, "run", spawn),
+                     patch.object(service_exec, "run_bounded", spawn_bounded),
                      *(patch.object(built_images, n, f) for n, f in _BOOKKEEPING.items()),
                      *(query(owner, n) for owner, names in _QUERIES for n in names),
                      *seams):

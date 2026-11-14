@@ -98,7 +98,7 @@ def test_a_backup_during_an_install_execs_with_the_running_releases_compose(path
     def fake_run(cmd, **kw):
         seen.append(cmd)
         raise OSError("stop here")
-    with patch("boxmunge.service_exec.subprocess.run", fake_run):
+    with patch("boxmunge.service_exec.run_bounded", fake_run):
         assert backup_locked(P, paths) == 1
     cmd = seen[0]
     pdir = paths.project_dir(P)

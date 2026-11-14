@@ -39,6 +39,7 @@ _SPAWN_MODULES = set(_SPAWNERS) | {"asyncio.subprocess"}
 # the other. "?" is a program the scan cannot read from the source.
 NOT_DOCKER = {
     ("as_deploy.py", "run_as_deploy", "?"): "the manifest's pre_deploy hook, and git in the project's repo or the slot's clone",
+    ("bounded_run.py", "run_bounded", "?"): "the caller's argv and env; service_exec passes docker_env()",
     ("commands/auto_update_cmd.py", "run_auto_update", "?"): "execs the upgrade shim, whose boxmunge-server scrubs its own docker calls",
     ("commands/doctor.py", "run_doctor", "systemctl"): "reads timer state",
     ("commands/logs.py", "_show_host_logs", "journalctl"): "reads the journal",

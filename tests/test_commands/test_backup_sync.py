@@ -37,7 +37,7 @@ class TestDumpOwnership:
                           side_effect=lambda p, _paths: chowned.append(p)), \
              patch.object(backup_dump._backup, "fchown_for_system_container",
                           side_effect=lambda fd, _paths: chowned.append("dump fd")), \
-             patch("boxmunge.service_exec.subprocess.run",
+             patch("boxmunge.service_exec.run_bounded",
                    return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
             raw = backup_dump.execute_dump(paths, "myapp", "dump", "db")
         assert chowned == [paths.project_backups("myapp"), "dump fd"]
@@ -51,7 +51,7 @@ class TestDumpOwnership:
                           side_effect=lambda p, _paths: chowned.append(p)), \
              patch.object(backup_dump._backup, "fchown_for_system_container",
                           side_effect=lambda fd, _paths: chowned.append("dump fd")), \
-             patch("boxmunge.service_exec.subprocess.run",
+             patch("boxmunge.service_exec.run_bounded",
                    return_value=subprocess.CompletedProcess([], 0, stderr=b"")):
             raw = backup_dump.execute_dump(paths, "myapp", "dump", "db")
         assert chowned == ["dump fd"]

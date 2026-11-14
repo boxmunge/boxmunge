@@ -13,7 +13,9 @@ from boxmunge.commands.smoke_result import (
 )
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
-from boxmunge.service_exec import UNREAPED, ServiceCommandTimeout, run_in_container
+from boxmunge.service_exec import (
+    UNREAPED, ServiceCommandOutputLimit, ServiceCommandTimeout, run_in_container,
+)
 
 if TYPE_CHECKING:
     from boxmunge.compose_inventory import RunningInventory
@@ -48,10 +50,11 @@ def _smoke_one(container: str, script: str, svc_name: str,
             outcome = f"and was killed there; {UNREAPED}"
         else:
             outcome = "and was stopped there"
+        what = (f"timed out ({SMOKE_TIMEOUT}s)" if not isinstance(e, ServiceCommandOutputLimit)
+                else f"was stopped for {e.reason}")
         return SmokeResult(
             status="warning",
-            message=(f"Smoke test for {svc_name} timed out ({SMOKE_TIMEOUT}s) in container "
-                     f"{container} {outcome}"),
+            message=f"Smoke test for {svc_name} {what} in container {container} {outcome}",
         )
     except OSError as e:
         return SmokeResult(status="warning", message=f"Smoke test for {svc_name}: {e}")

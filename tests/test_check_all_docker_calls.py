@@ -10,7 +10,7 @@ import subprocess
 import pytest
 import yaml
 
-from boxmunge import compose_inventory
+from boxmunge import compose_inventory, service_exec
 from boxmunge.commands.check import run_smoke_in_container
 from boxmunge.commands.check_all import run_check_all
 from boxmunge.health_checks.projects import check_project_containers
@@ -60,6 +60,7 @@ def box(paths: BoxPaths, monkeypatch) -> Docker:
     docker = Docker(list(PROJECTS))
     monkeypatch.setattr(compose_inventory, "running_inventory", REAL_INVENTORY)
     monkeypatch.setattr(subprocess, "run", docker)
+    monkeypatch.setattr(service_exec, "run_bounded", docker)
     return docker
 
 

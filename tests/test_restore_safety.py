@@ -125,6 +125,7 @@ def box(paths: BoxPaths, monkeypatch: pytest.MonkeyPatch):
     b = Box(paths)
     FakeSystemContainer(paths, handler=b.age).install(monkeypatch)
     with patch("boxmunge.commands.restore.subprocess.run", side_effect=b.docker_run), \
+         patch("boxmunge.service_exec.run_bounded", side_effect=b.docker_run), \
          patch("boxmunge.commands.restore.time.sleep"), \
          patch("boxmunge.commands.restore.clear_probation_if_active"), \
          patch("boxmunge.commands.restore.compose_down",
