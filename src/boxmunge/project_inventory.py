@@ -65,4 +65,5 @@ def project_dir_names(paths: BoxPaths) -> list[str]:
 
 def damaged_detail(name: str) -> str:
     return (f"deployed before, but its manifest.yml is missing (or links to nothing); "
-            f"redeploy it (`boxmunge prod-deploy {name}`), or restore the manifest from a backup")
+            f"upload a new bundle and run `boxmunge prod-deploy {name}`, or restore the "
+            f"manifest from a backup")
