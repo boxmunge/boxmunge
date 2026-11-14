@@ -185,11 +185,11 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `commands/logs.py` | `_show_boxmunge_logs` | `boxmunge.log` and its archives | `logs/` |
 | `commands/quarantine_gate.py` | `lift_after_deploy` | `<p>.conf`, the site a lift republishes (capped at the size of a site file) | `caddy/sites/` |
 
-Three action-API modules hold no read of their own that needs a row. `api/actions/logs.py` reads
-nothing itself: the operational log goes through `commands/log_cmd.parse_log_file` (below), the
-manifest through `load_manifest`. `api/dev/fixture_host.py` (3 reads) serves canned answers from
-`dev/` of a fixture box, which `apid` dev mode accepts only with the fixture marker, never a real
-box, and which no deploy user writes. `api/jobs.py`'s reads of `state/jobs/` are in the table.
+Of the action-API modules, `api/jobs.py` has a row above (its reads of `state/jobs/`). Two need
+none: `api/actions/logs.py` reads nothing itself (the operational log goes through
+`commands/log_cmd.parse_log_file` below, the manifest through `load_manifest`), and
+`api/dev/fixture_host.py` (3 reads) serves canned answers from `dev/` of a fixture box, which `apid`
+dev mode accepts only with the fixture marker, never a real box, and which no deploy user writes.
 
 A project's YAML files go through `project_yaml.load_project_yaml` (`read_project_bytes` for the
 bytes), as the `caddy.read_override` rules: a git project's `manifest.yml` and `compose.yml` are
