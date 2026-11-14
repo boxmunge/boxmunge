@@ -24,6 +24,7 @@ from boxmunge.pause import awaiting_deploy
 from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
+from boxmunge.project_inventory import project_dir_names
 from boxmunge.redeploy_hint import deploy_ways
 
 if TYPE_CHECKING:
@@ -64,10 +65,7 @@ def run_check_all(paths: BoxPaths, *, read_only: bool) -> int:
         print("No projects directory.")
         return worst
 
-    projects = sorted(
-        p.name for p in projects_dir.iterdir()
-        if p.is_dir() and (p / "manifest.yml").exists()
-    )
+    projects = project_dir_names(paths)
 
     if not projects:
         print("No projects to check.")

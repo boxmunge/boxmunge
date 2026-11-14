@@ -128,18 +128,19 @@ def test_the_health_tick_holds_an_alert_it_cannot_mark_as_sent(paths, project) -
     assert alerts.titles == [FAILED]
 
 
-def test_an_alert_is_marked_before_it_is_sent_and_unmarked_if_not_delivered(
+def test_an_alert_is_pending_before_it_is_sent_and_stays_so_if_not_delivered(
         paths, project) -> None:
     record_failure(paths, P, CAUSE, now=T0)
     seen = []
 
     def refused(paths_, title, body, **k) -> bool:
-        seen.append(dict(project_evidence(paths_, P).alerted))
+        seen.append(dict(project_evidence(paths_, P).pending))
         return False
 
     deliver(paths, refused, now=T0)
     assert seen == [{"failing": T0.isoformat()}]
-    assert project_evidence(paths, P).alerted == {}
+    after = project_evidence(paths, P)
+    assert after.alerted == {} and after.pending == {"failing": T0.isoformat()}
 
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can write anywhere")

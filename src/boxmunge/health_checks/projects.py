@@ -29,6 +29,7 @@ from boxmunge.lifecycle import is_blocked
 from boxmunge.manifest import ManifestError
 from boxmunge.pause import awaiting_deploy, is_paused, pause_incomplete
 from boxmunge.paths import InvalidProjectName
+from boxmunge.project_inventory import Inventory, classify, damaged_detail, project_dir_names
 from boxmunge.redeploy_hint import deploy_ways
 from boxmunge.state import StateError
 
@@ -58,8 +59,7 @@ def _fix(paths: BoxPaths, name: str, error: Exception) -> str:
 
 
 def _project_dirs(paths: BoxPaths) -> list[Path]:
-    return [d for d in sorted(paths.projects.iterdir())
-            if d.is_dir() and (d / "manifest.yml").exists()]
+    return [paths.projects / n for n in project_dir_names(paths)]
 
 
 def check_project_containers(paths: BoxPaths) -> HealthCheck:
@@ -76,6 +76,9 @@ def check_project_containers(paths: BoxPaths) -> HealthCheck:
     unchecked: list[str] = []
     expected: list[str] = []
     for name in (d.name for d in dirs):
+        if classify(name, paths) is Inventory.DAMAGED:
+            unchecked.append(f"{name}: {damaged_detail(name)}")
+            continue
         try:
             if not (is_blocked(name, paths) or is_monitor_stopped(name, paths)):
                 expected.append(name)

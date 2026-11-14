@@ -20,7 +20,10 @@ state/backup/<project>.json, for each project:
   synced_at                 when an off-site sync last copied its snapshots;
   unsynced_since            when the oldest snapshot no sync has copied was
                             published;
-  alerted                   the conditions the operator was told of
+  alerted                   the conditions whose alert a notifier accepted;
+  pending                   the conditions whose alert was being sent, and
+                            is not in `alerted` until it was accepted: one
+                            still here under the alerts lock was abandoned
                             (backup_alerts).
 state/backup-sync.json holds the all-projects sync's own synced_at,
 failing_since, failed_at, failure and alerted, and expected_since: when a
@@ -54,15 +57,17 @@ from boxmunge.fileutil import exclusive_lock
 from boxmunge.log import log_error
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths, InvalidProjectName
+from boxmunge.project_inventory import project_dir_names
 from boxmunge.state import StateError, read_state, write_state
 
 _TIMES = ("snapshot_at", "excused_at", "unbacked_since", "failing_since", "failed_at", "synced_at",
           "unsynced_since", "expected_since")
 _TEXTS = ("snapshot", "failure")
-_FIELDS = (*_TIMES, *_TEXTS, "alerted")
+_MAPS = ("alerted", "pending")   # {condition: the ref its alert was for}
+_FIELDS = (*_TIMES, *_TEXTS, *_MAPS)
 STATE_LOCK, ALERTS_LOCK = ".lock", ".alerts.lock"   # in state/backup
 # A time this far ahead of the clock was written before the clock stepped
-# back: the record stands, and an alert claimed then still counts as sent.
+# back: the record stands, and an alert delivered then still counts as sent.
 _AHEAD_LIMIT = timedelta(days=2)
 _EARLIEST = datetime(2020, 1, 1, tzinfo=timezone.utc)   # no boxmunge backup is older
 CAUSE_LIMIT = 600   # an alert carries the cause; a dump's stderr can be long
@@ -86,6 +91,7 @@ class Evidence:
     unsynced_since: datetime | None = None
     expected_since: datetime | None = None
     alerted: dict[str, str] = field(default_factory=dict)
+    pending: dict[str, str] = field(default_factory=dict)
 
 
 def _time(raw: Any, key: str, path: Path) -> datetime:
@@ -118,10 +124,10 @@ def _field(record: dict[str, Any], key: str, path: Path) -> Any:
         if not isinstance(record.get(key, ""), str):
             raise StateError(f"State file {path}: {key} is not text")
         return record.get(key)
-    alerted = record.get("alerted", {})
-    if not isinstance(alerted, dict) or not all(isinstance(v, str) for v in alerted.values()):
-        raise StateError(f"State file {path}: alerted is not a mapping of text")
-    return dict(alerted)
+    refs = record.get(key, {})
+    if not isinstance(refs, dict) or not all(isinstance(v, str) for v in refs.values()):
+        raise StateError(f"State file {path}: {key} is not a mapping of text")
+    return dict(refs)
 
 
 def _parse(record: dict[str, Any], path: Path) -> Evidence:
@@ -142,16 +148,13 @@ def sync_evidence(paths: BoxPaths) -> Evidence:
 def deployed_projects(paths: BoxPaths) -> list[str]:
     """The projects backup-all visits. One whose name is no longer valid has
     no record (backup-all reports it every night)."""
-    if not paths.projects.exists():
-        return []
     names = []
-    for entry in sorted(paths.projects.iterdir()):
-        if entry.is_dir() and (entry / "manifest.yml").exists():
-            try:
-                paths.project_backup_state(entry.name)
-            except InvalidProjectName:
-                continue
-            names.append(entry.name)
+    for name in project_dir_names(paths):
+        try:
+            paths.project_backup_state(name)
+        except InvalidProjectName:
+            continue
+        names.append(name)
     return names
 
 
@@ -353,20 +356,23 @@ def start_unbacked_clock(paths: BoxPaths, project: str, now: datetime) -> None:
     _change(paths, project, change)
 
 
-def claim(paths: BoxPaths, project: str | None, alert: str, ref: str) -> None:
-    """Record, before it is sent, that the operator is told of the `alert`
-    condition identified by `ref`. Raises OSError when that cannot be
-    written: the sender then knows it could not say so a second time."""
+def mark_pending(paths: BoxPaths, project: str | None, alert: str, ref: str) -> None:
+    """Record, before it is sent, that the `alert` condition identified by
+    `ref` is being sent. It is not yet told: only mark_delivered says so, so
+    a run interrupted mid-send is retried. Raises OSError when that cannot
+    be written: the sender then knows it could not record the delivery either."""
     def change(record: dict[str, Any]) -> None:
-        record["alerted"] = {**record.get("alerted", {}), alert: ref}
+        record["pending"] = {**record.get("pending", {}), alert: ref}
     _change(paths, project, change)
 
 
-def withdraw(paths: BoxPaths, project: str | None, alert: str, ref: str) -> None:
-    """The claimed alert was not delivered: the next run tries it again.
+def mark_delivered(paths: BoxPaths, project: str | None, alert: str, ref: str) -> None:
+    """A notifier accepted the alert: it is told, and no longer pending.
     Raises OSError."""
     def change(record: dict[str, Any]) -> None:
-        alerted = dict(record.get("alerted", {}))
-        if alerted.pop(alert, None) == ref:
-            record["alerted"] = alerted
+        record["alerted"] = {**record.get("alerted", {}), alert: ref}
+        pending = dict(record.get("pending", {}))
+        if pending.get(alert) == ref:
+            del pending[alert]
+        record["pending"] = pending
     _change(paths, project, change)

@@ -22,6 +22,7 @@ from boxmunge.commands.health_cmd import HealthCheck
 from boxmunge.cve.policy import PolicyError, parse_posture, severity_gate_quarantines
 from boxmunge.cve.scan_state import SCAN_MAX_AGE, read_scan_state, scan_problem
 from boxmunge.manifest import ManifestError, load_manifest
+from boxmunge.project_inventory import damaged_among, damaged_detail
 from boxmunge.project_registry import deployed_among, read_registry
 from boxmunge.state import StateError
 
@@ -96,6 +97,7 @@ def check_cve_scan_freshness(paths: BoxPaths, *, now: datetime | None = None) ->
         return HealthCheck(name="cve-scan", status="ok", detail="no projects deployed")
     # A bad registry line may be a project the scan cannot see.
     problems = [f"not a project name, so never scanned: {p}" for p in registry.problems]
+    problems += [f"{n}: {damaged_detail(n)}" for n in damaged_among(projects, paths)]
     problems += [p for p in (scan_problem(paths.project_scan_state(name), name, now) for name in projects) if p]
     if problems:
         return HealthCheck(

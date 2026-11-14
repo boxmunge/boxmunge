@@ -12,14 +12,16 @@ From where each project's backups stand (backup_standing):
   priority 1; and the all-projects sync failed, priority 0.
 
 Each goes out once per continuing condition. `alerted` in the record holds
-when the condition began: it is claimed before the alert is sent and
-withdrawn if the alert was not delivered, so an undelivered one is tried
-again on the next run. backup-all and backup-sync deliver when they
+when the condition began, and is written only once a notifier accepted
+the alert. Before sending, the condition is recorded as `pending`; a
+run holds the alerts lock across its sends, so a pending one it finds was
+abandoned (interrupted, or never accepted) and is sent again. A duplicate
+after an uncertain send is preferred to a lost alert. backup-all and backup-sync deliver when they
 finish; check-all (the health timer) every five minutes, which is what
 sends a 50-hour alert on time and retries.
 
-When the claim cannot be written the same alert would go out on every run.
-check-all's five-minute tick therefore sends nothing it cannot claim: it
+When the pending record cannot be written the same alert would go out on every run.
+check-all's five-minute tick therefore sends nothing it cannot record: it
 logs why, and backup-freshness reports the unwritable state. A nightly run
 sends it unclaimed (once a night at most) and reports the unwritten state
 with its other unwritten changes (backup_evidence.reporting_unwritten).
@@ -34,8 +36,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from boxmunge.backup_evidence import (
-    ALERTS_LOCK, Evidence, Send, claim, deployed_projects, report_unwritten,
-    start_unbacked_clock, sync_evidence, withdraw,
+    ALERTS_LOCK, Evidence, Send, deployed_projects, mark_delivered, mark_pending, report_unwritten,
+    start_unbacked_clock, sync_evidence,
 )
 from boxmunge.backup_standing import (
     ALERT_AFTER, Standing, awaiting_copy_since, newest_snapshot, remote_configured,
@@ -118,18 +120,20 @@ def _send_due(paths: BoxPaths, send: Send, project: str | None, alerted: dict[st
         if alerted.get(alert.kind) == alert.ref:
             continue
         try:
-            claim(paths, project, alert.kind, alert.ref)
+            mark_pending(paths, project, alert.kind, alert.ref)
         except OSError as e:
             _unwritten(paths, project, f"that the alert '{alert.title}' was sent", e, held)
             if held is None:
                 _send(paths, send, project, alert)
             continue
         if not _send(paths, send, project, alert):
-            try:
-                withdraw(paths, project, alert.kind, alert.ref)
-            except OSError as e:
-                _unwritten(paths, project,
-                           f"that the alert '{alert.title}' was not delivered", e, held)
+            continue   # stays pending, so the next run sends it again
+        try:
+            mark_delivered(paths, project, alert.kind, alert.ref)
+        except OSError as e:
+            _unwritten(paths, project,
+                       f"that the alert '{alert.title}' was delivered (it will be sent "
+                       f"again)", e, held)
 
 
 def _start_clock(paths: BoxPaths, s: Standing, now: datetime, held: list[str] | None) -> Standing:
@@ -160,7 +164,7 @@ def _expected_sync(paths: BoxPaths) -> Evidence | None:
 def _deliver(paths: BoxPaths, send: Send, now: datetime, held: list[str] | None) -> None:
     with ExitStack() as locked:
         try:
-            # Held across the sends: a second run waits, then finds them claimed.
+            # Held across the sends: a second run waits, then finds them delivered.
             locked.enter_context(exclusive_lock(paths.backup_state / ALERTS_LOCK))
         except OSError as e:
             if held is not None:
@@ -193,7 +197,7 @@ def deliver(paths: BoxPaths, send: Send, *, now: datetime | None = None) -> None
 
 def alert_backups(paths: BoxPaths, *, now: datetime | None = None) -> None:
     """For check-all (root's health timer): send every backup alert that is
-    due, was not delivered yet, and can be claimed."""
+    due, was not delivered yet, and whose pending record can be written."""
     held: list[str] = []
     try:
         _deliver(paths, notify, now or datetime.now(timezone.utc), held)

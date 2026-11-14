@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from boxmunge.fileutil import registry_lock
 from boxmunge.fs_nofollow import read_text_nofollow_or_none
 from boxmunge.paths import InvalidProjectName, validate_project_name
+from boxmunge.project_inventory import known_deployed
 from boxmunge.state import StateError
 
 if TYPE_CHECKING:
@@ -153,13 +154,14 @@ def load_registered_projects(paths: BoxPaths) -> set[str]:
 
 
 def deployed_among(names: frozenset[str] | set[str], paths: BoxPaths) -> list[str]:
-    """Those of `names` that have been deployed (have a manifest), sorted.
+    """Those of `names` that have been deployed, sorted: manifest present, or
+    gone from a project that was deployed (project_inventory: that one is
+    damaged, and the fleet check reports it).
 
     A project registered but never deployed has no images to scan or watch,
     so fleet-wide checks skip it rather than report it failing every run.
     """
-    return sorted(name for name in names
-                  if (paths.project_dir(name) / "manifest.yml").exists())
+    return known_deployed(names, paths)
 
 
 def missing_among(names: frozenset[str] | set[str], paths: BoxPaths) -> list[str]:

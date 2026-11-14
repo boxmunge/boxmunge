@@ -23,6 +23,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from boxmunge.project_inventory import Inventory, classify, damaged_detail
 from boxmunge.backup_evidence import Evidence, deployed_projects, sync_evidence, write_problem
 from boxmunge.backup_standing import (
     WARN_AFTER, Standing, awaiting_copy_since, remote_configured, stamp, standing,
@@ -99,6 +100,8 @@ def check_backup_freshness(paths: BoxPaths, *, now: datetime | None = None) -> H
     sync = _sync(paths, problems)
     fresh = 0
     for project in deployed_projects(paths):
+        if classify(project, paths) is Inventory.DAMAGED:
+            problems.append(f"{project}: {damaged_detail(project)}")
         try:
             s = standing(paths, project, now)
         except OSError as e:
