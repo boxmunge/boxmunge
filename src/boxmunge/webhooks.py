@@ -10,8 +10,11 @@ finishes delivering before it exits.
 """
 from __future__ import annotations
 
+import http.client
 import json
+import re
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -49,10 +52,38 @@ def _matching_urls(event: str, config: dict[str, Any]) -> list[str]:
     ]
 
 
+_LABEL_HOST = re.compile(r"[A-Za-z0-9.:-]+")
+_MALFORMED = ("its url setting is malformed; correct 'url' of the entry in "
+              "'webhooks' in the host config")
+
+
 def _url_host(url: str) -> str:
-    """Scheme and host only: webhook URL paths often carry secret tokens."""
-    parts = urllib.parse.urlsplit(url)
-    return f"{parts.scheme}://{parts.hostname}" if parts.hostname else "<invalid url>"
+    """Scheme and host only: webhook URL paths, queries and userinfo often
+    carry secret tokens. Parsing a malformed URL can raise, and a host that
+    is not plain host syntax is not echoed, so this never fails and never
+    returns more than a hostname."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return "<invalid url>"
+    if parts.scheme not in ("http", "https") or not host or not _LABEL_HOST.fullmatch(host):
+        return "<invalid url>"
+    return f"{parts.scheme}://{host}"
+
+
+def _describe(url: str, e: Exception) -> str:
+    """A delivery failure as the endpoint label, the exception class and the
+    allowed detail (HTTP status, the transport error's class). Never the
+    exception's text: urllib and http.client quote the request target."""
+    label = _url_host(url)
+    if isinstance(e, urllib.error.HTTPError):
+        return f"{label}: HTTPError (HTTP {e.code})"
+    if isinstance(e, (http.client.InvalidURL, ValueError)):
+        return f"{label}: {type(e).__name__} ({_MALFORMED})"
+    if isinstance(e, urllib.error.URLError):
+        return f"{label}: URLError ({type(e.reason).__name__})"
+    return f"{label}: {type(e).__name__}"
 
 
 def fire_webhook(event: str, project: str, config: dict[str, Any],
@@ -77,7 +108,7 @@ def fire_webhook(event: str, project: str, config: dict[str, Any],
             with urllib.request.urlopen(request, timeout=_POST_TIMEOUT_SEC):
                 pass
         except Exception as e:  # noqa: BLE001 — best-effort delivery, logged by caller
-            failures.append(f"{_url_host(url)}: {e}")
+            failures.append(_describe(url, e))
     return failures
 
 

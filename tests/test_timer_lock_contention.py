@@ -149,7 +149,8 @@ class TestWebhookDelivery:
             thread.join(5)
         warn.assert_called_once()
         msg = warn.call_args[0][1]
-        assert "hooks.example.com" in msg and "connection refused" in msg
+        assert "hooks.example.com" in msg and "OSError" in msg
+        assert "connection refused" not in msg, "exception text is never logged"
         assert "secret-token" not in msg, "webhook URL paths can carry secrets"
 
     def test_no_matching_hooks_starts_no_thread(self, paths):

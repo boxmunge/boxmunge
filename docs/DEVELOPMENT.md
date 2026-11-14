@@ -199,7 +199,7 @@ These open a no-follow, non-blocking descriptor themselves (`open_regular_nofoll
 | Module | Functions |
 |---|---|
 | `backup.py` | `publish_new` |
-| `bind_sources.py` | `_hash_file` |
+| `bind_sources.py` | `_hash_file`, `_open_in_project` |
 | `caddy.py` | `read_override` |
 | `compose_images.py` | `_read_dockerfile` |
 | `fileutil.py` | `durable_rename` |
