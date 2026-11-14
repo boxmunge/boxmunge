@@ -87,12 +87,27 @@ def test_a_job_finishing_between_the_two_scans_is_never_missed(paths, monkeypatc
     assert [(j["id"], j["state"]) for j in jobs] == [(_id(1), "succeeded")]
 
 
-def test_a_record_that_vanishes_before_it_is_read_is_absent(paths) -> None:
+def test_a_record_that_vanishes_before_it_is_read_is_absent(paths, monkeypatch) -> None:
     paths.jobs_queue.mkdir(parents=True)
-    (paths.jobs_queue / f"{_id(1)}.json").symlink_to(paths.jobs_queue / "gone.json")
+    real = Path.glob
+
+    def glob_listing_a_ghost(self, pattern):
+        found = list(real(self, pattern))
+        return iter(found + [self / f"{_id(1)}.json"] if self == paths.jobs_queue else found)
+
+    monkeypatch.setattr(Path, "glob", glob_listing_a_ghost)
     store = JobStore(paths, result_schemas=registry_results)
     assert store.recent().jobs == [] and store.recent().unreadable == []
     assert store.get(_id(1)) is None
+
+
+def test_a_dangling_link_in_place_of_a_record_is_unreadable_not_absent(paths) -> None:
+    paths.jobs_queue.mkdir(parents=True)
+    (paths.jobs_queue / f"{_id(1)}.json").symlink_to(paths.jobs_queue / "gone.json")
+    store = JobStore(paths, result_schemas=registry_results)
+    assert [u["id"] for u in store.recent().unreadable] == [_id(1)]
+    with pytest.raises(StateError, match="symlink"):
+        store.get(_id(1))
 
 
 def test_a_record_without_its_result_field_is_corrupt(paths) -> None:

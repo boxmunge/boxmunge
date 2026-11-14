@@ -22,6 +22,7 @@ from boxmunge.api.schema import (
     NULLABLE_STRING, RESULT_OF_ACTION, STRING, ResultSchemas, enum, nullable, obj, validate,
 )
 from boxmunge.api.timefmt import NULLABLE_TIMESTAMP, TIMESTAMP
+from boxmunge.fs_nofollow import read_text_nofollow_or_none
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError
 
@@ -120,10 +121,11 @@ class JobStore:
     def events(self, job_id: str, *, after: int = 0) -> list[dict[str, Any]]:
         """The job's events with seq greater than *after*, in order."""
         path = self._done / f"{job_id}.events.jsonl"
-        if not path.exists():
+        text = _read(path, "job events")
+        if text is None:
             return []
         events = []
-        for lineno, line in enumerate(path.read_text().splitlines(), start=1):
+        for lineno, line in enumerate(text.splitlines(), start=1):
             if not line.strip():
                 continue
             try:
@@ -141,12 +143,9 @@ class JobStore:
 
     def _load(self, path: Path, job_id: str) -> dict[str, Any] | None:
         """The record at *path*, or None if there is none there (any more)."""
-        try:
-            text = path.read_text()
-        except FileNotFoundError:
+        text = _read(path, "job record")
+        if text is None:
             return None
-        except OSError as e:
-            raise StateError(f"Cannot read job record {path}: {e}") from e
         try:
             record = json.loads(text)
             violations = validate(JOB_SCHEMA, record, result_schemas=self._result_schemas)
@@ -164,6 +163,16 @@ class JobStore:
         if record["id"] != job_id:
             raise StateError(f"Job record {path} holds the id {record['id']}")
         return record
+
+
+def _read(path: Path, what: str) -> str | None:
+    """The file's text, or None if nothing is at the name. deploy writes
+    state/jobs/, so a link, a FIFO or an oversized file there is refused
+    (StateError naming the file), never followed or waited on."""
+    try:
+        return read_text_nofollow_or_none(path)
+    except (OSError, UnicodeDecodeError) as e:
+        raise StateError(f"Cannot read {what} {path}: {e}") from e
 
 
 def _prefer(current: dict[str, Any] | None, other: dict[str, Any]) -> dict[str, Any]:

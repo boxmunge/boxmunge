@@ -32,6 +32,7 @@ from boxmunge import (
     bind_mounts, bind_sources, compose_up_steps, data_dirs, fs_nofollow, overlay_users, pause,
     release, release_txn, run_as, staged_release, unresolved_stage, upgrade_state, user_drift,
 )
+from boxmunge.api.jobs import JobStore
 from boxmunge.backup_evidence import project_evidence, sync_evidence
 from boxmunge.bind_sources import read_record
 from boxmunge.blocked_update import read_blocked_state
@@ -51,6 +52,7 @@ from boxmunge.project_registry import read_registry, unfinished_removals
 from boxmunge.project_alerts import alert_state, alert_once
 from boxmunge import manual_update, start_alerts
 from boxmunge.state import StateError, read_state
+from tests.api.fakes import registry_results
 
 P = "myapp"
 NOW = datetime.now(timezone.utc)
@@ -97,6 +99,18 @@ def _backup_freshness(paths: BoxPaths) -> str:
     paths.project_dir(P).mkdir(parents=True, exist_ok=True)
     paths.project_manifest(P).write_text("project: myapp\n")
     return check_backup_freshness(paths).detail
+
+
+JOB_ID = "01J" + "A" * 23
+JOB = {"id": JOB_ID, "action": "project.deploy", "principal": "plugin:webui", "project": P,
+       "state": "succeeded", "created_at": "2026-10-14T01:00:00Z",
+       "started_at": "2026-10-14T01:00:05Z", "finished_at": "2026-10-14T01:01:30Z",
+       "error": None, "result": None}
+JOB_EVENT = json.dumps({"seq": 1, "ts": "2026-10-14T01:00:06Z", "type": "log", "message": "m"}) + "\n"
+
+
+def _jobs(paths: BoxPaths) -> JobStore:
+    return JobStore(paths, result_schemas=registry_results)
 
 
 def _alerted(paths: BoxPaths) -> bool:
@@ -189,6 +203,10 @@ READERS = [
     Reader("backup evidence", lambda p: p.project_backup_state(P),
            {"snapshot": "myapp-s.tar.gz.age", "snapshot_at": ISO},
            lambda p: project_evidence(p, P)),
+    Reader("job record", lambda p: p.jobs_dir / f"{JOB_ID}.json", JOB,
+           lambda p: _jobs(p).get(JOB_ID)),
+    Reader("job events", lambda p: p.jobs_dir / f"{JOB_ID}.events.jsonl", JOB_EVENT,
+           lambda p: _jobs(p).events(JOB_ID)),
     Reader("backup sync evidence", lambda p: p.backup_sync_state, {"synced_at": ISO},
            sync_evidence),
     Reader("health backup_freshness", lambda p: p.project_backup_state(P),
