@@ -36,6 +36,7 @@ from boxmunge.mcp_tools import (
     _tool_upgrade_howto,
     _tool_validate,
 )
+from boxmunge.version_check_notice import MCP_INSTRUCTIONS
 from boxmunge.version import get_build_version, parse_version_string
 
 # ---------------------------------------------------------------------------
@@ -451,7 +452,7 @@ def create_mcp_server() -> Any:
                                                    text=json.dumps(result, default=str))])
 
     server = Server("boxmunge", version=parse_version_string(get_build_version())[0],
-                    on_list_tools=on_list_tools, on_call_tool=on_call_tool)
+                    instructions=MCP_INSTRUCTIONS, on_list_tools=on_list_tools, on_call_tool=on_call_tool)
     _drop_tracing(server)
     return server
 

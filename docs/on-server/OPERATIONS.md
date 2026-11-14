@@ -2298,6 +2298,12 @@ The box's other outbound requests go to third parties, never to a boxmunge servi
   blocklist;
 - alert channels the operator set up (Pushover, webhooks).
 
+`server-setup` shows the operator this explanation before it installs, and install writes the
+choice into `boxmunge.yml` (`version_check: {enabled: true}`; `server-setup --no-version-check`
+writes `false`). A box with no `version_check` key was never asked: `doctor` warns "Version
+check choice", and an agent tells the operator what the check sends and asks (see
+`agent-help rules`). Nothing changes for such a box: the check stays on.
+
 To send the version-check service nothing at all, set this in
 `/opt/boxmunge/config/boxmunge.yml` (as root):
 

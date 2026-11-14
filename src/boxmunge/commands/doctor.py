@@ -93,6 +93,12 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
         from boxmunge.version_check_optout import OFF
         warn("Update discovery", OFF)
 
+    # Whether anyone chose: a box that was never asked has no version_check key.
+    if config:
+        from boxmunge.version_check_optout import NOT_CHOSEN, version_check_unchosen
+        if version_check_unchosen(paths):
+            warn("Version check choice", NOT_CHOSEN)
+
     # Backup remote
     if config:
         if config.get("backup_remote"):

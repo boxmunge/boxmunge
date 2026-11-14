@@ -30,6 +30,7 @@ INSTALL_AIDE=true
 INSTALL_CROWDSEC=true
 INSTALL_AUTO_UPDATES=true
 SELF_SIGNED_TLS=false
+VERSION_CHECK=true
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -43,6 +44,7 @@ while [[ $# -gt 0 ]]; do
         --no-aide)        INSTALL_AIDE=false;        shift ;;
         --no-crowdsec)    INSTALL_CROWDSEC=false;    shift ;;
         --no-auto-updates) INSTALL_AUTO_UPDATES=false; shift ;;
+        --no-version-check) VERSION_CHECK=false;        shift ;;
         --self-signed-tls)    SELF_SIGNED_TLS=true;           shift ;;
         *)
             echo "Unknown argument: $1" >&2
@@ -411,7 +413,15 @@ reboot:
 logging:
   docker_max_size: "50m"
   docker_max_file: 5
+
+# The choice about the version-check service at boxmunge.dev, recorded at
+# install: what it sends and what declining costs is in OPERATIONS.md
+# ("What boxmunge sends home"). enabled: false stops update checks and
+# failure reports, and security releases are then NOT installed automatically.
+version_check:
+  enabled: ${VERSION_CHECK}
 EOF
+echo "  Version checks: ${VERSION_CHECK} (recorded in boxmunge.yml; install.sh --no-version-check turns them off)"
 userns_record "${USERNS_OFFSET}"
 chmod 640 "${BOXMUNGE_ROOT}/config/boxmunge.yml"
 chown root:"${DEPLOY_USER}" "${BOXMUNGE_ROOT}/config/boxmunge.yml"

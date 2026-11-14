@@ -40,6 +40,7 @@ class ServerSetupArgs:
     no_aide: bool = False
     no_crowdsec: bool = False
     no_auto_updates: bool = False
+    no_version_check: bool = False
     self_signed_tls: bool = False
     yes: bool = False
     release: str | None = None
@@ -92,6 +93,9 @@ def add_arguments(p: argparse.ArgumentParser) -> None:
     p.add_argument("--no-crowdsec", action="store_true", help="Skip CrowdSec")
     p.add_argument("--no-auto-updates", action="store_true",
                    help="Skip unattended-upgrades")
+    p.add_argument("--no-version-check", action="store_true",
+                   help="Record version_check: {enabled: false}: the box never contacts "
+                        "the version-check service and installs no release automatically")
     p.add_argument("--self-signed-tls", action="store_true",
                    help="Use self-signed TLS instead of Let's Encrypt (testing)")
     p.add_argument("--host-key-fingerprint", type=_fingerprint, metavar="SHA256:...",
@@ -123,7 +127,8 @@ def from_namespace(ns: argparse.Namespace) -> ServerSetupArgs:
         ssh_key_arg=ns.ssh_key_arg, hostname=hostname,
         boxmunge_ssh_port=ns.boxmunge_ssh_port,
         no_aide=ns.no_aide, no_crowdsec=ns.no_crowdsec,
-        no_auto_updates=ns.no_auto_updates, self_signed_tls=ns.self_signed_tls,
+        no_auto_updates=ns.no_auto_updates,
+        no_version_check=ns.no_version_check, self_signed_tls=ns.self_signed_tls,
         yes=ns.yes, release=ns.release, local_bundle=ns.local_bundle,
         host_key_fingerprint=ns.host_key_fingerprint,
     )
