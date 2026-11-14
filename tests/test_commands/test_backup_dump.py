@@ -23,7 +23,7 @@ from boxmunge.backup import BackupError, BackupKind
 from boxmunge.commands import backup_cmd
 from boxmunge.paths import BoxPaths
 
-_real_run = subprocess.run
+_real_run = service_exec.run_bounded
 
 
 class _Docker:
@@ -54,7 +54,7 @@ def project(paths: BoxPaths) -> BoxPaths:
 
 
 def _run_dump(paths: BoxPaths, docker) -> Path:
-    with patch.object(service_exec.subprocess, "run", side_effect=docker):
+    with patch.object(service_exec, "run_bounded", side_effect=docker):
         return backup_dump.execute_dump(paths, "myapp", "dump", "db")
 
 
@@ -134,7 +134,8 @@ from boxmunge import backup_dump, service_exec
 from boxmunge.paths import BoxPaths
 
 paths, marker = BoxPaths(Path(sys.argv[1])), Path(sys.argv[2])
-real_run = service_exec.subprocess.run
+_rb = service_exec.run_bounded
+real_run = lambda cmd, **kw: _rb(cmd, **{"timeout": 30, "keep": 10**5, "budget": 10**7, **kw})
 def docker(cmd, **kw):
     if "boxmunge-stop" in cmd:
         marker.write_text("stopped")
@@ -143,7 +144,7 @@ def docker(cmd, **kw):
                     **{k: v for k, v in kw.items() if k != "cwd"})
 def backup(args):
     backup_dump.execute_dump(paths, "myapp", "dump", "db")
-with patch.object(service_exec.subprocess, "run", side_effect=docker), \\
+with patch.object(service_exec, "run_bounded", side_effect=docker), \\
      patch.object(backup_dump._backup, "chown_for_system_container"), \\
      patch.object(backup_dump._backup, "fchown_for_system_container"), \\
      patch.dict(boxmunge.cli.COMMANDS, {"backup": backup}), \\

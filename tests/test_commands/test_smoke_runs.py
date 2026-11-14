@@ -76,7 +76,7 @@ def _manifest(*services: str) -> dict:
 
 
 def _smoke(tmp_path: Path, services: tuple[str, ...], docker: Docker):
-    with patch.object(subprocess, "run", docker):
+    with patch.object(service_exec, "run_bounded", docker):
         return run_smoke_in_container(tmp_path, _manifest(*services), ["compose.yml"])
 
 
@@ -110,7 +110,7 @@ def _tick(box: BoxPaths, docker: Docker) -> tuple[int, MagicMock, MagicMock]:
     """One health-timer tick: its status, compose_down and the alert sender."""
     from boxmunge.commands.check_all import run_check_all
     down, push = MagicMock(), MagicMock(return_value=True)
-    with patch.object(subprocess, "run", docker), \
+    with patch.object(service_exec, "run_bounded", docker), \
          patch("boxmunge.commands.health_state.compose_down", down), \
          patch("boxmunge.notify.send_notification", push):
         return run_check_all(box, read_only=False), down, push
@@ -362,7 +362,8 @@ from boxmunge import service_exec
 from boxmunge.commands import check
 
 started, stopped = sys.argv[1:]
-real_run = service_exec.subprocess.run
+_rb = service_exec.run_bounded
+real_run = lambda cmd, **kw: _rb(cmd, **{"timeout": 30, "keep": 10**5, "budget": 10**7, **kw})
 def docker(cmd, **kw):
     if "boxmunge-stop" in cmd:
         open(stopped, "w").write("stopped")
@@ -370,7 +371,7 @@ def docker(cmd, **kw):
     return real_run(["sh", "-c", 'echo started > "$1"; exec sleep 60', "smoke", started], **kw)
 def smoke(args):
     check._smoke_one("myapp-web-1", "/boxmunge-scripts/smoke.sh", "web")
-with patch.object(service_exec.subprocess, "run", side_effect=docker), \\
+with patch.object(service_exec, "run_bounded", side_effect=docker), \\
      patch.dict(boxmunge.cli.COMMANDS, {"check": smoke}), \\
      patch.object(sys, "argv", ["boxmunge-server", "check", "myapp"]):
     boxmunge.cli.main()

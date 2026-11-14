@@ -66,7 +66,7 @@ class _Smoke:
 
 def _tick(paths: BoxPaths, smoke: _Smoke, down, push) -> int:
     from boxmunge.commands.check_all import run_check_all
-    with patch("boxmunge.service_exec.subprocess.run", smoke), \
+    with patch("boxmunge.service_exec.run_bounded", smoke), \
          patch("boxmunge.commands.health_state.compose_down", down), \
          patch("boxmunge.notify.send_notification", push):
         return run_check_all(paths, read_only=False)
@@ -146,7 +146,7 @@ class TestStickyCriticalStop:
         _tick(paths, _Smoke((2, "db unreachable")), MagicMock(), MagicMock(return_value=True))
         before = paths.project_health_state(NAME).read_text()
         smoke = _Smoke((1, NO_CONTAINER))
-        with patch("boxmunge.service_exec.subprocess.run", smoke):
+        with patch("boxmunge.service_exec.run_bounded", smoke):
             assert run_check_all(paths, read_only=True) == 2
         assert smoke.calls == 0
         assert paths.project_health_state(NAME).read_text() == before

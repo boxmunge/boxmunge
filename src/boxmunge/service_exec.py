@@ -31,6 +31,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
+from boxmunge.bounded_run import OutputBudgetExceeded, run_bounded
 from boxmunge.docker_run import docker_env
 
 _LOGGER = logging.getLogger("boxmunge")
@@ -98,6 +99,11 @@ done
 echo "$pid unreaped"
 """
 _STOP_TIMEOUT = 60
+# What of each captured stream is kept (the head: a smoke's launch marker and
+# its message come first), and how much of it a command may write before it
+# is killed. The host never holds more than the first, whatever is printed.
+OUTPUT_KEEP = 64 * 1024
+OUTPUT_BUDGET = 16 * 1024 * 1024
 # Said of a command that was killed but whose entries nothing reaps.
 UNREAPED = ("its finished process entries remain until the container restarts, "
             "because the container runs without an init process")
@@ -111,19 +117,22 @@ class Stop(NamedTuple):
 
 
 class ServiceCommandTimeout(Exception):
-    """The command overran its budget.
+    """The command overran its budget (of time, or see ServiceCommandOutputLimit).
 
     ``stopped_group`` is the process group killed and verified gone, or
     None with ``stop_error`` saying why that could not be confirmed.
     ``unreaped`` is whether the killed group's entries were left listed.
+    ``reason`` says why it was stopped.
     """
 
     def __init__(self, timeout: float, stopped_group: str | None,
-                 stop_error: str | None, unreaped: bool = False) -> None:
+                 stop_error: str | None, unreaped: bool = False, *,
+                 reason: str | None = None) -> None:
         self.timeout = timeout
         self.stopped_group = stopped_group
         self.stop_error = stop_error
         self.unreaped = unreaped
+        self.reason = reason or f"timed out after {timeout}s"
         if stopped_group is not None:
             outcome = f"it was stopped inside the container (process group {stopped_group})"
             if unreaped:
@@ -131,7 +140,17 @@ class ServiceCommandTimeout(Exception):
         else:
             outcome = (f"stopping it inside the container FAILED ({stop_error}), "
                        "so it may still be running there")
-        super().__init__(f"timed out after {timeout}s; {outcome}")
+        super().__init__(f"{self.reason}; {outcome}")
+
+
+class ServiceCommandOutputLimit(ServiceCommandTimeout):
+    """The command wrote more than OUTPUT_BUDGET bytes on a captured stream
+    and was stopped, as for a timeout."""
+
+    def __init__(self, over: OutputBudgetExceeded, timeout: float, stop: Stop) -> None:
+        super().__init__(
+            timeout, stop.group, stop.error, stop.unreaped,
+            reason=f"wrote more than {over.budget} bytes on {over.stream}")
 
 
 def _service_exec(project_dir: Path, project_name: str, service: str,
@@ -156,10 +175,13 @@ def _stop(exec_into: list[str], pid_name: str, cwd: Path | None = None) -> Stop:
     """
     cmd = [*exec_into, "sh", "-c", _STOP_SCRIPT, "boxmunge-stop", pid_name]
     try:
-        result = subprocess.run(cmd, cwd=cwd, capture_output=True,
-                                text=True, timeout=_STOP_TIMEOUT, env=docker_env())
+        result = run_bounded(cmd, cwd=cwd, capture_output=True, text=True,
+                             timeout=_STOP_TIMEOUT, env=docker_env(),
+                             keep=OUTPUT_KEEP, budget=OUTPUT_BUDGET)
     except subprocess.TimeoutExpired:
         return Stop(None, f"the stop did not finish in {_STOP_TIMEOUT}s")
+    except OutputBudgetExceeded:
+        return Stop(None, "the stop wrote more output than expected")
     except OSError as e:
         return Stop(None, f"docker could not be run ({e.strerror or type(e).__name__})")
     group, *rest = result.stdout.split() or [""]
@@ -173,8 +195,10 @@ def _run(exec_into: list[str], where: str, command: str, *, timeout: float,
     """``sh -c command`` in the container ``exec_into`` reaches (``where``,
     in words), bounded by ``timeout``.
 
-    Raises ServiceCommandTimeout when it overruns, after trying to kill it in
-    the container. If boxmunge is interrupted meanwhile, the command is
+    Raises ServiceCommandTimeout when it overruns, and ServiceCommandOutputLimit
+    when it writes past OUTPUT_BUDGET on a captured stream (output is drained
+    and only OUTPUT_KEEP bytes of each stream kept, decoded with replacement),
+    after trying to kill it in the container. If boxmunge is interrupted meanwhile, the command is
     killed there too before the interruption propagates, and a stop that
     did not leave the container clean is logged, since nothing else will
     report it.
@@ -182,9 +206,12 @@ def _run(exec_into: list[str], where: str, command: str, *, timeout: float,
     pid_name = f"boxmunge-exec-{secrets.token_hex(16)}.pid"
     cmd = [*exec_into, "sh", "-c", _WRAPPER, _WRAPPER, pid_name, command]
     try:
-        return subprocess.run(cmd, cwd=cwd, timeout=timeout, env=docker_env(), **run_kwargs)
+        return run_bounded(cmd, cwd=cwd, timeout=timeout, env=docker_env(),
+                           keep=OUTPUT_KEEP, budget=OUTPUT_BUDGET, **run_kwargs)
     except subprocess.TimeoutExpired as e:
         raise ServiceCommandTimeout(timeout, *_stop(exec_into, pid_name, cwd)) from e
+    except OutputBudgetExceeded as e:
+        raise ServiceCommandOutputLimit(e, timeout, _stop(exec_into, pid_name, cwd)) from e
     except OSError:
         raise  # nothing started
     except BaseException:
