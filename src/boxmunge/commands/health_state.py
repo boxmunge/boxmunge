@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from boxmunge import pending_snapshot
 from boxmunge.config import DEFAULTS, ConfigError, load_config
+from boxmunge.health_record import read_health_record
 from boxmunge.docker import DockerError, compose_down
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
@@ -82,7 +83,13 @@ def is_monitor_stopped(project_name: str, paths: BoxPaths) -> bool:
     project again (deploy state ``last_started_at`` newer than the stop's
     ``stopped_at``); the next tick then judges the project afresh.
     """
-    state = read_state(paths.project_health_state(project_name))
+    try:
+        state = read_health_record(paths.project_health_state(project_name))
+    except StateError:
+        # A damaged record cannot say whether a stop stands. The tick then
+        # judges the project afresh, and update_health_state applies the
+        # damaged-record policy (a critical verdict is still enforced).
+        return False
     return _stop_stands(state, project_name, paths)
 
 
@@ -121,7 +128,7 @@ def record_still_stopped(project_name: str, paths: BoxPaths) -> None:
     Retries the critical alert if it was never delivered.
     """
     state_path = paths.project_health_state(project_name)
-    state = read_state(state_path)
+    state = read_health_record(state_path)
     now = datetime.now(timezone.utc).isoformat()
     reason = state.get("failure_reason", "")
     updates: dict = {"last_check": now}
@@ -152,9 +159,26 @@ def update_health_state(
     Pushover accepted. An alert that was not delivered is logged by
     ``notify`` and retried on the next tick. With ``status: ok``,
     ``alerted: True`` means the RECOVERED notice is still owed.
+
+    Damaged record policy: a record whose fields have the wrong types (see
+    health_record) never defeats a critical verdict. The damage is logged as
+    an error, the stop and alert go ahead from fresh bookkeeping, and the
+    recorded failure reason names the damage; the rewritten record is valid.
+    An ok or warning verdict raises StateError naming the field instead,
+    leaving the record for the operator: the fleet loop reports it every tick
+    and still checks the other projects.
     """
     state_path = paths.project_health_state(project_name)
-    state = read_state(state_path)
+    damage: StateError | None = None
+    try:
+        state = read_health_record(state_path)
+    except StateError as e:
+        if check_result != 2:
+            raise
+        damage = e
+        state = {}
+        log_error("health", f"{e}; the health record is damaged and is reset, "
+                  f"the critical stop goes ahead", paths, project=project_name)
     now = datetime.now(timezone.utc).isoformat()
 
     # A standing monitor stop is sticky: leave status, reason, and alert
@@ -180,6 +204,8 @@ def update_health_state(
     if check_result == 0:
         _record_ok(project_name, paths, state, now)
     elif check_result == 2:
+        if damage is not None:
+            message = f"{message} (health record was damaged and reset: {damage})"
         _record_critical(project_name, paths, state, now, message)
     else:
         _record_warning(project_name, paths, state, now, message)
