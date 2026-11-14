@@ -29,7 +29,7 @@ from boxmunge import compose_mounts
 from boxmunge.compose_mounts import bind_entries
 from boxmunge.compose_own_files import CONTROL_ENTRIES
 from boxmunge.fileutil import atomic_write_text
-from boxmunge.fs_nofollow import open_regular_nofollow, read_text_nofollow
+from boxmunge.fs_nofollow import open_dir_beneath, open_regular_nofollow, read_text_nofollow
 
 DIR = "dir"
 FILE = "file"
@@ -52,6 +52,9 @@ _CONTROL_FILES = tuple(
     if e not in ("security", ".releases", "boxmunge-scripts", "repo/.git") and e not in _UNHASHED
 )
 OVERLAY = "compose.boxmunge.yml"
+# Hashing streams, which bounds memory but not time: a control file larger
+# than this is refused. Real compose, manifest and env files are a few KiB.
+MAX_CONTROL_FILE_BYTES = 8 * 1024 * 1024
 
 
 class BindSourceError(Exception):
@@ -179,6 +182,11 @@ def _hash_file(project_dir: Path, path: Path, rel: str) -> str | None:
                 f"container may have replaced it with a special file") from e
     try:
         with os.fdopen(fd, "rb") as f:
+            if os.fstat(f.fileno()).st_size > MAX_CONTROL_FILE_BYTES:
+                raise BindSourceError(
+                    f"control file {rel} is larger than {MAX_CONTROL_FILE_BYTES} bytes; "
+                    f"boxmunge will not hash it. Shrink it, or remove it if a container "
+                    f"wrote it.")
             for chunk in iter(lambda: f.read(1 << 16), b""):
                 h.update(chunk)
         return h.hexdigest()
@@ -209,28 +217,24 @@ def control_file_unchanged(project_dir: Path, path: Path, rel: str) -> bool:
 def _open_in_project(root: str, target: str, rel: str) -> int:
     """Open a control file's resolved target, one component at a time from
     the project root with O_NOFOLLOW, so a link swapped in after the
-    realpath cannot redirect the read. The target must be a plain regular
-    file."""
+    realpath cannot redirect the read. The final open is the shared
+    open_regular_nofollow (nonblocking, so a FIFO is refused, not waited
+    on): the target must be a plain regular file."""
     parts = target.split(os.sep)
-    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
     try:
-        for part in parts[:-1]:
-            nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-            os.close(fd)
-            fd = nxt
-        out = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+        fd = open_dir_beneath(Path(root), parts[:-1])
     except OSError as e:
         raise BindSourceError(
             f"control file {rel}: its link target {target} cannot be opened "
             f"without following a further link ({e})") from e
+    try:
+        return open_regular_nofollow(Path(parts[-1]), os.O_RDONLY, dir_fd=fd)
+    except OSError as e:
+        raise BindSourceError(
+            f"control file {rel}: its link target {target} is not a plain "
+            f"regular file ({e})") from e
     finally:
         os.close(fd)
-    st = os.fstat(out)
-    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-        os.close(out)
-        raise BindSourceError(
-            f"control file {rel}: its link target {target} is not a plain regular file")
-    return out
 
 
 def read_record(path: Path, *, redo: str) -> dict[str, Any]:
