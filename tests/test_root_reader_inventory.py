@@ -125,7 +125,7 @@ def _goes_around_the_helpers(call: ast.Call) -> bool:
 # rise fails. A lower count is welcome, and the baseline may be lowered to
 # match when convenient.
 RAW_READS: dict[str, int] = {
-    "api/dev/fixture_host.py": 3, "api/jobs.py": 2, "backup.py": 1,
+    "api/dev/fixture_host.py": 3, "backup.py": 1,
     "commands/auto_update_cmd.py": 1, "commands/bundle_cmd.py": 1,
     "commands/doctor.py": 1, "commands/health_cmd.py": 1, "commands/help.py": 1,
     "config.py": 1, "cve/kev_refresh.py": 1,
