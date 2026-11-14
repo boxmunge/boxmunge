@@ -73,6 +73,19 @@ def restore_and_report(
     return f"{reason}; {failed}" if reason else failed
 
 
+def restore_after_interrupt(
+    paths: "BoxPaths", project: str, interrupt: BaseException,
+    services: dict[str, DeployedService], running: dict[str, ProjectContainer],
+) -> None:
+    """restore_tags, for an interruption (KeyboardInterrupt, SystemExit, a
+    SIGTERM handler's exception) that is about to propagate. The interrupt
+    stays the failure; a tag that could not go back is attached to it as a
+    note, and logged by restore_tags."""
+    stuck = restore_tags(paths, project, services, running)
+    if stuck:
+        interrupt.add_note("tag_restore_failed: " + "; ".join(stuck[ref] for ref in sorted(stuck)))
+
+
 def _restore(ref: str, ids: set[str]) -> str | None:
     """None once `ref` names an image its services run; else why it may not,
     ending with the fix."""
