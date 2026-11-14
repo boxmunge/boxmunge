@@ -7,7 +7,7 @@ import pytest
 
 from boxmunge import backup_evidence
 from boxmunge.backup_alerts import deliver
-from boxmunge.backup_evidence import project_evidence, record_failure
+from boxmunge.backup_evidence import PENDING_LEASE, project_evidence, record_failure
 from tests.backup_alert_helpers import Alerts, backed_up_project, no_space
 from tests.fake_system_container import fake_age
 
@@ -37,11 +37,13 @@ def test_an_alert_interrupted_before_delivery_is_sent_by_the_next_run(paths, pro
     assert ev.alerted == {} and ev.pending == {"failing": T0.isoformat()}
 
     working = Alerts()
-    deliver(paths, working, now=T0 + timedelta(minutes=5))   # a fresh process
+    deliver(paths, working, now=T0 + timedelta(minutes=5))   # inside the lease: still live
+    assert working.sent == []
+    deliver(paths, working, now=T0 + PENDING_LEASE + timedelta(minutes=5))   # a fresh process
     assert [t for t, _ in working.titles] == ["shop: scheduled backup failed"]
     ev = project_evidence(paths, P)
     assert ev.alerted == {"failing": T0.isoformat()} and ev.pending == {}
-    deliver(paths, working, now=T0 + timedelta(minutes=10))
+    deliver(paths, working, now=T0 + PENDING_LEASE + timedelta(minutes=10))
     assert len(working.sent) == 1
 
 
@@ -54,9 +56,9 @@ def test_an_alert_interrupted_after_delivery_is_sent_again_not_lost(
         deliver(paths, first, now=T0)
     monkeypatch.undo()
     again = Alerts()
-    deliver(paths, again, now=T0 + timedelta(minutes=5))
+    deliver(paths, again, now=T0 + PENDING_LEASE + timedelta(minutes=5))
     assert len(first.sent) == 1 and len(again.sent) == 1   # a bounded duplicate
-    deliver(paths, again, now=T0 + timedelta(minutes=10))
+    deliver(paths, again, now=T0 + PENDING_LEASE + timedelta(minutes=10))
     assert len(again.sent) == 1
 
 
@@ -68,6 +70,25 @@ def test_a_delivery_that_cannot_be_recorded_is_sent_again(paths, project, monkey
     deliver(paths, alerts, now=T0)
     assert project_evidence(paths, P).alerted == {}
     monkeypatch.setattr("boxmunge.backup_alerts.mark_delivered", real)
-    deliver(paths, alerts, now=T0 + timedelta(minutes=5))
+    deliver(paths, alerts, now=T0 + PENDING_LEASE + timedelta(minutes=5))
     assert len(alerts.sent) == 2
     assert project_evidence(paths, P).alerted == {"failing": T0.isoformat()}
+
+
+def test_a_delivery_that_keeps_failing_to_record_is_resent_once_per_lease(
+        paths, project, monkeypatch) -> None:
+    record_failure(paths, P, "dump failed", now=T0)
+    alerts = Alerts()
+    monkeypatch.setattr("boxmunge.backup_alerts.mark_delivered", no_space)
+    for tick in range(24):                       # two hours of five-minute ticks
+        deliver(paths, alerts, now=T0 + timedelta(minutes=5 * tick))
+    assert len(alerts.sent) == 2                 # at T0 and once the lease ended
+
+
+def test_a_refused_alert_is_retried_on_the_next_tick(paths, project) -> None:
+    record_failure(paths, P, "dump failed", now=T0)
+    alerts = Alerts()
+    alerts.delivers = False
+    deliver(paths, alerts, now=T0)
+    deliver(paths, alerts, now=T0 + timedelta(minutes=5))
+    assert len(alerts.sent) == 2 and project_evidence(paths, P).pending == {}

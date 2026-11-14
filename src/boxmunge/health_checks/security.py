@@ -22,7 +22,7 @@ from boxmunge.commands.health_cmd import HealthCheck
 from boxmunge.cve.policy import PolicyError, parse_posture, severity_gate_quarantines
 from boxmunge.cve.scan_state import SCAN_MAX_AGE, read_scan_state, scan_problem
 from boxmunge.manifest import ManifestError, load_manifest
-from boxmunge.project_inventory import damaged_among, damaged_detail
+from boxmunge.project_inventory import Inventory, classify, damaged_among, damaged_detail
 from boxmunge.project_registry import deployed_among, read_registry
 from boxmunge.state import StateError
 
@@ -49,11 +49,16 @@ def check_security_profiles(paths: BoxPaths) -> HealthCheck:
 
     off_entries: list[str] = []
     override_entries: list[str] = []
+    damaged: list[str] = []
     for project_dir in sorted(paths.projects.iterdir()):
         if not project_dir.is_dir():
             continue
         manifest_path = project_dir / "manifest.yml"
-        if not manifest_path.exists():
+        standing = classify(project_dir.name, paths)
+        if standing is Inventory.DAMAGED:
+            damaged.append(f"{project_dir.name}: {damaged_detail(project_dir.name)}")
+            continue
+        if standing is Inventory.AWAITING:
             continue
         try:
             manifest = load_manifest(manifest_path)
@@ -69,8 +74,13 @@ def check_security_profiles(paths: BoxPaths) -> HealthCheck:
 
     # `off` services are warn-level. Overrides are appended to detail
     # for visibility but do not escalate status.
+    if damaged and not off_entries:
+        return HealthCheck(name="security-profiles", status="warn",
+                           detail="not checked -- " + "; ".join(damaged))
     if off_entries:
         detail = "SECURITY OFF -- " + "; ".join(off_entries)
+        if damaged:
+            detail += " | not checked: " + "; ".join(damaged)
         if override_entries:
             detail += " | overrides: " + "; ".join(override_entries)
         return HealthCheck(

@@ -107,3 +107,32 @@ def test_status_shows_the_damaged_project_as_an_error_not_pre_registered(paths, 
     assert rows[DAMAGED]["state"] != "pre_registered"
     assert rows[WAITING]["state"] == "pre_registered"
     assert any(n == DAMAGED for n, _ in snap.failures)
+
+
+def test_the_security_profiles_check_reports_the_damaged_project(paths, fleet) -> None:
+    from boxmunge.health_checks.security import check_security_profiles
+    (fleet / "manifest.yml").unlink()
+    check = check_security_profiles(paths)
+    assert check.status == "warn" and DAMAGED in check.detail and WAITING not in check.detail
+
+
+def test_container_update_targets_report_not_skip_the_damaged_project(paths, fleet) -> None:
+    from boxmunge.container_update_targets import build_targets
+    (fleet / "manifest.yml").unlink()
+    names = [t.name for t in build_targets(paths, {})]
+    assert HEALTHY in names and DAMAGED not in names
+    assert f"{DAMAGED}" in paths.log_file.read_text()
+
+
+def test_cve_suppress_targets_leave_out_the_damaged_project_loudly(paths, fleet) -> None:
+    from boxmunge.commands.security_suppress_targets import all_currently_quarantining_cves
+    (fleet / "manifest.yml").unlink()
+    _, left_out = all_currently_quarantining_cves(paths)
+    assert left_out == [DAMAGED]
+
+
+def test_the_console_shows_the_damaged_project_marked_damaged(paths, fleet) -> None:
+    from boxmunge.tui.data import load_all_project_status
+    (fleet / "manifest.yml").unlink()
+    rows = {r.name: r for r in load_all_project_status(paths)}
+    assert rows[DAMAGED].status == "damaged" and WAITING not in rows

@@ -14,7 +14,8 @@ from typing import TYPE_CHECKING, Any
 
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
-from boxmunge.manifest import load_manifest
+from boxmunge.manifest import ManifestError, load_manifest
+from boxmunge.project_inventory import Inventory, classify, damaged_detail
 from boxmunge.fs_nofollow import read_text_nofollow
 
 if TYPE_CHECKING:
@@ -56,7 +57,10 @@ def _build_project_target(
 ) -> UpdateTarget | None:
     """Build a target for a user project, or None if it should be skipped."""
     manifest_path = project_dir / "manifest.yml"
-    if not manifest_path.exists():
+    standing = classify(project_dir.name, paths)
+    if standing is Inventory.DAMAGED:
+        raise ManifestError(f"{project_dir.name}: {damaged_detail(project_dir.name)}")
+    if standing is Inventory.AWAITING:
         return None
     manifest = load_manifest(manifest_path)
 

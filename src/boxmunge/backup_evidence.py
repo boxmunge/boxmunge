@@ -21,9 +21,10 @@ state/backup/<project>.json, for each project:
   unsynced_since            when the oldest snapshot no sync has copied was
                             published;
   alerted                   the conditions whose alert a notifier accepted;
-  pending                   the conditions whose alert was being sent, and
-                            is not in `alerted` until it was accepted: one
-                            still here under the alerts lock was abandoned
+  pending, pending_at       the conditions whose alert was being sent, and
+                            when its attempt began. Not in `alerted` until
+                            a notifier accepted it: an attempt older than
+                            PENDING_LEASE was abandoned and is made again
                             (backup_alerts).
 state/backup-sync.json holds the all-projects sync's own synced_at,
 failing_since, failed_at, failure and alerted, and expected_since: when a
@@ -63,13 +64,16 @@ from boxmunge.state import StateError, read_state, write_state
 _TIMES = ("snapshot_at", "excused_at", "unbacked_since", "failing_since", "failed_at", "synced_at",
           "unsynced_since", "expected_since")
 _TEXTS = ("snapshot", "failure")
-_MAPS = ("alerted", "pending")   # {condition: the ref its alert was for}
+_MAPS = ("alerted", "pending", "pending_at")   # {condition: the ref its alert was for}
 _FIELDS = (*_TIMES, *_TEXTS, *_MAPS)
 STATE_LOCK, ALERTS_LOCK = ".lock", ".alerts.lock"   # in state/backup
 # A time this far ahead of the clock was written before the clock stepped
 # back: the record stands, and an alert delivered then still counts as sent.
 _AHEAD_LIMIT = timedelta(days=2)
 _EARLIEST = datetime(2020, 1, 1, tzinfo=timezone.utc)   # no boxmunge backup is older
+# An attempt not accepted within this is abandoned and made again, so an alert
+# that cannot be recorded as delivered is resent at most once per lease.
+PENDING_LEASE = timedelta(hours=1)
 CAUSE_LIMIT = 600   # an alert carries the cause; a dump's stderr can be long
 _SHOWN, _SHOWN_LENGTH = 3, 250   # of the unwritten changes, in one alert
 
@@ -92,6 +96,7 @@ class Evidence:
     expected_since: datetime | None = None
     alerted: dict[str, str] = field(default_factory=dict)
     pending: dict[str, str] = field(default_factory=dict)
+    pending_at: dict[str, str] = field(default_factory=dict)
 
 
 def _time(raw: Any, key: str, path: Path) -> datetime:
@@ -356,14 +361,23 @@ def start_unbacked_clock(paths: BoxPaths, project: str, now: datetime) -> None:
     _change(paths, project, change)
 
 
-def mark_pending(paths: BoxPaths, project: str | None, alert: str, ref: str) -> None:
+def mark_pending(paths: BoxPaths, project: str | None, alert: str, ref: str,
+                 now: datetime) -> None:
     """Record, before it is sent, that the `alert` condition identified by
-    `ref` is being sent. It is not yet told: only mark_delivered says so, so
-    a run interrupted mid-send is retried. Raises OSError when that cannot
-    be written: the sender then knows it could not record the delivery either."""
+    `ref` is being sent, from `now`. It is not yet told: only mark_delivered
+    says so, so a run interrupted mid-send is retried once its lease ends.
+    Raises OSError when that cannot be written: the sender then knows it
+    could not record the delivery either."""
     def change(record: dict[str, Any]) -> None:
         record["pending"] = {**record.get("pending", {}), alert: ref}
+        record["pending_at"] = {**record.get("pending_at", {}), alert: now.isoformat()}
     _change(paths, project, change)
+
+
+def _drop_pending(record: dict[str, Any], alert: str, ref: str) -> None:
+    if record.get("pending", {}).get(alert) == ref:
+        for key in ("pending", "pending_at"):
+            record[key] = {k: v for k, v in record.get(key, {}).items() if k != alert}
 
 
 def mark_delivered(paths: BoxPaths, project: str | None, alert: str, ref: str) -> None:
@@ -371,8 +385,25 @@ def mark_delivered(paths: BoxPaths, project: str | None, alert: str, ref: str) -
     Raises OSError."""
     def change(record: dict[str, Any]) -> None:
         record["alerted"] = {**record.get("alerted", {}), alert: ref}
-        pending = dict(record.get("pending", {}))
-        if pending.get(alert) == ref:
-            del pending[alert]
-        record["pending"] = pending
+        _drop_pending(record, alert, ref)
     _change(paths, project, change)
+
+
+def clear_pending(paths: BoxPaths, project: str | None, alert: str, ref: str) -> None:
+    """The alert was refused: nothing is told, and the next run sends it
+    without waiting out the lease. Raises OSError."""
+    def change(record: dict[str, Any]) -> None:
+        _drop_pending(record, alert, ref)
+    _change(paths, project, change)
+
+
+def pending_live(record: Evidence, alert: str, ref: str, now: datetime) -> bool:
+    """Whether another attempt at this alert began within the lease."""
+    began = record.pending_at.get(alert)
+    if record.pending.get(alert) != ref or began is None:
+        return False
+    try:
+        age = now - datetime.fromisoformat(began)
+    except ValueError:
+        return False   # unreadable stamp: nothing proves an attempt is live
+    return timedelta(0) <= age < PENDING_LEASE

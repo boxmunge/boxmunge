@@ -14,6 +14,7 @@ from boxmunge.config import read_config, ConfigError
 from boxmunge.docker_run import DockerError, docker_env
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
+from boxmunge.project_inventory import Inventory, classify, damaged_detail
 from boxmunge.state import StateError, read_state
 
 
@@ -86,10 +87,16 @@ def load_all_project_status(paths: BoxPaths) -> list[ProjectStatus]:
 
     results = []
     for pdir in sorted(projects_dir.iterdir()):
-        if not pdir.is_dir() or not (pdir / "manifest.yml").exists():
+        if not pdir.is_dir() or classify(pdir.name, paths) is Inventory.AWAITING:
             continue
 
         name = pdir.name
+        if classify(name, paths) is Inventory.DAMAGED:
+            results.append(ProjectStatus(
+                name=name, status="damaged", last_check="", deployed_at="",
+                current_ref="", failure_reason=damaged_detail(name),
+            ))
+            continue
         try:
             health = read_state(paths.project_health_state(name))
             deploy = read_state(paths.project_deploy_state(name))

@@ -14,8 +14,9 @@ From where each project's backups stand (backup_standing):
 Each goes out once per continuing condition. `alerted` in the record holds
 when the condition began, and is written only once a notifier accepted
 the alert. Before sending, the condition is recorded as `pending`; a
-run holds the alerts lock across its sends, so a pending one it finds was
-abandoned (interrupted, or never accepted) and is sent again. A duplicate
+pending attempt older than PENDING_LEASE (backup_evidence) was abandoned
+(interrupted) and is sent again; a refused one is cleared and retried next
+run. So an alert whose delivery cannot be recorded repeats at most once per lease. A duplicate
 after an uncertain send is preferred to a lost alert. backup-all and backup-sync deliver when they
 finish; check-all (the health timer) every five minutes, which is what
 sends a 50-hour alert on time and retries.
@@ -36,7 +37,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 from boxmunge.backup_evidence import (
-    ALERTS_LOCK, Evidence, Send, deployed_projects, mark_delivered, mark_pending, report_unwritten,
+    ALERTS_LOCK, Evidence, Send, clear_pending, deployed_projects, mark_delivered, mark_pending, pending_live, report_unwritten,
     start_unbacked_clock, sync_evidence,
 )
 from boxmunge.backup_standing import (
@@ -112,22 +113,27 @@ def _send(paths: BoxPaths, send: Send, project: str | None, alert: Alert) -> boo
                 priority=alert.priority)
 
 
-def _send_due(paths: BoxPaths, send: Send, project: str | None, alerted: dict[str, str],
-              alerts: list[Alert], held: list[str] | None) -> None:
+def _send_due(paths: BoxPaths, send: Send, project: str | None, record: Evidence,
+              alerts: list[Alert], held: list[str] | None, now: datetime) -> None:
     """`held` is None for a scheduled run, which sends an alert it cannot
     claim; for the tick it gathers the ones it did not send for that."""
     for alert in alerts:
-        if alerted.get(alert.kind) == alert.ref:
+        if record.alerted.get(alert.kind) == alert.ref or pending_live(
+                record, alert.kind, alert.ref, now):
             continue
         try:
-            mark_pending(paths, project, alert.kind, alert.ref)
+            mark_pending(paths, project, alert.kind, alert.ref, now)
         except OSError as e:
             _unwritten(paths, project, f"that the alert '{alert.title}' was sent", e, held)
             if held is None:
                 _send(paths, send, project, alert)
             continue
         if not _send(paths, send, project, alert):
-            continue   # stays pending, so the next run sends it again
+            try:
+                clear_pending(paths, project, alert.kind, alert.ref)
+            except OSError as e:   # then it waits out the lease
+                _unwritten(paths, project, f"that the alert '{alert.title}' was refused", e, held)
+            continue
         try:
             mark_delivered(paths, project, alert.kind, alert.ref)
         except OSError as e:
@@ -180,10 +186,10 @@ def _deliver(paths: BoxPaths, send: Send, now: datetime, held: list[str] | None)
                           paths, project=project)
                 continue
             s = _start_clock(paths, s, now, held)
-            _send_due(paths, send, project, s.record.alerted,
-                      _project_alerts(s, sync, now), held)
+            _send_due(paths, send, project, s.record,
+                      _project_alerts(s, sync, now), held, now)
         if sync is not None:
-            _send_due(paths, send, None, sync.alerted, _sync_alerts(sync), held)
+            _send_due(paths, send, None, sync, _sync_alerts(sync), held, now)
 
 
 def deliver(paths: BoxPaths, send: Send, *, now: datetime | None = None) -> None:
