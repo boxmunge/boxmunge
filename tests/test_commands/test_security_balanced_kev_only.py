@@ -19,7 +19,7 @@ from boxmunge.bind_sources import BindSourceError
 from boxmunge.commands import quarantine_lift, security_actions, security_scan_core
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.security_actions import cmd_security_scan
-from boxmunge.commands.security_scan_core import scan_one_project
+from tests.test_commands.cve_helpers import scan_and_send
 from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.policy import Disposition
 from boxmunge.cve.quarantine import is_quarantined, quarantine_action_complete
@@ -59,7 +59,7 @@ def box(tmp_path, monkeypatch):
 
 
 def _scan(paths, kev: KevCatalog | None = None):
-    return scan_one_project(paths, "demo", kev=kev or _kev())
+    return scan_and_send(paths, "demo", kev=kev or _kev())
 
 
 def _titles(pushover, words: str) -> list[str]:
