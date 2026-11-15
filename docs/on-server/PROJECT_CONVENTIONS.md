@@ -558,11 +558,15 @@ The `boxmunge-scripts/` directory is the project's side of the integration. boxm
 executed directly and must be executable.
 
 A bundle ships `boxmunge-scripts/` at its top level. A git project commits it at the top of its
-repository: every checkout of a commit (deploy, promote, rollback, and the staged release) makes the
-project directory's `boxmunge-scripts/` exactly the commit's, and removes it when the commit has
-none, so nothing has to be placed on the server by hand. Of a git project's repository only
-`compose.yml`, `manifest.yml` and `boxmunge-scripts/` are used from the project directory, so a
-relative `pre_deploy` names a script under `boxmunge-scripts/`.
+repository: every checkout of a commit that has one (deploy, promote, rollback, abandon, and the
+staged release) refreshes the project directory's `boxmunge-scripts/` to exactly the commit's
+contents, so nothing has to be placed on the server by hand. A commit with no `boxmunge-scripts/`
+leaves the existing one as it is (the checkout says so), so scripts placed by hand before 0.12 keep
+working, also for a rollback to an older commit. The scripts must be regular files and directories:
+a symbolic link anywhere in the committed `boxmunge-scripts/` is refused, because it would not
+resolve in the container. Of a git project's repository only `compose.yml`, `manifest.yml` and
+`boxmunge-scripts/` are used from the project directory, so a relative `pre_deploy` names a script
+under `boxmunge-scripts/`.
 
 A deploy, stage or promote whose manifest names a smoke script, or a relative `pre_deploy`, that the
 release does not have is refused before anything starts, naming the missing file (`validate`

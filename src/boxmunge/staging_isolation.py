@@ -238,7 +238,8 @@ def never_deployed_refusal(project: str) -> str:
     return (f"'{project}' has never been deployed to production, so there is no "
             f"production for staging to be checked against, nor data for "
             f"staging.copy_data to copy. Deploy its first release straight to "
-            f"production with 'prod-deploy {project}', then stage the releases after it.")
+            f"production with 'prod-deploy {project}' (a bundle project's after its "
+            f"upload), then stage the releases after it.")
 
 
 def production_model(paths: BoxPaths, project: str) -> dict[str, Any] | None:

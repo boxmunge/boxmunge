@@ -65,8 +65,8 @@ def test_project_entries_copied_and_links_made_relative(project, tmp_path) -> No
     assert os.readlink(release / "manifest.yml") == "repo/manifest.yml"
     assert (release / "compose.yml").read_text() == "services: {}\n"
     assert (release / ".env").read_text() == "X=1\n"
-    # The commit has no scripts: production's are not the staged commit's.
-    assert not os.path.lexists(release / "boxmunge-scripts")
+    # The commit has no scripts: production's stay, as a promote would leave them.
+    assert (release / "boxmunge-scripts" / "smoke.sh").read_text() == "true\n"
     for state in ("secrets.env", "data", "data-staging"):                # box state stays
         assert not os.path.lexists(release / state)
 

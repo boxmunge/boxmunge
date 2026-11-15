@@ -19,7 +19,7 @@ Managed by [boxmunge](https://github.com/boxmunge/boxmunge).
    boxmunge secrets set __PROJECT_NAME__ KEY=value
    ```
 3. Configure `boxmunge-scripts/smoke.sh` with health checks for your services, and commit it:
-   every deploy uses the deployed commit's `boxmunge-scripts/`.
+   every deploy copies the deployed commit's `boxmunge-scripts/` (as regular files, not links).
 4. Validate the project config:
    ```
    boxmunge validate __PROJECT_NAME__

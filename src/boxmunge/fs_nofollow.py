@@ -13,6 +13,7 @@ import errno
 import fcntl
 import logging
 import os
+import shutil
 import pwd
 import stat
 from collections.abc import Sequence
@@ -425,3 +426,14 @@ def _write_all(fd: int, data: bytes, name: str) -> None:
             raise OSError(errno.EIO, f"copying {name} wrote nothing with {len(left)} "
                           "bytes left; refusing to leave it truncated")
         left = left[written:]
+
+
+def clear_dir_nofollow(fd: int) -> None:
+    """Remove everything in the open directory ``fd``, keeping the directory
+    itself (its inode, so a bind mount of it survives). Entries are reached
+    through ``fd`` and never followed: a link is removed, not its target."""
+    for name in os.listdir(fd):
+        if stat.S_ISDIR(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
+            shutil.rmtree(name, dir_fd=fd)
+        else:
+            os.unlink(name, dir_fd=fd)

@@ -90,6 +90,16 @@ class TestValidate:
         assert "smoke 'boxmunge-scripts/smoke.sh' runs /boxmunge-scripts/smoke.sh" in err
         assert "upload a new bundle" in err
 
+    def test_a_missing_script_exits_as_deploy_does_before_compose_checks(
+            self, paths: BoxPaths, capsys) -> None:
+        """Deploy refuses the missing script first (exit 1): so does validate."""
+        _setup_project(paths, "myapp", "schema_version: 3\n" + VALID_MANIFEST
+                       + "security:\n  posture: strict\n")
+        (paths.project_dir("myapp") / "boxmunge-scripts" / "smoke.sh").unlink()
+        assert run_validate("myapp", paths) == 1
+        err = capsys.readouterr().err
+        assert "smoke 'boxmunge-scripts/smoke.sh'" in err and "posture" not in err
+
     def test_a_git_projects_scripts_are_read_from_its_repository(
             self, paths: BoxPaths, capsys) -> None:
         """Before its next checkout installs them, the commit's scripts count."""
@@ -99,7 +109,8 @@ class TestValidate:
         (project_dir / "boxmunge-scripts").rmdir()
         (project_dir / "repo").mkdir()
         assert run_validate("myapp", paths) == 1
-        assert "the repository has no boxmunge-scripts/smoke.sh" in capsys.readouterr().err
+        assert ("the commit has no boxmunge-scripts/, and the project directory has no "
+                "boxmunge-scripts/smoke.sh") in capsys.readouterr().err
         (project_dir / "repo" / "boxmunge-scripts").mkdir()
         (project_dir / "repo" / "boxmunge-scripts" / "smoke.sh").write_text("#!/bin/sh\n")
         assert run_validate("myapp", paths) == 0

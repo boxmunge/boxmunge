@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import shlex
 import shutil
+import stat
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -25,7 +26,7 @@ from boxmunge.log import log_error
 from boxmunge.manifest import (
     ManifestError, at_current_schema, load_manifest_as_written, validate_manifest,
 )
-from boxmunge.release import SCRIPTS
+from boxmunge.commit_scripts import SCRIPTS, links_refusal, script_links
 from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.user_entries import USER_ENTRIES
 
@@ -165,31 +166,38 @@ def check_release_compose(tree: Path, project_name: str, paths: BoxPaths,
 
 
 def scripts_problems(tree: Path, manifest: dict[str, Any]) -> list[str]:
-    """Each script the manifest runs that the release does not have.
+    """Each script the manifest runs that the release does not have as a
+    regular file (a link is not one: it dangles in the container).
 
     A smoke check runs ``/boxmunge-scripts/<its file name>`` in the
     container, which mounts the release's ``boxmunge-scripts/``, and a
     relative pre_deploy command is run from the release's top directory.
-    A git project's ``boxmunge-scripts/`` is its commit's (in ``repo/``;
-    release.install_commit_scripts puts it beside). Refused before compose
-    runs: Docker would otherwise create a missing ``boxmunge-scripts/`` as
-    an empty root-owned directory."""
+    A git project's ``boxmunge-scripts/`` is its commit's when the commit
+    has one (in ``repo/``; commit_scripts.install_commit_scripts copies it
+    beside), else the project directory's own. Refused before compose runs:
+    Docker would otherwise create a missing ``boxmunge-scripts/`` as an
+    empty root-owned directory."""
     git = (tree / "repo").is_dir()
+    from_repo = git and os.path.lexists(tree / "repo" / SCRIPTS)
+    if from_repo:
+        links = script_links(tree / "repo" / SCRIPTS)
+        if links:
+            return [links_refusal(links, "the repository")]
     problems = []
     services = manifest.get("services")
     for name, svc in (services.items() if isinstance(services, dict) else ()):
         smoke = svc.get("smoke") if isinstance(svc, dict) else None
         if isinstance(smoke, str) and smoke:
             rel = f"{SCRIPTS}/{PurePosixPath(smoke).name}"
-            if not _has(tree, rel, git):
+            if not _has(tree, rel, from_repo):
                 problems.append(f"service {name}: smoke {smoke!r} runs /{rel} in its "
-                                f"container, but {_missing(rel, git)}")
+                                f"container, but {_missing(rel, git, from_repo)}")
     program = _pre_deploy_program(manifest.get("deploy"))
     if "/" in program and not program.startswith("/"):
         rel = os.path.normpath(program)
-        if not _has(tree, rel, git):
+        if not _has(tree, rel, from_repo):
             problems.append(f"deploy.pre_deploy runs {program!r} from the project "
-                            f"directory, but {_missing(rel, git)}")
+                            f"directory, but {_missing(rel, git, from_repo)}")
     return problems
 
 
@@ -202,17 +210,23 @@ def _pre_deploy_program(deploy: object) -> str:
     return words[0] if words else ""
 
 
-def _has(tree: Path, rel: str, git: bool) -> bool:
-    from_repo = git and rel.split("/")[0] == SCRIPTS
-    return (tree / "repo" / rel if from_repo else tree / rel).is_file()
+def _has(tree: Path, rel: str, from_repo: bool) -> bool:
+    """``rel`` is a regular file, not a link (lstat), in the release."""
+    path = tree / "repo" / rel if from_repo and rel.split("/")[0] == SCRIPTS else tree / rel
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
 
 
-def _missing(rel: str, git: bool) -> str:
+def _missing(rel: str, git: bool, from_repo: bool) -> str:
     if not git:
         return (f"the release has no {rel}: add it to the project, then upload a new "
                 f"bundle and deploy it")
     if rel.split("/")[0] == SCRIPTS:
-        return (f"the repository has no {rel} at this commit: commit it there, then "
+        where = ("the repository has" if from_repo else
+                 f"the commit has no {SCRIPTS}/, and the project directory has")
+        return (f"{where} no {rel} as a regular file: commit it in the repository, then "
                 f"deploy that commit")
     return (f"the project directory has no {rel}: of a git project's repository, only "
             f"{SCRIPTS}/ is put there, so commit the script under {SCRIPTS}/ and name it "

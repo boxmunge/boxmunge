@@ -92,8 +92,9 @@ For projects hosted in a git repository.
    promote myapp
    ```
 
-The repository's `boxmunge-scripts/` (smoke checks, a `pre_deploy` script) is put in the project
-directory at every checkout, so nothing is placed on the server by hand.
+The repository's `boxmunge-scripts/` (smoke checks, a `pre_deploy` script) is copied into the
+project directory at every checkout of a commit that has one, so nothing is placed on the server by
+hand; a commit without one leaves the existing scripts in place.
 
 Deploy a specific git ref:
 

@@ -95,6 +95,8 @@ def gather_validation(project_name: str, paths: BoxPaths) -> Validation:
         errors.append(str(e))
         return done()
     errors.extend(scripts_problems(project_dir, manifest))
+    if errors:
+        return done()  # deploy refuses these first (exit 1), before compose.yml's checks
     try:
         check_release_compose(project_dir, project_name, paths, manifest)
     except ComposeSecurityError as e:

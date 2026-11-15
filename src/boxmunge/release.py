@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -37,7 +39,8 @@ from boxmunge.data_dirs import (
 )
 from boxmunge.fileutil import atomic_write_text, discard_dir, fsync_dir, sync_entries
 from boxmunge.fs_nofollow import (
-    chmod_nofollow, chown_tree_deploy, mkdir_p_deploy, read_text_nofollow_or_none,
+    chmod_nofollow, chown_tree_deploy, clear_dir_nofollow, copy_entry_nofollow, mkdir_p_deploy,
+    read_text_nofollow_or_none,
 )
 from boxmunge.staged_release import SLOT, release_dir
 
@@ -206,11 +209,13 @@ def _remove(path: Path) -> None:
 
 
 def _copy_entry(src: Path, dest: Path) -> None:
-    """Copy one entry, keeping links as links. dest must not exist."""
-    if src.is_dir() and not src.is_symlink():
-        shutil.copytree(src, dest, symlinks=True)
-    else:
-        shutil.copy2(src, dest, follow_symlinks=False)
+    """Copy one entry, keeping links as links, never through a link on either
+    side and without setuid or setgid bits (fs_nofollow.copy_entry_nofollow).
+    dest must not exist and must have src's name."""
+    if src.name != dest.name:
+        raise ValueError(f"cannot copy {src} to {dest}: the names differ")
+    with _dir_fd(src.parent) as src_fd, _dir_fd(dest.parent) as dest_fd:
+        copy_entry_nofollow(src_fd, src.name, dest_fd)
 
 
 def _refresh_dir_in_place(src_dir: Path, dest_dir: Path) -> None:
@@ -218,12 +223,23 @@ def _refresh_dir_in_place(src_dir: Path, dest_dir: Path) -> None:
 
     The top-level ``dest_dir`` inode is never recreated, so a live container
     bind-mounting it keeps resolving the mount (see install_entry). Nested
-    entries are not bind-mount roots, so they are replaced wholesale.
+    entries are not bind-mount roots, so they are replaced wholesale, through
+    descriptors that never follow a link the deploy user planted.
     """
-    for child in dest_dir.iterdir():
-        _remove(child)
-    for child in src_dir.iterdir():
-        _copy_entry(child, dest_dir / child.name)
+    with _dir_fd(src_dir) as src_fd, _dir_fd(dest_dir) as dest_fd:
+        clear_dir_nofollow(dest_fd)
+        for name in sorted(os.listdir(src_fd)):
+            copy_entry_nofollow(src_fd, name, dest_fd)
+
+
+@contextmanager
+def _dir_fd(path: Path) -> Iterator[int]:
+    """A descriptor of the directory ``path``, refusing a link at its name."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
 
 
 def _install_entry(item: Path, dest_item: Path) -> None:
@@ -346,38 +362,6 @@ def install_release(tree: Path, project_dir: Path,
     retained = dirs.retained()
     warn_retained(dirs, retained)
     return KeptData(retained=retained, copies=copies)
-
-
-SCRIPTS = "boxmunge-scripts"
-
-
-def install_commit_scripts(tree: Path) -> None:
-    """Make a git release's ``boxmunge-scripts/`` its checked-out commit's.
-
-    The overlay mounts ``./boxmunge-scripts`` from the release's top
-    directory (the project dir, or a git slot's release) and a relative
-    pre_deploy runs from there, but a git project's scripts are committed
-    in ``repo/``. So after every checkout ``tree/boxmunge-scripts`` is made
-    exactly ``tree/repo/boxmunge-scripts`` (refreshed in place, so a running
-    container's mount survives; see _install_entry), or removed when the
-    commit has none. Raises ReleaseStateError for a committed entry that is
-    not a directory; OSError if copying fails.
-    """
-    src, dest = tree / "repo" / SCRIPTS, tree / SCRIPTS
-    if not os.path.lexists(src):
-        if os.path.lexists(dest):
-            _remove(dest)
-            print(f"  NOTE: removed {SCRIPTS}/ from {tree}: the checked-out commit has "
-                  f"none, and a git project's scripts come from its repository")
-        return
-    if src.is_symlink() or not src.is_dir():
-        raise ReleaseStateError(
-            f"{src} is not a directory. boxmunge copies a git project's {SCRIPTS}/ "
-            f"from the checked-out commit: commit it as a directory of scripts at the top "
-            f"of the repository (not a link), then deploy that commit")
-    _install_entry(src, dest)
-    _make_scripts_executable([dest])
-    chown_tree_deploy(dest)
 
 
 def live_ref(paths: BoxPaths, project_name: str) -> str:

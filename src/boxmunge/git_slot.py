@@ -236,10 +236,10 @@ def checkout_detached(repo: Path, sha: str) -> None:
 
 def checkout_release(project_dir: Path, sha: str) -> None:
     """Check ``sha`` out in production's ``repo/`` (checkout_detached) and
-    install its boxmunge-scripts/ beside it (release.install_commit_scripts).
+    install its boxmunge-scripts/ beside it (commit_scripts.install_commit_scripts).
     Idempotent, so a resume at any phase makes sure the tree is the SHA's."""
     from boxmunge.data_dirs import ReleaseStateError
-    from boxmunge.release import install_commit_scripts
+    from boxmunge.commit_scripts import install_commit_scripts
     checkout_detached(project_dir / "repo", sha)
     try:
         install_commit_scripts(project_dir)
@@ -326,7 +326,7 @@ def materialise(project_dir: Path, sha: str, release: Path, *,
     the staged release: staging runs only from the staged tree. ``made``
     is what the current slot records that staging created (staging_copies).
     """
-    from boxmunge.release import install_commit_scripts
+    from boxmunge.commit_scripts import install_commit_scripts
     _require_full_sha(sha, "stage")
     _refuse_foreign_copies(project_dir, made)
     source, clone = project_dir / "repo", release / "repo"
@@ -397,16 +397,15 @@ def _refuse_foreign_copies(project_dir: Path, made: Collection[str]) -> None:
 
 def copy_project_entries(project_dir: Path, release: Path) -> None:
     """Production's release-code entries other than repo/ (.env, project.env,
-    operator-placed files) are copied verbatim, links as links and never
-    through one (fs_nofollow.copy_entry_nofollow); a link into repo/
-    (production's are absolute) is recreated as a relative link to the
-    slot's repo/. boxmunge-scripts/ is not copied: it is the staged
-    commit's (release.install_commit_scripts). Box state and staging's
-    ``-staging`` copies stay in the project dir (materialise refused any
-    other ``-staging`` entry). The current slot is not read (a re-stage
-    replaces it)."""
+    boxmunge-scripts/, operator-placed files) are copied verbatim, links as
+    links and never through one (fs_nofollow.copy_entry_nofollow); a link
+    into repo/ (production's are absolute) is recreated as a relative link
+    to the slot's repo/. Box state and staging's ``-staging`` copies stay in
+    the project dir (materialise refused any other ``-staging`` entry). The
+    current slot is not read (a re-stage replaces it). materialise then
+    refreshes boxmunge-scripts/ from the staged commit, when it has one."""
     from boxmunge.bundle import STAGING_SUFFIX
-    from boxmunge.release import SCRIPTS, project_data_dirs
+    from boxmunge.release import project_data_dirs
     state = project_data_dirs(project_dir, with_staged=False).box_state()
     repo = os.path.normpath(project_dir / "repo")
     src = os.open(project_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
@@ -414,8 +413,8 @@ def copy_project_entries(project_dir: Path, release: Path) -> None:
         dest = os.open(release, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
         try:
             for name in sorted(os.listdir(src)):
-                if name in state or name.endswith(STAGING_SUFFIX) or name == SCRIPTS:
-                    continue  # box state, staging's copy of it (checked above), or the commit's
+                if name in state or name.endswith(STAGING_SUFFIX):
+                    continue  # box state, or staging's copy of it (checked above)
                 if stat.S_ISLNK(os.stat(name, dir_fd=src, follow_symlinks=False).st_mode):
                     target = os.path.normpath(os.path.join(project_dir,
                                                            os.readlink(name, dir_fd=src)))
