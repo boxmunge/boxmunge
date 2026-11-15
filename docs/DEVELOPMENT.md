@@ -177,7 +177,6 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `release_txn.py` | `load_txn`, `_sha` | `.releases/install.json` | `projects/<p>/` |
 | `staged_release.py` | `load_slot` | the staging slot's `meta.json` | `projects/<p>/` |
 | `data_dirs.py` | `_load_record` | `.releases/data-dirs.json` | `projects/<p>/` |
-| `unresolved_stage.py` | `_state_active`, `_records` | a stage state file from 0.10.1 or earlier, `legacy-stages.json` | `state/` |
 | `compose_up_steps.py` | `restore_build_names` | the generated compose overlay | `projects/<p>/` |
 | `overlay_users.py` | `_overlay_users` | the generated compose overlay | `projects/<p>/` |
 | `upgrade_state.py` | `_read_json` | `probation.json`, `blocklist.json` | `upgrade-state/` |
@@ -259,7 +258,7 @@ added again under the same name reuses them. Create a new lock under `state/` wi
 | `state/container-updates/.lock` | `commands/container_update_cmd.py` (doesn't wait) | one container-update run at a time | kept for good |
 | `logs/.<log name>.lock` | `log_rotation` (doesn't wait) | rotating that log | kept for good |
 | `upgrade-root/upgrade.lock` | the upgrade shim, `upgrade_state.upgrade_lock` (doesn't wait: `UpgradeInProgress`) | one platform upgrade at a time | kept for good |
-| `upgrade-state/upgrade.lock` | the same, together with the one above | upgrades started by a shim from 0.10.1 or earlier | kept while such a shim can still run; the shim replaces one that isn't root's (`acquire_lock` in `scripts/boxmunge-upgrade.d/state.sh`) |
+| `upgrade-state/upgrade.lock` | nothing since 0.12: shims up to 0.11.11 took it with the one above | (upgrades started by a shim from 0.10.1 or earlier) | left on a box where an older shim made it |
 | `state/.cve-grace.lock` | nothing: retired | (the v0.6 grace window) | deleted by the CVE scan where an old release left it |
 
 `upgrade-root/` is root-only, so `deploy` can't replace the upgrade lock. The others are in
@@ -386,22 +385,22 @@ PyPI Trusted Publishing, so no API token exists anywhere.
 
 ### The upgrade floor
 
-A release installs only over 0.11.0 or later: `UPGRADE_FLOOR` in `src/boxmunge/upgrade_floor.py`,
+A release installs only over 0.11.11 or later: `UPGRADE_FLOOR` in `src/boxmunge/upgrade_floor.py`,
 and the same value in `bootstrap/upgrade-floor.sh` for an `install.sh` run by hand (a test keeps
-the two equal). Below the floor the release refuses in the old shim's pre-flight, before that
-shim changes anything, and names the bridge release (`BRIDGE_RELEASE`, 0.11.6): the last
-release that installs over an older box. `tests/integration/test_shim_hop.py` runs released
-shims against the tree. Below the floor it proves the refusal leaves the box on its release and
-still able to install the bridge release; from the floor up, that the hop completes.
+the two equal). The floor is 0.11.11 because a failed upgrade is rolled back by the shim that
+started it, and 0.11.11's is the first that puts the previous release's systemd units back
+(`scripts/boxmunge-upgrade.d/units.sh`), which 0.12 needs: it adds units and retires others.
+Below the floor the release refuses in the old shim's pre-flight, before that shim changes
+anything, and names the bridge release (`BRIDGE_RELEASE`, 0.11.11), the one release to
+install first. The bridge has a floor of its own (0.11.0, bridge 0.11.6), so a box below 0.11.0
+is refused by it in turn and pointed at 0.11.6: every box reaches the floor in at most three
+steps. `tests/integration/test_shim_hop.py` runs released shims against the tree. Below the
+floor it proves the refusal leaves the box on its release and still able to install the bridge
+release; at the floor, that the hop completes, and that a hop rolled back after the swap puts
+the previous release's units back.
 
 Code that exists only for a source below the floor is deleted. Code kept for a source above it
-says, where it lives, which floor retires it. Today that is 0.11.1 (the `report_failure` probe
-in the shim; re-owning root-made directories in `deploy_dirs.py`), 0.11.5 (a rollback with no
-recorded stash), 0.11.6 (adopting a probation with no root record) and 0.11.7 (the shim's
-legacy lock; `bootstrap/caddy-log-path.sh`, which refuses a box whose Caddy configs write a log
-under `/var/log/caddy`; `unresolved_stage.py`, which refuses a box that still holds a stage
-0.10.1 or earlier made, with `unresolved_stage_install.py` and `bootstrap/unresolved-stage.sh`,
-which ask it for an `install.sh` run by hand).
+says, where it lives, which floor retires it. Today there is none.
 
 To raise the floor, announce it in the release notes of the release that becomes the bridge,
 then in the next release change the constants in both files, move the hop test's shims across,

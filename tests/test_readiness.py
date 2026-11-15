@@ -45,7 +45,7 @@ def test_a_clean_box_passes(box) -> None:
     add_project(box, "alpha")
     r = evaluate(box)
     assert r.result == "pass" and ids(r) == []
-    assert [p.name for p in r.projects] == ["alpha"] and r.installed == "0.11.7"
+    assert [p.name for p in r.projects] == ["alpha"] and r.installed == "0.11.11"
     assert parse(to_json(r)) == r
 
 
@@ -62,7 +62,7 @@ def test_box_upgrade_floor(box) -> None:
     r = evaluate(box)
     finding = _only(r, "box.upgrade_floor")
     assert finding.severity == "block" and r.result == "blocked"
-    assert "0.10.4" in finding.message and "`upgrade --target 0.11.6`" in finding.remedy
+    assert "0.10.4" in finding.message and "`upgrade --target 0.11.11`" in finding.remedy
     assert "blocklist" not in finding.message  # the check leaves no blocklist entry
     assert r.installed == "0.10.4"
 
@@ -73,8 +73,8 @@ def test_box_upgrade_floor_without_a_version_record(box) -> None:
     finding = _only(r, "box.upgrade_floor")
     assert str(box.version_file) in finding.remedy
     assert finding.message == (f"{box.version_file} does not record the release this box "
-                               f"runs as one line like 0.11.6 (it is missing), and an "
-                               f"upgrade must start from 0.11.0 or later")
+                               f"runs as one line like 0.11.11 (it is missing), and an "
+                               f"upgrade must start from 0.11.11 or later")
     assert r.installed == "0.0.0" and r.result == "blocked"
 
 

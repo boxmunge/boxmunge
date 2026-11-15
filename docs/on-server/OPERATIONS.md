@@ -219,10 +219,7 @@ staged release's own in `.releases/staged/release/`.
 
 The staged release lives in `.releases/staged/`, so the project directory stays production's and
 production starts as usual during a stage (upgrade restarts, container updates, `recover`,
-`resume`, `security resume`, `restore`). A release staged by boxmunge 0.10.1 or earlier is
-different: it put the staged release's files in the project directory. This release does not
-handle such a stage, and its upgrade refuses until each one is resolved on 0.11.6 (see
-"Upgrading with a release staged by 0.10.1 or earlier").
+`resume`, `security resume`, `restore`).
 
 A bind mount, config or secret file in a data directory (any directory a release has mounted
 read-write) or another server-owned entry (`data/`, `secrets.env`) points staging at the entry's
@@ -646,19 +643,6 @@ Caddy's container has no writable log path: its root filesystem is read-only and
 mounted at `/var/log/caddy`. A `caddy.override.conf` or a hand-placed file in `caddy/sites/` that
 writes a log file there stops Caddy from loading its config. Use the log block boxmunge generates
 (stdout) instead.
-
-Releases 0.11.0 to 0.11.6 mounted a tmpfs there, so such a file worked on them. An install or
-upgrade to 0.11.7 or later looks for `/var/log/caddy` in `caddy/sites/*.conf`, in the site files
-waiting in `caddy/.site-journal/` and in every `projects/*/caddy.override.conf`, before it changes
-anything. If one names it, the install stops and lists the files, and the box stays on its
-release with its sites up. In each file, remove the log block or make it `output stdout`. An
-upgrade that stopped this way blocklisted the release it was installing, so clear that and
-upgrade again:
-
-```
-sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist <version>
-sudo /opt/boxmunge/bin/boxmunge-upgrade target <version>
-```
 
 ---
 
@@ -1535,11 +1519,10 @@ any item is FAIL. Address each FAIL, then each WARN, then re-run `doctor`.
 
 Issues requiring system-level investigation or repair (systemd timers, file permissions, Caddy container state) require the **supervisor** user.
 
-**"Deploy can write <directory>" FAIL** (for example `state/scans`). A box installed before v0.9.3
-can have directories root made that the deploy shell writes (`state/scans`, `state/health`,
-`state/deploy`, the other per-project state directories, `projects/<name>/security`), so a command
-in the deploy shell fails there: `security scan` with "Permission denied". The upgrade creates and
-re-owns them (and what root made inside them); until it runs, doctor prints the fix
+**"Deploy can write <directory>" FAIL** (for example `state/scans`). A directory the deploy shell
+writes (`state/scans`, `state/health`, `state/deploy`, the other per-project state directories,
+`projects/<name>/security`) is not the deploy user's, so a command in the deploy shell fails
+there: `security scan` with "Permission denied". Doctor prints the fix
 (`sudo chown -R deploy:deploy <directory>`), to run as the supervisor.
 
 **"MCP package installed" FAIL.** The live environment lacks the `mcp` package, so agents cannot
@@ -1932,10 +1915,12 @@ self-test
 
 ## Upgrading the Platform
 
-An upgrade starts from 0.11.0 or later. From 0.11.7 on, a release refuses to be installed over
-anything older: the upgrade stops at its pre-flight with the box unchanged, and names the way
-through, `sudo /opt/boxmunge/bin/boxmunge-upgrade target 0.11.6`. For a box still on 0.9 or
-0.10, follow [UPGRADING.md](UPGRADING.md), "Upgrading from 0.9 or 0.10".
+An upgrade to 0.12 or later starts from 0.11.11 or later: a release refuses to be installed
+over anything older, the upgrade stops at its pre-flight with the box unchanged, and it names
+the way through, `sudo /opt/boxmunge/bin/boxmunge-upgrade target 0.11.11`. On 0.11.0 to 0.11.10,
+run that, then upgrade (auto-update installs 0.11.11 by itself, as a break-fix release). 0.11.11
+installs only over 0.11.0 or later, so for a box still on 0.9 or 0.10, follow
+[UPGRADING.md](UPGRADING.md), "Upgrading from 0.9 or 0.10", first.
 
 Apply platform updates:
 
@@ -2090,10 +2075,7 @@ How an upgrade is applied and undone:
 3. The venvs swap and `upgrade --apply` first rewrites the latest stash without the symlink
    members an older release wrote, so a rollback's `stash restore` cannot abort on them (a
    failure leaves the stash as it is, sends a high-priority alert and does not stop the
-   upgrade). It creates any missing `state/` directory the deploy user writes, and gives
-   deploy any of those, or any `projects/<name>/security`, that root made (boxes installed
-   before v0.9.3); one it cannot re-own is printed as `FAIL` with the `chown` to run, and does
-   not stop the upgrade. It then migrates manifests and regenerates every project's Caddy site
+   upgrade). It creates any missing `state/` directory the deploy user writes. It then migrates manifests and regenerates every project's Caddy site
    and compose overlay, project by project under that project's lock, reloads Caddy and
    restarts projects. A restart starts the images the project's last deploy built and
    pulled: it never builds or pulls, so an upgrade cannot put an image on the box that no
@@ -2110,9 +2092,7 @@ How an upgrade is applied and undone:
    Two kinds of project are left exactly as they are (not migrated, regenerated or
    restarted), reported as `LEFT AS IS` or `Skipped (busy)`, alerted, and do not fail the
    upgrade: one with an open install, and one busy with another operation (it keeps its
-   previous configs until its next deploy, resume or recover). A project that holds a
-   release staged by boxmunge 0.10.1 or earlier is not left as is: the upgrade refuses
-   before it changes anything (see "Upgrading with a release staged by 0.10.1 or earlier"). A bundle project's manifest
+   previous configs until its next deploy, resume or recover). A bundle project's manifest
    is rewritten at the new schema. A git project's is not: its `manifest.yml` links into
    `repo/`, so it is migrated in memory and you are alerted once to update it in the
    repository (see "Deploying a New Project (Git)"). A failure in any of these
@@ -2172,11 +2152,10 @@ them. It also puts back the previous release's systemd units: each venv slot kee
 its release's units (`env-<slot>/boxmunge-systemd`), so the units the newer release added (in
 0.12, `boxmunge-maintenance.timer`, `boxmunge-kev-watch.timer` and `boxmunge-autofix.service`)
 are disabled and removed, and the ones it retired come back enabled. The next upgrade then runs
-the new release's `install.sh` again. A rollback during the upgrade to 0.12 itself (its dry run
-passed but `upgrade --apply` or the first health check failed) is run by the previous release's
-shim, which does not do this; the 0.12 shim is installed by then, and the health timer's next
-`check-probation` (within minutes) finds the live units are not the live slot's and puts them
-back. The same check runs on every `check-probation` and upgrade, so it also reverts hand edits
+the new release's `install.sh` again. Shims before 0.11.11 do not do this, which is why 0.12
+installs only over 0.11.11 or later: the shim running that upgrade is one that does. Every
+`check-probation` and upgrade also checks that the live units are the live slot's and, if not,
+puts the slot's back (within minutes, on the health timer). So it also reverts hand edits
 to the `boxmunge-*` unit files in `/etc/systemd/system`: put local changes in drop-ins
 (`sudo systemctl edit boxmunge-<unit>`), which it leaves alone. A slot with no copy keeps the
 newer units, logged as an error: reinstall the running release to put its own units back. A
@@ -2342,81 +2321,7 @@ discovery", both saying that updates are not being discovered. A plain `upgrade`
 refuses with the same message. Watch <https://github.com/boxmunge/boxmunge/releases>
 and install a release with `upgrade --target X.Y.Z`, which asks nothing; it downloads
 the release from GitHub, like every upgrade. The value must be `true` or `false`.
-Set it back to `true` to discover releases again. One exception: if this box rolls back from
-a release that has the setting to one that predates it (0.11.4 or older), the older release's
-code reports that rollback once, because it does not know the setting.
-
-## Upgrading with a release staged by 0.10.1 or earlier
-
-boxmunge 0.10.1 and earlier staged a release into the project directory, over or beside
-production's files. Releases 0.11.0 to 0.11.6 leave such a project as it is and resolve it with
-their `legacy-stage` command. This release has no such command, and its upgrade restarts every
-project, so it must never start one whose directory holds staged files. A box on 0.11.x that
-still carries such a stage is therefore refused by the upgrade's dry run, before any project is
-touched:
-
-```
-ERROR: 1 project (myapp) holds a release that boxmunge 0.10.1 or earlier staged over production's files, and it is not resolved. An upgrade restarts every project, and this release neither starts a project from staged files nor has the legacy-stage command that resolves them. On this box, on the release it runs now (boxmunge 0.11.6):
-  - myapp: a release staged by boxmunge 0.10.1 is unresolved (bundle); run `boxmunge-server legacy-stage myapp` and take one of the choices it shows
-Then retry the upgrade.
-```
-
-The box keeps running the release it is on. The refusal is also logged as an error (`log
---component upgrade`) and sent as one priority-1 Pushover alert that names the release and the
-projects, because an auto-update's dry run has nobody watching it. Each line names one project
-and the command the release the box still runs accepts for it:
-
-- **`a release staged by ... is unresolved (<kind>)`**: run `sudo boxmunge-server legacy-stage
-  <project>`, which shows what production runs and the choices it allows (`--discard`,
-  `--keep-staged`), then run it again with the one you choose. `<kind>` is `bundle`, `git`,
-  `leftover` (a 0.10.1 promote whose unstage did not finish) or `pre0101` (a stage made by a
-  release before 0.10.1).
-- **`the resolution ... was started with --<choice> and is not finished`**: run the command
-  it names, `sudo boxmunge-server legacy-stage <project> --<choice>`, again.
-- **`its directory holds the files of a stage that legacy-stage discarded, and no deploy has
-  replaced them`**: `--discard` of a stage made before 0.10.1 stops staging but cannot put
-  production's files back. Upload the bundle of the release production should run, then run
-  `prod-deploy <project>`.
-- **`its record says a resolution was started with --keep-staged, which legacy-stage does not
-  offer for a <kind> stage`**: the project's entry in `state/legacy-stages.json` was edited by
-  hand, and no `legacy-stage` command finishes it. Remove that project's entry from the file
-  the line names, then run `sudo boxmunge-server legacy-stage <project>`: it shows the choices
-  for the stage, or says the project has none.
-
-On a box below 0.11.6 the refusal says to upgrade to 0.11.6 first (`sudo
-/opt/boxmunge/bin/boxmunge-upgrade target 0.11.6`) and to resolve the stage there: before
-0.11.6, `legacy-stage --discard` starts production from the files of a stage made before
-0.10.1. On 0.11.6, a `legacy-stage` choice waits for that upgrade's probation to end (six
-hours). If the box has no record of the release it runs, the refusal says so instead:
-`boxmunge-server version` shows the release, and the commands it lists are the ones 0.11.6
-accepts. That release's own OPERATIONS.md (`/opt/boxmunge/docs/OPERATIONS.md` on the box)
-describes `legacy-stage` in full.
-
-A failed dry run blocklists the release on the box, and the refusal ends by saying so. Once
-every project it named is resolved, clear the blocklist and retry:
-
-```
-sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist <version>
-```
-
-then run the upgrade again.
-
-`install.sh` run by hand on such a box (`sudo bash install.sh` from an extracted bundle, with no
-upgrade shim) is refused the same way, before it changes anything: it prints the same lines,
-ending `Then run the install again.`, exits 1, and sends no alert and blocklists nothing. If it
-cannot run the check, it stops with an error that says so, and installs nothing.
-
-If the upgrade cannot tell (it cannot read `state/legacy-stages.json`, `legacy-stage`'s record;
-a project's entry there records a choice that is not `discard` or `keep-staged`; or it cannot
-examine a project directory, for example because `.releases` or `state/staging` is a file), it
-refuses and alerts the same way with `Cannot tell which projects hold a release ...`, naming
-the error. Repair what it names, then clear the blocklist and retry.
-
-An install left open by an interrupted deploy (see "An interrupted or failed install") is also
-left as is by the upgrade. A record that no longer matches the files, after a platform rollback to
-0.10.1 and a redeploy by it, is reported as stale; check production, then drop it as root with
-`boxmunge-server install-txn <project> --drop`.
-
+Set it back to `true` to discover releases again.
 
 ## Querying Logs
 

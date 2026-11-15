@@ -33,7 +33,7 @@ def _box(tmp_path: Path, before_deploy=lambda paths: None) -> BoxPaths:
               "caddy/sites", "upgrade-state"]:
         (paths.root / d).mkdir(parents=True)
     paths.config_file.write_text("hostname: test\nadmin_email: t@t\n")
-    write_installed_version(paths, "0.11.0", "abc1234")
+    write_installed_version(paths, "0.11.11", "abc1234")
     pdir = paths.project_dir("shop")
     pdir.mkdir(parents=True)
     (pdir / "manifest.yml").write_text(manifest_text("shop"))

@@ -27,7 +27,7 @@ COMMAND = re.compile(r"\b(prod-deploy|upgrade(-check)?|validate|project-delete|a
                      r"systemctl|resume|install-txn|rollback)\b")
 
 
-def make_box(root: Path, installed: str = "0.11.7") -> BoxPaths:
+def make_box(root: Path, installed: str = "0.11.11") -> BoxPaths:
     paths = BoxPaths(root=root)
     for d in ("config", "projects", "state/deploy", "stashes", "logs", "caddy/sites",
               "upgrade-state"):
