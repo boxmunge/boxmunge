@@ -154,13 +154,17 @@ _TRIVY_CLASS_MAP: dict[str, PkgClass] = {
     c.value: c for c in PkgClass if c is not PkgClass.UNKNOWN
 }
 
-# OS-distro vendor source ids, in preference order. distro_severity() walks
-# these to find the distro's own severity, ignoring NVD/GHSA (upstream feeds
-# that don't reflect distro triage).
-_DISTRO_SOURCES: tuple[str, ...] = (
-    "debian", "ubuntu", "redhat", "alpine", "amazon",
-    "oracle", "photon", "suse", "rocky", "alma",
-)
+# Trivy OS result `Type` -> the VendorSeverity key of that distro's own
+# security team. distro_severity() reads only the scanned image's own distro:
+# another distro's rating (ubuntu or the redhat family on a Debian image) is
+# not the verdict of the team that triaged the package, and counting it let a
+# finding Debian triaged as minor quarantine a site. Unlisted types have no
+# distro verdict.
+_OS_TYPE_VENDOR: dict[str, str] = {
+    "debian": "debian", "ubuntu": "ubuntu", "alpine": "alpine",
+    "redhat": "redhat", "centos": "redhat", "rocky": "rocky", "alma": "alma",
+    "amazon": "amazon", "oracle": "oracle-oval", "photon": "photon",
+}
 
 
 # Source priority for resolving disagreements when multiple feeds report a
@@ -198,11 +202,8 @@ class Finding:
     vendor_severities: dict[str, Severity] = field(default_factory=dict)
     severity_source: str | None = None
     pkg_class: PkgClass = PkgClass.UNKNOWN
-    # Trivy's raw `Type` (e.g. "debian", "python-pkg"). Not read by any
-    # decision path today — pkg_class is the field the relevance gate and
-    # policy engine act on — but it's spec-mandated diagnostic payload
-    # (finer-grained than pkg_class) kept for future triage/debugging. Do
-    # not delete as unused.
+    # Trivy's raw `Type` (e.g. "debian", "python-pkg"). For OS packages it
+    # names the distro whose own severity distro_severity() reads.
     pkg_type: str | None = None
 
     @property
@@ -407,18 +408,17 @@ def _parse_vendor_severities(raw: Any) -> dict[str, Severity]:
 
 
 def distro_severity(finding: Finding) -> Severity | None:
-    """Return the OS-distro vendor's severity for this finding, or None.
+    """Return the scanned image's own distro severity for this finding, or None.
 
-    Walks _DISTRO_SOURCES in order and returns the first present, non-UNKNOWN
-    vendor severity. None means "no distro verdict" — only upstream feeds
-    (NVD/GHSA) rated this CVE, so the policy engine has no distro opinion to
-    quarantine on below paranoid posture.
+    Only the vendor source matching the finding's OS type counts (Debian's
+    urgency on a Debian image). None means "no distro verdict": the distro
+    team rated nothing (a Debian no-DSA finding) or only other feeds rated
+    it (NVD, GHSA, other distros), so the policy engine has no distro opinion
+    to quarantine on below paranoid posture.
     """
-    for source in _DISTRO_SOURCES:
-        sev = finding.vendor_severities.get(source)
-        if sev is not None and sev is not Severity.UNKNOWN:
-            return sev
-    return None
+    vendor = _OS_TYPE_VENDOR.get(finding.pkg_type or "")
+    sev = finding.vendor_severities.get(vendor) if vendor else None
+    return None if sev is Severity.UNKNOWN else sev
 
 
 def _parse_attack_vector(cvss: dict[str, Any]) -> AttackVector | None:

@@ -73,6 +73,7 @@ def _finding(
         attack_vector=attack_vector,
         status=status,
         vendor_severities=vendor_severities,
+        pkg_type="debian",
     )
 
 
