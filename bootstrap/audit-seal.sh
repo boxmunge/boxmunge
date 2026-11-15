@@ -12,7 +12,7 @@
 #
 # A host that cannot set the attribute (a filesystem without it, a container
 # without CAP_LINUX_IMMUTABLE) installs anyway: _audit-seal records why in
-# state/audit-append-unsupported and prints a WARNING that deploy can rewrite
+# root-only upgrade-root/audit-append-unsupported and prints a WARNING that deploy can rewrite
 # the audit log on this host; `health` warns. Any other failure fails install.
 set -euo pipefail
 

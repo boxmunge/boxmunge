@@ -56,6 +56,7 @@ def test_a_planted_record_does_not_downgrade_the_error(paths, attr, monkeypatch)
     from boxmunge.api import audit_seal
     seal(paths)
     attr.clear(paths.audit_log)
+    paths.upgrade_root.mkdir(mode=0o700)
     paths.audit_append_unsupported.write_text("EOPNOTSUPP /opt/boxmunge/logs\n")
     monkeypatch.setattr(audit_seal, "_root_owner", lambda: (0, 0))
     check = check_audit_log(paths)

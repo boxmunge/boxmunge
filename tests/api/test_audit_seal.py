@@ -102,14 +102,28 @@ def test_eperm_is_not_unsupported_when_not_root(paths, attr, monkeypatch) -> Non
 
 def test_the_unsupported_message_names_the_filesystem(paths, attr) -> None:
     attr.fail = errno.EOPNOTSUPP
-    with pytest.raises(AppendUnsupported) as excinfo:
-        audit_seal.set_append_only(os.open(paths.logs, os.O_RDONLY), True, where=paths.audit_log)
+    fd = os.open(paths.logs, os.O_RDONLY)
+    try:
+        with pytest.raises(AppendUnsupported) as excinfo:
+            audit_seal.set_append_only(fd, True, where=paths.audit_log)
+    finally:
+        os.close(fd)
     assert (f"the filesystem under {paths.logs} does not support the append-only attribute"
             in str(excinfo.value))
 
 
+def test_the_record_is_root_only(paths, attr) -> None:
+    """In upgrade-root/, root's alone: deploy cannot rename a file into it."""
+    attr.fail = errno.EOPNOTSUPP
+    seal(paths)
+    assert paths.audit_append_unsupported.parent == paths.upgrade_root
+    assert stat.S_IMODE(os.lstat(paths.upgrade_root).st_mode) == 0o700
+    assert stat.S_IMODE(os.lstat(paths.audit_append_unsupported).st_mode) == 0o600
+
+
 def test_a_record_root_did_not_write_is_refused(paths, attr, monkeypatch) -> None:
-    """deploy can write state/: a record it planted must not unseal the log."""
+    """A record that is not root's own must not unseal the log."""
+    paths.upgrade_root.mkdir(mode=0o700)
     paths.audit_append_unsupported.write_text("EOPNOTSUPP /opt/boxmunge/logs\n")
     monkeypatch.setattr(audit_seal, "_root_owner", lambda: (0, 0))
     with pytest.raises(SealError, match="not root's"):
@@ -118,9 +132,27 @@ def test_a_record_root_did_not_write_is_refused(paths, attr, monkeypatch) -> Non
 
 def test_a_linked_record_is_refused(paths, attr, tmp_path) -> None:
     (tmp_path / "real").write_text("EOPNOTSUPP /x\n")
+    paths.upgrade_root.mkdir(mode=0o700)
     paths.audit_append_unsupported.symlink_to(tmp_path / "real")
     with pytest.raises(SealError, match="symlink"):
         audit_seal.read_unsupported(paths)
+
+
+def test_seal_sets_the_attribute_again_on_archives(paths, attr) -> None:
+    """A rotation that failed at step 3 left an archive without it."""
+    archive = paths.logs / "audit.jsonl.2026-11-01"
+    archive.write_text("old\n")
+    seal(paths)
+    assert attr.append_only(archive) and attr.append_only(paths.audit_log)
+
+
+def test_seal_refuses_a_linked_archive_naming_its_removal(paths, attr, tmp_path) -> None:
+    (tmp_path / "real").write_text("")
+    (paths.logs / "audit.jsonl.2026-11-01").symlink_to(tmp_path / "real")
+    with pytest.raises(SealError) as excinfo:
+        seal(paths)
+    assert f"sudo rm {paths.logs / 'audit.jsonl.2026-11-01'}" in excinfo.value.fix
+    assert not attr.flags.get(os.lstat(tmp_path / "real").st_ino)
 
 
 def test_unwritable_audit_log_refuses_the_call_and_runs_nothing(paths, attr) -> None:

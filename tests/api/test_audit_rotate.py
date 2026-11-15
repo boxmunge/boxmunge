@@ -54,6 +54,8 @@ def test_rotate_adopts_a_file_a_writer_created_mid_rotation(sealed, attr, monkey
 
     def rename_then_writer_creates(src, dst, *a, **k):
         real_rename(src, dst, *a, **k)
+        if str(src) != str(sealed.audit_log):
+            return
         with open(sealed.audit_log, "w") as f:
             f.write('{"outcome":"refused"}\n')
         os.chmod(sealed.audit_log, 0o666)
@@ -78,8 +80,9 @@ def test_rotate_keeps_12_archives(sealed, attr, monkeypatch) -> None:
     real_unlink = os.unlink
 
     def unlink(path, *a, **k):
-        assert not attr.append_only(path), f"{path} unlinked while append-only"
-        cleared.append(1)
+        if os.path.dirname(path) == str(sealed.logs):
+            assert not attr.append_only(path), f"{path} unlinked while append-only"
+            cleared.append(1)
         real_unlink(path, *a, **k)
 
     monkeypatch.setattr(audit_rotate.os, "unlink", unlink)
@@ -100,15 +103,58 @@ def test_rotate_of_an_empty_log_does_nothing(paths, attr) -> None:
 
 
 def test_rotate_refuses_an_archive_name_already_taken_before_touching_anything(sealed, attr) -> None:
-    (sealed.logs / "audit.jsonl.2026-12-01").write_text("")
-    with pytest.raises(SealError, match="already exists"):
+    taken = sealed.logs / "audit.jsonl.2026-12-01"
+    taken.write_text("")
+    with pytest.raises(SealError, match="already exists") as excinfo:
         rotate(sealed, DAY)
     assert attr.append_only(sealed.audit_log)
+    assert f"sudo mv {taken} {taken}.old" in excinfo.value.fix
+    assert "_audit-seal" not in excinfo.value.fix
+    assert not os.path.lexists(sealed.audit_rotating)
+
+
+def test_a_linked_archive_past_the_kept_names_its_removal(sealed, attr, tmp_path) -> None:
+    for month in range(1, 13):
+        (sealed.logs / f"audit.jsonl.2025-{month:02d}-01").write_text("old\n")
+    (sealed.logs / "audit.jsonl.2024-01-01").symlink_to(tmp_path / "gone")
+    with pytest.raises(SealError, match="step 5") as excinfo:
+        rotate(sealed, DAY)
+    assert f"sudo rm {sealed.logs / 'audit.jsonl.2024-01-01'}" in excinfo.value.fix
+    assert not os.path.lexists(sealed.audit_rotating)
+
+
+def test_health_warns_while_a_rotation_has_the_log_moved_aside(sealed, attr, monkeypatch) -> None:
+    """A health tick between the move and the new log must not error: in
+    probation an error rolls the upgrade back."""
+    from boxmunge.health_checks.audit_log import check_audit_log
+    seen = []
+    real_rename = os.rename
+
+    def rename_then_health(src, dst, *a, **k):
+        real_rename(src, dst, *a, **k)
+        if str(src) == str(sealed.audit_log):
+            seen.append(check_audit_log(sealed))
+
+    monkeypatch.setattr(audit_rotate.os, "rename", rename_then_health)
+    rotate(sealed, DAY)
+    (during,) = seen
+    assert (during.status, during.detail.split(":")[0]) == ("warn", "rotation in progress")
+    assert not os.path.lexists(sealed.audit_rotating)
+    assert check_audit_log(sealed).status == "ok"
+
+
+def test_a_stale_rotation_marker_is_ignored(paths, attr) -> None:
+    from boxmunge.health_checks.audit_log import check_audit_log
+    audit_seal.mark_rotating(paths)
+    old = audit_seal.time.time() - audit_seal.ROTATION_MARKER_FRESH_SECONDS - 1
+    os.utime(paths.audit_rotating, (old, old))
+    assert check_audit_log(paths).status == "error"   # the log is missing
 
 
 def test_rotate_of_a_missing_log_names_the_seal(paths, attr) -> None:
-    with pytest.raises(SealError, match="_audit-seal"):
+    with pytest.raises(SealError, match="missing") as excinfo:
         rotate(paths, DAY)
+    assert excinfo.value.fix == audit_seal.SEAL_FIX
 
 
 def test_rotate_on_unsupported_host_rotates_without_attribute_steps(paths, attr,

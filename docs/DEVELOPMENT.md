@@ -119,7 +119,7 @@ MCP still keep their own tables, so adding a command means touching several plac
 | `/opt/boxmunge/state/` | deploy | registry, locks, health, deploy, staging, scan, KEV, container-update, platform-update and OS-update state, and the unconfigured-alerts log throttle |
 | `/opt/boxmunge/upgrade-state/` | root:deploy | active venv slot, probation, blocklist |
 | `/opt/boxmunge/logs/boxmunge.log` | deploy, group-writable | structured JSON-lines operational log, written by root and deploy |
-| `/opt/boxmunge/logs/audit.jsonl` | deploy, 0640, append-only (+a) | the action audit log, one JSON object per line. Root seals it at install (`_audit-seal`) and rotates it monthly to `audit.jsonl.<YYYY-MM-DD>` (12 kept, each append-only); on a host that cannot set the attribute, root's `state/audit-append-unsupported` says why |
+| `/opt/boxmunge/logs/audit.jsonl` | deploy, 0640, append-only (+a) | the action audit log, one JSON object per line. Root seals it at install (`_audit-seal`) and rotates it monthly to `audit.jsonl.<YYYY-MM-DD>` (12 kept, each append-only); on a host that cannot set the attribute, root's `upgrade-root/audit-append-unsupported` says why, and `upgrade-root/audit-rotating` marks a rotation in progress |
 | `/opt/boxmunge/caddy/` | root:deploy | Caddyfile and generated `sites/*.conf` |
 
 `src/boxmunge/paths.py` is the source of truth for every path.
@@ -228,7 +228,7 @@ These open a no-follow, non-blocking descriptor themselves (`open_regular_nofoll
 | `commands/upgrade_offline.py` | `_read` |
 | `commands/userns_cmd.py` | `_held_on` |
 | `health_checks/userns.py` | `_alert_state` |
-| `api/audit_seal.py` | `open_log` (`logs/audit.jsonl` and its archives `audit.jsonl.<YYYY-MM-DD>`, for their attribute: seal, rotation and the `audit-log` health check), `read_unsupported` (`state/audit-append-unsupported`, refused unless root's; 4 KiB) |
+| `api/audit_seal.py` | `open_log` (`logs/audit.jsonl` and its archives `audit.jsonl.<YYYY-MM-DD>`, for their attribute: seal, rotation and the `audit-log` health check), `read_unsupported` (`upgrade-root/audit-append-unsupported`, root-only, refused unless root's; 4 KiB) |
 
 An uploaded bundle in `inbox/` is the other deploy-written input. `bundle.inspect_bundle` is its
 one bounded reader, shared by reception and extraction (the limits are at the top of `bundle.py`).

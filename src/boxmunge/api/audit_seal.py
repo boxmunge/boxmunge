@@ -10,19 +10,24 @@ rename or delete it. Only root can set or clear the attribute. install runs
 
 Some hosts cannot set the attribute at all: a filesystem without it, or a
 container whose root lacks CAP_LINUX_IMMUTABLE. There the seal records why in
-state/audit-append-unsupported (root's) and leaves the log deploy's, 0640,
+upgrade-root/audit-append-unsupported and leaves the log deploy's, 0640,
 without it: the box installs, and `health` warns. On every other host a log
-without the attribute is an error.
+without the attribute is an error, except while a rotation, which marks
+itself in upgrade-root/audit-rotating, has the log moved aside.
 
-logs/ and state/ are deploy's, so every name is opened without following a
-link (fs_nofollow), and the record counts only when root wrote it.
+logs/ is deploy's, so every name there is opened without following a link
+(fs_nofollow). The records are in root-only upgrade-root/, so deploy cannot
+put one there, and each still counts only when root owns it.
 """
 from __future__ import annotations
 
 import errno
 import fcntl
 import os
+import re
+import stat
 import struct
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -37,8 +42,11 @@ FS_IOC_GETFLAGS = 0x80086601
 FS_IOC_SETFLAGS = 0x40086602
 FS_APPEND_FL = 0x20
 SEAL_FIX = "sudo boxmunge-server _audit-seal"
-RECORD_MODE = 0o644
+RECORD_MODE = 0o600
 RECORD_LIMIT_BYTES = 4096
+# A rotation takes well under a second; a marker older than this was left by
+# one that was killed, and is ignored.
+ROTATION_MARKER_FRESH_SECONDS = 600
 
 # The kernel boundary, a seam: tests replace it, as the ioctls need Linux and,
 # to set +a, CAP_LINUX_IMMUTABLE.
@@ -46,7 +54,12 @@ _ioctl = fcntl.ioctl
 
 
 class SealError(Exception):
-    """The audit log could not be sealed, checked or rotated."""
+    """The audit log could not be sealed, checked or rotated. *fix* is what
+    the operator runs (or does) about this failure."""
+
+    def __init__(self, message: str, fix: str = SEAL_FIX) -> None:
+        super().__init__(message)
+        self.fix = fix
 
 
 class AppendUnsupported(SealError):
@@ -61,6 +74,12 @@ class AppendUnsupported(SealError):
 def _root_owner() -> tuple[int, int]:
     """The owner the unsupported record must have (a seam for tests)."""
     return 0, 0
+
+
+def archives(logs: Path, active: str) -> list[str]:
+    """The names of the audit log's archives (<active>.<YYYY-MM-DD>), newest first."""
+    pattern = re.compile(rf"{re.escape(active)}\.\d{{4}}-\d{{2}}-\d{{2}}")
+    return sorted((name for name in os.listdir(logs) if pattern.fullmatch(name)), reverse=True)
 
 
 def is_append_only(fd: int) -> bool:
@@ -137,14 +156,17 @@ def open_log(path: Path, *, create: bool) -> int:
 
 def read_unsupported(paths: BoxPaths) -> str | None:
     """The record's line ("<errno name> <filesystem>"), or None when there is
-    none. A record root did not write, or one that is a link or not a plain
-    file, is refused with SealError: deploy can write state/, and a record it
-    planted would keep the log unsealed."""
+    none. A record root does not own, or one that is a link or not a plain
+    file, is refused with SealError: a record that is not root's own would
+    keep the log unsealed. Raises PermissionError for a caller who is not
+    root (upgrade-root/ is root's alone): health reports that as needing root."""
     path = paths.audit_append_unsupported
     try:
         fd = open_regular_nofollow(path, os.O_RDONLY)
     except FileNotFoundError:
         return None
+    except PermissionError:
+        raise
     except OSError as e:
         raise SealError(f"{e}. Then run as root: {SEAL_FIX}") from e
     with os.fdopen(fd, "rb") as f:
@@ -160,22 +182,83 @@ def read_unsupported(paths: BoxPaths) -> str | None:
     return data.decode("utf-8", errors="replace").strip()
 
 
-def _record_unsupported(paths: BoxPaths, e: AppendUnsupported) -> None:
-    """Root's record, written as a new file renamed over the name, so a file
-    deploy planted there is replaced, not written through."""
+def _root_dir(paths: BoxPaths) -> None:
+    """upgrade-root/, root's alone: created 0700 if missing, refused if it
+    is a link or not root's."""
     try:
-        atomic_write_bytes(paths.audit_append_unsupported,
-                           f"{e.errno_name} {e.filesystem}\n".encode(), RECORD_MODE,
-                           owner=_root_owner())
-    except OSError as err:
-        raise SealError(f"{e}, and the record of it could not be written: {err}") from err
+        os.mkdir(paths.upgrade_root, 0o700)
+    except FileExistsError:
+        pass
+    except OSError as e:
+        raise SealError(f"cannot create {paths.upgrade_root}: {e}") from e
+    st = os.lstat(paths.upgrade_root)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != _root_owner()[0]:
+        raise SealError(f"{paths.upgrade_root} is not a directory of root's own; refusing to "
+                        f"keep root's audit records there", fix="re-run install.sh as root")
+
+
+def _write_root_record(paths: BoxPaths, path: Path, text: str) -> None:
+    """A root-owned record in upgrade-root/, written by rename."""
+    _root_dir(paths)
+    try:
+        atomic_write_bytes(path, text.encode(), RECORD_MODE, owner=_root_owner())
+    except OSError as e:
+        raise SealError(f"cannot write {path}: {e}") from e
+
+
+def _remove(path: Path) -> None:
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        raise SealError(f"cannot remove {path}: {e}") from e
+
+
+def mark_rotating(paths: BoxPaths) -> None:
+    """Mark a rotation in progress: while it has the log moved aside,
+    `health` warns instead of reporting the log missing."""
+    _write_root_record(paths, paths.audit_rotating, f"{time.time():.0f}\n")
+
+
+def unmark_rotating(paths: BoxPaths) -> None:
+    _remove(paths.audit_rotating)
+
+
+def rotation_in_progress(paths: BoxPaths) -> bool:
+    """Whether a rotation's marker is there, root's and fresh. A stale one
+    (a killed rotation) is ignored. Raises PermissionError when not root."""
+    try:
+        st = os.lstat(paths.audit_rotating)
+    except FileNotFoundError:
+        return False
+    return (stat.S_ISREG(st.st_mode) and st.st_uid == _root_owner()[0]
+            and time.time() - st.st_mtime < ROTATION_MARKER_FRESH_SECONDS)
+
+
+def _seal_archives(paths: BoxPaths) -> None:
+    """Set the attribute again on every archive: a rotation that failed
+    between moving the log and sealing the archive leaves one without it."""
+    for name in archives(paths.logs, paths.audit_log.name):
+        where = paths.logs / name
+        try:
+            fd = open_log(where, create=False)
+        except (SealError, FileNotFoundError) as e:
+            raise SealError(f"cannot seal the archive {where}: {e}",
+                            fix=f"remove {where} if it is not an archive "
+                                f"(sudo rm {where}), then run: {SEAL_FIX}") from e
+        try:
+            set_append_only(fd, True, where=where)
+        finally:
+            os.close(fd)
 
 
 def seal(paths: BoxPaths) -> None:
     """As root: open or create logs/audit.jsonl, make it deploy's and 0640,
-    and set the append-only attribute. On a host that cannot set it, record
-    why (state/audit-append-unsupported) and return; a later seal that sets
-    it removes the record. Raises SealError for anything else."""
+    and set the append-only attribute, on it and on every archive. On a host
+    that cannot set it, record why (upgrade-root/audit-append-unsupported)
+    and return; a later seal that sets it removes the record. Raises
+    SealError for anything else."""
     where = paths.audit_log
     fd = open_log(where, create=True)
     try:
@@ -183,14 +266,10 @@ def seal(paths: BoxPaths) -> None:
             own_and_seal(fd, where, attribute=True)
         except AppendUnsupported as e:
             own_and_seal(fd, where, attribute=False)
-            _record_unsupported(paths, e)
+            _write_root_record(paths, paths.audit_append_unsupported,
+                               f"{e.errno_name} {e.filesystem}\n")
             return
     finally:
         os.close(fd)
-    try:
-        os.unlink(paths.audit_append_unsupported)
-    except FileNotFoundError:
-        pass
-    except OSError as e:
-        raise SealError(f"the log is sealed, but {paths.audit_append_unsupported} "
-                        f"could not be removed: {e}") from e
+    _seal_archives(paths)
+    _remove(paths.audit_append_unsupported)

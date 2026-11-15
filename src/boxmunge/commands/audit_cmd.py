@@ -8,7 +8,7 @@ import sys
 from datetime import datetime, timezone
 
 from boxmunge.api.audit_rotate import rotate
-from boxmunge.api.audit_seal import SEAL_FIX, SealError, read_unsupported, seal
+from boxmunge.api.audit_seal import SealError, read_unsupported, seal
 from boxmunge.fs_nofollow import running_as_root
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
@@ -33,8 +33,8 @@ def cmd_audit_seal(args: list[str]) -> None:
         seal(paths)
         reason = read_unsupported(paths)
     except SealError as e:
-        log_error(COMPONENT, f"audit log not sealed: {e}", paths)
-        print(f"ERROR: the audit log was not sealed: {e}", file=sys.stderr)
+        log_error(COMPONENT, f"audit log not sealed: {e}. Fix: {e.fix}", paths)
+        print(f"ERROR: the audit log was not sealed: {e}. Fix: {e.fix}", file=sys.stderr)
         sys.exit(1)
     if reason is None:
         log_operation(COMPONENT, f"sealed {paths.audit_log} append-only", paths)
@@ -55,7 +55,7 @@ def cmd_audit_rotate(args: list[str]) -> None:
     try:
         archive = rotate(paths, datetime.now(timezone.utc).date())
     except SealError as e:
-        message = f"{e}. Fix: {SEAL_FIX}, then check with: boxmunge health"
+        message = f"{e}. Fix: {e.fix}, then check with: boxmunge health"
         log_error(COMPONENT, message, paths)
         notify(paths, "Audit log rotation failed", message, component=COMPONENT, priority=1)
         print(f"ERROR: {message}", file=sys.stderr)

@@ -625,13 +625,13 @@ A log file or archive that is a symlink, a FIFO or a file with a second hard lin
 
 ### The action audit log
 
-Every call through the action API that changes something is recorded in `/opt/boxmunge/logs/audit.jsonl`, one JSON object per line: who asked, which action, its parameters (secrets redacted) and the outcome. Refusals are recorded too. The file belongs to `deploy`, mode 0640, and carries the filesystem's append-only attribute (`chattr +a`, shown by `lsattr`): every writer can add lines, but nobody, `deploy` included, can truncate, rewrite, rename or delete it. Only root can set or clear the attribute. The installer sets it (`boxmunge-server _audit-seal`, as root), creating the file if it is missing. If the log cannot be written, the call is refused with `unavailable` and nothing runs; no writer ever recreates a missing log.
+Every call through the action API that changes something is recorded in `/opt/boxmunge/logs/audit.jsonl`, one JSON object per line: who asked, which action, its parameters (secrets redacted) and the outcome. Refusals are recorded too. The file belongs to `deploy`, mode 0640, and carries the filesystem's append-only attribute (`chattr +a`, shown by `lsattr`): every writer can add lines, but nobody, `deploy` included, can truncate, rewrite, rename or delete it. Only root can set or clear the attribute. The installer sets it (`boxmunge-server _audit-seal`, as root), creating the file if it is missing; `_audit-seal` also sets it again on every archive. If the log cannot be written, the call is refused with `unavailable` and nothing runs; no writer ever recreates a missing log.
 
-`boxmunge-audit-rotate.timer` rotates it at 00:15 on the 1st of each month (a month missed while the box was off is rotated at the next boot). As root, it clears the attribute, moves the log to `audit.jsonl.YYYY-MM-DD`, sets the attribute on that archive, starts a new sealed log and deletes archives beyond the newest 12, clearing each one's attribute first. An empty log is left alone. A step that fails is logged and alerted at high priority, naming the step, and the fix is `sudo boxmunge-server _audit-seal`.
+`boxmunge-audit-rotate.timer` rotates it at 00:15 on the 1st of each month (a month missed while the box was off is rotated at the next boot). As root, it clears the attribute, moves the log to `audit.jsonl.YYYY-MM-DD`, sets the attribute on that archive, starts a new sealed log and deletes archives beyond the newest 12, clearing each one's attribute first. An empty log is left alone. While the log is moved aside, root's marker `upgrade-root/audit-rotating` says so, and `health` warns "rotation in progress" instead of reporting the log missing (a marker older than 10 minutes, left by a rotation that was killed, is ignored). A step that fails is logged and alerted at high priority, naming the step and its fix: usually `sudo boxmunge-server _audit-seal`; for an archive name that is already taken, moving that archive aside; for an archive that is a link, removing it. After either of the last two, `sudo systemctl start boxmunge-audit-rotate.service` runs the rotation again.
 
 `health` reports the log as an error (`audit-log`) when it is missing, is a link or not a plain file, or has lost the attribute: install sets all of these, so the error means a control is off, and an upgrade in probation that finds it rolls back. The fix is `sudo boxmunge-server _audit-seal`.
 
-Some hosts cannot set the attribute at all: a filesystem without it, or a container whose root lacks `CAP_LINUX_IMMUTABLE`. There, install still completes. `_audit-seal` records the reason in `state/audit-append-unsupported` (root's), leaves the log `deploy`'s with mode 0640, and prints a warning that `deploy` can rewrite the audit log on this host. `health` then warns, and never errors, so the box can still upgrade. Rotation works the same way but skips the attribute steps. If the host later supports the attribute (the box moved to another filesystem), a run of `_audit-seal` that sets it removes the record. A record that root did not write is refused, so `health` still reports an error.
+Some hosts cannot set the attribute at all: a filesystem without it, or a container whose root lacks `CAP_LINUX_IMMUTABLE`. There, install still completes. `_audit-seal` records the reason in `upgrade-root/audit-append-unsupported` (root's, in a directory only root can write), leaves the log `deploy`'s with mode 0640, and prints a warning that `deploy` can rewrite the audit log on this host. `health` then warns, and never errors, so the box can still upgrade. Rotation works the same way but skips the attribute steps. If the host later supports the attribute (the box moved to another filesystem), a run of `_audit-seal` that sets it removes the record. A record root does not own is refused, so `health` still reports an error. Both records are root-only, so `health` run from the deploy shell reports the check as needing root when the log is not sealed; the root health timer gives the verdict.
 
 ### Caddy access log
 
@@ -1665,14 +1665,16 @@ unless `health` also ran past its budget before the upgrade.
 | `auto-updates` | OS security updates are not being fetched or installed | see [OS security updates](#os-security-updates) |
 | `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, maintenance, kev-watch, audit-rotate) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
 
-Because an error during probation that was not there before the upgrade rolls it back, only two
+Because an error during probation that was not there before the upgrade rolls it back, only three
 things report an error. One is a
 platform component a probe saw broken: Docker not running (`docker info` fails) or its CLI
 missing, Caddy missing, stopped, restarting or from another compose project, the system container
 missing or wrong (a missing, stopped or restarting container only if a second probe 5 seconds later
 agrees), the backup key missing or unreadable, sshd's drop-in changed or widened, the
-firewall off or not installed, or the userns remap inconsistent. The other is a defect in the
-release's own code: a check whose module cannot be imported, or that hits a missing name or module
+firewall off or not installed, or the userns remap inconsistent. Another is a platform control
+install sets being off: the audit log missing, linked, or without its append-only attribute on a
+host that supports it (`audit-log`; a host recorded as unable to set the attribute, or a rotation
+in progress, warns). The third is a defect in the release's own code: a check whose module cannot be imported, or that hits a missing name or module
 attribute or a syntax error, is an error naming what is broken, so the release is rolled back.
 Everything else warns:
 
