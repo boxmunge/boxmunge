@@ -186,6 +186,7 @@ resume_rollback() {
             || die_logged "$marker is malformed; inspect both slots as supervisor"
         rollback_target_ok "$slot" \
             || die_logged "$marker is in env-$slot, which is not a working venv; inspect both slots as supervisor"
+        take_jobs_gate skip
         log "Resuming the interrupted rollback of $version (stage $stage) onto slot $slot"
         complete_rollback "$version" "$("$BOXMUNGE_ROOT/env-$slot/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")" \
             "$stage" "$slot" "$count"
@@ -207,6 +208,7 @@ recover_interrupted_upgrade() {
         rm -f "$marker"
         return 0
     fi
+    take_jobs_gate skip
     log "Upgrade to $version was interrupted after the venv swap — rolling back"
     do_rollback "$version" "$("$BOXMUNGE_ROOT/env-$(standby_slot)/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")" \
         interrupted "$(standby_slot)"
@@ -284,6 +286,7 @@ alert_once() {
 probation_failed() {
     local version="$1" prev_slot="$2" why="$3" detail="${4:-}" from_version
     rollback_target_ok "$prev_slot" || rollback_impossible "$version" "$prev_slot" "$why"
+    take_jobs_gate skip
     from_version="$("$BOXMUNGE_ROOT/env-$prev_slot/bin/boxmunge-server" --version 2>/dev/null || echo "unknown")"
     log "CRITICAL: $version $why during probation — rolling back"
     do_rollback "$version" "$from_version" "health_probation" "$prev_slot" "$detail"
@@ -334,12 +337,19 @@ check_live_slot() {
     probation_failed "$version" "$prev_slot" "is broken: $why" "live_venv_dead: $why"
 }
 
+# cmd_check_probation: every five minutes, for the whole probation after
+# every upgrade. It takes upgrade.lock but not the jobs gate: each step that
+# changes a slot or the units (a resumed or new rollback, healing the units,
+# promotion, removing an orphan slot) takes the gate first (take_jobs_gate
+# skip: the run is skipped while jobs run), and the gate is let go before the
+# health run, so jobs are refused only while something changes.
 cmd_check_probation() {
     load_active_slot
-    acquire_lock skip  # an upgrade is in progress; retry on the next health-timer fire
+    acquire_lock skip-nogate  # an upgrade is in progress; retry on the next health-timer fire
     resume_rollback
     recover_interrupted_upgrade
     heal_slot_units
+    release_jobs_gate
 
     local inactive
     inactive="$(standby_slot)"
@@ -350,6 +360,7 @@ cmd_check_probation() {
         # upgrade that failed before its swap, or a promotion made from the
         # deploy context (deploy cannot rmtree root-owned dirs).
         if [[ -d "$BOXMUNGE_ROOT/env-$inactive" ]]; then
+            take_jobs_gate skip
             log "Cleaning up orphan venv in inactive slot $inactive"
             remove_slot "$inactive"
         fi
@@ -361,6 +372,7 @@ cmd_check_probation() {
 
     # Expiry next: promotion needs no rollback target (it deletes it).
     if [[ "$PROB_EXPIRED" == "yes" ]]; then
+        take_jobs_gate skip
         log "Probation expired for $version — promoting"
         remove_slot "$prev_slot"
         rm -f "$PROBATION_FILE"

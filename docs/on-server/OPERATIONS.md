@@ -1192,7 +1192,9 @@ A platform upgrade and jobs never overlap:
 
 - While an upgrade runs, new jobs are refused (`unavailable`: `boxmunge is being upgraded, so new
   jobs are refused until the upgrade finishes ...`). Run the same `job run` again once it has
-  finished (`boxmunge log --component upgrade`).
+  finished (`boxmunge log --component upgrade`). The probation check after an upgrade refuses
+  them only while it changes a slot or the systemd units (a rollback or promotion), not for the
+  whole probation.
 - An upgrade waits up to 60 minutes for running jobs to finish, printing `Waiting up to 60 minutes
   for running jobs to finish`; if they are still running then, it installs nothing and stops (see
   UPGRADING.md).

@@ -7,7 +7,8 @@
 # Every running job holds state/jobs/gate.lock shared (api/job_gate.py), and
 # no job starts while it is held exclusively. acquire_lock opens it on fd 8
 # and, with upgrade.lock held, takes it (take_jobs_gate): an upgrade waits for
-# running jobs, as it waits for a held lock; check-probation skips.
+# running jobs, as it waits for a held lock. check-probation takes it only
+# right before it changes a slot or the units, and skips while jobs run.
 
 LOCK_HELD=0
 # How long the auto-update timer's run waits for upgrade.lock (acquire_lock).
@@ -48,6 +49,15 @@ take_jobs_gate() {
     JOBS_GATE_HELD=1
 }
 
+# release_jobs_gate: let jobs start again. check-probation, which takes the
+# gate only around a change to the units or slots, releases it before its
+# health run (up to 180 s), so jobs are refused only while something changes.
+release_jobs_gate() {
+    [[ "$JOBS_GATE_HELD" -eq 1 ]] || return 0
+    flock -u 8
+    JOBS_GATE_HELD=0
+}
+
 # skip_while_upgrade_waits_for_jobs: check-probation found upgrade.lock held.
 # If its holder is an upgrade waiting for jobs (JOBS_WAIT_FILE, written within
 # the wait), skip without feeding lock-skips: that wait is bounded, and fails
@@ -63,8 +73,8 @@ skip_while_upgrade_waits_for_jobs() {
     exit 0
 }
 
-# acquire_lock [skip|try|wait|nogate]: take upgrade.lock once per run. With "skip",
-# a busy lock exits 0 (the health timer retries on its next fire); with "try"
+# acquire_lock [skip|skip-nogate|try|wait|nogate]: take upgrade.lock once per
+# run. With "skip" or "skip-nogate", a busy lock exits 0 (the health timer retries on its next fire); with "try"
 # (a readiness check), it returns 1 and counts no skip; with "wait" (the
 # auto-update timer's run, whose discovery waited the same), it waits up to
 # LOCK_WAIT_SECS, as a readiness check holds the lock for up to ten minutes,
@@ -88,13 +98,16 @@ skip_while_upgrade_waits_for_jobs() {
 # no new job starts until it ends (take_jobs_gate, above). "try" (the
 # readiness check, which installs nothing) does not take the gate; nor does
 # "nogate" (auto's discovery, which may find nothing to install): a later
-# acquire_lock, with the lock held, takes it. state/jobs/
+# acquire_lock, with the lock held, takes it. Nor does "skip-nogate"
+# (check-probation, every five minutes for the whole probation): it runs
+# take_jobs_gate skip itself, right before each step that changes a slot or
+# the units, and never holds the gate across its health run. state/jobs/
 # is deploy's, so the gate is opened without following a link, and made with
 # its directory if missing (see open_lock_and_reexec). Children,
 # the userns verbs' among them, inherit fds 8 and 9 and the locks with them.
 acquire_lock() {
     if [[ "$LOCK_HELD" -eq 1 ]]; then
-        [[ "${1:-}" == "try" || "${1:-}" == "nogate" ]] || take_jobs_gate "${1:-}"
+        ! gate_mode "${1:-}" || take_jobs_gate "${1:-}"
         return 0
     fi
     if [[ "${BM_UPGRADE_LOCK_FD:-}" != 9 || "${BM_JOBS_GATE_FD:-}" != 8 ]]; then
@@ -122,15 +135,18 @@ for fd, path in ((9, sys.argv[1]), (8, sys.argv[2])):
             die_logged "upgrade.lock was held for the whole $((LOCK_WAIT_SECS / 60)) minutes the auto-update timer waited, so nothing was installed; it tries again on its next run. Find the holder as supervisor: sudo lslocks | grep upgrade.lock"
         fi
     elif ! flock -n 9; then
-        [[ "${1:-}" != "skip" ]] || skip_while_upgrade_waits_for_jobs
-        [[ "${1:-}" != "skip" ]] || lock_busy_skip "upgrade.lock is held"
+        [[ "${1:-}" != skip* ]] || skip_while_upgrade_waits_for_jobs
+        [[ "${1:-}" != skip* ]] || lock_busy_skip "upgrade.lock is held"
         [[ "${1:-}" != "try" ]] || return 1
         die "Another upgrade is in progress"
     fi
-    [[ "${1:-}" == "try" || "${1:-}" == "nogate" ]] || take_jobs_gate "${1:-}"
+    ! gate_mode "${1:-}" || take_jobs_gate "${1:-}"
     [[ "${1:-}" == "try" ]] || rm -f "$LOCK_SKIPS_FILE"
     LOCK_HELD=1
 }
+
+# gate_mode <acquire_lock mode>: whether acquire_lock takes the jobs gate.
+gate_mode() { [[ "$1" != try && "$1" != nogate && "$1" != skip-nogate ]]; }
 
 # lock_busy_skip <why>: check-probation could not take upgrade.lock (<why>),
 # and retries on the next health-timer fire (every five minutes). One skip is routine;

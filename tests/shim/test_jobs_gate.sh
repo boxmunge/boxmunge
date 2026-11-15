@@ -4,8 +4,9 @@
 # Every running job holds state/jobs/gate.lock shared (api/job_gate.py); the
 # upgrade shim takes it exclusively, after upgrade.lock, and holds both for the
 # whole run. An upgrade waits for running jobs to finish, up to
-# JOBS_GATE_WAIT_SECS, as it waits for a held lock; check-probation skips
-# instead, and the readiness check, which installs nothing, never takes it.
+# JOBS_GATE_WAIT_SECS, as it waits for a held lock; check-probation takes it
+# only right before it changes a slot or the units, and skips instead; the
+# readiness check, which installs nothing, never takes it.
 # state/jobs/ is deploy's, so the gate is opened without following a link,
 # and a missing one is made with its directory, deploy's, as install makes them.
 # pass() always returns 0, so "cond && pass || fail" is a safe if/else here.
@@ -76,8 +77,10 @@ grep -q "^bm_log error Jobs were still running after the 60 minutes" "$BOXMUNGE_
     && pass "the give-up is an error in the operational log" || fail "not logged: $(cat "$BOXMUNGE_ROOT/calls" 2>&1)"
 drop_root
 
-# test_check_probation_skips_while_a_job_runs: with no count and no alert,
-# however many in a row (a job is not stuck upgrade work).
+# test_check_probation_skips_while_a_job_runs: a run with a slot to change
+# (here the orphan standby, env-b) skips, with no count and no alert, however
+# many in a row (a job is not stuck upgrade work). It took upgrade.lock, so
+# the held-lock count starts again.
 new_root a
 record_bm_log
 mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
@@ -89,13 +92,62 @@ done
 exec 7<&-
 expect 0 "Jobs are running; skipping until they finish (see: boxmunge jobs --running)" \
     "check-probation skips while a job runs"
-[[ "$(cat "$BOXMUNGE_ROOT/upgrade-root/lock-skips")" == 11 && "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" != *"bm_log error"* ]] \
+[[ ! -e "$BOXMUNGE_ROOT/upgrade-root/lock-skips" && "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" != *"bm_log error"* ]] \
     && pass "skips for running jobs feed no lock-skip count and raise no alert" \
-    || fail "count $(cat "$BOXMUNGE_ROOT/upgrade-root/lock-skips"), calls: $(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)"
+    || fail "count $(cat "$BOXMUNGE_ROOT/upgrade-root/lock-skips" 2>&1), calls: $(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)"
+[[ -d "$BOXMUNGE_ROOT/env-b" ]] && pass "the skipped run left the orphan slot alone" || fail "env-b removed under a job"
 run_shim check-probation
-expect 0 "" "check-probation runs once the job finishes"
-[[ ! -e "$BOXMUNGE_ROOT/upgrade-root/lock-skips" ]] && pass "taking the gate resets the skip count" \
-    || fail "count left: $(cat "$BOXMUNGE_ROOT/upgrade-root/lock-skips")"
+expect 0 "Cleaning up orphan venv in inactive slot b" "check-probation runs once the job finishes"
+drop_root
+
+# test_probation_health_run_leaves_jobs_free: check-probation holds
+# upgrade.lock for its whole run, but the gate only right before it changes a
+# slot or the units, never across its health run (up to 180 s, every five
+# minutes for the whole probation). A job that starts meanwhile, taking the
+# gate shared, is not held up, and nothing is skipped.
+new_root a
+record_bm_log
+write_probation 1.2.3 b "$SOON"
+# shellcheck disable=SC2016  # a mock body: literal bash
+mock_server a 'if [[ "$1" == health ]]; then
+    python3 -c "import fcntl, os, sys
+fd = os.open(sys.argv[1], os.O_RDONLY)
+fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)" "$BOXMUNGE_ROOT/state/jobs/gate.lock" \
+        && echo "job took the gate" >> "$BOXMUNGE_ROOT/calls" || echo "job refused" >> "$BOXMUNGE_ROOT/calls"
+    exec health-report 0
+fi
+exit 0'
+run_shim check-probation
+expect 0 "" "check-probation runs its probation health check"
+grep -q "^job took the gate" "$BOXMUNGE_ROOT/calls" \
+    && pass "a job takes the gate shared while the probation health run runs" \
+    || fail "the gate was held across the health run: $(cat "$BOXMUNGE_ROOT/calls" 2>&1) / $OUT"
+[[ "$OUT" != *"Jobs are running"* && -d "$BOXMUNGE_ROOT/env-b" ]] \
+    && pass "a mid-probation run changes nothing, so takes no gate" || fail "said: $OUT"
+drop_root
+
+# ... and a job that runs through a mid-probation run holds nothing up.
+new_root a
+write_probation 1.2.3 b "$SOON"
+hold_shared
+RC=0; OUT="$(bash "$SHIM" check-probation 2>&1 7<&-)" || RC=$?
+exec 7<&-
+[[ "$RC" -eq 0 && "$OUT" != *"Jobs are running"* ]] \
+    && pass "a mid-probation run goes ahead while a job runs" || fail "rc=$RC: $OUT"
+drop_root
+
+# test_promotion_waits_for_jobs: promotion removes the previous slot, so it
+# takes the gate first, and skips while a job runs.
+new_root a
+write_probation 1.2.3 b "2020-01-01T00:00:00+00:00"
+hold_shared
+RC=0; OUT="$(bash "$SHIM" check-probation 2>&1 7<&-)" || RC=$?
+exec 7<&-
+expect 0 "Jobs are running; skipping until they finish" "an expired probation is not promoted while a job runs"
+[[ -d "$BOXMUNGE_ROOT/env-b" && -e "$BOXMUNGE_ROOT/upgrade-state/probation.json" ]] \
+    && pass "the previous slot and the probation are left for the next run" || fail "promoted under a running job"
+run_shim check-probation
+expect 0 "Version 1.2.3 promoted" "it is promoted once the job finishes"
 drop_root
 
 # An upgrade waiting for jobs holds upgrade.lock for up to 60 minutes: the

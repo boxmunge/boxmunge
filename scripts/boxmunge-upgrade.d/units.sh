@@ -113,12 +113,15 @@ units_match() {
 
 # heal_slot_units: the live slot has a record of its units and the live
 # units are not those, so a rollback left the newer release's: put them back.
-# The caller holds the upgrade lock and nothing is in flight.
+# The caller holds the upgrade lock and nothing is in flight. The jobs gate is
+# taken before anything changes (an upgrade already holds it; check-probation
+# skips its run while jobs hold it).
 heal_slot_units() {
     local src
     src="$(slot_units "$ACTIVE_SLOT")"
     compgen -G "$src/boxmunge-*.timer" >/dev/null || return 0
     units_match "$src" && return 0
+    take_jobs_gate skip
     log "The live systemd units are not those of the release on slot $ACTIVE_SLOT (a rollback left them); restoring them"
     bm_log warn upgrade "systemd units differ from the live slot's; restoring" "{\"slot\": \"$ACTIVE_SLOT\"}"
     restore_slot_units "$ACTIVE_SLOT" || true   # a refusal is logged; the check goes on

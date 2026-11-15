@@ -75,15 +75,18 @@ expect() {
 
 FAKEBIN="$(mktemp -d)"
 if ! command -v flock >/dev/null 2>&1; then
-    # `flock -n <fd>` and `flock -w <secs> <fd>`, the forms the shim uses. A
-    # flock(2) lock belongs to the open file description, which Python shares
-    # with its caller, so the lock is held, and contended, exactly as with
-    # util-linux flock.
+    # `flock -n <fd>`, `flock -w <secs> <fd>` and `flock -u <fd>`, the forms
+    # the shim uses. A flock(2) lock belongs to the open file description,
+    # which Python shares with its caller, so the lock is held, contended and
+    # released exactly as with util-linux flock.
     cat > "$FAKEBIN/flock" <<'EOF'
 #!/usr/bin/env bash
 wait=0
+if [[ "$#" -eq 2 && "$1" == -u ]]; then
+    exec python3 -c 'import fcntl, sys; fcntl.flock(int(sys.argv[1]), fcntl.LOCK_UN)' "$2"
+fi
 if [[ "$#" -eq 3 && "$1" == -w ]]; then wait="$2"; shift 2; elif [[ "$#" -eq 2 && "$1" == -n ]]; then shift; else
-    echo "flock stand-in: only 'flock -n <fd>' or 'flock -w <secs> <fd>'" >&2; exit 64; fi
+    echo "flock stand-in: only 'flock -n <fd>', 'flock -w <secs> <fd>' or 'flock -u <fd>'" >&2; exit 64; fi
 exec python3 -c 'import fcntl, sys, time
 deadline = time.monotonic() + float(sys.argv[2])
 while True:
