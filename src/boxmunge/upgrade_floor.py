@@ -9,6 +9,13 @@ left exactly as it was, still able to install the bridge release.
 
 Shims of 0.5.8 to 0.9.1 never reach the dry run. Their pre-flight first
 reads `boxmunge.__version__`, which fails with package_version_refusal().
+
+The floor is 0.11.11 because a failed upgrade is rolled back by the shim
+that started it, and only shims from 0.11.11 on put the previous release's
+systemd units back (scripts/boxmunge-upgrade.d/units.sh); 0.12 adds and
+retires units. The refusal names one release to install first, the bridge.
+The bridge has a floor of its own: a box below 0.11.0 that targets it is
+refused in turn and told to install 0.11.6 first, so every box gets here.
 """
 from __future__ import annotations
 
@@ -20,9 +27,9 @@ from boxmunge.version import get_build_version, parse_version_string
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
-UPGRADE_FLOOR = "0.11.0"
+UPGRADE_FLOOR = "0.11.11"
 # The last release that installs over a box below the floor.
-BRIDGE_RELEASE = "0.11.6"
+BRIDGE_RELEASE = "0.11.11"
 SHIM = "sudo /opt/boxmunge/bin/boxmunge-upgrade"
 BRIDGE_COMMAND = f"{SHIM} target {BRIDGE_RELEASE}"
 

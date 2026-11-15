@@ -222,13 +222,11 @@ reads from that directory is checked before use:
   end a probation early but neither start one nor lengthen one. A
   `probation.json` the record does not cover is removed, with an error in the
   operational log and an alert, so a planted one cannot hold off upgrades.
-  A probation a shim up to 0.11.5 started has no record; it is adopted only
-  when `config/version` is its release, and ends 6 hours after `env-active`
-  was swapped (at once, if the box was off past that). A recorded expiry more than 6 hours ahead means the
+  A recorded expiry more than 6 hours ahead means the
   clock went back (an NTP step, a VM restore); it is moved to 6 hours from
   then, rather than promoting the release at once.
 - `blocklist.json` must be a JSON object keyed by semver versions.
-- None of these files, nor the legacy `upgrade.lock` (below), may be a
+- None of these files may be a
   symlink, a FIFO or anything but a plain file. Root opens them without
   following a link or blocking (bash never opens a lock by name: Python opens
   it and hands the shim the descriptor), and writes them by rename from a temp
@@ -251,21 +249,11 @@ the health report from just before the upgrade (`health-baseline`: a health
 error already there then does not roll the release back) and the name of the
 stash the upgrade made (`upgrade-stash`). One upgrade runs at a time because
 the shim, `auto-update` and `check-probation` all hold that
-lock, which deploy cannot replace. The shim also locks
-`upgrade-state/upgrade.lock`, the only lock of shims up to 0.10.1, after the
-root-only one. No exclusion depends on it any more (an upgrade starts from
-0.11.0 or later, and every shim and release since then takes the root-only
-lock). It is kept for one caller: `userns migrate`, `rollback` and `commit` of
-releases 0.11.0 to 0.11.6 refuse to run unless the shim calling them holds
-both locks, and after a rollback this shim calls the previous release's.
-Deploy could hold that legacy lock to stall upgrades and probation checks, so
-the shim makes it root-only (0600; shims up to 0.10.1 created it 0644), and
-replaces a lock file there that is not root's with its own, with a warning:
-deploy cannot newly open it. A deploy process that opened it before that keeps
-its lock (an open descriptor is not revoked); that is reported, not prevented:
-an hour of `check-probation` runs that cannot take the lock is an error in the
-operational log, repeated every hour it lasts. The shim stops taking the
-legacy lock once no upgrade can start from a release before 0.11.7.
+lock, which deploy cannot replace. Should something hold it anyway, an hour
+of `check-probation` runs that cannot take the lock is an error in the
+operational log, repeated every hour it lasts. `upgrade-state/upgrade.lock`,
+the lock of shims up to 0.10.1, is no lock any more: an upgrade starts from
+0.11.11 or later, and the shim never opens that name.
 
 ### Files root writes in deploy-writable directories
 
@@ -282,12 +270,13 @@ another file. Remove the link and re-run.
 
 A platform rollback restores exactly the stash its upgrade made, never whichever is newest in
 `stashes/`: the shim records the stash's name, size and sha256 root-only (the size and sha256
-`stash create` prints for the bytes it wrote, since 0.11.6; an upgrade stops before changing
-anything if the file at the name does not match them), copies that archive
+`stash create` prints for the bytes it wrote; an upgrade stops before changing
+anything if it prints none or the file at the name does not match them), copies that archive
 into `upgrade-root/rollback-stash/` (opened without following a link, and only if it is a plain
 file root owns, which deploy cannot write, with the recorded size and sha256, so no other stash
 renamed onto the name passes), and has the previous release restore the copy. A missing
-or replaced stash stops the rollback as "ROLLBACK PARTIAL", naming the file.
+record, or a missing or replaced stash, stops the rollback as "ROLLBACK PARTIAL", naming the
+file.
 
 This protects the last path component only. Deploy can still swap an intermediate directory it
 owns (`projects/<p>/backups`, a `state/` subdirectory, `inbox/.tmp`) for a symlink, so a root
@@ -367,8 +356,7 @@ deploy ALL=(root) NOPASSWD: /opt/boxmunge/bin/boxmunge-upgrade auto, /opt/boxmun
   and prints one JSON answer. It changes no upgrade state: the blocklist, the
   slots, the interruption, pip and cosign counts, probation and the stash stay
   byte-identical whatever happens. The one exception is what every taker of
-  the upgrade lock does: it may create the lock files, make the legacy
-  `upgrade-state/upgrade.lock` 0600, and replace one deploy owns. It first
+  the upgrade lock does: it may create the lock file. It first
   refuses a version that is not newer than the installed one, predates the
   check (0.11.8), or is blocklisted, and any check while an upgrade or rollback
   is unfinished, during a probation (`probation.json` is only read, never acted

@@ -18,8 +18,8 @@ from tests.stage_helpers import V1, staging_docker_off
 
 @pytest.fixture(autouse=True)
 def _box_at_the_upgrade_floor(paths) -> None:
-    """The dry run refuses a box that records no release, or one below 0.11.0."""
-    paths.version_file.write_text("0.11.0\n")
+    """The dry run refuses a box that records no release, or one below the upgrade floor."""
+    paths.version_file.write_text("0.11.11\n")
 
 
 def _deployed(paths) -> None:

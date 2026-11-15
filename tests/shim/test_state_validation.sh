@@ -82,19 +82,6 @@ expect 0 "" "env-active alone identifies the active slot"
     || fail "orphan standby env-a not cleaned"
 drop_root
 
-# --- upgrade.lock ---------------------------------------------------------
-
-new_root a
-victim="$(mktemp)"
-echo "precious" > "$victim"
-ln -s "$victim" "$BOXMUNGE_ROOT/upgrade-state/upgrade.lock"
-run_shim check-probation
-expect 1 "is a symlink" "symlinked upgrade.lock is refused"
-[[ "$(cat "$victim")" == "precious" ]] && pass "lock symlink target not truncated" \
-    || fail "root truncated the lock symlink target"
-rm -f "$victim"
-drop_root
-
 # Large files reach Python on stdin: one environment variable is capped at
 # 128 KiB on Linux, past which the shim itself would fail to run Python.
 new_root a
@@ -193,7 +180,7 @@ drop_root
 for bad_blocklist in '["1.2.3"]' '{"../x": {}}' '{"1.2.3": {}, "evil\nkey": {}}' 'not json'; do
     new_root a
     printf '%s' "$bad_blocklist" > "$BOXMUNGE_ROOT/upgrade-state/blocklist.json"
-    run_shim run 1.2.3 ignored-url
+    run_shim run 1.2.3 ignored-url feature
     expect 1 "blocklist.json is malformed" "malformed blocklist is refused: $bad_blocklist"
     drop_root
 done

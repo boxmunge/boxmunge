@@ -20,15 +20,6 @@
 # length ahead means the clock went back (an NTP step, a VM restore); it is
 # moved to a probation's length from now rather than promoting at once, which
 # deleted the rollback target.
-#
-# A probation an older shim (0.11.5 or earlier) started has no record (none,
-# or that shim's "<slot> <expiry>"). It is adopted when root's own state
-# shows the upgrade it names (config/version is that release), and ends a
-# probation's length after env-active was swapped: one past that (the box was
-# off, say) is promoted at once, which is all a planted one could make
-# happen, and the record then says none is running. Otherwise it is refused
-# like any unrecorded one.
-# The adoption goes when the upgrade floor reaches 0.11.6.
 PROBATION_EXPIRY_FILE="$UPGRADE_ROOT_DIR/probation-expiry"
 
 # record_probation <version>: root's record of a probation starting now.
@@ -38,12 +29,12 @@ record_probation() {
 
 # read_probation: parse probation.json, against root's record, into
 # PROB_VERSION, PROB_PREV_SLOT, PROB_EXPIRED (yes/no), PROB_EXPIRES_AT
-# (re-formatted in UTC, so safe to print), PROB_STATUS (recorded, adopted or
+# (re-formatted in UTC, so safe to print), PROB_STATUS (recorded or
 # unrecorded), PROB_NOTE (clock_back, lengthened or nothing), PROB_RECORD (the
 # record to keep) and PROB_RECORDED (the record as found). It changes nothing:
 # settle_probation acts on the result.
 read_probation() {
-    local out content installed valid='^([ab] [^ ]+ [0-9]+|[ab] [0-9]+|none)$'
+    local out content valid='^([ab] [^ ]+ [0-9]+|none)$'
     refuse_symlink "$PROBATION_FILE"
     content="$(read_untrusted "$PROBATION_FILE")" || exit 1
     refuse_symlink "$PROBATION_EXPIRY_FILE"
@@ -51,9 +42,8 @@ read_probation() {
     [[ ! -e "$PROBATION_EXPIRY_FILE" ]] || PROB_RECORDED="$(cat "$PROBATION_EXPIRY_FILE")"
     [[ -z "$PROB_RECORDED" || "$PROB_RECORDED" =~ $valid ]] \
         || die_logged "$PROBATION_EXPIRY_FILE is malformed. As supervisor, remove it and $PROBATION_FILE: that ends the probation, keeping the live release"
-    installed="$(installed_version)"
     out="$(printf '%s' "$content" | BM_RECORDED="$PROB_RECORDED" BM_SLOT="$ACTIVE_SLOT" BM_HOURS="$PROBATION_HOURS" \
-        BM_INSTALLED="$installed" BM_ENV_ACTIVE="$BOXMUNGE_ROOT/env-active" python3 -c '
+        python3 -c '
 import json, os, sys
 from datetime import datetime, timedelta, timezone
 d = json.loads(sys.stdin.read())
@@ -69,9 +59,6 @@ record = os.environ["BM_RECORDED"].split()  # checked by the caller
 status, note, recorded = "unrecorded", "", now
 if len(record) == 3 and record[:2] == [os.environ["BM_SLOT"], d["version"]]:
     status, recorded = "recorded", datetime.fromtimestamp(int(record[2]), timezone.utc)
-elif len(record) < 3 and record != ["none"] and d["version"] == os.environ["BM_INSTALLED"]:
-    swapped = datetime.fromtimestamp(os.lstat(os.environ["BM_ENV_ACTIVE"]).st_mtime, timezone.utc)
-    status, recorded = "adopted", swapped + length
 if recorded > now + length:
     recorded, note = now + length, "clock_back"
 elif expires > recorded + timedelta(minutes=1):
@@ -100,12 +87,6 @@ print(int(recorded.timestamp()))
 # settle_probation: act on what read_probation found.
 settle_probation() {
     [[ "$PROB_STATUS" != unrecorded ]] || refuse_unrecorded_probation
-    if [[ "$PROB_STATUS" == adopted ]]; then
-        local ends="it ends at $PROB_EXPIRES_AT"
-        [[ "$PROB_EXPIRED" == no ]] || ends="it ran past its end with no check ($PROB_EXPIRES_AT; was the box off?), so it is promoted now"
-        log "WARN: the probation of $PROB_VERSION has no record (an older shim started it); adopted, as root's state shows that upgrade: $ends"
-        bm_log warn upgrade "probation started by an older shim adopted" "{\"version\": \"$PROB_VERSION\"}"
-    fi
     [[ "$PROB_RECORD" == "$PROB_RECORDED" ]] || write_root_file "$PROBATION_EXPIRY_FILE" "$PROB_RECORD"
     case "$PROB_NOTE" in
         lengthened)
@@ -117,14 +98,14 @@ settle_probation() {
 }
 
 # refuse_unrecorded_probation: probation.json names a probation no upgrade on
-# this box started (root's record names another slot or release, says none
-# is running, or an older shim's probation lacks the evidence above). Deploy
-# can write that file, and one it planted would defer upgrades and refuse
-# targets for a probation's length, again each time it is planted. It has no
-# authority, so it is removed, with an error in the operational log and an
-# alert: the run stops, and the next one carries on as if it was never there.
+# this box started (root's record names another slot or release, or says
+# none is running). Deploy can write that file, and one it planted would
+# defer upgrades and refuse targets for a probation's length, again each
+# time it is planted. It has no authority, so it is removed, with an error in
+# the operational log and an alert: the run stops, and the next one carries
+# on as if it was never there.
 refuse_unrecorded_probation() {
-    local msg="$PROBATION_FILE names $PROB_VERSION on probation, but no upgrade on this box started that probation (root's record, $PROBATION_EXPIRY_FILE, does not match it; one an older shim started counts only for the installed release), so it was removed and nothing else changed; the next run carries on. If it comes back, something running as the deploy user is writing it: find and stop it."
+    local msg="$PROBATION_FILE names $PROB_VERSION on probation, but no upgrade on this box started that probation (root's record, $PROBATION_EXPIRY_FILE, does not match it), so it was removed and nothing else changed; the next run carries on. If it comes back, something running as the deploy user is writing it: find and stop it."
     rm -f "$PROBATION_FILE"
     send_notification "boxmunge: planted probation removed" "$msg" 1
     die_logged "$msg"
@@ -133,8 +114,8 @@ refuse_unrecorded_probation() {
 # load_probation: 0 with PROB_* set while a release is on probation, 1 when
 # there is none. A probation naming the live slot as previous_slot is stale
 # (an older shim's rollback left it behind; deploy may remove it anyway), so
-# it is removed with a warning. previous_slot need not hold a working venv:
-# a pre-0.11 shim could recycle it mid-probation. Only a rollback needs it
+# it is removed with a warning. previous_slot need not hold a working venv
+# (a broken or half-removed slot). Only a rollback needs it
 # (do_rollback checks); promotion deletes it, and demanding it here left such
 # a probation unable to expire, deferring every upgrade for good (#119).
 load_probation() {
@@ -242,8 +223,8 @@ clear_probation_markers() {
 }
 
 # rollback_impossible <version> <prev_slot> <why>: the release on probation
-# failed (<why>), but the previous slot cannot take over (a pre-0.11 shim may
-# have recycled it). Said once per probation, as an error and an alert; later
+# failed (<why>), but the previous slot cannot take over (its venv is broken
+# or gone). Said once per probation, as an error and an alert; later
 # timer fires only print it, rather than adding an error to the log every five
 # minutes. With a live slot that still runs, expiry promotes the release; with
 # one that does not, nothing can until it is reinstalled.

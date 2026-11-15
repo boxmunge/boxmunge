@@ -87,21 +87,20 @@ expect 1 "stash create did not name the stash it made" "an unnamed stash stops t
     && pass "an unnamed stash: the proven slot stays live" || fail "an unnamed stash: live=$(readlink "$BOXMUNGE_ROOT/env-active")"
 drop_root
 
-# A stash create without a 'Stash digest:' line (a release before 0.11.6;
-# the default mock): the upgrade records the stash it made with the size and
-# sha256 of the file.
+# A stash create without a 'Stash digest:' line: the shim cannot tell the
+# stash it made from one renamed over the name, so the upgrade stops there.
 new_root a
 echo "1.4.0" > "$BOXMUNGE_ROOT/config/version"
-mock_server a '[[ "$1" != --version ]] || echo "boxmunge 1.4.0"; exit 0'
+mock_server a 'if [[ "$1 $2" == "stash create" ]]; then
+    n=boxmunge-stash-2026-06-01T120000.tar.gz; : > "$BOXMUNGE_ROOT/stashes/$n"; echo "Stash created: $n"; exit 0
+fi
+[[ "$1" != --version ]] || echo "boxmunge 1.4.0"; exit 0'
 rm "$BOXMUNGE_ROOT/env-a/bin/python"
 stub "$BOXMUNGE_ROOT/env-a/bin/python" '[[ "$1" != "-" ]] || cat >/dev/null; exit 0'
 run_shim target 1.5.0
-expect 0 "probation started" "an upgrade whose stash create prints no digest completes"
-read -r v name size sha < "$BOXMUNGE_ROOT/upgrade-root/upgrade-stash"
-stash="$BOXMUNGE_ROOT/stashes/$name"
-want="$("$REAL_PYTHON3" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$stash")"
-[[ "$v" == 1.5.0 && -f "$stash" && "$size" == "$(wc -c < "$stash" | tr -d ' ')" && "$sha" == "$want" ]] \
-    && pass "the stash is recorded with its size and sha256" || fail "record: $v $name $size $sha"
+expect 1 "stash create printed no digest line the shim can read" "a stash create without a digest stops the upgrade"
+[[ "$(readlink "$BOXMUNGE_ROOT/env-active")" == *env-a && ! -e "$BOXMUNGE_ROOT/upgrade-root/upgrade-stash" ]] \
+    && pass "no digest: nothing has changed" || fail "no digest: live=$(readlink "$BOXMUNGE_ROOT/env-active")"
 drop_root
 
 # A stash create that prints the size and sha256 of what it wrote: the shim
@@ -139,7 +138,7 @@ for twist in none renamed-over malformed; do
         expect 1 "$stash is not what stash create just wrote" "a file renamed over the stash is refused, naming it"
         [[ "$OUT" == *"boxmunge-upgrade target 1.5.0"* ]] && pass "the refusal names the retry" || fail "out: $OUT" ;;
     malformed)
-        expect 1 "stash create printed a digest line the shim cannot read" "an unreadable digest line is refused" ;;
+        expect 1 "stash create printed no digest line the shim can read" "an unreadable digest line is refused" ;;
     esac
     if [[ "$twist" != none ]]; then
         [[ "$(readlink "$BOXMUNGE_ROOT/env-active")" == *env-a && ! -e "$BOXMUNGE_ROOT/env-b" \

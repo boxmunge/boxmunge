@@ -35,7 +35,7 @@ pytestmark = [pytest.mark.integration, skip_no_docker]
 REPO = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 BASE = "python:3.13-slim"
-INSTALLED = "0.11.8"  # the release this tree becomes
+INSTALLED = "0.11.11"  # a release at the upgrade floor, running this tree's shim
 NEXT = "0.12.0"       # a breaking release after it: this tree, numbered so
 PREREQUISITES = ("bootstrap/upgrade-floor.sh", "bootstrap/python-floor.sh",
                   "bootstrap/compose-version.sh")

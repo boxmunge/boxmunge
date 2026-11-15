@@ -20,7 +20,6 @@
  "tests/integration/test_crowdsec_caddy_trixie.py": 101.4,
  "tests/integration/test_data_adopt.py": 36.7,
  "tests/integration/test_data_helper.py": 12.5,
- "tests/integration/test_deploy_dirs_ownership.py": 8.8,
  "tests/integration/test_deploy_lifecycle.py": 62.8,
  "tests/integration/test_dump_offline.py": 3.8,
  "tests/integration/test_dump_timeout.py": 39.4,

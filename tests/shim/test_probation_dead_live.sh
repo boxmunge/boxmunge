@@ -104,6 +104,8 @@ drop_root
 box "$DEAD" "$SOON"
 run_shim check-probation
 write_probation "1.5.1" "b" "$SOON"
+rm "$BOXMUNGE_ROOT/upgrade-root/upgrade-stash"
+record_upgrade_stash 1.5.1
 run_shim check-probation
 expect 1 "Rollback complete" "a rewritten probation version does not reset the live-slot failure count"
 drop_root

@@ -287,7 +287,7 @@ new_root() {
     ln -s "$BOXMUNGE_ROOT/env-$slot" "$BOXMUNGE_ROOT/env-active"
     cp "$BUILT_SHIM" "$BOXMUNGE_ROOT/bin/boxmunge-upgrade"
     chmod 0755 "$BOXMUNGE_ROOT/bin/boxmunge-upgrade"
-    # The stash a rollback restores when no upgrade recorded one.
+    # The stash a rollback of write_probation's upgrade restores.
     mkdir -m 0770 "$BOXMUNGE_ROOT/stashes"
     : > "$BOXMUNGE_ROOT/stashes/$OLD_STASH"
     chmod 0600 "$BOXMUNGE_ROOT/stashes/$OLD_STASH"
@@ -316,12 +316,14 @@ PY
 OLD_STASH="boxmunge-stash-2026-01-01T000000.tar.gz"
 
 # STASH_CREATE: what `stash create` does in a mock boxmunge-server whose body
-# does not handle it itself: make an (empty) stash and name it, as the real one
-# does, since the shim records the stash an upgrade made.
+# does not handle it itself: make an (empty) stash and name it, with its size
+# and sha256, as the real one does, since the shim records the stash an
+# upgrade made.
 # shellcheck disable=SC2016  # a mock body: literal bash
 STASH_CREATE='if [[ "$1 ${2:-}" == "stash create" ]]; then
     n="boxmunge-stash-$(date -u +%Y-%m-%dT%H%M%S).tar.gz"
-    mkdir -p "$BOXMUNGE_ROOT/stashes"; : > "$BOXMUNGE_ROOT/stashes/$n"; echo "Stash created: $n"; exit 0
+    mkdir -p "$BOXMUNGE_ROOT/stashes"; : > "$BOXMUNGE_ROOT/stashes/$n"; echo "Stash created: $n"
+    echo "Stash digest: 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"; exit 0
 fi'
 
 # HEALTHY: what `health --json` does in a mock boxmunge-server whose body does
@@ -366,6 +368,14 @@ SOON="$(python3 -c 'from datetime import datetime, timedelta, timezone; print((d
 write_probation() {
     forge_probation "$@"
     record_probation "$1"
+    record_upgrade_stash "$1"
+}
+
+# record_upgrade_stash <version>: root's record of the stash the upgrade to
+# <version> made (new_root's empty OLD_STASH), unless one is recorded already.
+record_upgrade_stash() {
+    local record="$BOXMUNGE_ROOT/upgrade-root/upgrade-stash"
+    [[ -e "$record" ]] || echo "$1 $OLD_STASH 0 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" > "$record"
 }
 
 # forge_probation <version> <previous_slot> <expires_at>: probation.json
@@ -382,12 +392,6 @@ record_probation() {
     slot="$(readlink "$BOXMUNGE_ROOT/env-active")"
     [[ -d "$BOXMUNGE_ROOT/upgrade-root" ]] || mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
     echo "${slot##*/env-} $1 ${2:-$(( $(date +%s) + 6 * 3600 ))}" > "$BOXMUNGE_ROOT/upgrade-root/probation-expiry"
-}
-
-# age_swap <hours>: make env-active look swapped <hours> ago.
-age_swap() {
-    python3 -c 'import os, sys, time; t = time.time() - float(sys.argv[2]) * 3600; os.utime(sys.argv[1], (t, t), follow_symlinks=False)' \
-        "$BOXMUNGE_ROOT/env-active" "$1"
 }
 
 drop_root() { rm -rf "$BOXMUNGE_ROOT"; unset BOXMUNGE_ROOT; }

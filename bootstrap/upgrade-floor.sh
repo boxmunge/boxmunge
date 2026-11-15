@@ -14,8 +14,8 @@
 # a re-run of this installer is how an interrupted first install is finished.
 set -euo pipefail
 
-UPGRADE_FLOOR="0.11.0"
-BRIDGE_RELEASE="0.11.6"
+UPGRADE_FLOOR="0.11.11"
+BRIDGE_RELEASE="0.11.11"
 BOXMUNGE_ROOT="${BOXMUNGE_ROOT:-/opt/boxmunge}"
 RECORD="${BOXMUNGE_ROOT}/config/version"
 

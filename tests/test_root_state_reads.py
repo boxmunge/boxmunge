@@ -30,7 +30,7 @@ import pytest
 
 from boxmunge import (
     bind_mounts, bind_sources, compose_up_steps, data_dirs, fs_nofollow, image_pins,
-    overlay_users, pause, release, release_txn, run_as, staged_release, unresolved_stage,
+    overlay_users, pause, release, release_txn, run_as, staged_release,
     upgrade_state, user_drift,
 )
 from boxmunge.api.jobs import JobStore
@@ -359,7 +359,6 @@ def test_a_dangling_link_at_the_name_is_not_read_as_no_record(paths, tmp_path, r
 DANGLING_ONLY: list[tuple[str, Callable[[BoxPaths], Path], Callable[[BoxPaths], Any]]] = [
     ("install.json", lambda p: release_txn.txn_path(p, P),
      lambda p: release_txn.load_txn(p, P)),
-    ("legacy-stages.json", lambda p: p.state / "legacy-stages.json", unresolved_stage._records),
     ("slot meta.json", lambda p: staged_release.slot_dir(p, P) / "meta.json",
      lambda p: staged_release.load_slot(p, P)),
     ("data dirs record", lambda p: data_dirs.record_path(p.project_dir(P)),

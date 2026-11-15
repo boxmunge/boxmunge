@@ -7,8 +7,7 @@ transaction (the core that finishes or abandons it migrates what it keeps),
 one whose pause or quarantine record cannot be read (whether it is meant to
 be offline cannot be told), and one whose lock is held (it keeps its old
 configs until its next deploy, resume or recover). Excluded projects do not
-fail the upgrade. A stage left by 0.10.1 or earlier fails it before any
-project is touched (refuse_unresolved_stages).
+fail the upgrade.
 """
 from __future__ import annotations
 
@@ -22,8 +21,7 @@ from boxmunge import bind_sources
 from boxmunge.commands.upgrade_offline import UnreadableRecord
 from boxmunge.commands.upgrade_steps import (
     ManifestMigration, Regeneration, _links_into_repository, _migrated, _project_dirs,
-    _regenerate_project, exclusion, install_exclusion_text, refuse_unresolved_stages,
-    require_manifest,
+    _regenerate_project, exclusion, install_exclusion_text, require_manifest,
 )
 from boxmunge.compose_guard import ComposeRefused, check_kept_files
 from boxmunge.fileutil import LockError, project_lock
@@ -110,9 +108,7 @@ def apply_projects(paths: BoxPaths) -> tuple[ManifestMigration, Regeneration, Ex
     (ManifestError, MigrationError, UpgradeGateError) where the upgrade
     cannot succeed; the shim then rolls back."""
     migration, regen, excluded = ManifestMigration(), Regeneration(), Exclusions()
-    project_dirs = list(_project_dirs(paths))
-    refuse_unresolved_stages(paths, [project_dir.name for project_dir in project_dirs])
-    for project_dir in project_dirs:
+    for project_dir in list(_project_dirs(paths)):
         name = project_dir.name
         try:
             with project_lock(name, paths):

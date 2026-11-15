@@ -6,11 +6,15 @@
 # Python code — it only calls Python commands as subprocesses and checks
 # exit codes. This ensures rollback works even if the new code is broken.
 #
-# Entry points (deploy may sudo only the three marked *; see install-sudoers):
+# Entry points (deploy may sudo only the five marked *; see install-sudoers):
 # * auto                       discover the latest release and upgrade to it
 # * target <version>           upgrade to a specific newer, non-blocklisted version
 # * repair-deps                install the installed release's hash-pinned
 #                              dependencies into the live slot (also in probation)
+# * check <version>            run a newer release's readiness check against this
+#                              box, changing nothing; prints JSON (check.sh)
+# * guide <version>            print a newer release's signed upgrade-notes.json
+#   _check-run <version> <installed>  check's part under upgrade.lock (check runs it)
 #   force-target <version>     operator only: ignore the blocklist and downgrade floor
 #   run <version> <url> [<class>]  auto-update timer: upgrade to a discovered
 #                              version of release class <class> (the bundle URL
@@ -24,10 +28,10 @@
 #   userns-commit              operator only: delete the old root after the soak
 #
 # In the source tree the functions live in boxmunge-upgrade.d/ (state, slots,
-# probation, health, release, system, userns). The release build (scripts/build-shim.py)
-# inlines them, so the shim a box runs is this one self-contained file:
-# whatever installs it (install.sh, or an older release's shim
-# self-updating) copies only this file.
+# probation, health, release, system, userns, readiness, check, gate). The
+# release build (scripts/build-shim.py) inlines them, so the shim a box runs
+# is this one self-contained file: whatever installs it (install.sh, or an
+# older release's shim self-updating) copies only this file.
 #
 # Cross-version contract: the crash-safety markers (upgrade-inflight,
 # rollback-inflight; see slots.sh) may be left by this shim and found by a
@@ -141,6 +145,8 @@ die_logged() {
 SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
 ACTIVE_SLOT=""
 LOCK_HELD=0
+# How long the auto-update timer's run waits for upgrade.lock (acquire_lock).
+LOCK_WAIT_SECS=900
 
 printable() { local s="${1:0:80}"; printf '%s' "${s//[^[:alnum:]._+-]/?}"; }
 
@@ -163,11 +169,13 @@ refuse_symlink() {
 # read_untrusted <file>: print a deploy-writable file. A FIFO would block a
 # plain read forever with upgrade.lock held, and a link swapped in after
 # refuse_symlink would be read through, so the file is opened O_NOFOLLOW |
-# O_NONBLOCK and anything but a regular file is refused. Use it as
+# O_NONBLOCK and anything but a regular file is refused; so is one over
+# UNTRUSTED_MAX_BYTES, which no state file root reads comes near. Use it as
 # value="$(read_untrusted <file>)" || exit 1 (it has already said why).
+UNTRUSTED_MAX_BYTES=1048576
 read_untrusted() {
     local rc=0
-    python3 - "$1" <<'PYRU' || rc=$?
+    python3 - "$1" "$UNTRUSTED_MAX_BYTES" <<'PYRU' || rc=$?
 import errno, os, stat, sys
 try:
     fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -176,11 +184,15 @@ except OSError as e:
 with os.fdopen(fd, "rb") as f:
     if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
         sys.exit(3)
-    sys.stdout.buffer.write(f.read())
+    data = f.read(int(sys.argv[2]) + 1)
+    if len(data) > int(sys.argv[2]):
+        sys.exit(4)
+    sys.stdout.buffer.write(data)
 PYRU
     case "$rc" in
         0) ;;
         3) die_logged "$1 is a symlink, FIFO or other non-regular file; refusing to read it as root. Remove it and re-run." ;;
+        4) die_logged "$1 is over $UNTRUSTED_MAX_BYTES bytes; refusing to read it as root. Remove it and re-run." ;;
         *) die_logged "Cannot read $1; inspect it and repair or remove it" ;;
     esac
 }
@@ -193,9 +205,10 @@ replace_file() {
 
 # write_root_file <file> <line>: replace a file in root-only upgrade-root/
 # (created if missing) by rename, so a reader never sees half of it. A temp a
-# run killed before its rename left (every caller holds upgrade.lock, so none
-# is in use) is swept first, and a failed write removes its own. No trap: it
-# would replace the shim's EXIT trap (cleanup_download), and SIGKILL skips one.
+# run killed before its rename left (every caller holds upgrade.lock, or
+# check.lock for the readiness check's own stamp, so none is in use) is swept
+# first, and a failed write removes its own. No trap: it would replace the
+# shim's EXIT trap (cleanup_scratch), and SIGKILL skips one.
 write_root_file() {
     local tmp prefix
     refuse_symlink "$UPGRADE_ROOT_DIR"
@@ -241,8 +254,14 @@ load_active_slot() {
 standby_slot() { [[ "$ACTIVE_SLOT" == "a" ]] && echo "b" || echo "a"; }
 active_venv() { echo "$BOXMUNGE_ROOT/env-$ACTIVE_SLOT"; }
 
-# acquire_lock [skip]: take upgrade.lock once per run. With "skip", a busy
-# lock exits 0 (the health timer retries on its next fire); otherwise it dies.
+# acquire_lock [skip|try|wait]: take upgrade.lock once per run. With "skip",
+# a busy lock exits 0 (the health timer retries on its next fire); with "try"
+# (a readiness check), it returns 1 and counts no skip; with "wait" (the
+# auto-update timer's run, whose discovery waited the same), it waits up to
+# LOCK_WAIT_SECS, as a readiness check holds the lock for up to ten minutes,
+# then dies, logged; otherwise it dies at once. Only "try" leaves
+# check-probation's skip count (lock-skips) alone when it takes the lock: a
+# readiness check is not a check-probation run.
 #
 # upgrade.lock is in root-only upgrade-root/, so deploy cannot replace it to
 # let a second upgrade run. Every shim and release an upgrade can start from
@@ -276,6 +295,7 @@ acquire_lock() {
         local foreign="$BM_UPGRADE_LOCK_FOREIGN"
         unset BM_UPGRADE_LOCK_FOREIGN
         [[ "${1:-}" != "skip" ]] || lock_busy_skip "$foreign was not root's when opened"
+        [[ "${1:-}" != "try" ]] || return 1
         die_logged "$foreign was replaced by a file that is not root's as it was opened (the deploy user is racing for it to stall upgrades); refusing to lock it. Retry; if it keeps happening, find what runs as deploy and stop it."
     fi
     if [[ "${BM_UPGRADE_LOCK_FD:-}" != 9 ]]; then
@@ -298,11 +318,16 @@ for fd, path in ((9, sys.argv[1]), (8, sys.argv[2])):
     if not (stat.S_ISREG(held.st_mode) and (held.st_dev, held.st_ino) == (name.st_dev, name.st_ino)):
         sys.exit(f"fd {fd} is not {path}")' "$LOCK_FILE" "$LEGACY_LOCK_FILE" 2>&1)" \
         || die "$why (it was replaced, or the descriptor came from elsewhere); refusing to lock it. Remove it and re-run."
-    if ! flock -n 9 || ! flock -n 8; then
+    if [[ "${1:-}" == wait ]]; then
+        if ! flock -w "$LOCK_WAIT_SECS" 9 || ! flock -w "$LOCK_WAIT_SECS" 8; then
+            die_logged "upgrade.lock was held for the whole $((LOCK_WAIT_SECS / 60)) minutes the auto-update timer waited, so nothing was installed; it tries again on its next run. Find the holder as supervisor: sudo lslocks | grep upgrade.lock"
+        fi
+    elif ! flock -n 9 || ! flock -n 8; then
         [[ "${1:-}" != "skip" ]] || lock_busy_skip "upgrade.lock is held"
+        [[ "${1:-}" != "try" ]] || return 1
         die "Another upgrade is in progress"
     fi
-    rm -f "$LOCK_SKIPS_FILE"
+    [[ "${1:-}" == "try" ]] || rm -f "$LOCK_SKIPS_FILE"
     LOCK_HELD=1
 }
 
@@ -640,8 +665,11 @@ report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.envir
 }
 
 # notify_via <python> <title> <message> [priority]: send a Pushover alert
-# through that venv's python. Returns 0 when sent, 3 when Pushover is not
-# configured, anything else when it could not be sent.
+# through that venv's python, its title prefixed with [<hostname>]. Returns 0
+# when sent, 3 when Pushover is not configured, anything else when it could
+# not be sent. A bare load_config stops over no setting the alert does not
+# use, in any release: an older shim still in memory during the hop calls it
+# exactly like this.
 notify_via() {
     local python="$1" title="$2" message="$3" priority="${4:-0}"
     BM_TITLE="$title" BM_MESSAGE="$message" BM_PRIORITY="$priority" "$python" -c "
@@ -653,7 +681,10 @@ config = load_config(BoxPaths())
 po = config.get('pushover', {})
 if not (po.get('user_key') and po.get('app_token')):
     sys.exit(3)
-sys.exit(0 if send_notification(po['user_key'], po['app_token'], os.environ['BM_TITLE'], os.environ['BM_MESSAGE'],
+# Every alert's title starts with the box's hostname (boxmunge.notify does the
+# same for the rest), so an operator with several boxes knows which one it is.
+title = '[%s] %s' % (config['hostname'], os.environ['BM_TITLE'])
+sys.exit(0 if send_notification(po['user_key'], po['app_token'], title, os.environ['BM_MESSAGE'],
                                 int(os.environ['BM_PRIORITY'])) else 1)
 " 2>/dev/null
 }
@@ -1511,8 +1542,10 @@ health_unjudged() {
 
 # >>> inlined from boxmunge-upgrade.d/release.sh by scripts/build-shim.py
 # release.sh — release bundles: fetching one and verifying its signature and
-# checksum, the hash-pinned requirements a slot is built from, and
-# repair-deps, which installs them into the live slot.
+# checksum, the hash-pinned requirements a slot is built from, how an upgrade
+# fails before its swap (preflight_fail and the failures that are the box's
+# doing, not the release's), and repair-deps, which installs the requirements
+# into the live slot.
 # Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
 # the shim that releases ship.
 
@@ -1578,6 +1611,68 @@ cosign_reason() {
     printf '%s' "${reason:0:300}"
 }
 
+# preflight_fail <version> <from_version> <blocklist_reason> <message> [stage] [detail]
+#
+# Abort before the slot swap: drop the half-built standby venv, blocklist
+# the version so auto-update stops retrying it, and report the failure, with
+# <detail> (by default the blocklist reason) as the report's reason.
+preflight_fail() {
+    log "$4"
+    remove_slot "$(standby_slot)"
+    add_blocklist "$1" "$3"
+    report_failure "$1" "$2" "${5:-preflight}" "${6:-$3}"
+    exit 1
+}
+
+# dependency_install_failed <version> <from_version>: pip could not install
+# the bundle's hash-pinned dependencies. That is rarely the release's fault
+# (a network blip, the disk filling mid-install), so, as for an interrupted
+# upgrade, the first failure of a version is not blocklisted or reported to
+# the fleet service and auto-update retries it; a second in a row is.
+dependency_install_failed() {
+    local version="$1" from_version="$2" count
+    count=$(( $(pip_failures "$version") + 1 ))
+    pip_failures "$version" "$count"
+    [[ "$count" -lt 2 ]] || preflight_fail "$version" "$from_version" "preflight_failed: pip_install_deps" \
+        "Failed to install hash-pinned dependencies from bundle ($count times in a row); blocklisting $version"
+    log "Failed to install hash-pinned dependencies from bundle; not blocklisted, auto-update will retry $version"
+    remove_slot "$(standby_slot)"
+    bm_log warn upgrade "dependency install failed" "{\"version\": \"$version\", \"failures\": $count}"
+    send_notification "boxmunge upgrade failed" "Could not install the dependencies of $version (not blocklisted; auto-update will retry it)"
+    exit 1
+}
+
+# stash_failed <version> <output>: the platform stash was refused (a symlink
+# it cannot hold) or failed (a full disk) before anything changed. That is the
+# box's doing, not the release's, so the version is not blocklisted or
+# reported; the standby is dropped and the operator alerted, so an unattended
+# auto-update stopping here every run is seen.
+stash_failed() {
+    local version="$1" output="$2"
+    log "Stash creation failed, aborting; $version not blocklisted: $output"
+    remove_slot "$(standby_slot)"
+    bm_log error upgrade "upgrade to $version aborted before any change: stash creation failed: $output" \
+        "{\"version\": \"$version\"}"
+    send_notification "boxmunge upgrade failed" \
+        "The platform stash failed, so the upgrade to $version stopped before changing anything (not blocklisted; auto-update will retry it). Fix this and retry: $output"
+    exit 1
+}
+
+# extract_failed <version> <message>: the bundle passed its checksum but did
+# not extract, so the box failed (a full disk under the download directory),
+# not the release: like stash_failed, not blocklisted or reported, and the
+# operator is alerted, so an auto-update stopping here every run is seen.
+extract_failed() {
+    local version="$1" message="$2"
+    log "$message; $version not blocklisted"
+    remove_slot "$(standby_slot)"
+    bm_log error upgrade "upgrade to $version aborted before any change: bundle extract failed" \
+        "{\"version\": \"$version\"}"
+    send_notification "boxmunge upgrade failed" \
+        "The verified bundle of $version did not extract, so the upgrade stopped before changing anything (not blocklisted; auto-update will retry it). Free disk space and retry: $message"
+    exit 1
+}
+
 # cosign_verify_failed <version> <from_version>: an upgrade's fetch_release
 # failed at cosign_verify. A bad signature and an unreachable Sigstore (cosign
 # searches Rekor online) look alike, and cosign's error text is not a stable
@@ -1616,88 +1711,106 @@ require_free_space() {
     [[ "$avail_mb" -ge 250 ]] || die "Insufficient disk space: ${avail_mb}MB available, need 250MB"
 }
 
+# The shim's scratch, removed when it exits, by one EXIT trap (cleanup_scratch):
+# TMP_DOWNLOAD (start_download) and, for a readiness check that took
+# check.lock, OWNED_CHECK_DIR (check.sh).
 TMP_DOWNLOAD=""
-cleanup_download() { [[ -z "$TMP_DOWNLOAD" ]] || rm -rf "$TMP_DOWNLOAD"; }
+OWNED_CHECK_DIR=""
+cleanup_scratch() {
+    [[ -z "$TMP_DOWNLOAD" ]] || rm -rf "$TMP_DOWNLOAD"
+    [[ -z "$OWNED_CHECK_DIR" ]] || rm -rf "$OWNED_CHECK_DIR"
+}
 
 # start_download: TMP_DOWNLOAD becomes a fresh root-only directory, removed
 # when the shim exits.
 start_download() {
     TMP_DOWNLOAD="$(mktemp -d)"
-    trap cleanup_download EXIT
+    trap cleanup_scratch EXIT
 }
 
-# fetch_release <version> <dir>: download release <version>'s bundle and its
-# signed SHA256SUMS into <dir>, verify both, and extract the bundle to
-# <dir>/boxmunge. On failure it returns 1 with FETCH_STEP (the step that
-# failed, for a blocklist reason) and FETCH_ERROR set; nothing outside <dir>
-# has changed. Every step but the last fails on the release or its download;
-# bundle_extract fails on the box (the bundle passed its checksum, so it is
-# the release's own bytes: a full disk). Callers run it as
+# fetch_release <version> <dir> [readonly]: download release <version>'s
+# bundle and its signed SHA256SUMS into <dir>, verify both, and extract the
+# bundle to <dir>/boxmunge. On failure it returns 1 with FETCH_STEP (the step
+# that failed, for a blocklist reason) and FETCH_ERROR set; nothing outside
+# <dir> has changed. Every step but the last fails on the release or its
+# download; bundle_extract fails on the box (the bundle passed its checksum,
+# so it is the release's own bytes: a full disk). Callers run it as
 # `fetch_release ... || <handle the failure>`, which suspends set -e here, so
-# every step checks its own result.
+# every step checks its own result. With readonly (a readiness check), a
+# verified signature leaves the cosign failure count alone (fetch_signed_sums).
 FETCH_STEP=""
 FETCH_ERROR=""
-# download <dest> <url>: every download runs with upgrade.lock held, so a
-# stalled connection must not park the upgrade (and check-probation, which
-# skips while the lock is held) indefinitely.
-download() { curl -sLf -o "$1" --connect-timeout 30 --max-time 600 --proto =https --proto-redir =https "$2"; }
+# release_url <version> <file>: where release <version> publishes <file>.
+release_url() { echo "https://github.com/boxmunge/boxmunge/releases/download/v$1/$2"; }
+# download <dest> <url> [<curl option>...]: every download of an upgrade runs
+# with upgrade.lock held, so a stalled connection must not park the upgrade
+# (and check-probation, which skips while the lock is held) indefinitely.
+download() { curl -sLf -o "$1" --connect-timeout 30 --max-time 600 --proto =https --proto-redir =https "${@:3}" "$2"; }
 # shellcheck disable=SC2034  # FETCH_STEP is read by upgrade_to, in the shim itself
 fetch_failed() { FETCH_STEP="$1"; FETCH_ERROR="$2"; }
 
 fetch_release() {
-    local version="$1" dir="$2"
-    local base="https://github.com/boxmunge/boxmunge/releases/download/v${version}"
+    local version="$1" dir="$2" mode="${3:-}"
     local bundle="boxmunge-${version}.tar.gz"
 
-    log "Downloading bundle from ${base}/${bundle}"
-    download "$dir/$bundle" "$base/$bundle" \
+    log "Downloading bundle from $(release_url "$version" "$bundle")"
+    download "$dir/$bundle" "$(release_url "$version" "$bundle")" \
         || { fetch_failed bundle_download "Failed to download bundle"; return 1; }
-    download "$dir/SHA256SUMS" "$base/SHA256SUMS" \
-        || { fetch_failed checksum_download "Failed to download SHA256SUMS"; return 1; }
-    download "$dir/SHA256SUMS.sig" "$base/SHA256SUMS.sig" \
-        || { fetch_failed signature_download "Failed to download SHA256SUMS.sig (release is unsigned or sig artifact missing)"; return 1; }
-    download "$dir/SHA256SUMS.cert" "$base/SHA256SUMS.cert" \
-        || { fetch_failed certificate_download "Failed to download SHA256SUMS.cert (release is unsigned or cert artifact missing)"; return 1; }
-
-    # Verify cosign signature on SHA256SUMS BEFORE running sha256sum -c.
-    #
-    # This breaks the circularity of the prior design (where SHA256SUMS and
-    # the bundle came from the same release URL — an attacker who replaced
-    # the bundle could replace SHA256SUMS in lockstep). Cosign's keyless
-    # signature chains to a Fulcio cert tying SHA256SUMS to the release
-    # workflow on a tagged release of this exact repo; without the OIDC
-    # issuer pinning the attacker would need to compromise GitHub Actions
-    # OIDC, not just the release artifacts.
-    #
-    # cosign is hard-required: if the host is missing it, abort.
-    verify_release_signature "$dir" \
-        || { fetch_failed cosign_verify "Cosign verification of SHA256SUMS FAILED, refusing to install: $COSIGN_REASON"; return 1; }
-    cosign_failures "$version" 0
-    log "Cosign signature on SHA256SUMS verified (release-workflow identity)"
-    bm_log info upgrade "signature verified" "{\"version\": \"$version\"}"
-
-    # Verify checksum.
-    #
-    # SHA256SUMS lines are produced by `sha256sum <file>` and have the
-    # canonical form: `<64-hex-hash>  <filename>` (two spaces, bare filename
-    # — the release workflow takes care to write bare filenames).
-    #
-    # We do NOT pass --ignore-missing: it makes `sha256sum -c` succeed when
-    # the SHA256SUMS file lists zero matching files. An adversary who could
-    # publish a SHA256SUMS without a line for our bundle would then pass
-    # verification trivially. So instead we (a) require that SHA256SUMS
-    # contains a line for the exact bundle filename we just downloaded, and
-    # (b) run the full check. SHA256SUMS may also list boxmunge-install.sh and
-    # other release artefacts we did not download; the check is restricted to
-    # the bundle line.
-    grep -q "  ${bundle}\$" "$dir/SHA256SUMS" \
-        || { fetch_failed checksum_missing_entry "Checksum verification FAILED: SHA256SUMS does not list ${bundle}"; return 1; }
-    (cd "$dir" && grep "  ${bundle}\$" SHA256SUMS | sha256sum -c -) \
-        || { fetch_failed checksum_mismatch "Checksum verification FAILED"; return 1; }
+    fetch_signed_sums "$version" "$dir" "$mode" || return 1
+    verify_listed "$dir" "$bundle" checksum || return 1
 
     local out
     out="$(tar xzf "$dir/$bundle" -C "$dir" 2>&1)" \
         || { fetch_failed bundle_extract "Failed to extract the verified bundle in $dir: $out"; return 1; }
+}
+
+# fetch_signed_sums <version> <dir> [readonly]: download release <version>'s
+# SHA256SUMS with its signature and certificate into <dir>, and verify the
+# signature. A verified one clears the version's cosign failure count
+# (cosign_verify_failed), except with readonly: a readiness check or a guide
+# changes no upgrade state. Sets FETCH_STEP and FETCH_ERROR like fetch_release.
+#
+# The signature is checked BEFORE any checksum: SHA256SUMS and the bundle come
+# from the same release URL, so an attacker who replaced the bundle could
+# replace SHA256SUMS in lockstep. Cosign's keyless signature chains to a
+# Fulcio cert tying SHA256SUMS to the release workflow on a tagged release of
+# this exact repo (the OIDC issuer is pinned), so forging one means
+# compromising GitHub Actions OIDC, not just the release artifacts. cosign is
+# hard-required: if the host is missing it, this fails.
+fetch_signed_sums() {
+    local version="$1" dir="$2" mode="${3:-}"
+    download "$dir/SHA256SUMS" "$(release_url "$version" SHA256SUMS)" \
+        || { fetch_failed checksum_download "Failed to download SHA256SUMS"; return 1; }
+    download "$dir/SHA256SUMS.sig" "$(release_url "$version" SHA256SUMS.sig)" \
+        || { fetch_failed signature_download "Failed to download SHA256SUMS.sig (release is unsigned or sig artifact missing)"; return 1; }
+    download "$dir/SHA256SUMS.cert" "$(release_url "$version" SHA256SUMS.cert)" \
+        || { fetch_failed certificate_download "Failed to download SHA256SUMS.cert (release is unsigned or cert artifact missing)"; return 1; }
+    verify_release_signature "$dir" \
+        || { fetch_failed cosign_verify "Cosign verification of SHA256SUMS FAILED, refusing to install: $COSIGN_REASON"; return 1; }
+    [[ "$mode" == readonly ]] || cosign_failures "$version" 0
+    log "Cosign signature on SHA256SUMS verified (release-workflow identity)"
+    bm_log info upgrade "signature verified" "{\"version\": \"$version\"}"
+}
+
+# verify_listed <dir> <file> <step>: <dir>/<file> is what the verified
+# <dir>/SHA256SUMS says. SHA256SUMS lines are `sha256sum <file>` output,
+# `<64-hex-hash>  <filename>` (two spaces, a bare filename), and must hold
+# exactly one line ending `  <file>`. No --ignore-missing: it makes
+# `sha256sum -c` pass when SHA256SUMS lists none of the files, so a SHA256SUMS
+# published without the line would pass trivially. SHA256SUMS lists other
+# artefacts too, so only that line is checked. Fails with FETCH_STEP
+# <step>_missing_entry (no line) or <step>_mismatch (a wrong hash, or more
+# than one line).
+verify_listed() {
+    local dir="$1" file="$2" step="$3" line count
+    line="  ${file//./\\.}\$"
+    count="$(grep -cE "$line" "$dir/SHA256SUMS")" || true
+    [[ "$count" != 0 ]] \
+        || { fetch_failed "${step}_missing_entry" "Checksum verification FAILED: SHA256SUMS does not list ${file}"; return 1; }
+    [[ "$count" == 1 ]] \
+        || { log "SHA256SUMS lists ${file} $count times"; fetch_failed "${step}_mismatch" "Checksum verification FAILED"; return 1; }
+    (cd "$dir" && grep -E "$line" SHA256SUMS | sha256sum -c - >&2) \
+        || { fetch_failed "${step}_mismatch" "Checksum verification FAILED"; return 1; }
 }
 
 # The bundle's hash-pinned requirements files (covered by the signed
@@ -1716,15 +1829,19 @@ missing_requirement() {
     return 1
 }
 
-# install_pinned_deps <bundle> <slot>: install every PINNED_REQUIREMENTS file
-# of <bundle> into env-<slot>, hash-checked, so nothing beyond the pins is
-# resolved. No pip self-upgrade (one more unpinned download) and no cache
-# (nothing builds up under /root). Check missing_requirement first.
-install_pinned_deps() {
+# install_pinned_deps_into <bundle> <venv_dir>: install every
+# PINNED_REQUIREMENTS file of <bundle> into the venv, hash-checked, so nothing
+# beyond the pins is resolved. No pip self-upgrade (one more unpinned
+# download) and no cache (nothing builds up under /root). Check
+# missing_requirement first.
+install_pinned_deps_into() {
     local req reqs=()
     for req in "${PINNED_REQUIREMENTS[@]}"; do reqs+=(-r "$1/$req"); done
-    "$BOXMUNGE_ROOT/env-$2/bin/pip" install --quiet --no-cache-dir --require-hashes "${reqs[@]}"
+    "$2/bin/pip" install --quiet --no-cache-dir --require-hashes "${reqs[@]}"
 }
+
+# install_pinned_deps <bundle> <slot>: the same into env-<slot>.
+install_pinned_deps() { install_pinned_deps_into "$1" "$BOXMUNGE_ROOT/env-$2"; }
 
 # repair-deps: install the installed release's hash-pinned dependencies into
 # the live slot, from that release's own bundle, fetched and verified as an
@@ -1781,13 +1898,14 @@ cmd_repair_deps() {
 # deploy's sudo rule. Owned here so install.sh and every upgrade write the
 # same text; a box whose rule predates a tightening is fixed on its next
 # upgrade. sudo matches the whole argument string against each pattern, so
-# `target *` cannot reach force-target or any other subcommand, and `auto`
+# `target *`, `check *` and `guide *` cannot reach force-target, _check-run
+# or any other subcommand (each verb takes exactly one version), and `auto`
 # and `repair-deps` take no further words.
 # ---------------------------------------------------------------------------
 sudoers_rule() {
     cat <<EOF
 # Managed by boxmunge-upgrade install-sudoers; rewritten on every install and upgrade.
-deploy ALL=(root) NOPASSWD: $BIN_DIR/boxmunge-upgrade auto, $BIN_DIR/boxmunge-upgrade target *, $BIN_DIR/boxmunge-upgrade repair-deps
+deploy ALL=(root) NOPASSWD: $BIN_DIR/boxmunge-upgrade auto, $BIN_DIR/boxmunge-upgrade target *, $BIN_DIR/boxmunge-upgrade repair-deps, $BIN_DIR/boxmunge-upgrade check *, $BIN_DIR/boxmunge-upgrade guide *
 EOF
 }
 
@@ -1926,6 +2044,20 @@ self_update_shim() {
             bm_log error upgrade "wrapper self-update skipped: bash -n failed" "{\"name\": \"$name\"}"
         fi
     done
+}
+
+# new_shim_sudoers <previous shim> <version> <from_version>: the shim just
+# self-updated writes deploy's sudo rule (the one written earlier was the
+# running shim's), so the rule follows the shim. If it cannot, <version>
+# fails its pre-flight, with the shim the box ran before put back first: a
+# shim that cannot write the rule refuses every later upgrade, force-target
+# included.
+new_shim_sudoers() {
+    "$BIN_DIR/boxmunge-upgrade" install-sudoers && return 0
+    install_by_rename "$1" "$BIN_DIR/boxmunge-upgrade" \
+        || log "ERROR: could not put the previous shim back from $1; reinstall the installed release (sudo bash boxmunge-install.sh)"
+    preflight_fail "$2" "$3" "preflight_failed: install_sudoers" \
+        "The new shim could not write deploy's sudo rule; the previous shim is back in place"
 }
 
 # ---------------------------------------------------------------------------
@@ -2086,72 +2218,780 @@ cmd_userns_rollback() { [[ $# -eq 0 ]] || die "Usage: boxmunge-upgrade userns-ro
 cmd_userns_commit() { [[ $# -eq 0 ]] || die "Usage: boxmunge-upgrade userns-commit"; userns_run commit; }
 # <<< boxmunge-upgrade.d/userns.sh
 
-# preflight_fail <version> <from_version> <blocklist_reason> <message> [stage] [detail]
-#
-# Abort before the slot swap: drop the half-built standby venv, blocklist
-# the version so auto-update stops retrying it, and report the failure, with
-# <detail> (by default the blocklist reason) as the report's reason.
-preflight_fail() {
-    log "$4"
-    remove_slot "$(standby_slot)"
-    add_blocklist "$1" "$3"
-    report_failure "$1" "$2" "${5:-preflight}" "${6:-$3}"
-    exit 1
+# >>> inlined from boxmunge-upgrade.d/readiness.sh by scripts/build-shim.py
+# readiness.sh — running a release's own checks against this box without
+# letting them change it: confined runs (systemd-run), the bundle's
+# prerequisite scripts, and the verdict of its readiness command
+# (`boxmunge-server upgrade-readiness --json`, readiness contract 1).
+# Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
+# the shim that releases ship.
+
+# Time limits of each confined run, in seconds. A unit still running at its
+# limit gets SIGTERM, and STOP_SECS later SIGKILL, every process in it. The
+# readiness check holds upgrade.lock only for the readiness and dry runs: at
+# most READINESS_SECS + DRY_RUN_SECS + 2 * STOP_SECS = 610 s (and a few
+# seconds of the shim's own), so the health timer (every 5 minutes) skips
+# at most three check-probation runs, and auto-update waits it out.
+STOP_SECS=5
+PREREQ_SECS=60
+# shellcheck disable=SC2034  # VENV_SECS and DRY_RUN_SECS are check.sh's
+VENV_SECS=900
+READINESS_SECS=300
+# shellcheck disable=SC2034
+DRY_RUN_SECS=300
+# The readiness command's stdout, at most; a longer one is not contract 1.
+READINESS_MAX_BYTES=1048576
+# The largest file a unit with no writable path may write: its output files
+# (and its private /tmp). A larger write fails (EFBIG, or SIGXFSZ).
+CONFINED_FILE_MAX=2097152
+
+# PY_CLEAN: Python that every message built from a release's output goes
+# through. clean(text, limit, tail=False) gives one line of printable ASCII
+# (line breaks and tabs as spaces, anything else unprintable as '?', runs of
+# spaces as one) of at most <limit> characters, the last ones with tail=True.
+PY_CLEAN='def clean(text, limit, tail=False):
+    text = text[-4 * limit:] if tail else text[:4 * limit]
+    text = " ".join("".join(c if " " <= c <= "~" else " " if c in "\n\r\t" else "?" for c in text).split())
+    return text[-limit:] if tail else text[:limit]
+'
+
+# require_systemd_run: a release's code runs here only inside systemd-run.
+require_systemd_run() {
+    command -v systemd-run >/dev/null 2>&1 \
+        || die "systemd-run is missing, and a readiness check runs a release's code only inside it. It comes with systemd: as supervisor, sudo apt-get install systemd"
 }
 
-# dependency_install_failed <version> <from_version>: pip could not install
-# the bundle's hash-pinned dependencies. That is rarely the release's fault
-# (a network blip, the disk filling mid-install), so, as for an interrupted
-# upgrade, the first failure of a version is not blocklisted or reported to
-# the fleet service and auto-update retries it; a second in a row is.
-dependency_install_failed() {
-    local version="$1" from_version="$2" count
-    count=$(( $(pip_failures "$version") + 1 ))
-    pip_failures "$version" "$count"
-    [[ "$count" -lt 2 ]] || preflight_fail "$version" "$from_version" "preflight_failed: pip_install_deps" \
-        "Failed to install hash-pinned dependencies from bundle ($count times in a row); blocklisting $version"
-    log "Failed to install hash-pinned dependencies from bundle; not blocklisted, auto-update will retry $version"
-    remove_slot "$(standby_slot)"
-    bm_log warn upgrade "dependency install failed" "{\"version\": \"$version\", \"failures\": $count}"
-    send_notification "boxmunge upgrade failed" "Could not install the dependencies of $version (not blocklisted; auto-update will retry it)"
-    exit 1
+# confined_run <name> <secs> <user> <rw-dir|-> <out> <err> -- <cmd...>: run
+# <cmd> as <user> in the transient unit boxmunge-check-<name>-<pid>, stopped
+# after <secs> seconds (STOP_SECS more to end), with the filesystem read-only
+# except <rw-dir> (none for -; then no file over CONFINED_FILE_MAX either), a
+# private /tmp, no new privileges and no kernel tunables, modules or cgroups;
+# as root, also no capabilities, devices or namespaces, and only the system
+# calls of @system-service.
+# Its stdin is /dev/null. Its stdout goes to the file <out>, its stderr to
+# <err> ("-" discards either, an <err> of "+" goes with stdout); systemd
+# opens them, emptied first. So nothing here ever reads the unit's output
+# while it runs: a process the unit's output is handed to (deploy can reach a
+# deploy unit's) cannot keep this shell, or upgrade.lock, waiting. The
+# environment is PATH, BOXMUNGE_ROOT, PYTHONSAFEPATH and
+# PYTHONDONTWRITEBYTECODE, and what systemd adds (USER, and for a <user> not
+# root HOME, LOGNAME and SHELL), the working directory /. Returns <cmd>'s
+# exit code, or 124 when the time limit stopped it, or 125 when systemd can
+# no longer say how the unit ended (confined_ending).
+confined_run() {
+    local name="$1" secs="$2" user="$3" rw="$4" out="$5" err="$6" stream
+    [[ "${7:-}" == -- && $# -gt 7 && "$name" =~ ^[a-z0-9-]+$ && "$secs" =~ ^[1-9][0-9]*$ \
+        && "$user" =~ ^[a-z_][a-z0-9_-]*$ && ( "$rw" == - || "$rw" == /* ) \
+        && ( "$out" == - || "$out" == /* ) && ( "$err" == - || "$err" == + || "$err" == /* ) ]] \
+        || die "Usage: confined_run <name> <secs> <user> <rw-dir|-> <out|-> <err|-|+> -- <cmd...>"
+    shift 7
+    require_systemd_run
+    local unit="boxmunge-check-$name-$$" rc=0
+    local props=(-p "RuntimeMaxSec=$secs" -p "TimeoutStopSec=$STOP_SECS" -p ProtectSystem=strict
+        -p ProtectHome=read-only -p PrivateTmp=yes -p NoNewPrivileges=yes -p ProtectKernelTunables=yes
+        -p ProtectKernelModules=yes -p ProtectControlGroups=yes)
+    if [[ "$rw" == - ]]; then props+=(-p "LimitFSIZE=$CONFINED_FILE_MAX"); else props+=(-p "ReadWritePaths=$rw"); fi
+    if [[ "$user" == root ]]; then
+        # Root runs only the signed release's own scripts and pip, and needs
+        # none of root's powers for them: no capabilities, no devices, no
+        # namespaces, and only the system calls an ordinary service makes.
+        props+=(-p CapabilityBoundingSet= -p PrivateDevices=yes -p RestrictNamespaces=yes
+            -p SystemCallFilter=@system-service)
+    else
+        props+=(-p "User=$user")
+    fi
+    for stream in "$out" "$err"; do
+        [[ "$stream" != /* ]] || : > "$stream"  # there, empty, even if the unit never starts
+    done
+    props+=(-p "StandardOutput=$(confined_stream "$out")")
+    if [[ "$err" == + ]]; then props+=(-p StandardError=inherit); else props+=(-p "StandardError=$(confined_stream "$err")"); fi
+    # A failed unit keeps its name until it is reset. One a killed run left
+    # under this name (the same pid) would stop this one from starting; when
+    # there is none, systemctl says so, and that is not an error here.
+    systemctl reset-failed "$unit.service" >/dev/null 2>&1 || true
+    systemd-run --quiet --wait --unit="$unit" "${props[@]}" \
+        --setenv=PATH=/usr/sbin:/usr/bin:/sbin:/bin --setenv="BOXMUNGE_ROOT=$BOXMUNGE_ROOT" \
+        --setenv=PYTHONSAFEPATH=1 --setenv=PYTHONDONTWRITEBYTECODE=1 --working-directory=/ \
+        -- "$@" </dev/null || rc=$?
+    [[ "$rc" -ne 0 ]] || return 0
+    confined_ending "$unit.service" "$rc"
 }
 
-# stash_failed <version> <output>: the platform stash was refused (a symlink
-# it cannot hold) or failed (a full disk) before anything changed. That is the
-# box's doing, not the release's, so the version is not blocklisted or
-# reported; the standby is dropped and the operator alerted, so an unattended
-# auto-update stopping here every run is seen.
-stash_failed() {
-    local version="$1" output="$2"
-    log "Stash creation failed, aborting; $version not blocklisted: $output"
-    remove_slot "$(standby_slot)"
-    bm_log error upgrade "upgrade to $version aborted before any change: stash creation failed: $output" \
-        "{\"version\": \"$version\"}"
-    send_notification "boxmunge upgrade failed" \
-        "The platform stash failed, so the upgrade to $version stopped before changing anything (not blocklisted; auto-update will retry it). Fix this and retry: $output"
-    exit 1
+# confined_ending <unit> <rc>: how a unit `systemd-run --wait` reported as
+# failed (<rc>) ended, asked of systemd, which keeps a failed transient unit
+# loaded until it is reset: its Result, which nothing the command prints or
+# exits with can fake. 124 for Result=timeout; 125 when systemd does not know
+# the unit (systemd-run could not start it, or it is gone), so a timeout
+# cannot be ruled out; otherwise <rc>, the command's own 124 or 125 as 1.
+confined_ending() {
+    local unit="$1" rc="$2" shown load="" result="" line
+    shown="$(systemctl show --property=LoadState --property=Result "$unit" 2>/dev/null)" || shown=""
+    systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+    while IFS= read -r line; do
+        case "$line" in
+            LoadState=*) load="${line#LoadState=}" ;;
+            Result=*) result="${line#Result=}" ;;
+        esac
+    done <<< "$shown"
+    if [[ "$load" != loaded ]]; then
+        log "ERROR: $unit exited $rc, and systemd does not know the unit (LoadState=${load:-unknown}), so whether it ran out of time cannot be told"
+        return 125
+    fi
+    [[ "$result" != timeout ]] || return 124
+    [[ "$rc" -ne 124 && "$rc" -ne 125 ]] || return 1
+    return "$rc"
 }
 
-# extract_failed <version> <message>: the bundle passed its checksum but did
-# not extract, so the box failed (a full disk under the download directory),
-# not the release: like stash_failed, not blocklisted or reported, and the
-# operator is alerted, so an auto-update stopping here every run is seen.
-extract_failed() {
-    local version="$1" message="$2"
-    log "$message; $version not blocklisted"
-    remove_slot "$(standby_slot)"
-    bm_log error upgrade "upgrade to $version aborted before any change: bundle extract failed" \
-        "{\"version\": \"$version\"}"
-    send_notification "boxmunge upgrade failed" \
-        "The verified bundle of $version did not extract, so the upgrade stopped before changing anything (not blocklisted; auto-update will retry it). Free disk space and retry: $message"
-    exit 1
+# confined_stream <file|->: a systemd StandardOutput= or StandardError= value.
+confined_stream() { if [[ "$1" == - ]]; then echo null; else echo "truncate:$1"; fi; }
+
+# run_prerequisites <bundle_dir> <out_jsonl>: run the box checks the bundle
+# lists in bootstrap/prerequisites (one bootstrap/<name>.sh a line; # comments
+# and blank lines allowed), each as `bash <script>` as root, confined with no
+# writable path, PREREQ_SECS at most. Appends {"script", "ok", "message"} for
+# each to <out_jsonl>; a script's message is the end of its stderr. Returns 0
+# when all are met (or none is listed), 1 when one is not, and 2 when that
+# cannot be told: the list is malformed (reported as the script
+# bootstrap/prerequisites), or a script did not finish.
+run_prerequisites() {
+    local bundle="$1" out="$2" manifest="$1/bootstrap/prerequisites" line script rc verdict=0 scripts=()
+    local skip='^[[:space:]]*(#.*)?$' valid='^bootstrap/[a-z0-9-]+\.sh$'
+    [[ -e "$manifest" || -L "$manifest" ]] || return 0
+    if [[ -L "$manifest" || ! -f "$manifest" ]]; then
+        prerequisite_line "$out" bootstrap/prerequisites false "is not a regular file in the bundle"
+        return 2
+    fi
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ ! "$line" =~ $skip ]] || continue
+        if [[ ! "$line" =~ $valid || -L "$bundle/$line" || ! -f "$bundle/$line" ]]; then
+            prerequisite_line "$out" bootstrap/prerequisites false "lists '$line', which is not a bootstrap/<name>.sh script in the bundle"
+            return 2
+        fi
+        scripts+=("$line")
+    done < "$manifest"
+    for script in "${scripts[@]+"${scripts[@]}"}"; do
+        rc=0
+        confined_run "prereq-$(basename "$script" .sh)" "$PREREQ_SECS" root - - "$out.err" \
+            -- bash "$bundle/$script" || rc=$?
+        case "$rc" in
+            0) prerequisite_line "$out" "$script" true "" ;;
+            124) prerequisite_line "$out" "$script" false "did not finish within $PREREQ_SECS s; retry when the box is less busy"
+                 [[ "$verdict" -eq 1 ]] || verdict=2 ;;
+            125) prerequisite_line "$out" "$script" false "could not tell how it ended" "$out.err"
+                 [[ "$verdict" -eq 1 ]] || verdict=2 ;;
+            *) prerequisite_line "$out" "$script" false "exited $rc and said nothing" "$out.err"
+               verdict=1 ;;
+        esac
+    done
+    rm -f "$out.err"
+    return "$verdict"
 }
+
+# prerequisite_line <out_jsonl> <script> <ok> <message> [<stderr file>]: one
+# result line; the message is the end of the stderr file when it says
+# anything, <message> otherwise.
+prerequisite_line() {
+    python3 -I -c "$PY_CLEAN"'
+import json, sys
+out, script, ok, message = sys.argv[1:5]
+if len(sys.argv) > 5:
+    with open(sys.argv[5], "rb") as f:
+        f.seek(0, 2)
+        f.seek(max(0, f.tell() - 4096))
+        message = clean(f.read().decode("utf-8", "replace"), 1024, tail=True) or message
+with open(out, "a") as f:
+    f.write(json.dumps({"script": script, "ok": ok == "true", "message": clean(message, 1024)}) + "\n")
+' "$@"
+}
+
+# run_readiness <venv_dir> <out_file>: the readiness command of the release in
+# <venv_dir> against this box, as deploy, confined with no writable path,
+# READINESS_SECS at most. As deploy, so a project file deploy links elsewhere
+# cannot make root read it into a finding. Its stdout goes to <out_file>
+# (readiness_verdict reads at most READINESS_MAX_BYTES and one more byte),
+# its stderr to <out_file>.err. Returns its exit code (124: timed out).
+run_readiness() {
+    confined_run readiness "$READINESS_SECS" deploy - "$2" "$2.err" \
+        -- "$1/bin/boxmunge-server" upgrade-readiness --json
+}
+
+# readiness_verdict <out_file> [<exit code>]: pass, blocked or invalid. Only
+# what the shim acts on is checked (the deploy side reads the findings): a
+# JSON object of at most READINESS_MAX_BYTES whose contract is the integer 1
+# and whose result is pass or blocked. With <exit code>, it must agree (0 for
+# pass, 1 for blocked, readiness contract 1), or the answer is invalid.
+readiness_verdict() {
+    BM_MAX="$READINESS_MAX_BYTES" BM_RC="${2:-}" python3 -I -c 'import json, os, sys
+limit, verdict = int(os.environ["BM_MAX"]), "invalid"
+try:
+    with open(sys.argv[1], "rb") as f:
+        raw = f.read(limit + 1)
+    d = json.loads(raw) if len(raw) <= limit else None
+except (OSError, ValueError, RecursionError):
+    d = None
+if isinstance(d, dict) and type(d.get("contract")) is int and d["contract"] == 1 and d.get("result") in ("pass", "blocked"):
+    verdict = d["result"]
+rc = os.environ["BM_RC"]
+if rc and verdict != "invalid" and rc != {"pass": "0", "blocked": "1"}[verdict]:
+    verdict = "invalid"
+print(verdict)' "$1"
+}
+
+# readiness_summary <out_file>: one line of at most 400 printable characters
+# saying what the readiness answer found: for the box and for each project,
+# its first block, or else its first to-do. Use it on an answer
+# readiness_verdict accepted.
+readiness_summary() {
+    python3 -I -c "$PY_CLEAN"'
+import json, sys
+with open(sys.argv[1], "rb") as f:
+    d = json.loads(f.read())
+def first(findings):
+    findings = [f for f in findings if isinstance(f, dict)] if isinstance(findings, list) else []
+    for severity in ("block", "todo"):
+        for f in findings:
+            if f.get("severity") == severity and isinstance(f.get("message"), str):
+                return f["message"]
+parts = []
+if first(d.get("box")):
+    parts.append("box: " + first(d.get("box")))
+for p in d.get("projects") if isinstance(d.get("projects"), list) else []:
+    if isinstance(p, dict) and first(p.get("findings")):
+        parts.append(str(p.get("name")) + ": " + first(p.get("findings")))
+print(clean("; ".join(parts), 400))
+' "$1"
+}
+# <<< boxmunge-upgrade.d/readiness.sh
+
+# >>> inlined from boxmunge-upgrade.d/check.sh by scripts/build-shim.py
+# check.sh — what deploy may ask root before an upgrade: `check <version>`,
+# the target release's own readiness check against this box (its part under
+# upgrade.lock is `_check-run`, root only), and `guide <version>`, the
+# release's signed upgrade notes. Neither changes any upgrade state (the
+# blocklist, the slots, the failure counts, probation, the stash), whatever
+# happens: every helper they share with an upgrade runs read-only.
+# Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
+# the shim that releases ship.
+
+# The first release that publishes upgrade-notes.json (at most
+# NOTES_MAX_BYTES) and carries the readiness command.
+FIRST_NOTES_RELEASE="0.11.8"
+NOTES_MAX_BYTES=1048576
+# One check at a time (check.lock), each starting at least CHECK_WINDOW_SECS
+# after the last one began and after it ended (check-last, the epoch second
+# of the later): a check downloads a release and builds a venv as root, and
+# holds upgrade.lock for up to ten minutes, so back-to-back checks must not
+# be able to keep it held. Both root-only, in upgrade-root/.
+CHECK_WINDOW_SECS=600
+CHECK_LOCK_FILE="$UPGRADE_ROOT_DIR/check.lock"
+CHECK_STAMP_FILE="$UPGRADE_ROOT_DIR/check-last"
+# The scratch, root's and 0755, cleared when a check begins and removed when
+# it ends: download/ (0700) the verified bundle, venv/ the release's venv,
+# which deploy runs its checks from (so not in 0700 upgrade-root/), out/
+# (0700) what the confined runs reported. Not in /tmp, a tmpfs on Debian 13.
+CHECK_DIR="$BOXMUNGE_ROOT/upgrade-check"
+# Free there: the upgrade's own 250 MB floor, and the scratch (a venv is
+# about 90 MB, the bundle a few).
+CHECK_FREE_MB=400
+CHECK_VERSION=""
+CHECK_INSTALLED=""
+CHECK_OUT=""
+CHECK_STAMPED=0
+
+usage_exit() { echo "Usage: $1" >&2; exit 2; }
+
+# check <version>: the readiness check of <version> against this box. After
+# the argument check, stdout is one JSON object (check contract 1; fd 3 is
+# its, everything else goes to stderr) and the exit code is 0 only for a
+# pass. A refusal comes first, before anything is fetched or written.
+cmd_check() {
+    [[ $# -eq 1 && "$1" =~ $SEMVER_RE ]] || usage_exit "boxmunge-upgrade check <version>"
+    exec 3>&1 1>&2
+    CHECK_VERSION="$1"
+    CHECK_INSTALLED="$(installed_version)"
+    require_systemd_run
+    # Before load_active_slot, which repairs active-slot after a cut-short swap.
+    ! check_interrupted || check_refused "an earlier upgrade or rollback was interrupted, and the health timer's check-probation finishes it within minutes; run upgrade-check --version $CHECK_VERSION again after that"
+    load_active_slot
+    take_check_lock || check_refused "a readiness check is already running; retry when it ends"
+    check_refusals
+    prepare_check_dir
+    write_root_file "$CHECK_STAMP_FILE" "$(date +%s)"
+    CHECK_STAMPED=1
+    bm_log info upgrade "readiness check started" "{\"version\": \"$CHECK_VERSION\"}"
+
+    local bundle="$CHECK_DIR/download/boxmunge" rc=0 missing
+    fetch_release "$CHECK_VERSION" "$CHECK_DIR/download" readonly || check_finish cant_verify fetch "$FETCH_ERROR"
+    run_prerequisites "$bundle" "$CHECK_OUT/prerequisites.jsonl" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) check_finish blocked prerequisites "this box does not meet what $CHECK_VERSION needs before it can be installed" ;;
+        *) check_finish cant_verify prerequisites "could not tell whether this box meets what $CHECK_VERSION needs" ;;
+    esac
+    if missing="$(missing_requirement "$bundle")"; then
+        check_finish cant_verify venv "the bundle of $CHECK_VERSION has no hash-pinned $missing, so no venv is built from it"
+    fi
+    build_check_venv "$bundle" "$CHECK_DIR/venv" "$CHECK_OUT/venv.txt" || rc=$?
+    case "$rc" in
+        0) ;;
+        124) check_finish cant_verify venv "building $CHECK_VERSION's venv did not finish within $VENV_SECS s; retry when the box is less busy" ;;
+        *) check_finish cant_verify venv "building $CHECK_VERSION's venv failed (exit $rc): $(tail -c 1024 "$CHECK_OUT/venv.txt")" ;;
+    esac
+    "$BASH" "$SHIM_PATH" _check-run "$CHECK_VERSION" "$CHECK_INSTALLED" >"$CHECK_OUT/check-run.log" 2>&1 || rc=$?
+    check_outcome "$rc"
+}
+
+# check_interrupted: an upgrade or rollback marker in either slot.
+check_interrupted() {
+    [[ -e "$(inflight_marker a)" || -e "$(inflight_marker b)" || -e "$(rollback_marker a)" || -e "$(rollback_marker b)" ]]
+}
+
+# take_check_lock: check.lock, on fd 7 until the shim exits. In root-only
+# upgrade-root/, which deploy cannot write, so it is opened by name.
+take_check_lock() {
+    refuse_symlink "$UPGRADE_ROOT_DIR"
+    [[ -d "$UPGRADE_ROOT_DIR" ]] || mkdir -m 0700 "$UPGRADE_ROOT_DIR"
+    refuse_symlink "$CHECK_LOCK_FILE"
+    exec 7>>"$CHECK_LOCK_FILE"
+    chmod 0600 "$CHECK_LOCK_FILE"
+    flock -n 7
+}
+
+# check_refusals: what stops a check before it fetches anything.
+check_refusals() {
+    local v="$CHECK_VERSION" state
+    semver_lt "$CHECK_INSTALLED" "$v" \
+        || check_refused "this box runs $CHECK_INSTALLED, and upgrade-check checks a newer release: run upgrade-howto --version <a release newer than $CHECK_INSTALLED>"
+    semver_lt "$LAST_RELEASE_WITHOUT_MCP_LOCK" "$v" \
+        || check_refused "$v predates the hash-pinned requirements every install needs, so this box can neither check nor install it; run upgrade-howto --version <a release newer than $CHECK_INSTALLED>"
+    ! semver_lt "$v" "$FIRST_NOTES_RELEASE" \
+        || check_refused "$v predates the readiness check (releases carry it from $FIRST_NOTES_RELEASE on), so it cannot be checked; upgrade to it from the deploy shell: upgrade --target $v"
+    ! is_blocklisted "$v" \
+        || check_refused "$v is blocklisted on this box (it failed an earlier upgrade). The operator clears it as supervisor (sudo $BIN_DIR/boxmunge-upgrade clear-blocklist $v), then run upgrade-check --version $CHECK_VERSION again"
+    check_probation
+    state="$(userns_state)" \
+        || check_refused "the userns migration journal is malformed; the operator inspects it as supervisor: sudo $BIN_DIR/boxmunge-upgrade userns-migrate --check"
+    case "${state#* }" in
+        ""|applied|committed|rolled-back) ;;
+        *) check_refused "a userns $state is stopped part-way, and no upgrade runs until it is finished. The operator finishes it as supervisor (sudo $BIN_DIR/boxmunge-upgrade $(userns_finish "$state")), then run upgrade-check --version $CHECK_VERSION again" ;;
+    esac
+    check_rate_limit
+}
+
+# check_probation: refuse while probation.json is there. deploy may write it,
+# so it is only read (read_probation changes nothing): never settled or
+# removed, as check-probation does.
+check_probation() {
+    [[ -e "$PROBATION_FILE" || -L "$PROBATION_FILE" ]] || return 0
+    local found version ends expired status previous
+    found="$( { read_probation && printf '%s|%s|%s|%s|%s' "$PROB_VERSION" "$PROB_EXPIRES_AT" "$PROB_EXPIRED" \
+        "$PROB_STATUS" "$PROB_PREV_SLOT"; } 2>/dev/null)" \
+        || check_refused "$PROBATION_FILE is unreadable or malformed, and defers every upgrade until it is removed. The operator inspects and removes it as supervisor (sudo rm $PROBATION_FILE), then run upgrade-check --version $CHECK_VERSION again"
+    IFS='|' read -r version ends expired status previous <<< "$found"
+    if [[ "$status" == unrecorded || "$previous" == "$ACTIVE_SLOT" ]]; then
+        check_refused "$PROBATION_FILE names $version on probation, but no upgrade on this box is running that probation; the health timer's check-probation removes it within minutes, then run upgrade-check --version $CHECK_VERSION again"
+    fi
+    [[ "$expired" == no ]] \
+        || check_refused "$version has finished its probation, and the health timer's check-probation promotes it within minutes; run upgrade-check --version $CHECK_VERSION again after that"
+    check_refused "$version is on probation until $ends, and no upgrade runs until it ends; run upgrade-check --version $CHECK_VERSION again after that"
+}
+
+# check_rate_limit: one check every CHECK_WINDOW_SECS. A stamp in the future
+# (the clock went back) does not refuse: a clock step must not stop checks
+# for days.
+check_rate_limit() {
+    local last now
+    refuse_symlink "$CHECK_STAMP_FILE"
+    [[ -e "$CHECK_STAMP_FILE" ]] || return 0
+    last="$(cat "$CHECK_STAMP_FILE")"
+    [[ "$last" =~ ^[0-9]{1,15}$ ]] \
+        || check_refused "$CHECK_STAMP_FILE is malformed; the operator removes it as supervisor (sudo rm $CHECK_STAMP_FILE), then run upgrade-check --version $CHECK_VERSION again"
+    now="$(date +%s)"
+    if (( now - 10#$last >= 0 && now - 10#$last < CHECK_WINDOW_SECS )); then
+        check_refused "the last readiness check ran less than $((CHECK_WINDOW_SECS / 60)) minutes ago, and checks start at least $((CHECK_WINDOW_SECS / 60)) minutes after the last one ended; run upgrade-check --version $CHECK_VERSION again from $(utc_time $((10#$last + CHECK_WINDOW_SECS)))"
+    fi
+}
+
+# check_exit: the EXIT trap of a check that owns the scratch. One that got as
+# far as its stamp stamps again as it ends, however it ends, so the next can
+# start only CHECK_WINDOW_SECS after this one has let go of upgrade.lock.
+check_exit() {
+    [[ "$CHECK_STAMPED" -eq 0 ]] || write_root_file "$CHECK_STAMP_FILE" "$(date +%s)"
+    cleanup_scratch
+}
+
+utc_time() { python3 -I -c 'import sys, time; print(time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(int(sys.argv[1]))))' "$1"; }
+
+# prepare_check_dir: CHECK_DIR, empty, root's; and the free space there. It
+# is under BOXMUNGE_ROOT, which must be root's and writable by root alone:
+# otherwise deploy could swap a link in for it between the checks and use.
+prepare_check_dir() {
+    local avail
+    python3 -I -c 'import os, sys
+st = os.stat(sys.argv[1])
+sys.exit(st.st_uid != os.geteuid() or st.st_mode & 0o022)' "$BOXMUNGE_ROOT" \
+        || check_refused "$BOXMUNGE_ROOT is not root's alone (another user owns it or may write it), so no scratch is made under it. The operator fixes it as supervisor: sudo chown root:root $BOXMUNGE_ROOT && sudo chmod 0755 $BOXMUNGE_ROOT"
+    [[ ! -L "$CHECK_DIR" ]] \
+        || check_refused "$CHECK_DIR is a symlink; the operator removes it as supervisor (sudo rm $CHECK_DIR), then run upgrade-check --version $CHECK_VERSION again"
+    # From here this check owns the scratch (it holds check.lock): removed
+    # however the shim exits. A refusal before here leaves everything as it was.
+    # shellcheck disable=SC2034  # read by cleanup_scratch (release.sh)
+    OWNED_CHECK_DIR="$CHECK_DIR"
+    trap check_exit EXIT
+    rm -rf "$CHECK_DIR"
+    mkdir -m 0755 "$CHECK_DIR"
+    mkdir -m 0700 "$CHECK_DIR/download" "$CHECK_DIR/out"
+    if [[ "$(id -u)" -eq 0 ]]; then chown root:root "$CHECK_DIR" "$CHECK_DIR/download" "$CHECK_DIR/out"; fi
+    CHECK_OUT="$CHECK_DIR/out"
+    avail="$(df -P -m "$CHECK_DIR" | awk 'NR==2{print $4}')"
+    [[ "$avail" =~ ^[0-9]+$ ]] || die "Cannot read the free space of $CHECK_DIR from df (got '$(printable "$avail")')"
+    [[ "$avail" -ge "$CHECK_FREE_MB" ]] \
+        || check_refused "$CHECK_DIR has ${avail} MB free, and a check needs $CHECK_FREE_MB MB (an upgrade's 250 MB, and the scratch venv). Free disk space, then run upgrade-check --version $CHECK_VERSION again"
+}
+
+# build_check_venv <bundle> <venv> <output>: the release's venv, built as an
+# upgrade builds a slot (only the bundle's hash-pinned requirements, then the
+# package with no further resolution), as root, confined, writing only
+# CHECK_DIR; what it prints goes to <output>.
+build_check_venv() {
+    local script
+    script="$(declare -p PINNED_REQUIREMENTS)
+$(declare -f install_pinned_deps_into)
+set -euo pipefail
+python3 -m venv \"\$2\"
+install_pinned_deps_into \"\$1\" \"\$2\"
+\"\$2/bin/pip\" install --quiet --no-cache-dir --no-deps --no-build-isolation \"\$1\""
+    confined_run venv "$VENV_SECS" root "$CHECK_DIR" "$3" + -- bash -c "$script" build-venv "$1" "$2"
+}
+
+# _check-run <version> <installed>: the part of a check that reads the live
+# box, under upgrade.lock: the release's readiness command, then (when it
+# answered) its `upgrade --dry-run`, each as deploy, confined, results in
+# CHECK_DIR/out. Run by check, as root; not in deploy's sudo rule. The lock is
+# taken here, not in check, because acquire_lock runs the shim again with
+# the same arguments. Exits 75 when an upgrade holds the lock, 76 when the
+# installed release changed since the check began.
+cmd_check_run() {
+    [[ $# -eq 2 && "$1" =~ $SEMVER_RE && "$2" =~ $SEMVER_RE ]] \
+        || die "Usage: boxmunge-upgrade _check-run <version> <installed> (check runs it)"
+    local venv="$CHECK_DIR/venv" out="$CHECK_DIR/out" rc=0 verdict
+    [[ ! -L "$CHECK_DIR" && -d "$out" && -x "$venv/bin/boxmunge-server" ]] \
+        || die "$CHECK_DIR holds no checked release; run: boxmunge-upgrade check $1"
+    load_active_slot
+    acquire_lock try || exit 75
+    [[ "$(installed_version)" == "$2" ]] || exit 76
+    run_readiness "$venv" "$out/readiness.json" || rc=$?
+    echo "$rc" > "$out/readiness.rc"
+    verdict="$(readiness_verdict "$out/readiness.json" "$rc")"
+    echo "$verdict" > "$out/readiness.verdict"
+    [[ "$verdict" != invalid ]] || exit 0
+    rc=0
+    confined_run dryrun "$DRY_RUN_SECS" deploy - "$out/dry_run.out" + \
+        -- "$venv/bin/boxmunge-server" upgrade --dry-run || rc=$?
+    tail -c 4096 "$out/dry_run.out" > "$out/dry_run.txt"
+    echo "$rc" > "$out/dry_run.rc"
+}
+
+# check_outcome <_check-run exit code>: finish with what it found.
+check_outcome() {
+    local out="$CHECK_OUT" rc verdict dry err reasons=()
+    case "$1" in
+        0) ;;
+        75) check_finish cant_verify readiness "an upgrade is in progress; retry after it" ;;
+        76) check_finish cant_verify readiness "the box was upgraded during the check; run upgrade-check --version $CHECK_VERSION again" ;;
+        *) check_finish cant_verify readiness "the readiness run stopped (exit $1): $(tail -c 1024 "$out/check-run.log")" ;;
+    esac
+    rc="$(cat "$out/readiness.rc")"
+    verdict="$(cat "$out/readiness.verdict")"
+    err="$(tail -c 1024 "$out/readiness.json.err")"
+    case "$rc:$verdict" in
+        124:*) check_finish cant_verify readiness "the readiness check of $CHECK_VERSION did not finish within $READINESS_SECS s; retry when the box is less busy" ;;
+        125:*) check_finish cant_verify readiness "could not tell how the readiness check of $CHECK_VERSION ended: $err" ;;
+        2:invalid) check_finish cant_verify readiness "$CHECK_VERSION has no working readiness command (boxmunge-server upgrade-readiness --json exited 2, a usage error: $err), so it cannot be checked" ;;
+        0:pass) ;;
+        1:blocked) reasons+=("the readiness check of $CHECK_VERSION found what blocks the upgrade: $(readiness_summary "$out/readiness.json")") ;;
+        *) check_finish cant_verify readiness "the readiness command of $CHECK_VERSION gave no valid answer (exit $rc): $err" ;;
+    esac
+    dry="$(cat "$out/dry_run.rc")"
+    case "$dry" in
+        0) [[ "$verdict" != blocked ]] || check_finish blocked complete "${reasons[@]}"
+           check_finish pass complete ;;
+        124) reasons+=("the upgrade's own pre-flight (upgrade --dry-run) did not finish within $DRY_RUN_SECS s; retry when the box is less busy") ;;
+        125) reasons+=("could not tell how the upgrade's own pre-flight (upgrade --dry-run) ended") ;;
+        *) reasons+=("the upgrade's own pre-flight (upgrade --dry-run) of $CHECK_VERSION refused (exit $dry); dry_run.output says why")
+           check_finish blocked dry_run "${reasons[@]}" ;;
+    esac
+    [[ "$verdict" != blocked ]] || check_finish blocked dry_run "${reasons[@]}"
+    check_finish cant_verify dry_run "${reasons[@]}"
+}
+
+check_refused() { check_finish cant_verify refused "$1"; }
+
+# check_finish <result> <stage> [<reason>...]: print the check's answer (one
+# JSON object: check contract 1), log it, and exit 0 for pass, 1 otherwise.
+# Reasons and output are cut and cleaned; the readiness answer is the
+# release's own, at most READINESS_MAX_BYTES, re-serialised.
+check_finish() {
+    BM_TARGET="$CHECK_VERSION" BM_INSTALLED="$CHECK_INSTALLED" BM_RESULT="$1" BM_STAGE="$2" BM_OUT="$CHECK_OUT" \
+        python3 -I -c "$PY_CLEAN"'
+import json, os, sys
+out, stage = os.environ["BM_OUT"], os.environ["BM_STAGE"]
+def read(name, limit):
+    if not out:
+        return None
+    try:
+        with open(os.path.join(out, name), "rb") as f:
+            return f.read(limit).decode("utf-8", "replace")
+    except FileNotFoundError:
+        return None
+prerequisites = [json.loads(line) for line in (read("prerequisites.jsonl", 1 << 20) or "").splitlines()]
+reasons = [clean(r, 1000) for r in sys.argv[1:21]]
+if stage == "prerequisites":
+    reasons += [clean(p["script"] + ": " + p["message"], 1000) for p in prerequisites if not p["ok"]]
+readiness = None
+if (read("readiness.verdict", 16) or "").strip() in ("pass", "blocked"):
+    readiness = json.loads(read("readiness.json", 1 << 20))
+dry_run, rc = None, read("dry_run.rc", 16)
+if rc is not None:
+    output = "".join(c if c == "\n" or " " <= c <= "~" else "?" for c in (read("dry_run.txt", 4096) or ""))
+    dry_run = {"ok": rc.strip() == "0", "output": output}
+print(json.dumps({"check": 1, "target": os.environ["BM_TARGET"], "installed": os.environ["BM_INSTALLED"],
+                  "result": os.environ["BM_RESULT"], "stage": stage, "reasons": reasons,
+                  "prerequisites": prerequisites, "readiness": readiness, "dry_run": dry_run}))
+' "${@:3}" >&3
+    bm_log info upgrade "readiness check finished" \
+        "{\"version\": \"$CHECK_VERSION\", \"result\": \"$1\", \"stage\": \"$2\"}"
+    [[ "$1" == pass ]] || exit 1
+    exit 0
+}
+
+# guide <version>: print release <version>'s upgrade-notes.json byte for
+# byte, once its own line in the release's signed SHA256SUMS verifies it (the
+# deploy side composes the guide). No lock and no rate limit: a few small
+# downloads, and no release code runs.
+cmd_guide() {
+    [[ $# -eq 1 && "$1" =~ $SEMVER_RE ]] || usage_exit "boxmunge-upgrade guide <version>"
+    exec 3>&1 1>&2
+    local version="$1" installed notes size status rc=0
+    installed="$(installed_version)"
+    semver_lt "$installed" "$version" \
+        || die "Not fetching the upgrade notes of $version: this box runs $installed, and they are for a newer release; run upgrade-howto --version <a release newer than $installed>"
+    ! semver_lt "$version" "$FIRST_NOTES_RELEASE" \
+        || die "$version has no upgrade notes: releases publish them from $FIRST_NOTES_RELEASE on; run upgrade-howto --version <a release from $FIRST_NOTES_RELEASE on>"
+    start_download
+    notes="$TMP_DOWNLOAD/upgrade-notes.json"
+    fetch_signed_sums "$version" "$TMP_DOWNLOAD" readonly || die "$FETCH_ERROR (the upgrade notes of $version)"
+    status="$(download "$notes" "$(release_url "$version" upgrade-notes.json)" --max-filesize "$NOTES_MAX_BYTES" \
+        --write-out '%{http_code}')" || rc=$?
+    case "$rc:$status" in
+        0:*) ;;
+        22:404) die "Release $version publishes no upgrade-notes.json (GitHub answered 404)" ;;
+        22:*) die "GitHub refused the download of upgrade-notes.json of $version (HTTP $(printable "$status")); retry later" ;;
+        63:*) die "upgrade-notes.json of $version is over $NOTES_MAX_BYTES bytes; refusing it" ;;
+        *) die "Failed to download upgrade-notes.json of $version (the download failed, exit $rc); retry later" ;;
+    esac
+    size="$(wc -c < "$notes" | tr -d ' ')"
+    [[ "$size" -le "$NOTES_MAX_BYTES" ]] || die "upgrade-notes.json of $version is $size bytes, over $NOTES_MAX_BYTES; refusing it"
+    verify_listed "$TMP_DOWNLOAD" upgrade-notes.json notes || die "$FETCH_ERROR (upgrade-notes.json of $version)"
+    cat "$notes" >&3
+}
+# <<< boxmunge-upgrade.d/check.sh
+
+# >>> inlined from boxmunge-upgrade.d/gate.sh by scripts/build-shim.py
+# gate.sh — an upgrade that crosses a breaking release runs the target's
+# readiness check first, and installs only when it passes; and after any
+# upgrade, the to-do alert: what each project must change before its next
+# deploy. Security and break-fix releases are non-breaking by definition, so
+# they install ungated (one unready project must not hold a fix hostage for
+# the whole box), and the to-do alert tells what their new rules ask.
+# Whether an upgrade crosses a breaking release is read from the target's
+# own signed upgrade-notes.json, never from the unsigned discovery answer.
+# Every mode but force is gated: run as well, which deploy's `upgrade`
+# (auto) uses. The operator's force-target is the override.
+# Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
+# the shim that releases ship.
+
+# GATE: 1 while the upgrade in progress crosses a breaking release.
+GATE=0
+
+# gate_prepare <version> <mode> <dir> <from_version>: decide GATE, before the
+# standby is built. <dir> holds the release fetch_release verified; its
+# upgrade-notes.json must be the one its signed SHA256SUMS lists, or the
+# upgrade fails its pre-flight (and <version> is blocklisted) as for a bad
+# bundle. A crossing upgrade then needs the bundle's prerequisites met, or
+# it is refused, unblocklisted (gate_refused).
+gate_prepare() {
+    local version="$1" mode="$2" dir="$3" from_version="$4" notes="$3/upgrade-notes.json" breaking rc=0
+    GATE=0
+    [[ "$mode" != force ]] || return 0
+    ! semver_lt "$version" "$FIRST_NOTES_RELEASE" || return 0
+    download "$notes" "$(release_url "$version" upgrade-notes.json)" --max-filesize "$NOTES_MAX_BYTES" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: notes_download" \
+            "Failed to download upgrade-notes.json of $version"
+    [[ "$(wc -c < "$notes" | tr -d ' ')" -le "$NOTES_MAX_BYTES" ]] \
+        || preflight_fail "$version" "$from_version" "preflight_failed: notes_download" \
+            "upgrade-notes.json of $version is over $NOTES_MAX_BYTES bytes"
+    verify_listed "$dir" upgrade-notes.json notes \
+        || preflight_fail "$version" "$from_version" "preflight_failed: $FETCH_STEP" "$FETCH_ERROR (upgrade-notes.json)"
+    breaking="$(crossing_breaking "$notes" "$(installed_version)" "$version")" \
+        || preflight_fail "$version" "$from_version" "preflight_failed: notes_invalid" \
+            "The signed upgrade-notes.json of $version cannot be read: $breaking"
+    [[ -n "$breaking" ]] || return 0
+    GATE=1
+    log "The upgrade to $version crosses the breaking release $breaking: $version's readiness check must pass first"
+    command -v systemd-run >/dev/null 2>&1 \
+        || gate_refused "$version" "this box has no systemd-run, which the readiness check runs in (as supervisor: sudo apt-get install systemd)"
+    run_prerequisites "$dir/boxmunge" "$dir/prerequisites.jsonl" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) gate_refused "$version" "this box does not meet what $version needs: $(prerequisites_summary "$dir/prerequisites.jsonl")" ;;
+        *) gate_refused "$version" "could not tell whether this box meets what $version needs: $(prerequisites_summary "$dir/prerequisites.jsonl")" ;;
+    esac
+}
+
+# crossing_breaking <notes> <installed> <target>: the first release I < v <= T
+# that the notes' releases table marks breaking, or nothing. Fails, saying
+# why, when the notes are not format 1 of <target> with a table holding it,
+# every entry's breaking a JSON boolean: the gate is never skipped on a guess.
+crossing_breaking() {
+    python3 -I -c 'import json, re, sys
+path, installed, target = sys.argv[1:4]
+semver = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?")
+def key(v):
+    core, _, pre = v.partition("-")
+    nums = tuple(int(x) for x in core.split("."))
+    if not pre:
+        return nums, 1, ()
+    return nums, 0, tuple((0, int(p), "") if p.isdigit() else (1, 0, p) for p in pre.split("."))
+try:
+    with open(path, "rb") as f:
+        d = json.loads(f.read())
+except (OSError, ValueError, RecursionError) as e:
+    sys.exit(f"not JSON ({type(e).__name__})")
+if not (isinstance(d, dict) and type(d.get("format")) is int and d["format"] == 1 and d.get("release") == target):
+    sys.exit(f"not format 1 of {target}")
+releases = d.get("releases")
+if not (isinstance(releases, dict) and target in releases and all(
+        semver.fullmatch(v) and isinstance(r, dict) and type(r.get("breaking")) is bool for v, r in releases.items())):
+    sys.exit(f"its releases table must hold {target}, each entry with a boolean breaking")
+crossed = sorted((key(v), v) for v, r in releases.items() if r["breaking"] and key(installed) < key(v) <= key(target))
+print(crossed[0][1] if crossed else "")' "$@" 2>&1
+}
+
+# prerequisites_summary <jsonl>: the unmet prerequisites, one line of at most
+# 400 printable characters.
+prerequisites_summary() {
+    python3 -I -c "$PY_CLEAN"'
+import json, sys
+lines = [json.loads(line) for line in open(sys.argv[1])]
+print(clean("; ".join(p["script"] + ": " + p["message"] for p in lines if not p["ok"]), 400))' "$1"
+}
+
+# gate_readiness <version> <standby>: with GATE set, the readiness command of
+# the release just built into env-<standby> (as deploy, confined) must pass,
+# or the upgrade is refused. Run in the pre-flight before the release's own
+# dry run, so a box the dry run would refuse is refused here, unblocklisted.
+gate_readiness() {
+    local version="$1" out="$TMP_DOWNLOAD/readiness.json" rc=0 verdict
+    [[ "$GATE" -eq 1 ]] || return 0
+    log "Running the readiness check of $version against this box..."
+    run_readiness "$BOXMUNGE_ROOT/env-$2" "$out" || rc=$?
+    verdict="$(readiness_verdict "$out" "$rc")"
+    case "$rc:$verdict" in
+        *:pass) log "The readiness check of $version passed"; return 0 ;;
+        *:blocked) gate_refused "$version" "its readiness check found what blocks it: $(readiness_summary "$out")" ;;
+        124:*) gate_refused "$version" "its readiness check did not finish within $READINESS_SECS s, so this box could not be verified; retry when it is less busy" ;;
+        *) gate_refused "$version" "its readiness check gave no valid answer (exit $rc), so this box could not be verified: $(clean_file "$out.err" 300)" ;;
+    esac
+}
+
+# clean_file <file> <limit>: the end of <file> as one printable line.
+clean_file() {
+    python3 -I -c "$PY_CLEAN"'
+import sys
+with open(sys.argv[1], "rb") as f:
+    print(clean(f.read().decode("utf-8", "replace"), int(sys.argv[2]), tail=True))' "$1" "$2"
+}
+
+# gate_refused <version> <why>: stop the upgrade before anything changed. Not
+# the release's failure but the box's state: no blocklist entry and no failure
+# report; the standby is dropped and the operator alerted.
+gate_refused() {
+    local version="$1" msg
+    msg="Not upgrading to $version: $2. Nothing was changed and $version is not blocklisted. See what to fix: upgrade-check --version $version (deploy shell). The operator can override as supervisor: sudo $BIN_DIR/boxmunge-upgrade force-target $version"
+    remove_slot "$(standby_slot)"
+    bm_log warn upgrade "upgrade refused: box not ready" "{\"version\": \"$version\"}"
+    send_notification "boxmunge upgrade to $version refused" "$msg" 0
+    die "$msg"
+}
+
+# post_install_todo <version> <mode>: once <version> is live and on
+# probation, its readiness command (as deploy, confined) lists what each
+# project must change before its next deploy, as one low-priority alert.
+# "blocked" is said at normal priority: after force-target, as the blocks the
+# operator installed over; otherwise as a release bug (the upgrade went
+# ahead). It can neither fail nor roll back the upgrade: whatever goes wrong
+# is a warning.
+post_install_todo() {
+    local version="$1" mode="$2" out="$TMP_DOWNLOAD/todo.json" rc=0 verdict alert priority title
+    ! semver_lt "$version" "$FIRST_NOTES_RELEASE" || return 0
+    if ! command -v systemd-run >/dev/null 2>&1; then
+        log "WARN: no systemd-run, so no to-do list for $version's projects"
+        return 0
+    fi
+    run_readiness "$(active_venv)" "$out" || rc=$?
+    verdict="$(readiness_verdict "$out" "$rc")" || verdict=invalid
+    if [[ "$verdict" == invalid ]] || ! alert="$(todo_alert "$version" "$out" "$mode")"; then
+        log "WARN: the readiness check of $version gave no to-do list (exit $rc); run validate <project> before deploying each project"
+        bm_log warn upgrade "post-install to-do list unavailable" "{\"version\": \"$version\", \"exit\": $rc}"
+        return 0
+    fi
+    [[ -n "$alert" ]] || return 0
+    priority="${alert%%$'\n'*}"
+    alert="${alert#*$'\n'}"
+    title="${alert%%$'\n'*}"
+    send_notification "$title" "${alert#*$'\n'}" "$priority"
+}
+
+# todo_alert <version> <answer> <mode>: the to-do alert as its priority,
+# title and body, one a line (the body over several), or nothing when there
+# is nothing to do.
+todo_alert() {
+    python3 -I -c "$PY_CLEAN"'
+import json, sys
+version, mode = sys.argv[1], sys.argv[3]
+with open(sys.argv[2], "rb") as f:
+    d = json.loads(f.read())
+def todos(findings, severity="todo"):
+    return [f for f in findings if isinstance(f, dict) and f.get("severity") == severity] if isinstance(findings, list) else []
+def first_blocks():
+    found = [("box", todos(d.get("box"), "block")[:1])] + [
+        (p.get("name"), todos(p.get("findings"), "block")[:1]) for p in d.get("projects") or [] if isinstance(p, dict)]
+    return clean("; ".join(str(n) + ": " + str(f[0].get("message")) for n, f in found if f), 400)
+if d["result"] == "blocked" and mode == "force":
+    print(0, f"boxmunge {version}: installed by force-target over its readiness blocks", sep="\n")
+    print(f"The operator installed {version} with force-target over what its own readiness check blocks: {first_blocks()}. Fix them before deploying what they name; the whole list: boxmunge-server upgrade-readiness")
+    sys.exit()
+if d["result"] == "blocked":
+    print(0, f"boxmunge {version}: readiness reports blocked (a boxmunge bug)", sep="\n")
+    print(f"{version} is installed, but its own readiness check reports the box blocked, which an installed release must never do. Report it as a boxmunge bug, with the output of: boxmunge-server upgrade-readiness")
+    sys.exit()
+lines = []
+for name, findings in [("box", d.get("box"))] + [(p.get("name"), p.get("findings")) for p in d.get("projects") or [] if isinstance(p, dict)]:
+    first = todos(findings)[:1]
+    if first:
+        lines.append(clean(str(name) + ": " + str(first[0].get("message")) + " (" + str(first[0].get("remedy")) + ")", 300))
+if lines:
+    print(-1, f"boxmunge {version}: project to-dos before their next deploy", *lines, sep="\n")
+    print("Run validate <project> before deploying each one.")' "$1" "$2" "$3"
+}
+# <<< boxmunge-upgrade.d/gate.sh
 
 # run <version> <url> [<class>]: the auto-update timer's entry point (root
 # only). Releases before 0.10.1 pass no class.
 cmd_run() {
     [[ $# -eq 2 || $# -eq 3 ]] || die "Usage: boxmunge-upgrade run <version> <url> [<class>]"
+    acquire_lock wait  # as auto-update's discovery waited; upgrade_to finds it held
     upgrade_to "$1" run "${3:-}"
 }
 
@@ -2238,6 +3078,8 @@ upgrade_to() {
         preflight_fail "$version" "$from_version" "preflight_failed: no_pinned_requirements" \
             "Bundle has no hash-pinned $missing; refusing an unpinned install"
     fi
+    # Crossing a breaking release: the release's prerequisites, now (gate.sh).
+    gate_prepare "$version" "$mode" "$tmp_download" "$from_version"
     install_pinned_deps "$bundle" "$standby" || dependency_install_failed "$version" "$from_version"
     pip_failures "$version" 0
     "$BOXMUNGE_ROOT/env-$standby/bin/pip" install --quiet --no-cache-dir --no-deps --no-build-isolation "$bundle" \
@@ -2265,6 +3107,10 @@ upgrade_to() {
         || preflight_fail "$version" "$from_version" "preflight_failed: cli_version" \
             "Pre-flight FAILED: CLI version check"
 
+    # Crossing a breaking release, the box must pass the release's readiness
+    # check (gate.sh) before its dry run: what the dry run would refuse on
+    # this box, the check reports, and it refuses without blocklisting.
+    gate_readiness "$version" "$standby"
     "$BOXMUNGE_ROOT/env-$standby/bin/boxmunge-server" upgrade --dry-run \
         || preflight_fail "$version" "$from_version" "preflight_failed: dry_run" \
             "Pre-flight FAILED: dry-run upgrade"
@@ -2292,8 +3138,11 @@ upgrade_to() {
         bm_log info upgrade "canary refreshed" "{\"version\": \"$version\"}"
     fi
 
-    # 3b. Self-update the upgrade shim and its libraries (see self_update_shim).
+    # 3b. Self-update the upgrade shim and its libraries (see self_update_shim),
+    # then deploy's sudo rule as the new shim writes it (new_shim_sudoers).
+    cp "$BIN_DIR/boxmunge-upgrade" "$tmp_download/previous-shim"
     self_update_shim "$tmp_download/boxmunge"
+    new_shim_sudoers "$tmp_download/previous-shim" "$version" "$from_version"
 
     # 3c. System upgrade: re-run the bundle's install.sh if it changed (see
     # system_upgrade).
@@ -2347,6 +3196,7 @@ write_probation(BoxPaths(), os.environ['BM_VERSION'], os.environ['BM_PREV_SLOT']
     rm -f "$(inflight_marker "$ACTIVE_SLOT")"
     refresh_docs_for_slot "$ACTIVE_SLOT"
 
+    post_install_todo "$version" "$mode"
     local alert
     alert="$(applied_alert "$version" "$mode" "$class")"
     send_notification "${alert%%$'\t'*}" "${alert#*$'\t'}"
@@ -2454,5 +3304,8 @@ case "${1:-}" in
     userns-rollback) shift; cmd_userns_rollback "$@" ;;
     userns-commit)   shift; cmd_userns_commit "$@" ;;
     repair-deps)     shift; cmd_repair_deps "$@" ;;
-    *)               die "Usage: boxmunge-upgrade {run|auto|target|force-target|check-probation|clear-blocklist|install-sudoers|install-docs|userns-migrate|userns-rollback|userns-commit|repair-deps} [args]" ;;
+    check)           shift; cmd_check "$@" ;;
+    guide)           shift; cmd_guide "$@" ;;
+    _check-run)      shift; cmd_check_run "$@" ;;
+    *)               die "Usage: boxmunge-upgrade {run|auto|target|force-target|check-probation|clear-blocklist|install-sudoers|install-docs|userns-migrate|userns-rollback|userns-commit|repair-deps|check|guide} [args]" ;;
 esac

@@ -131,12 +131,12 @@ drop_root
 
 new_root a
 echo "1.4.0" > "$BOXMUNGE_ROOT/config/version"
-run_shim run '1.5.0$(id)' https://example.com/x
+run_shim run '1.5.0$(id)' https://example.com/x feature
 expect 1 "Invalid version" "run requires semver"
 blocklist 1.5.0
-run_shim run 1.5.0 https://example.com/x
+run_shim run 1.5.0 https://example.com/x feature
 expect 0 "blocklisted, skipping" "run skips a blocklisted version"
-run_shim run 1.3.0 https://example.com/x
+run_shim run 1.3.0 https://example.com/x feature
 expect 1 "Refusing to downgrade" "run refuses a downgrade"
 drop_root
 
@@ -210,7 +210,9 @@ mock_server a 'echo "{\"action\": \"upgrade\", \"version\": \"1.5.0\", \"url\": 
 PATH="$FAILVISUDO:$PATH" run_shim auto
 expect 1 "failed visudo" "auto passes a known release class through to the upgrade"
 run_shim run 1.5.0 https://example.com/x security extra
-expect 1 "Usage: boxmunge-upgrade run <version> <url> [<class>]" "run refuses extra arguments"
+expect 1 "Usage: boxmunge-upgrade run <version> <url> <class>" "run refuses extra arguments"
+run_shim run 1.5.0 https://example.com/x
+expect 1 "Usage: boxmunge-upgrade run <version> <url> <class>" "run requires the release class"
 run_shim clear-blocklist "1.0.0' or '1"
 expect 1 "Invalid version" "clear-blocklist requires semver"
 mock_server a 'echo "$*" >> "$BOXMUNGE_ROOT/calls"; echo "{\"action\": \"up_to_date\"}"'

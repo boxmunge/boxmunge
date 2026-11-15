@@ -301,35 +301,31 @@ def chown_tree_deploy(path: Path) -> None:
         os.close(top)
 
 
-def chown_open_tree_deploy(top: int, label: str, *, only_uid: int | None = None) -> None:
+def chown_open_tree_deploy(top: int, label: str) -> None:
     """chown_tree_deploy for a directory the caller opened without following
     a link (``label`` names it in warnings): the descriptor itself, then
     everything under it, reached only through directory descriptors.
 
     A file with other links is skipped with a warning, always: its inode may
-    be shared with a file outside the tree, which deploy must not gain. With
-    ``only_uid``, only entries owned by that uid are re-owned, so what a
-    container user or deploy made is not touched.
+    be shared with a file outside the tree, which deploy must not gain.
     """
     owner = _deploy_owner()
     if owner is None:
         return
     try:
-        if only_uid is None or os.fstat(top).st_uid == only_uid:
-            os.fchown(top, *owner)
+        os.fchown(top, *owner)
     except OSError as e:
         _warn_chown(label, e)
     for root, dirs, files, dirfd in os.fwalk(".", dir_fd=top, follow_symlinks=False):
         for name in dirs + files:
             where = os.path.join(label, root, name)
             try:
-                _chown_entry(name, dirfd, where, owner, only_uid)
+                _chown_entry(name, dirfd, where, owner)
             except OSError as e:
                 _warn_chown(where, e)
 
 
-def _chown_entry(name: str, dirfd: int, where: str, owner: tuple[int, int],
-                 only_uid: int | None) -> None:
+def _chown_entry(name: str, dirfd: int, where: str, owner: tuple[int, int]) -> None:
     """Re-own one entry through a descriptor opened on it without following a
     link, so the checks and the chown are about the same inode however the
     name is swapped meanwhile. A link is left alone (owning it grants nothing,
@@ -356,8 +352,7 @@ def _chown_entry(name: str, dirfd: int, where: str, owner: tuple[int, int],
                 logging.getLogger("boxmunge").warning(
                     "not re-owning %s: it has %d links", where, st.st_nlink)
             return
-        if only_uid is None or st.st_uid == only_uid:
-            os.fchown(fd, *owner)
+        os.fchown(fd, *owner)
     finally:
         os.close(fd)
 

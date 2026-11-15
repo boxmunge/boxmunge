@@ -21,8 +21,7 @@ from boxmunge.commands.upgrade_offline import (
 )
 from boxmunge.commands.upgrade_steps import (
     _links_into_repository, _migrated, _project_dirs, _unreadable_release_files,
-    compose_refusal, exclusion, install_exclusion_text, refuse_unresolved_stages,
-    require_manifest,
+    compose_refusal, exclusion, install_exclusion_text, require_manifest,
 )
 from boxmunge.git_layout import relink_advice, repo_ownership_advice, unlinked_files
 from boxmunge.lifecycle import is_blocked
@@ -150,7 +149,5 @@ def check_upgrade(paths: BoxPaths, *, skip: Collection[str] = ()) -> list[DryRun
     Projects in `skip` are not read: the readiness check has its verdict on
     them already (left as is, or files it found unreadable, such as a FIFO
     that would stall the read). `upgrade --dry-run` skips none."""
-    project_dirs = list(_project_dirs(paths))
-    refuse_unresolved_stages(paths, [project_dir.name for project_dir in project_dirs])
-    return [line for project_dir in project_dirs if project_dir.name not in skip
+    return [line for project_dir in _project_dirs(paths) if project_dir.name not in skip
             for line in _project_lines(paths, project_dir)]

@@ -82,9 +82,10 @@ with_shim_functions seed_slot_units a
     && pass "a slot's own record is kept" || fail "seed overwrote the slot's record"
 drop_root
 
-# Self-heal: a rollback by a shim from before 0.12 left the newer units. The
-# next check-probation (the 0.12 shim, no probation, nothing in flight) puts
-# the live slot's own back; units that already match are left alone.
+# Self-heal: the live units are not the live slot's (edited by hand, or left
+# by a rollback that could not restore them). The next check-probation (no
+# probation, nothing in flight) puts the live slot's own back; units that
+# already match are left alone.
 new_root a
 mkdir -p "$BOXMUNGE_ROOT/env-a/boxmunge-systemd"
 for u in boxmunge-cve-scan.timer boxmunge-cve-scan.service boxmunge-health.timer; do
@@ -105,8 +106,8 @@ expect 0 "" "a second check-probation runs"
     && pass "units that match are left alone" || fail "healed again: $OUT"
 drop_root
 
-# A live slot with no record (the first 0.12 slot, upgraded by an older
-# shim) is left alone.
+# A live slot with no record (installed from a bundle without units) is left
+# alone.
 new_root a
 unit "$BOXMUNGE_SYSTEMD_DIR/boxmunge-kev-watch.timer" "new"
 run_shim check-probation

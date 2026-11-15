@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from boxmunge import unresolved_stage
 from boxmunge.caddy import override_refusal, prepare_caddy_config
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.upgrade_offline import (
@@ -37,25 +36,10 @@ from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.fleet import report_project_failure
 from boxmunge.paths import BoxPaths, InvalidProjectName, validate_project_name
 from boxmunge.security_overlay import services_with_off_profile
-from boxmunge.version import read_installed_version
 
 
 class UpgradeGateError(Exception):
     """A step the upgrade cannot succeed without failed; the shim rolls back."""
-
-
-class UnresolvedStages(UpgradeGateError):
-    """refuse_unresolved_stages's refusal; the dry run alerts it."""
-
-
-def refuse_unresolved_stages(paths: BoxPaths, names: list[str]) -> None:
-    """Raise, before anything is changed, while a project holds a stage
-    0.10.1 or earlier made that the release this box still runs has not
-    resolved (boxmunge.unresolved_stage): the restart would start it from
-    the staged files."""
-    refusal = unresolved_stage.refusal(paths, names, read_installed_version(paths))
-    if refusal is not None:
-        raise UnresolvedStages(refusal)
 
 
 def _project_dirs(paths: BoxPaths) -> Iterator[Path]:

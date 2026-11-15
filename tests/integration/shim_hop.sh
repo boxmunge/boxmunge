@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# tests/integration/shim_hop.sh <floor|ok|fail> <old-shim> <installed> — run
+# tests/integration/shim_hop.sh <floor|ok|fail|rollback> <old-shim> <installed> — run
 # as root in a throwaway container by test_shim_hop.py, whose image holds this
 # tree's package, numbered $NEW, installed in /relvenv.
 #
@@ -13,19 +13,26 @@
 #            refuse and leave the box as it was. Then the box takes the way
 #            out the refusal names: `target $BRIDGE` (a stand-in bundle that
 #            ships the real $BRIDGE shim) and `clear-blocklist $NEW`.
-#   ok|fail  <installed> is at or above the floor. The old shim installs the
+#   ok|fail|rollback
+#            <installed> is at or above the floor. The old shim installs the
 #            bundle's scripts/boxmunge-upgrade over itself and runs the
 #            bundle's install.sh, a stand-in: `fail` exits like an apt outage,
 #            `ok` runs the real install.sh's steps that tell a shim's run from
 #            one by hand and act on it (the floor check, the venv install, the
 #            shim install, deploy's sudo rule as the new shim writes it, and
-#            the version record). Then the installed shim must work, and
-#            deploy's rule must be the new shim's: an old shim writes only
-#            its own, so install.sh is how the new rule reaches a box.
-# Network, signing, pip and the venvs are stubbed: a venv is the stubs plus a
-# `release` file naming what pip "installed" into it. pip records its calls.
-# visudo is the real one (the image has sudo): every rule a shim writes must
-# pass it.
+#            the version record) and installs the bundle's systemd units.
+#            Then the installed shim must work, and deploy's rule must be the
+#            new shim's. `rollback` is `ok` whose `upgrade --apply` fails
+#            after the swap: the old shim rolls back, and must put the
+#            previous release's units back.
+# Network, signing, pip, systemctl and the venvs are stubbed: a venv is the
+# stubs plus a `release` file naming what pip "installed" into it. pip and
+# systemctl record their calls. Each release is served from /rel/v<version>/,
+# with upgrade-notes.json (no release in it is breaking, so no readiness
+# check runs) listed in its SHA256SUMS. The systemd units live in /tmp/units:
+# the box starts with the units of the previous release, this tree's minus
+# the ones 0.12 added, plus the timers 0.12 retired. visudo is the real one
+# (the image has sudo): every rule a shim writes must pass it.
 # shellcheck disable=SC2016  # stub bodies are literal bash
 set -uo pipefail
 MODE="$1" OLD="$2" WAS="$3"
@@ -37,8 +44,9 @@ mkdir -p /stub/bin /rel /mockvenv/bin
 REALPY="$(command -v python3)" REALSHA="$(command -v sha256sum)"
 st() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$1"; chmod +x "$1"; }
 st /stub/bin/python3 "if [[ \"\$1 \$2\" == '-m venv' ]]; then mkdir -p \"\$3\"; cp -R /mockvenv/bin \"\$3/\"; exit 0; fi; exec $REALPY \"\$@\""
-st /stub/bin/curl 'cp "/rel/$(basename "${@: -1}")" "$3"'
+st /stub/bin/curl 'u="${@: -1}"; cp "/rel/$(basename "$(dirname "$u")")/$(basename "$u")" "$3"'
 st /stub/bin/cosign 'exit 0'
+st /stub/bin/systemctl 'echo "$*" >> /tmp/systemctl.log'
 st /stub/bin/sha256sum "if [[ \"\$1\" == -c ]]; then cat >/dev/null; exit 0; fi; exec $REALSHA \"\$@\""
 st /mockvenv/bin/pip 'echo "$0 $*" >> /tmp/pip.log
 venv="$(dirname "$0")/.."
@@ -57,6 +65,7 @@ case "$1 ${2:-}" in
         echo "boxmunge $rel" ;;
     "upgrade --dry-run") [[ "$rel" != '"$NEW"' ]] || exec /relvenv/bin/boxmunge-server upgrade --dry-run ;;
     "upgrade --apply")
+        [[ ! -e /tmp/fail-apply || "$rel" != '"$NEW"' ]] || { echo "apply failed (simulated)"; exit 1; }
         [[ -e /tmp/watch-apply ]] && for c in "target '"$NEXT"'" check-probation; do
             rc=0; bash /opt/boxmunge/bin/boxmunge-upgrade $c > "/tmp/during-${c%% *}.log" 2>&1 || rc=$?
             echo "rc=$rc" >> "/tmp/during-${c%% *}.log"
@@ -92,24 +101,28 @@ case "$2" in
 esac
 exit 0'
 
-# release <version> <shim> <install.sh>: the built bundle as that release.
+# release <version> <shim> <install.sh>: the built bundle as that release,
+# with its upgrade notes, in /rel/v<version>/.
 release() {
-    mkdir "/rel/$1"
-    cp -R /bundle/boxmunge "/rel/$1/boxmunge"
-    sed -i "s/^version = \".*\"$/version = \"$1\"/" "/rel/$1/boxmunge/pyproject.toml"
-    cp "$2" "/rel/$1/boxmunge/scripts/boxmunge-upgrade"
-    cp "$3" "/rel/$1/boxmunge/install.sh"
-    tar czf "/rel/boxmunge-$1.tar.gz" -C "/rel/$1" boxmunge
-    (cd /rel && sha256sum "boxmunge-$1.tar.gz" >> SHA256SUMS)
+    local d="/rel/v$1"
+    mkdir -p "$d/src"
+    cp -R /bundle/boxmunge "$d/src/boxmunge"
+    sed -i "s/^version = \".*\"$/version = \"$1\"/" "$d/src/boxmunge/pyproject.toml"
+    cp "$2" "$d/src/boxmunge/scripts/boxmunge-upgrade"
+    cp "$3" "$d/src/boxmunge/install.sh"
+    tar czf "$d/boxmunge-$1.tar.gz" -C "$d/src" boxmunge
+    printf '{"format": 1, "release": "%s", "releases": {"%s": {"class": "feature", "breaking": false}}}\n' \
+        "$1" "$1" > "$d/upgrade-notes.json"
+    (cd "$d" && sha256sum "boxmunge-$1.tar.gz" upgrade-notes.json > SHA256SUMS)
+    touch "$d/SHA256SUMS.sig" "$d/SHA256SUMS.cert"
 }
-touch /rel/SHA256SUMS.sig /rel/SHA256SUMS.cert
 I=/bundle/boxmunge/install.sh
 case "$MODE" in
     floor) printf '#!/usr/bin/env bash\ntouch /tmp/install-sh-ran\n' > /tmp/install.sh
            printf '#!/usr/bin/env bash\nexit 0\n' > /tmp/install-bridge.sh
            release "$BRIDGE" "/t/old_shims/boxmunge-upgrade-v$BRIDGE" /tmp/install-bridge.sh ;;
     fail) printf '#!/usr/bin/env bash\necho "apt-get update failed (simulated)"; exit 100\n' > /tmp/install.sh ;;
-    ok) { printf '#!/usr/bin/env bash\nset -e\nSCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\nBOXMUNGE_ROOT=/opt/boxmunge\n'
+    ok|rollback) { printf '#!/usr/bin/env bash\nset -e\nSCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\nBOXMUNGE_ROOT=/opt/boxmunge\n'
           sed -n '/^FROM_UPGRADE_SHIM=0$/,/^fi$/p' "$I"
           grep -F 'bootstrap/upgrade-floor.sh"' "$I"
           sed -n '/^if \[\[ "${FROM_UPGRADE_SHIM}" -eq 0 \]\]; then$/,/^fi$/p' "$I"
@@ -117,8 +130,11 @@ case "$MODE" in
           echo 'cp "$BOXMUNGE_SUDOERS_FILE" /tmp/sudoers-before-install-sh'
           grep -Fx '"${BOXMUNGE_ROOT}/bin/boxmunge-upgrade" install-sudoers' "$I"
           sed -n '/^INSTALLED_VERSION=/,/^fi$/p' "$I"
+          # The release's units, as bootstrap/systemd-units.sh installs them.
+          echo 'rm -f "$BOXMUNGE_SYSTEMD_DIR"/boxmunge-*; cp "$SCRIPT_DIR"/systemd/boxmunge-* "$BOXMUNGE_SYSTEMD_DIR/"'
+          echo 'ls "$BOXMUNGE_SYSTEMD_DIR" | sort | paste -sd, - > /tmp/units-after-install-sh'
         } > /tmp/install.sh ;;
-    *) echo "usage: shim_hop.sh <floor|ok|fail> <old-shim> <installed>" >&2; exit 2 ;;
+    *) echo "usage: shim_hop.sh <floor|ok|fail|rollback> <old-shim> <installed>" >&2; exit 2 ;;
 esac
 release "$NEW" /bundle/boxmunge/scripts/boxmunge-upgrade /tmp/install.sh
 
@@ -138,7 +154,15 @@ case "$WAS" in
     *) cp -R "$R/env-a/boxmunge-docs" "$R/.docs.seed"; ln -s .docs.seed "$R/docs" ;;
 esac
 install -m 0755 "$OLD" "$R/bin/boxmunge-upgrade"
-export PATH="/stub/bin:$PATH" BOXMUNGE_SUDOERS_FILE=/tmp/sudoers-boxmunge
+export PATH="/stub/bin:$PATH" BOXMUNGE_SUDOERS_FILE=/tmp/sudoers-boxmunge BOXMUNGE_SYSTEMD_DIR=/tmp/units
+mkdir -p "$BOXMUNGE_SYSTEMD_DIR"
+cp /bundle/boxmunge/systemd/boxmunge-* "$BOXMUNGE_SYSTEMD_DIR/"
+rm "$BOXMUNGE_SYSTEMD_DIR"/boxmunge-{maintenance,kev-watch}.{timer,service} "$BOXMUNGE_SYSTEMD_DIR/boxmunge-autofix.service"
+for t in cve-scan container-update; do
+    printf '[Timer]\nOnCalendar=daily\nUnit=boxmunge-%s.service\n' "$t" > "$BOXMUNGE_SYSTEMD_DIR/boxmunge-$t.timer"
+done
+units() { ls "$BOXMUNGE_SYSTEMD_DIR" | sort | paste -sd, -; }
+echo "UNITS_BEFORE=$(units)"
 
 shim() {  # shim <log> <args...>: run the installed shim, print its exit code
     local log="$1" rc=0; shift
@@ -153,10 +177,15 @@ box_facts() {  # box_facts <prefix>
     echo "${1}VERSION_RECORD=$(cat "$R/config/version")"
 }
 [[ "$MODE" != ok ]] || touch /tmp/watch-apply
+[[ "$MODE" != rollback ]] || touch /tmp/fail-apply
 echo "HOP rc=$(shim /tmp/hop.log target "$NEW")"
-rm -f /tmp/watch-apply
+rm -f /tmp/watch-apply /tmp/fail-apply
 [[ ! -e "$BOXMUNGE_SUDOERS_FILE" ]] || cp "$BOXMUNGE_SUDOERS_FILE" /tmp/sudoers-after-hop
 box_facts ""
+echo "UNITS=$(units)"
+echo "UNITS_AFTER_INSTALL_SH=$(cat /tmp/units-after-install-sh 2>/dev/null || echo none)"
+echo "DISABLED=$(sed -n 's/^disable --now //p' /tmp/systemctl.log 2>/dev/null | sort | paste -sd, -)"
+echo "ENABLED=$(sed -n 's/^enable --now //p' /tmp/systemctl.log 2>/dev/null | tr ' ' '\n' | sort | paste -sd, -)"
 for shim in "$OLD" /bundle/boxmunge/scripts/boxmunge-upgrade "/t/old_shims/boxmunge-upgrade-v$BRIDGE"; do
     ! cmp -s "$R/bin/boxmunge-upgrade" "$shim" || echo "SHIM_IS=$(basename "$shim")"
 done
@@ -170,7 +199,7 @@ if [[ "$MODE" == floor ]]; then
     echo "CLEAR rc=$(shim /tmp/clear.log clear-blocklist "$NEW")"
     box_facts CLEARED_
 else
-    for c in "check-probation" "run $NEXT https://example.com/x" "target $NEXT"; do
+    for c in "check-probation" "run $NEXT https://example.com/x feature" "target $NEXT"; do
         # shellcheck disable=SC2086  # word-split the subcommand on purpose
         rc="$(shim /tmp/cmd.log $c)"
         echo "CMD ${c%% *} rc=$rc :: $(tr '\n' ' ' < /tmp/cmd.log | cut -c1-2000)"

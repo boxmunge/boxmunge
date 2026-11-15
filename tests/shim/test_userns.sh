@@ -8,9 +8,9 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 
 # recording_server: env-a's boxmunge-server records its arguments, and
-# whether it inherited the shim's two lock descriptors.
+# whether it inherited the shim's lock descriptor.
 recording_server() {
-    mock_server a 'printf "%s locks=%s\n" "$*" "$([[ -e /dev/fd/9 && -e /dev/fd/8 ]] && echo yes || echo no)" >> "$BOXMUNGE_ROOT/calls"; exit 0'
+    mock_server a 'printf "%s locks=%s\n" "$*" "$([[ -e /dev/fd/9 ]] && echo yes || echo no)" >> "$BOXMUNGE_ROOT/calls"; exit 0'
 }
 calls() { cat "$BOXMUNGE_ROOT/calls" 2>/dev/null || true; }
 

@@ -16,7 +16,7 @@
 # * guide <version>            print a newer release's signed upgrade-notes.json
 #   _check-run <version> <installed>  check's part under upgrade.lock (check runs it)
 #   force-target <version>     operator only: ignore the blocklist and downgrade floor
-#   run <version> <url> [<class>]  auto-update timer: upgrade to a discovered
+#   run <version> <url> <class>    auto-update timer: upgrade to a discovered
 #                              version of release class <class> (the bundle URL
 #                              is always derived from <version>)
 #   check-probation            health timer: promote or roll back a probation
@@ -57,7 +57,6 @@ PROBATION_FILE="$STATE_DIR/probation.json"
 # failure_count in state.sh.
 UPGRADE_ROOT_DIR="$BOXMUNGE_ROOT/upgrade-root"
 LOCK_FILE="$UPGRADE_ROOT_DIR/upgrade.lock"
-LEGACY_LOCK_FILE="$STATE_DIR/upgrade.lock"
 INTERRUPTED_FILE="$UPGRADE_ROOT_DIR/interrupted.json"
 PIP_FAILURES_FILE="$UPGRADE_ROOT_DIR/pip-failures.json"
 COSIGN_FAILURES_FILE="$UPGRADE_ROOT_DIR/cosign-failures.json"
@@ -136,12 +135,12 @@ for lib in state slots probation health release system units userns readiness ch
 done
 # <<< boxmunge-upgrade.d
 
-# run <version> <url> [<class>]: the auto-update timer's entry point (root
-# only). Releases before 0.10.1 pass no class.
+# run <version> <url> <class>: the auto-update timer's entry point (root
+# only).
 cmd_run() {
-    [[ $# -eq 2 || $# -eq 3 ]] || die "Usage: boxmunge-upgrade run <version> <url> [<class>]"
+    [[ $# -eq 3 ]] || die "Usage: boxmunge-upgrade run <version> <url> <class>"
     acquire_lock wait  # as auto-update's discovery waited; upgrade_to finds it held
-    upgrade_to "$1" run "${3:-}"
+    upgrade_to "$1" run "$3"
 }
 
 # applied_alert <version> <mode> <class>: the title, a tab, and the message of

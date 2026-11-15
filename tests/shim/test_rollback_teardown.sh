@@ -66,6 +66,8 @@ resumed() {
     mock_server a 'echo "a $*" >> "$BOXMUNGE_ROOT/calls"; exit 0'
     mock_server b 'echo "b $*" >> "$BOXMUNGE_ROOT/calls"; exit 0'
     printf '1.2.3\nprobation\n0\n' > "$BOXMUNGE_ROOT/env-b/rollback-inflight"
+    mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+    record_upgrade_stash 1.2.3
     run_shim check-probation
 }
 

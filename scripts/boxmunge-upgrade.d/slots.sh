@@ -79,12 +79,10 @@ swap_to() {
 report_failure() {
     local version="$1" from_version="$2" stage="$3" detail="${4:-}"
     BM_VERSION="$version" BM_FROM_VERSION="$from_version" BM_STAGE="$stage" BM_DETAIL="$detail" "$(active_venv)/bin/python" -c "
-import inspect, os
+import os
 from boxmunge.report_failure import report_failure
-# The active venv is the release being left: 0.11.0 has no detail parameter
-# (the probe goes when the upgrade floor reaches 0.11.1).
-extra = {'detail': os.environ['BM_DETAIL']} if 'detail' in inspect.signature(report_failure).parameters else {}
-report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.environ['BM_STAGE'], **extra)
+report_failure(os.environ['BM_VERSION'], os.environ['BM_FROM_VERSION'], os.environ['BM_STAGE'],
+               detail=os.environ['BM_DETAIL'])
 " || { log "WARNING: the upgrade failure report could not be sent"; } || :
 }
 
@@ -133,15 +131,11 @@ send_notification() {
 # without following a link and only if it is a plain file root owns with the
 # recorded size and sha256 (so another root-made stash renamed onto the name
 # is refused), and has the previous release restore the copy (restore_stash
-# takes an archive path since 0.10.0). The size and sha256 recorded are the
-# ones `stash create` prints ("Stash digest: <size> <sha256>", since 0.11.6),
-# of the bytes it wrote, and the file at the name must match them: hashing
-# the name alone would record whatever deploy renamed over it meanwhile. A
-# release before 0.11.6 prints no digest (it runs the stash of the upgrade
-# away from it); then the file at the name is what is recorded. An upgrade a
-# shim before 0.11.5 started recorded nothing: its rollback takes the
-# newest-named stash, as that shim would, under the same checks. That goes
-# when the upgrade floor reaches 0.11.5.
+# takes an archive path). The size and sha256 recorded are the ones `stash
+# create` prints ("Stash digest: <size> <sha256>"), of the bytes it wrote, and
+# the file at the name must match them: hashing the name alone would record
+# whatever deploy renamed over it meanwhile. A rollback with no record of this
+# upgrade's stash restores nothing and says how to restore by hand.
 #
 # upgrade-stash: "<version> <name> <size> <sha256>"
 # ---------------------------------------------------------------------------
@@ -180,10 +174,10 @@ record_stash() {
     [[ "$name" =~ $STASH_NAME_RE ]] \
         || { echo "stash create did not name the stash it made (no 'Stash created: <name>' line): $2"; return 1; }
     printed="$(printf '%s\n' "$2" | sed -n 's/^Stash digest: //p')"
-    [[ -z "$printed" || "$printed" =~ ^[0-9]+\ [0-9a-f]{64}$ ]] \
-        || { echo "stash create printed a digest line the shim cannot read (want one 'Stash digest: <size> <sha256>'): $2"; return 1; }
+    [[ "$printed" =~ ^[0-9]+\ [0-9a-f]{64}$ ]] \
+        || { echo "stash create printed no digest line the shim can read (want one 'Stash digest: <size> <sha256>'): $2"; return 1; }
     facts="$(stash_facts "$BOXMUNGE_ROOT/stashes/$name")" || { echo "$facts"; return 1; }
-    if [[ -n "$printed" && "$facts" != "$printed" ]]; then
+    if [[ "$facts" != "$printed" ]]; then
         echo "$BOXMUNGE_ROOT/stashes/$name is not what stash create just wrote: it printed size and sha256 '$printed', the file there has '$facts' (stashes/ is deploy-writable: something renamed or wrote another file over the name). Nothing has changed. Find what wrote to stashes/, then retry: sudo $BOXMUNGE_ROOT/bin/boxmunge-upgrade target $1"
         return 1
     fi
@@ -194,26 +188,29 @@ record_stash() {
 # <new_version> restores into STASH_COPY_DIR and print the copy's path; on
 # failure print why and return 1.
 copy_rollback_stash() {
-    local recorded="" name="" size="" sha="" r_version r_name r_size r_sha r_extra
+    local recorded="" r_version r_name r_size r_sha r_extra
     local hash_re='^[0-9]+ [0-9a-f]{64}$'
+    local by_hand="restore the stash this upgrade made by hand as supervisor: check that sudo boxmunge-server stash list names it first (stashes/ is deploy-writable), then run: sudo boxmunge-server stash restore --latest; sudo boxmunge-server upgrade --apply"
     refuse_symlink "$STASH_RECORD_FILE"
     refuse_symlink "$STASH_COPY_DIR"
     [[ ! -e "$STASH_RECORD_FILE" ]] || recorded="$(cat "$STASH_RECORD_FILE")"
-    if [[ -n "$recorded" ]]; then
-        read -r r_version r_name r_size r_sha r_extra <<< "$recorded"
-        if [[ ! "$r_name" =~ $STASH_NAME_RE || -n "${r_extra:-}" || ! "${r_size:-} ${r_sha:-}" =~ $hash_re ]]; then
-            echo "$STASH_RECORD_FILE is malformed ('$(printable "$recorded")'); restore the stash this upgrade made by hand as supervisor: check that sudo boxmunge-server stash list names it first (stashes/ is deploy-writable), then run: sudo boxmunge-server stash restore --latest; sudo boxmunge-server upgrade --apply"
-            return 1
-        elif [[ "$r_version" == "$1" ]]; then
-            name="$r_name" size="$r_size" sha="$r_sha"
-        else
-            log "WARN: $STASH_RECORD_FILE ('$(printable "$recorded")') is not the stash of the upgrade to $1; taking the newest-named stash"
-        fi
+    if [[ -z "$recorded" ]]; then
+        echo "$STASH_RECORD_FILE records no stash for the upgrade to $1; $by_hand"
+        return 1
     fi
-    BM_STASHES="$BOXMUNGE_ROOT/stashes" BM_NAME="$name" BM_SIZE="$size" BM_SHA="$sha" BM_DEST="$STASH_COPY_DIR" python3 - <<'PYSTASH'
-import errno, fnmatch, hashlib, os, stat, sys, tempfile
+    read -r r_version r_name r_size r_sha r_extra <<< "$recorded"
+    if [[ ! "$r_name" =~ $STASH_NAME_RE || -n "${r_extra:-}" || ! "${r_size:-} ${r_sha:-}" =~ $hash_re ]]; then
+        echo "$STASH_RECORD_FILE is malformed ('$(printable "$recorded")'); $by_hand"
+        return 1
+    fi
+    if [[ "$r_version" != "$1" ]]; then
+        echo "$STASH_RECORD_FILE ('$(printable "$recorded")') is not the stash of the upgrade to $1; $by_hand"
+        return 1
+    fi
+    BM_STASHES="$BOXMUNGE_ROOT/stashes" BM_NAME="$r_name" BM_SIZE="$r_size" BM_SHA="$r_sha" BM_DEST="$STASH_COPY_DIR" python3 - <<'PYSTASH'
+import errno, hashlib, os, stat, sys, tempfile
 stashes, name, dest = os.environ["BM_STASHES"], os.environ["BM_NAME"], os.environ["BM_DEST"]
-want = (int(os.environ["BM_SIZE"]), os.environ["BM_SHA"]) if os.environ["BM_SHA"] else None
+want = (int(os.environ["BM_SIZE"]), os.environ["BM_SHA"])
 fix = (" (stashes/ is deploy-writable: it was removed, planted or replaced). Put the right stash back"
        " or remove the wrong one, so that sudo boxmunge-server stash list names the stash this upgrade made"
        " first; then, as supervisor, run: sudo boxmunge-server stash restore --latest;"
@@ -223,12 +220,6 @@ def refuse(why):
     print(why + fix)
     sys.exit(1)
 
-if not name:
-    names = sorted(n for n in os.listdir(stashes) if fnmatch.fnmatch(n, "boxmunge-stash-*.tar.gz"))
-    if not names:
-        refuse(f"no stash in {stashes} to restore")
-    name = names[-1]
-    print(f"WARN: no stash recorded for this upgrade; restoring the newest-named, {name}", file=sys.stderr)
 src = os.path.join(stashes, name)
 try:
     fd = os.open(src, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -249,7 +240,7 @@ with os.fdopen(fd, "rb") as f:
             out.write(chunk)
         out.flush()
         os.fsync(out.fileno())
-    if want and (os.path.getsize(tmp), digest.hexdigest()) != want:
+    if (os.path.getsize(tmp), digest.hexdigest()) != want:
         os.unlink(tmp)
         refuse(f"{src} is not the stash this upgrade made (its size or sha256 differs from the record)")
 copy = os.path.join(dest, name)

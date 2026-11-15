@@ -45,9 +45,11 @@ over anything older than 0.11.0, so a 0.9 or 0.10 box goes to 0.11.6 first.
 |---|---|
 | 0.7.0 to 0.10.1 | 0.11.6 |
 | older than 0.7.0 | ask for help first (see the end of this page) |
-| 0.11.0 or later | this page is not for you: run `upgrade` |
+| 0.11.0 or later | this page is not for you: see "Upgrading the Platform" in OPERATIONS.md |
 
-Once you are on 0.11.6, `upgrade` (or auto-update) takes you the rest of the way.
+Once you are on 0.11.6, upgrade to 0.11.11 (`sudo /opt/boxmunge/bin/boxmunge-upgrade target
+0.11.11`, or let auto-update install it: it is a break-fix release). From 0.12 on, a release
+installs only over 0.11.11 or later. Then `upgrade` takes you the rest of the way.
 
 **0.7.0 to 0.9.1:** 0.11.6 is also the only 0.11 release you can install. The upgrader those
 releases installed checks every new release in a way that 0.9.1 to 0.11.5 fail
@@ -55,9 +57,11 @@ releases installed checks every new release in a way that 0.9.1 to 0.11.5 fail
 
 ### If you targeted 0.11.7 or later
 
-The new release refuses before anything on the box changes. What it prints depends on the
-release you are on (these lines are from the test that runs each old upgrader against 0.11.7;
-the rehearsal did not cover them). On 0.9.2 to 0.10.1:
+The new release refuses before anything on the box changes. A release from 0.12 on names
+0.11.11 as the release to install first; 0.11.11 then refuses a 0.9 or 0.10 box in the same way
+and names 0.11.6. Either way, go to 0.11.6 first, as this page says. What 0.11.7 to 0.11.11
+print depends on the release you are on (these lines are from the test that runs each old
+upgrader against 0.11.7; the rehearsal did not cover them). On 0.9.2 to 0.10.1:
 
 ```
   ERROR: boxmunge 0.11.7 cannot be installed over 0.10.1: an upgrade must start from 0.11.0 or later. Upgrade to 0.11.6 first: sudo /opt/boxmunge/bin/boxmunge-upgrade target 0.11.6
