@@ -1,0 +1,215 @@
+{
+ "SchemaVersion": 2,
+ "Trivy": {
+  "Version": "0.58.0"
+ },
+ "ArtifactName": "debian:bookworm-slim",
+ "Metadata": {
+  "OS": {
+   "Family": "debian",
+   "Name": "12.15"
+  }
+ },
+ "Results": [
+  {
+   "Target": "debian:bookworm-slim (debian 12.15)",
+   "Class": "os-pkgs",
+   "Type": "debian",
+   "Vulnerabilities": [
+    {
+     "VulnerabilityID": "CVE-2016-2781",
+     "PkgName": "coreutils",
+     "InstalledVersion": "9.1-1",
+     "Status": "will_not_fix",
+     "Severity": "LOW",
+     "VendorSeverity": {
+      "azure": 2,
+      "cbl-mariner": 2,
+      "debian": 1,
+      "nvd": 2,
+      "redhat": 2
+     },
+     "CVSS": {
+      "nvd": {
+       "V2Vector": "AV:L/AC:L/Au:N/C:N/I:P/A:N",
+       "V3Vector": "CVSS:3.0/AV:L/AC:L/PR:L/UI:N/S:C/C:N/I:H/A:N",
+       "V2Score": 2.1,
+       "V3Score": 6.5
+      },
+      "redhat": {
+       "V2Vector": "AV:L/AC:H/Au:N/C:C/I:C/A:C",
+       "V3Vector": "CVSS:3.0/AV:L/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:H",
+       "V2Score": 6.2,
+       "V3Score": 8.6
+      }
+     },
+     "SeveritySource": "debian"
+    },
+    {
+     "VulnerabilityID": "CVE-2017-18018",
+     "PkgName": "coreutils",
+     "InstalledVersion": "9.1-1",
+     "Status": "affected",
+     "Severity": "LOW",
+     "VendorSeverity": {
+      "debian": 1,
+      "nvd": 2,
+      "redhat": 2
+     },
+     "CVSS": {
+      "nvd": {
+       "V2Vector": "AV:L/AC:M/Au:N/C:N/I:P/A:N",
+       "V3Vector": "CVSS:3.0/AV:L/AC:H/PR:L/UI:N/S:U/C:N/I:H/A:N",
+       "V2Score": 1.9,
+       "V3Score": 4.7
+      },
+      "redhat": {
+       "V3Vector": "CVSS:3.0/AV:L/AC:H/PR:L/UI:R/S:U/C:L/I:L/A:L",
+       "V3Score": 4.2
+      }
+     },
+     "SeveritySource": "debian"
+    },
+    {
+     "VulnerabilityID": "CVE-2026-41991",
+     "PkgName": "gzip",
+     "InstalledVersion": "1.12-1",
+     "Status": "fix_deferred",
+     "Severity": "MEDIUM",
+     "VendorSeverity": {
+      "alma": 2,
+      "julia": 1,
+      "nvd": 2,
+      "oracle-oval": 2,
+      "photon": 2,
+      "redhat": 2,
+      "rocky": 2,
+      "ubuntu": 2
+     },
+     "CVSS": {
+      "julia": {
+       "V3Vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:N/I:H/A:N",
+       "V40Vector": "CVSS:4.0/AV:L/AC:H/AT:P/PR:N/UI:P/VC:N/VI:L/VA:N/SC:N/SI:N/SA:N",
+       "V3Score": 4.7,
+       "V40Score": 2
+      },
+      "nvd": {
+       "V3Vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:N/I:H/A:N",
+       "V3Score": 4.7
+      },
+      "redhat": {
+       "V3Vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:R/S:U/C:N/I:H/A:H",
+       "V3Score": 6
+      }
+     },
+     "SeveritySource": "nvd"
+    },
+    {
+     "VulnerabilityID": "CVE-2026-42250",
+     "PkgName": "libbz2-1.0",
+     "InstalledVersion": "1.0.8-5+b1",
+     "Status": "affected",
+     "Severity": "MEDIUM",
+     "VendorSeverity": {
+      "azure": 2,
+      "redhat": 2,
+      "ubuntu": 1
+     },
+     "CVSS": {
+      "redhat": {
+       "V3Vector": "CVSS:3.1/AV:L/AC:L/PR:L/UI:R/S:U/C:N/I:N/A:H",
+       "V3Score": 5
+      }
+     }
+    },
+    {
+     "VulnerabilityID": "CVE-2026-5435",
+     "PkgName": "libc6",
+     "InstalledVersion": "2.36-9+deb12u14",
+     "Status": "affected",
+     "Severity": "MEDIUM",
+     "VendorSeverity": {
+      "alma": 2,
+      "oracle-oval": 2,
+      "redhat": 2,
+      "rocky": 2,
+      "ubuntu": 2
+     },
+     "CVSS": {
+      "redhat": {
+       "V3Vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:H",
+       "V3Score": 5.9
+      }
+     }
+    },
+    {
+     "VulnerabilityID": "CVE-2026-95619",
+     "PkgName": "libgcc-s1",
+     "InstalledVersion": "12.2.0-14+deb12u1",
+     "Status": "fix_deferred",
+     "Severity": "MEDIUM",
+     "VendorSeverity": {
+      "alma": 2,
+      "oracle-oval": 2,
+      "redhat": 2,
+      "rocky": 2,
+      "ubuntu": 2
+     },
+     "CVSS": {
+      "redhat": {
+       "V3Vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:H/A:H",
+       "V3Score": 7.7
+      }
+     }
+    },
+    {
+     "VulnerabilityID": "CVE-2024-10041",
+     "PkgName": "libpam0g",
+     "InstalledVersion": "1.5.2-6+deb12u2",
+     "Status": "will_not_fix",
+     "Severity": "MEDIUM",
+     "VendorSeverity": {
+      "alma": 2,
+      "amazon": 2,
+      "azure": 2,
+      "cbl-mariner": 2,
+      "oracle-oval": 2,
+      "redhat": 2,
+      "rocky": 3
+     },
+     "CVSS": {
+      "redhat": {
+       "V3Vector": "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:H/I:N/A:N",
+       "V3Score": 4.7
+      }
+     }
+    },
+    {
+     "VulnerabilityID": "CVE-2026-3184",
+     "PkgName": "mount",
+     "InstalledVersion": "2.38.1-5+deb12u3",
+     "Status": "will_not_fix",
+     "Severity": "MEDIUM",
+     "VendorSeverity": {
+      "azure": 1,
+      "nvd": 2,
+      "photon": 2,
+      "redhat": 1,
+      "ubuntu": 2
+     },
+     "CVSS": {
+      "nvd": {
+       "V3Vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",
+       "V3Score": 5.3
+      },
+      "redhat": {
+       "V3Vector": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:L/A:N",
+       "V3Score": 3.7
+      }
+     },
+     "SeveritySource": "nvd"
+    }
+   ]
+  }
+ ]
+}

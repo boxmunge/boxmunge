@@ -1415,6 +1415,7 @@ def test_scan_quarantine_finding_triggers_quarantine_action(
         attack_vector=AttackVector.NETWORK,
         status=VulnStatus.AFFECTED,
         vendor_severities={"debian": Severity.CRITICAL},
+        pkg_type="debian",
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -2029,6 +2030,7 @@ def test_resume_blocked_when_finding_still_quarantines(
         attack_vector=AttackVector.NETWORK,
         status=VulnStatus.AFFECTED,
         vendor_severities={"debian": Severity.CRITICAL},
+        pkg_type="debian",
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -2078,6 +2080,7 @@ def test_scan_invokes_emit_scan_alerts_after_persist(
         attack_vector=AttackVector.NETWORK,
         status=VulnStatus.AFFECTED,
         vendor_severities={"debian": Severity.CRITICAL},
+        pkg_type="debian",
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -2136,6 +2139,7 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
         attack_vector=AttackVector.NETWORK,
         status=VulnStatus.AFFECTED,
         vendor_severities={"debian": Severity.CRITICAL},
+        pkg_type="debian",
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -2197,6 +2201,7 @@ def _quarantine_scan(monkeypatch, paths) -> None:
         attack_vector=AttackVector.NETWORK,
         status=VulnStatus.AFFECTED,
         vendor_severities={"debian": Severity.CRITICAL},
+        pkg_type="debian",
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -2562,6 +2567,7 @@ def test_resume_audit_only_does_not_take_quarantine_action(
         attack_vector=AttackVector.NETWORK,
         status=VulnStatus.AFFECTED,
         vendor_severities={"debian": Severity.CRITICAL},
+        pkg_type="debian",
     )
     sr = ScanResult(
         image_ref="myapp:1.0",
@@ -2616,6 +2622,7 @@ def test_resume_audit_only_still_detects_blocking_findings(
         attack_vector=AttackVector.NETWORK,
         status=VulnStatus.AFFECTED,
         vendor_severities={"debian": Severity.CRITICAL},
+        pkg_type="debian",
     )
     sr = ScanResult(
         image_ref="myapp:1.0",

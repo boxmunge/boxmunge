@@ -970,10 +970,10 @@ of the two the last scan checked.
 
 ## Scan cadence
 
-- **Daily** at 03:00 system time via systemd timer `boxmunge-cve-scan.timer`,
-  with up to 30 minutes of randomized delay (03:00 to 03:30). The nightly
-  container update runs first (02:30 to 03:00), and a scan due while it is
-  still running waits for it, so the images it pulled are scanned that night.
+- **Nightly** at 02:30 system time via systemd timer `boxmunge-maintenance.timer`,
+  with up to 30 minutes of randomized delay (02:30 to 03:00). The unit runs
+  the scan first and then the container update, so the scan always finishes
+  before the update starts.
 - **Not yet at deploy time.** `prod-deploy`, `stage` and `promote` do not
   scan, and no deploy is rejected for CVEs: a new image runs unscanned
   until the next daily scan. Run

@@ -1,0 +1,12 @@
+[Unit]
+Description=boxmunge nightly maintenance timer
+
+[Timer]
+# 30+ minutes after the 02:00 backup. One timer, one unit: the CVE scan
+# finishes before the container update starts.
+OnCalendar=*-*-* 02:30:00
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target

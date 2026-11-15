@@ -36,7 +36,7 @@ def finding(
         cve_id=cve, severity=sev, package=pkg, installed_version="1",
         fixed_version=fix, title="", primary_url=None,
         attack_vector=AttackVector.NETWORK, status=VulnStatus.AFFECTED,
-        vendor_severities={"debian": sev}, pkg_class=PkgClass.OS,
+        vendor_severities={"debian": sev}, pkg_class=PkgClass.OS, pkg_type="debian",
     )
 
 

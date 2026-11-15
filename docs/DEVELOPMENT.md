@@ -45,7 +45,7 @@ bootstrap/init-host.sh   one-time host provisioning (users, sshd, UFW, Docker, C
 install.sh               lays down /opt/boxmunge from a release bundle
 scripts/boxmunge-upgrade the root upgrade shim: download, verify signature, swap venvs, probation
 system/                  the boxmunge-system container (age, rclone)
-systemd/                 timers: backup, backup-sync, health, cve-scan, container-update, auto-update
+systemd/                 timers: backup, backup-sync, health, maintenance (scan then container-update), auto-update
 canary/                  the project self-test deploys to prove the pipeline works
 docs/on-server/          operator and agent docs, shipped to the box and served by agent-help
 services/version-check/  the public update-discovery service (itself deployed as a boxmunge project)

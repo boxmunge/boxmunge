@@ -63,3 +63,22 @@ def test_install_sh_installs_the_units_through_it() -> None:
     text = (REPO / "install.sh").read_text()
     assert 'bash "${SCRIPT_DIR}/bootstrap/systemd-units.sh" "${SCRIPT_DIR}"' in text
     assert "enable --now" not in text
+
+
+def test_old_timers_removed_on_upgrade(tmp_path) -> None:
+    bundle = _bundle(tmp_path)
+    dest = tmp_path / "etc-systemd"
+    dest.mkdir()
+    old = ("boxmunge-cve-scan.timer", "boxmunge-container-update.timer")
+    for name in old:
+        (dest / name).write_text("[Timer]\n")
+    calls = _run(tmp_path, bundle)
+    for name in old:
+        assert f"disable --now {name}" in calls
+        assert not (dest / name).exists()
+    assert calls.index("disable --now " + old[0]) < calls.index("daemon-reload")
+
+
+def test_cleanup_is_a_noop_when_the_old_timers_are_gone(tmp_path) -> None:
+    calls = _run(tmp_path, _bundle(tmp_path))
+    assert not [c for c in calls if c.startswith("disable")]
