@@ -318,7 +318,7 @@ Recurring operations run via systemd timers:
 | `boxmunge-backup-sync.timer` | Daily at 03:00 | `backup-sync` |
 | `boxmunge-maintenance.timer` | Daily at 02:30 (up to 30 min jitter) | `security scan`, then `container-update`, in one unit |
 | `boxmunge-kev-watch.timer` | Every 30 minutes (up to 2 min jitter) | `security kev-watch` |
-| `boxmunge-auto-update.timer` | Every 6 hours (up to 30 min jitter) | `auto-update` |
+| `boxmunge-auto-update.timer` | Every 4 hours (up to 30 min jitter) | `auto-update` |
 
 One unit has no timer: `boxmunge-autofix.service` (`security autofix-queue`) patches the urgent known-exploited findings a scan queued. The nightly scan, the KEV watch and a supervisor's single-project scan start it when they queue a patch, without waiting for it. It runs as root with a 6-hour limit, outside the scans' own units, and takes no lock beyond each project's own.
 

@@ -15,7 +15,7 @@ Thin orchestration layer: delegates discovery to upgrade_discovery and hands
 off the upgrade itself to the boxmunge-upgrade shim via os.execvp, which
 verifies the release signature, applies it, and runs probation, rollback
 and blocklisting identically for every class. Run by a systemd timer every
-6 hours.
+4 hours.
 """
 
 import os

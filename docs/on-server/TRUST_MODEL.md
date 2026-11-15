@@ -438,7 +438,7 @@ boxmunge hardens the VPS as part of installation:
 - **Unattended upgrades** — automatic OS security patches. `health` (`auto-updates`) and every
   `auto-update` run check that package lists are refreshing and updates are being installed,
   and `auto-update` alerts when they are not
-- **Automatic security and break-fix updates** — every 6 hours boxmunge checks for its own releases and applies security releases, plus break-fix releases unless `auto_update.breakfix` is `false`
+- **Automatic security and break-fix updates** — every 4 hours boxmunge checks for its own releases and applies security releases, plus break-fix releases unless `auto_update.breakfix` is `false`
 
 ## Per-Project Container Hardening
 

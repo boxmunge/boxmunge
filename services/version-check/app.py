@@ -84,7 +84,7 @@ STATS_DEFAULT_DAYS = 7
 # The service runs behind exactly one proxy we control (boxmunge's Caddy),
 # which overwrites X-Forwarded-For with the address it saw.
 TRUSTED_PROXY_HOPS = 1
-# Per-client request limit across all endpoints. A box checks every 6 hours;
+# Per-client request limit across all endpoints. A box checks every 4 hours;
 # this leaves ample room for many boxes behind one NAT.
 RATE_LIMIT_REQUESTS = 60
 RATE_LIMIT_WINDOW_SECONDS = 60

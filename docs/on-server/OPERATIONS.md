@@ -1875,7 +1875,7 @@ source under `/etc/apt/sources.list.d/` and run `sudo apt-get update` again unti
 manual `apt-get update` does not refresh the stamp; the next daily run does, or start it now with
 `sudo systemctl start apt-daily.service`. For a failed unit, `journalctl -u <unit>` shows why.
 
-Because `health` is not scheduled, the auto-update timer (every 6 hours) runs the same check. When
+Because `health` is not scheduled, the auto-update timer (every 4 hours) runs the same check. When
 it finds a problem it logs a warning (`log --component auto-update`) and sends a priority-1 Pushover
 alert, "[<hostname>] OS updates are not being installed". Every boxmunge alert title starts
 with the box's hostname. The alert repeats at most once a day while
@@ -1929,7 +1929,7 @@ upgrade
 ```
 
 `upgrade` installs the newest release of any class. Every release has a
-class, and the auto-update timer (every 6 hours) decides by class what to
+class, and the auto-update timer (every 4 hours) decides by class what to
 install without you:
 
 | Class | Applied automatically? |
@@ -2011,7 +2011,7 @@ error such as its rate limit's 429, a redirect to somewhere unreachable, or
 an unexpected shape), nothing is installed and the check fails with the
 reason: the maintainer marks a hold on GitHub by hand after tripping the
 breaker, so GitHub's answer could still install a release the service
-holds. The next run (every 6 hours) tries again. A security release can therefore wait while the service
+holds. The next run (every 4 hours) tries again. A security release can therefore wait while the service
 answers with errors; that is the price of never installing a release the
 maintainer has held. So it is never silent: once the service has gone 48
 hours without a usable answer, `health` reports `platform-updates` as
@@ -2258,7 +2258,7 @@ upgrade.
 
 The box contacts one boxmunge service, the version-check service at boxmunge.dev:
 
-- **Update checks**, every 6 hours from the `boxmunge-auto-update` timer and on a plain
+- **Update checks**, every 4 hours from the `boxmunge-auto-update` timer and on a plain
   `upgrade` (`upgrade --target` names its version and does not check): an HTTPS request
   for `/v1/check?v=<installed version>`, with User-Agent `boxmunge/<installed version>`.
   Nothing else: no hostname, machine ID or project names.
