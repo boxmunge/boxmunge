@@ -65,7 +65,10 @@ def _start_time(proc: Path, pid: int) -> int | None:
     fields = text[text.rindex(")") + 1:].split() if ")" in text else []
     if len(fields) <= _START_TIME_INDEX:
         raise StateError(f"Unparseable process stat in {path}: {text!r}.")
-    return int(fields[_START_TIME_INDEX])
+    try:
+        return int(fields[_START_TIME_INDEX])
+    except ValueError as e:
+        raise StateError(f"Unparseable process stat in {path}: {text!r}.") from e
 
 
 def current(proc: Path = PROC, pid: int | None = None) -> WorkerIdentity:

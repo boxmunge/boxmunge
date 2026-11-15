@@ -63,3 +63,11 @@ def test_record_round_trip():
     assert WorkerIdentity.from_record(ident.as_record()) == ident
     with pytest.raises(StateError, match="start_time"):
         WorkerIdentity.from_record({"boot_id": BOOT, "pid": 7})
+
+
+@pytest.mark.parametrize("stat", ["garbage", "1 (a) S 0 0", "1 (a) " + " ".join(["x"] * 25)])
+def test_unparseable_stat_raises_state_error(tmp_path, stat):
+    proc = _proc(tmp_path, 7, 50)
+    (proc / "7" / "stat").write_text(stat)
+    with pytest.raises(StateError, match="stat"):
+        is_alive(WorkerIdentity(BOOT, 7, 50), proc)
