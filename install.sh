@@ -378,6 +378,16 @@ BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" FROM_UPGRADE_SHIM="${FROM_UPGRADE_SHIM}" \
     bash "${SCRIPT_DIR}/bootstrap/audit-seal.sh"
 
 # ---------------------------------------------------------------------------
+# The job queue (state/jobs/, state/jobs/queue/) and the jobs gate, deploy's,
+# before the units: boxmunge-jobs.path watches the queue. See the script.
+# ---------------------------------------------------------------------------
+echo ""
+echo "========================================================"
+echo "  Making the job queue"
+echo "========================================================"
+BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" bash "${SCRIPT_DIR}/bootstrap/jobs-dirs.sh"
+
+# ---------------------------------------------------------------------------
 # Systemd units
 # ---------------------------------------------------------------------------
 echo ""

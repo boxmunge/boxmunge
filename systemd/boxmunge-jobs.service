@@ -1,0 +1,24 @@
+[Unit]
+Description=boxmunge job runner (runs each queued job, then exits)
+After=docker.service
+# A runner that cannot start is retried by boxmunge-jobs.path; past this rate
+# systemd gives up and the path unit fails, which `health` reports
+# (jobs-runner) with the commands that start it again.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
+[Service]
+# Started only by boxmunge-jobs.path (no [Install]). It runs each queued job
+# as `boxmunge-server _run-job <id>` and exits once queue/ is empty, or after
+# a worker exits 75 (an upgrade held the jobs gate) so that the path unit
+# starts it again on the code now installed. One unit, not a template: that
+# is what keeps two runners from running at once. KillMode is left at
+# control-group, so a stop's SIGTERM reaches every worker, not only the
+# runner; TimeoutStopSec gives them time to finish a step.
+Type=exec
+User=deploy
+Group=deploy
+ExecStart=/opt/boxmunge/bin/boxmunge-server _job-runner
+TimeoutStopSec=300
+StandardOutput=journal
+StandardError=journal

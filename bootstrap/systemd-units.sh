@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # bootstrap/systemd-units.sh — install boxmunge's systemd units and start its
-# timers. Run by install.sh as root.
+# timers and the job runner's path unit. Run by install.sh as root.
 #
 #   systemd-units.sh <bundle_dir>
 #
@@ -16,7 +16,8 @@
 # `systemctl enable --now` starts a timer that is not running, but leaves a
 # running one on the schedule it loaded: a release that changes a timer's
 # OnCalendar would take effect only at the next reboot. So each timer whose
-# unit file this run changes is restarted once the units are reloaded.
+# unit file this run changes is restarted once the units are reloaded, and so
+# is a changed path unit, which keeps the watch it loaded the same way.
 set -euo pipefail
 
 SRC="${1:?Usage: systemd-units.sh <bundle_dir>}/systemd"
@@ -31,7 +32,7 @@ record_units() {
     local unit stage previous
     mkdir -p "$(dirname "${SLOT_UNITS}")"
     stage="$(mktemp -d "$(dirname "${SLOT_UNITS}")/.boxmunge-systemd.XXXXXX")"
-    for unit in "$1"/boxmunge-*.service "$1"/boxmunge-*.timer; do
+    for unit in "$1"/boxmunge-*.service "$1"/boxmunge-*.timer "$1"/boxmunge-*.path; do
         if [[ -f "${unit}" ]] && ! cp "${unit}" "${stage}/"; then
             rm -rf "${stage}"
             echo "ERROR: could not copy ${unit} into ${SLOT_UNITS}; the record is left as it was" >&2
@@ -65,12 +66,14 @@ for old in boxmunge-cve-scan.timer boxmunge-container-update.timer; do
 done
 
 changed=()
-for timer in "${SRC}/"*.timer; do
-    cmp -s "${timer}" "${DEST}/${timer##*/}" || changed+=("${timer##*/}")
+for watcher in "${SRC}/"*.timer "${SRC}/"*.path; do
+    cmp -s "${watcher}" "${DEST}/${watcher##*/}" || changed+=("${watcher##*/}")
 done
-# Every service is copied, boxmunge-autofix.service included: it has no
-# timer and is not enabled; the scans start it when they queue a patch.
-cp "${SRC}/"*.service "${SRC}/"*.timer "${DEST}/"
+# Every service is copied, and none is enabled itself: the timers start most;
+# the scans start boxmunge-autofix.service when they queue a patch; and
+# boxmunge-jobs.path starts boxmunge-jobs.service, at boot and whenever a job
+# is queued.
+cp "${SRC}/"*.service "${SRC}/"*.timer "${SRC}/"*.path "${DEST}/"
 systemctl daemon-reload
 systemctl enable --now \
     boxmunge-audit-rotate.timer \
@@ -78,6 +81,7 @@ systemctl enable --now \
     boxmunge-backup-sync.timer \
     boxmunge-backup.timer \
     boxmunge-health.timer \
+    boxmunge-jobs.path \
     boxmunge-kev-watch.timer \
     boxmunge-maintenance.timer
 if [[ "${#changed[@]}" -gt 0 ]]; then

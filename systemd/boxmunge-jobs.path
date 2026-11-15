@@ -1,0 +1,9 @@
+[Unit]
+Description=boxmunge job runner: start it when a job is queued
+
+[Path]
+DirectoryNotEmpty=/opt/boxmunge/state/jobs/queue
+Unit=boxmunge-jobs.service
+
+[Install]
+WantedBy=paths.target
