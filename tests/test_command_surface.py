@@ -45,6 +45,7 @@ BASE_ARGS: dict[str, list[str]] = {
     "validate": ["myapp"],
     "userns": ["check"],
     "_discover-update": ["--json"],
+    "_run-job": ["01J" + "A" * 23],
 }
 
 # Subcommand forms that need their own coverage.

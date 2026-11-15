@@ -268,11 +268,15 @@ def _imports_of_the_api(path: Path) -> list[str]:
 API_FRONTENDS = frozenset({
     "commands/audit_cmd.py",  # _audit-seal / _audit-rotate: root seal and rotation of the audit log
     "health_checks/audit_log.py",  # the audit-log health check reads the seal's state
+    "commands/run_job_cmd.py",  # _run-job: the job worker, started by the job runner
 })
 
 
 def test_nothing_outside_the_api_package_imports_it() -> None:
-    """Phase A shipped inert: no CLI command, shell, MCP tool or timer routed through boxmunge.api. The only ways in are the boxmunge-apid console script and API_FRONTENDS. Update this deliberately when a frontend converts."""
+    """Phase A shipped inert: no CLI command, shell, MCP tool or timer routed
+    through boxmunge.api. The only ways in are the boxmunge-apid console
+    script and API_FRONTENDS. Update this deliberately when a frontend
+    converts."""
     src = REPO / "src" / "boxmunge"
     outside = [p for p in src.rglob("*.py") if (src / "api") not in p.parents
                and p.relative_to(src).as_posix() not in API_FRONTENDS]

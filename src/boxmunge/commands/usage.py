@@ -395,6 +395,12 @@ Usage: boxmunge _audit-rotate
 
 Internal: move the audit log to audit.jsonl.<date> and start a new sealed
 one, keeping 12 archives (the monthly boxmunge-audit-rotate timer, as root).""",
+    "_run-job": """\
+Usage: boxmunge _run-job <job-id>
+
+Internal: run one queued action API job (used by the job runner). Exits 0
+once the job has finished, 75 when an upgrade held the jobs gate and the
+job was left queued for the new code, 1 when the job is not queued.""",
     "mcp-serve": """\
 Usage: boxmunge mcp-serve
 
