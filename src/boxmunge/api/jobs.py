@@ -1,10 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Job records on disk, and the read side the jobs.* actions use.
 
-Layout (the job runner writes it):
+Layout (job_writer writes the records, the job runner the events):
   state/jobs/queue/<id>.json     every unfinished job (queued or running)
   state/jobs/<id>.json           finished jobs (succeeded or failed)
   state/jobs/<id>.events.jsonl   the job's events, one JSON object per line
+  state/jobs/<id>.lock           held by every write of the record, and by
+                                 every read of it here
 
 JOB_SCHEMA and EVENT_SCHEMA are the formats every writer must produce. A
 record or event line that breaks them is reported as corrupt (StateError),
@@ -13,6 +15,7 @@ never skipped.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,6 +25,8 @@ from boxmunge.api.schema import (
     NULLABLE_STRING, RESULT_OF_ACTION, STRING, ResultSchemas, enum, nullable, obj, validate,
 )
 from boxmunge.api.timefmt import NULLABLE_TIMESTAMP, TIMESTAMP
+from boxmunge.api.worker_identity import PROC, WORKER_SCHEMA, WorkerIdentity, is_alive
+from boxmunge.fileutil import exclusive_lock
 from boxmunge.fs_nofollow import read_text_nofollow_or_none
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError
@@ -39,6 +44,11 @@ JOB_SCHEMA = obj({
     "principal": STRING,
     "project": NULLABLE_STRING,
     "state": enum(*JOB_STATES),
+    # The call's params as compact JSON text (sorted keys, no spaces): the
+    # closed schema has no open object, so they are stored as a string.
+    "params": STRING,
+    # Who claimed the job: null while queued, set from the claim on.
+    "worker": nullable(WORKER_SCHEMA),
     "created_at": TIMESTAMP,
     "started_at": NULLABLE_TIMESTAMP,
     "finished_at": NULLABLE_TIMESTAMP,
@@ -70,12 +80,21 @@ class JobListing:
 
 class JobStore:
     """*result_schemas* resolves an action to its result schema, so a
-    non-null result is checked against the action that produced it."""
+    non-null result is checked against the action that produced it.
 
-    def __init__(self, paths: BoxPaths, *, result_schemas: ResultSchemas) -> None:
+    A running job whose worker is gone (see worker_identity.is_alive, which
+    reads *proc*) is reported as failed with the error worker_lost. That is
+    presentation only: the record on disk is left alone, and the job runner
+    is what writes the failure.
+    """
+
+    def __init__(self, paths: BoxPaths, *, result_schemas: ResultSchemas,
+                 proc: Path = PROC) -> None:
+        self._paths = paths
         self._done = paths.jobs_dir
         self._queue = paths.jobs_queue
         self._result_schemas = result_schemas
+        self._proc = proc
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         """The job's record, or None if there is no such job. A record that
@@ -85,7 +104,7 @@ class JobStore:
             record = self._load(directory / f"{job_id}.json", job_id)
             if record is not None:
                 found = _prefer(found, record)
-        return found
+        return None if found is None else self._presented(found)
 
     def recent(self, *, project: str | None = None, limit: int = 50) -> JobListing:
         """Jobs newest first, optionally for one project.
@@ -112,7 +131,8 @@ class JobStore:
                     continue
                 if record is not None:
                     records[path.stem] = _prefer(records.get(path.stem), record)
-        jobs = [r for r in records.values() if project is None or r["project"] == project]
+        jobs = [self._presented(r) for r in records.values()
+                if project is None or r["project"] == project]
         jobs.sort(key=lambda r: (r["created_at"], r["id"]), reverse=True)
         unreadable = [{"id": job_id, "problem": problem}
                       for job_id, problem in sorted(problems.items()) if job_id not in records]
@@ -141,9 +161,38 @@ class JobStore:
                 events.append(event)
         return events
 
+    def _presented(self, record: dict[str, Any]) -> dict[str, Any]:
+        """*record*, or, if it is running and its worker is gone, the failed
+        record the runner will write for it."""
+        if record["state"] != "running":
+            return record
+        worker = WorkerIdentity.from_record(record["worker"])
+        if is_alive(worker, self._proc):
+            return record
+        return {**record, "state": "failed", "error": {
+            "code": "worker_lost",
+            "message": (f"The worker running this job (pid {worker.pid}) is gone: it exited "
+                        f"or the box restarted before the job finished. The job is not re-run, "
+                        f"because a half-done {record['action']} must not repeat itself; check "
+                        f"what it changed before starting it again."),
+        }}
+
     def _load(self, path: Path, job_id: str) -> dict[str, Any] | None:
-        """The record at *path*, or None if there is none there (any more)."""
-        text = _read(path, "job record")
+        """The record at *path*, or None if there is none there (any more).
+
+        Read under the job's lock: while job_writer publishes or finishes a
+        job, the record briefly has a second hard link, which the no-follow
+        read refuses. Nothing at the name means no record, and no lock file
+        is created for it.
+        """
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            raise StateError(f"Cannot read job record {path}: {e}") from e
+        with exclusive_lock(self._paths.job_lock(job_id)):
+            text = _read(path, "job record")
         if text is None:
             return None
         try:
@@ -158,11 +207,22 @@ class JobStore:
                 and self._result_schemas(action) is None):
             raise StateError(f"Job record {path}: action {action} is no longer registered, "
                              f"so its result cannot be checked")
+        if not violations:
+            violations = worker_problems(record)
         if violations:
             raise StateError(f"Job record {path} is corrupt: {'; '.join(violations)}")
         if record["id"] != job_id:
             raise StateError(f"Job record {path} holds the id {record['id']}")
         return record
+
+
+def worker_problems(record: dict[str, Any]) -> list[str]:
+    """A queued job has no worker yet; a running one must name its worker."""
+    if record["state"] == "queued" and record["worker"] is not None:
+        return ["$.worker: the job is queued but names a worker"]
+    if record["state"] == "running" and record["worker"] is None:
+        return ["$.worker: the job is running but names no worker"]
+    return []
 
 
 def _read(path: Path, what: str) -> str | None:

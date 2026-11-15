@@ -189,10 +189,11 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `compose_up_steps.py` | `sweep_live_scripts` | the generated compose overlay, searched for one string (1 MiB) | `projects/<p>/` |
 | `secrets.py` | `_parse` | a project's `secrets.env`. Cap: 1 MiB | `projects/<p>/` |
 | `api/jobs.py` | `_read` | a job's record and events | `state/jobs/` |
+| `api/job_writer.py` | `_load` | a job's record, under its lock, before claim, finish or the finishing move rewrites it | `state/jobs/`, `state/jobs/queue/` |
 | `commands/logs.py` | `_show_boxmunge_logs` | `boxmunge.log` and its archives | `logs/` |
 | `commands/quarantine_gate.py` | `lift_after_deploy` | `<p>.conf`, the site a lift republishes (capped at the size of a site file) | `caddy/sites/` |
 
-Of the action-API modules, `api/jobs.py` has a row above (its reads of `state/jobs/`). Two need
+Of the action-API modules, `api/jobs.py` and `api/job_writer.py` have rows above (their reads of `state/jobs/`). Two need
 none: `api/actions/logs.py` reads nothing itself (the operational log goes through
 `commands/log_cmd.parse_log_file` below, the manifest through `load_manifest`), and
 `api/dev/fixture_host.py` (3 reads) serves canned answers from `dev/` of a fixture box, which `apid`
@@ -253,6 +254,7 @@ added again under the same name reuses them. Create a new lock under `state/` wi
 | `state/secrets-locks/.host.lock` | `SecretsFile.locked` | writes of the host secrets file | kept for good |
 | `state/.registry.lock` | `fileutil.registry_lock` | read, change and save of `projects.txt` | kept for good |
 | `state/.cve-fleet.lock` | `cve.fleet_lock.fleet_lock`: the KEV watch doesn't wait (skips its tick); the fleet `security scan` blocks until it is free; the watch service's 1h `TimeoutStartSec` bounds that | one fleet-wide CVE run at a time; the urgent autofix queue runs outside it, in `boxmunge-autofix.service` (`commands/autofix_urgent.py` takes each project's lock in turn and leaves a busy one for the next run) | kept for good |
+| `state/jobs/<id>.lock` | `api/job_writer.py` (blocks; each step is a few small writes) and `JobStore` reads (blocks) | publish, claim, finish and the finishing move of one job's record, and every read of that record | kept with the job's record |
 | `state/.caddy.lock` | `docker.caddy_config_lock` | writing Caddy site config and reloading | kept for good |
 | `state/.legacy-stages.lock` | nothing since 0.11.7: `legacy-stage` took it, up to 0.11.6 | (the legacy-stage records) | left on a box where an older release made it |
 | `state/container-updates/.lock` | `commands/container_update_cmd.py` (doesn't wait) | one container-update run at a time | kept for good |

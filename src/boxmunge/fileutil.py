@@ -18,8 +18,9 @@ To rule out deadlock, a process only ever acquires them in this order
    migration, item 5).
 4. Short blocking locks, always innermost: ``state/.registry.lock``
    (``registry_lock``), ``state/.caddy.lock`` (inside ``caddy_reload``),
-   and ``state/secrets-locks/*.lock`` (one per
-   secrets file, around every write of it). None of them is held while
+   ``state/secrets-locks/*.lock`` (one per
+   secrets file, around every write of it), and ``state/jobs/<id>.lock``
+   (one per job, around each write or read of its record). None of them is held while
    acquiring any other lock, and none is held across slow work.
 5. The user-namespace migration (``boxmunge-server userns migrate|rollback``,
    root, run by the upgrade shim under ``upgrade.lock``) is the one process
@@ -127,6 +128,22 @@ def durable_rename(tmp_path: Path, path: Path) -> None:
         raise RenamedNotSyncedError(
             e.errno, f"{tmp_path.name} was renamed to {path}, but {path.parent} was not "
             f"synced: {e.strerror or e}") from e
+
+
+def durable_link(src: Path, dest: Path) -> None:
+    """link() src to dest, then sync dest's directory, so the new name
+    survives a crash once this returns. Raises FileExistsError when dest
+    exists: a link never replaces anything. src's data must already be
+    synced (the link adds a name, not content)."""
+    os.link(src, dest)
+    fsync_dir(dest.parent)
+
+
+def durable_unlink(path: Path) -> None:
+    """unlink() path, then sync its directory, so the name cannot come back
+    after a crash once this returns."""
+    os.unlink(path)
+    fsync_dir(path.parent)
 
 
 class LinkedTargetError(OSError):

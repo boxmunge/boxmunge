@@ -2,6 +2,7 @@
 """The dev fixture box: written in the platform's own formats, never a real box."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -10,7 +11,8 @@ from boxmunge.api.dev.fixture import (
     FIXTURE_MARKER, FixtureError, make_fixture, require_fixture,
 )
 from boxmunge.api.dev.fixture_host import FixtureHost
-from boxmunge.api.jobs import JobStore
+from boxmunge.api.jobs import JOB_SCHEMA, JobStore
+from boxmunge.api.schema import validate
 from boxmunge.backup import snapshot_kind
 from boxmunge.commands.backup_cmd import list_snapshots
 from boxmunge.commands.inbox_cmd import collect_inbox
@@ -45,6 +47,14 @@ def test_fixture_reads_back_through_the_platform_readers(tmp_path) -> None:
     assert [(j["action"], j["state"]) for j in jobs] == [
         ("project.deploy", "succeeded"), ("project.backup", "failed")]
     assert len(JobStore(paths, result_schemas=registry_results).events(jobs[0]["id"])) == 7
+
+
+def test_fixture_jobs_validate_against_the_new_schema(tmp_path) -> None:
+    paths = make_fixture(tmp_path / "box", now=NOW)
+    for path in paths.jobs_dir.glob("*.json"):
+        record = json.loads(path.read_text())
+        assert validate(JOB_SCHEMA, record) == []
+        assert (record["params"], record["worker"]) == ("{}", None)
 
 
 def test_fixture_host_serves_the_canned_answers(tmp_path) -> None:

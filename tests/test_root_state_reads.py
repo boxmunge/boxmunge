@@ -33,7 +33,9 @@ from boxmunge import (
     overlay_users, pause, release, release_txn, run_as, staged_release,
     upgrade_state, user_drift,
 )
+from boxmunge.api import job_writer
 from boxmunge.api.jobs import JobStore
+from boxmunge.api.worker_identity import WorkerIdentity
 from boxmunge.backup_evidence import project_evidence, sync_evidence
 from boxmunge.bind_sources import read_record
 from boxmunge.blocked_update import read_blocked_state
@@ -106,8 +108,15 @@ JOB_ID = "01J" + "A" * 23
 JOB = {"id": JOB_ID, "action": "project.deploy", "principal": "plugin:webui", "project": P,
        "state": "succeeded", "created_at": "2026-10-14T01:00:00Z",
        "started_at": "2026-10-14T01:00:05Z", "finished_at": "2026-10-14T01:01:30Z",
-       "error": None, "result": None}
+       "error": None, "result": None, "params": "{}", "worker": None}
 JOB_EVENT = json.dumps({"seq": 1, "ts": "2026-10-14T01:00:06Z", "type": "log", "message": "m"}) + "\n"
+
+
+QUEUED_JOB = {**JOB, "state": "queued", "started_at": None, "finished_at": None}
+
+
+def _claim(paths: BoxPaths) -> Any:
+    return job_writer.claim(paths, JOB_ID, WorkerIdentity("boot", 1, 1), NOW)
 
 
 def _jobs(paths: BoxPaths) -> JobStore:
@@ -280,6 +289,8 @@ READERS = [
            lambda p: _jobs(p).get(JOB_ID)),
     Reader("job events", lambda p: p.jobs_dir / f"{JOB_ID}.events.jsonl", JOB_EVENT,
            lambda p: _jobs(p).events(JOB_ID)),
+    Reader("queued job record (claim)", lambda p: p.jobs_queue / f"{JOB_ID}.json", QUEUED_JOB,
+           _claim),
     Reader("backup sync evidence", lambda p: p.backup_sync_state, {"synced_at": ISO},
            sync_evidence),
     Reader("health backup_freshness", lambda p: p.project_backup_state(P),

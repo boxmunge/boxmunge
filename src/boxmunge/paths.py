@@ -179,6 +179,10 @@ class BoxPaths:
         # When notify() last logged that Pushover is not configured.
         self.alerts_unconfigured_state = self.state / "alerts-unconfigured.json"
 
+    def job_lock(self, job_id: str) -> Path:
+        """The flock every step of one job's publish, claim and finish holds."""
+        return self.jobs_dir / f"{job_id}.lock"
+
     def container_update_target_state(self, name: str) -> Path:
         return self.container_update_state / f"{name}.json"
 
