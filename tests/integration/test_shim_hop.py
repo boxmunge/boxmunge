@@ -183,7 +183,8 @@ def test_below_the_floor_the_release_is_refused_and_the_bridge_release_still_ins
 FLOOR_SHIM = ("boxmunge-upgrade-v0.11.11", "0.11.11")
 # The units this release adds, and the timers it retires (shim_hop.sh's box
 # starts with the previous release's).
-ADDED = ("boxmunge-autofix.service", "boxmunge-kev-watch.service", "boxmunge-kev-watch.timer",
+ADDED = ("boxmunge-audit-rotate.service", "boxmunge-audit-rotate.timer",
+         "boxmunge-autofix.service", "boxmunge-kev-watch.service", "boxmunge-kev-watch.timer",
          "boxmunge-maintenance.service", "boxmunge-maintenance.timer")
 RETIRED = ("boxmunge-container-update.timer", "boxmunge-cve-scan.timer")
 

@@ -103,6 +103,8 @@ Operator only (as root, not in the deploy shell):
   container-update        Pull and recreate Caddy and project image: containers
   install-txn <p> --drop  Drop a stale install record
   project-forget <p>      Drop a registry entry whose project directory is gone
+  _audit-seal             Make the action audit log append-only again (install
+                          does it; health's audit-log check names it)
   bundle <dir>            Build a bundle on this machine (the client's
                           'boxmunge bundle' is the usual way)
   boxmunge-upgrade force-target VER
@@ -112,8 +114,8 @@ Operator only (as root, not in the deploy shell):
   boxmunge-upgrade userns-migrate [--check] | userns-rollback | userns-commit
                           Remap Docker's user namespaces (OPERATIONS.md)
 
-Internal (run by the upgrade shim, not by hand): stash, _discover-update,
-staging-teardown-all
+Internal (run by the upgrade shim or a timer, not by hand): stash,
+_discover-update, staging-teardown-all, _audit-rotate
 
 Options (run 'help <command>' to see exactly which a command accepts):
   -h, --help              Show a command's usage; never runs the command

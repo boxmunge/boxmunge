@@ -371,6 +371,13 @@ if [[ -d "${SCRIPT_DIR}/canary" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# The action audit log, sealed append-only by this release's own code (under
+# the upgrade shim, its standby slot): see bootstrap/audit-seal.sh.
+# ---------------------------------------------------------------------------
+BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" FROM_UPGRADE_SHIM="${FROM_UPGRADE_SHIM}" \
+    bash "${SCRIPT_DIR}/bootstrap/audit-seal.sh"
+
+# ---------------------------------------------------------------------------
 # Systemd units
 # ---------------------------------------------------------------------------
 echo ""

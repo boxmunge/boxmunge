@@ -83,3 +83,13 @@ def test_the_maintenance_unit_fits_a_waited_scan_and_the_autofix_window() -> Non
     limit = int(_unit("boxmunge-maintenance.service")["Service"]["TimeoutStartSec"][:-1])
     watch = int(_unit("boxmunge-kev-watch.service")["Service"]["TimeoutStartSec"][:-1])
     assert timedelta(hours=limit) > timedelta(hours=watch) + NIGHTLY_AUTOFIX_WINDOW
+
+
+def test_rotate_timer_is_monthly_and_root() -> None:
+    """The audit log's rotation clears and sets the append-only attribute,
+    which only root can do."""
+    timer = _unit("boxmunge-audit-rotate.timer")["Timer"]
+    assert (timer["OnCalendar"], timer["Persistent"]) == ("*-*-01 00:15:00", "true")
+    service = _unit("boxmunge-audit-rotate.service")["Service"]
+    assert (service["Type"], service["User"]) == ("oneshot", "root")
+    assert service["ExecStart"] == "/opt/boxmunge/bin/boxmunge-server _audit-rotate"

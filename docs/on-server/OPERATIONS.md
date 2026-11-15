@@ -623,6 +623,16 @@ A line in a log file that is not a JSON entry (torn by a crash, hand-edited, or 
 
 A log file or archive that is a symlink, a FIFO or a file with a second hard link is not read: the query fails with an error naming it, as it does for one it has no permission to read. `logs/` is writable by deploy, and boxmunge never writes its log through such a name. Remove it and re-run.
 
+### The action audit log
+
+Every call through the action API that changes something is recorded in `/opt/boxmunge/logs/audit.jsonl`, one JSON object per line: who asked, which action, its parameters (secrets redacted) and the outcome. Refusals are recorded too. The file belongs to `deploy`, mode 0640, and carries the filesystem's append-only attribute (`chattr +a`, shown by `lsattr`): every writer can add lines, but nobody, `deploy` included, can truncate, rewrite, rename or delete it. Only root can set or clear the attribute. The installer sets it (`boxmunge-server _audit-seal`, as root), creating the file if it is missing. If the log cannot be written, the call is refused with `unavailable` and nothing runs; no writer ever recreates a missing log.
+
+`boxmunge-audit-rotate.timer` rotates it at 00:15 on the 1st of each month (a month missed while the box was off is rotated at the next boot). As root, it clears the attribute, moves the log to `audit.jsonl.YYYY-MM-DD`, sets the attribute on that archive, starts a new sealed log and deletes archives beyond the newest 12, clearing each one's attribute first. An empty log is left alone. A step that fails is logged and alerted at high priority, naming the step, and the fix is `sudo boxmunge-server _audit-seal`.
+
+`health` reports the log as an error (`audit-log`) when it is missing, is a link or not a plain file, or has lost the attribute: install sets all of these, so the error means a control is off, and an upgrade in probation that finds it rolls back. The fix is `sudo boxmunge-server _audit-seal`.
+
+Some hosts cannot set the attribute at all: a filesystem without it, or a container whose root lacks `CAP_LINUX_IMMUTABLE`. There, install still completes. `_audit-seal` records the reason in `state/audit-append-unsupported` (root's), leaves the log `deploy`'s with mode 0640, and prints a warning that `deploy` can rewrite the audit log on this host. `health` then warns, and never errors, so the box can still upgrade. Rotation works the same way but skips the attribute steps. If the host later supports the attribute (the box moved to another filesystem), a run of `_audit-seal` that sets it removes the record. A record that root did not write is refused, so `health` still reports an error.
+
 ### Caddy access log
 
 Every site's access log is JSON on the Caddy container's stdout; Caddy's own messages go to its
@@ -1646,13 +1656,14 @@ unless `health` also ran past its budget before the upgrade.
 | `registry` | a registered project's directory is gone but its deploy, scan or health state is not (a removal that did not finish); a name never deployed is ok | the supervisor user runs `sudo boxmunge-server project-forget <project>` |
 | `sshd-hardening`, `sshd-deploy-env` | `00-boxmunge.conf` is missing or changed, or `sshd -T` shows a later setting widening what deploy accepts (error; `sshd-deploy-env` needs root); `sshd -T` itself fails or times out (warning) | the supervisor user re-runs the installer, or removes the widening setting; `sudo sshd -t` names a config error |
 | `operational-log` | the active log file's first line is not a log entry, which stops all logging | move the file aside (see [Reading Logs](#reading-logs)) |
+| `audit-log` | `logs/audit.jsonl` is missing, a link or not a plain file, or has lost its append-only attribute on a host that supports it (error: every audited call is refused, or the log can be rewritten); on a host recorded as unable to set the attribute, a warning naming the reason | the supervisor user runs `sudo boxmunge-server _audit-seal`; see [The action audit log](#the-action-audit-log) |
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
 | `kev-watch` | the KEV watch has not run for 75 minutes (or its timer is installed and it has never run), its record cannot be read, or a known-exploited source that is turned on (the EU list, VulnCheck) is stale or was never fetched | the supervisor user runs `systemctl status boxmunge-kev-watch.timer`; for a source, `log --component cve-scan` names its error. See `agent-help cve`, "Known-exploited sources" |
 | `cve-hardening` | under posture `strict` or `paranoid`, a finding will quarantine from 0.12 because a compose-only service lacks `read_only: true` (or the manifest adds `cap_add` / `no_new_privileges: false`); not quarantined now | add `read_only: true` in compose.yml, or declare the service in the manifest; to accept the risk instead, suppress the CVE after review or choose `security.posture: balanced` (KEV-only quarantine); `security <project>` names it |
 | `autofix-queue` | an urgent autofix has waited 2 hours since it was found without starting (the autofix unit does not start, or another operation keeps holding the project), or a queue entry cannot be read | the supervisor user runs `journalctl -u boxmunge-autofix` and `systemctl start boxmunge-autofix.service`; `log --component autofix` says why. The scans have stopped holding the quarantine back |
 | `ufw`, `crowdsec`, `aide`, `auditd`, `sysctl` | a host hardening component is off or misconfigured | `doctor`, then the supervisor user |
 | `auto-updates` | OS security updates are not being fetched or installed | see [OS security updates](#os-security-updates) |
-| `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, maintenance, kev-watch) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
+| `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, maintenance, kev-watch, audit-rotate) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
 
 Because an error during probation that was not there before the upgrade rolls it back, only two
 things report an error. One is a
@@ -2150,7 +2161,8 @@ A rollback swaps the venvs back, restores the stash the upgrade made (never just
 `stashes/`), and re-runs `upgrade --apply` with the previous release, so its overlays and Caddy sites are regenerated and projects restarted on
 them. It also puts back the previous release's systemd units: each venv slot keeps a copy of
 its release's units (`env-<slot>/boxmunge-systemd`), so the units the newer release added (in
-0.12, `boxmunge-maintenance.timer`, `boxmunge-kev-watch.timer` and `boxmunge-autofix.service`)
+0.12, `boxmunge-maintenance.timer`, `boxmunge-kev-watch.timer`, `boxmunge-audit-rotate.timer`
+and `boxmunge-autofix.service`)
 are disabled and removed, and the ones it retired come back enabled. The next upgrade then runs
 the new release's `install.sh` again. Shims before 0.11.11 do not do this, which is why 0.12
 installs only over 0.11.11 or later: the shim running that upgrade is one that does. Every

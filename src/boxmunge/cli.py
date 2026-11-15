@@ -47,6 +47,7 @@ from boxmunge.commands.upgrade_howto_cmd import cmd_upgrade_howto
 from boxmunge.commands.auto_update_cmd import cmd_auto_update
 from boxmunge.commands.container_update_cmd import cmd_container_update
 from boxmunge.commands.discover_update_cmd import cmd_discover_update
+from boxmunge.commands.audit_cmd import cmd_audit_rotate, cmd_audit_seal
 from boxmunge.commands.readiness_cmd import cmd_upgrade_readiness
 from boxmunge.commands.mcp_serve_cmd import cmd_mcp_serve
 from boxmunge.commands.project_cmd import cmd_project_add, cmd_project_list
@@ -102,6 +103,8 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "auto-update": cmd_auto_update,
     "container-update": cmd_container_update,
     "_discover-update": cmd_discover_update,
+    "_audit-seal": cmd_audit_seal,
+    "_audit-rotate": cmd_audit_rotate,
     "upgrade-readiness": cmd_upgrade_readiness,
     "mcp-serve": cmd_mcp_serve,
     "project-add": cmd_project_add,

@@ -157,7 +157,7 @@ install -m 0755 "$OLD" "$R/bin/boxmunge-upgrade"
 export PATH="/stub/bin:$PATH" BOXMUNGE_SUDOERS_FILE=/tmp/sudoers-boxmunge BOXMUNGE_SYSTEMD_DIR=/tmp/units
 mkdir -p "$BOXMUNGE_SYSTEMD_DIR"
 cp /bundle/boxmunge/systemd/boxmunge-* "$BOXMUNGE_SYSTEMD_DIR/"
-rm "$BOXMUNGE_SYSTEMD_DIR"/boxmunge-{maintenance,kev-watch}.{timer,service} "$BOXMUNGE_SYSTEMD_DIR/boxmunge-autofix.service"
+rm "$BOXMUNGE_SYSTEMD_DIR"/boxmunge-{maintenance,kev-watch,audit-rotate}.{timer,service} "$BOXMUNGE_SYSTEMD_DIR/boxmunge-autofix.service"
 for t in cve-scan container-update; do
     printf '[Timer]\nOnCalendar=daily\nUnit=boxmunge-%s.service\n' "$t" > "$BOXMUNGE_SYSTEMD_DIR/boxmunge-$t.timer"
 done

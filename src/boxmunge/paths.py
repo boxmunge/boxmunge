@@ -106,6 +106,8 @@ class BoxPaths:
         self.log_file = self.logs / "boxmunge.log"
         # Action API audit log: one JSON object per line, append-only.
         self.audit_log = self.logs / "audit.jsonl"
+        # Root's record that this host cannot set that attribute (api.audit_seal).
+        self.audit_append_unsupported = self.state / "audit-append-unsupported"
         self.inbox = root / "inbox"
         self.inbox_tmp = self.inbox / ".tmp"
         self.inbox_consumed = self.inbox / ".consumed"
