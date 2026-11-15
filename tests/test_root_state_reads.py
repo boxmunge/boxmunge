@@ -39,7 +39,7 @@ from boxmunge.blocked_update import read_blocked_state
 from boxmunge.commands.security_scan_inputs import project_suppressions_path
 from boxmunge.container_update_targets import read_target_state
 from boxmunge.cve import (
-    breaker, exploited, kev, kev_source_history, kev_withdrawals, quarantine, scan_state,
+    breaker, exploited, kev, kev_enisa, kev_source_history, kev_withdrawals, quarantine, scan_state,
     suppressions,
 )
 from boxmunge.discovery_freshness import stale_discovery_warning
@@ -172,6 +172,10 @@ READERS = [
            {"fetched_at": ISO, "etag": None, "last_modified": None,
             "entries": {"CVE-1": ["eu_kev"]}},
            exploited.read_enisa_cache),
+    Reader("kev_enisa_refresh", lambda p: p.kev_enisa,
+           {"fetched_at": ISO, "etag": None, "last_modified": None,
+            "entries": {"CVE-1": ["eu_kev"]}},
+           lambda p: kev_enisa._cached(p)["entries"]),
     Reader("kev_vulncheck", lambda p: p.kev_vulncheck,
            {"fetched_at": ISO, "entries": ["CVE-1"]},
            exploited.read_vulncheck_cache),

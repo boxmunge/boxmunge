@@ -128,7 +128,7 @@ RAW_READS: dict[str, int] = {
     "api/dev/fixture_host.py": 3, "backup.py": 1,
     "commands/auto_update_cmd.py": 1, "commands/bundle_cmd.py": 1,
     "commands/doctor.py": 1, "commands/health_cmd.py": 1, "commands/help.py": 1,
-    "config.py": 1, "cve/kev_refresh.py": 1,
+    "config.py": 1, "cve/kev_http.py": 1,
     "health_checks/sshd.py": 2, "health_checks/userns.py": 1,
     "system_container.py": 1,
     "readiness.py": 1, "upgrade_discovery.py": 1, "upgrade_floor.py": 1,

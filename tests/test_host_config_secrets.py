@@ -16,7 +16,7 @@ from boxmunge.api.principal import Principal, Tier
 from boxmunge.api.result import ActionError
 from boxmunge.commands.check_all import run_check_all
 from boxmunge.config import ConfigError, load_config
-from boxmunge.cve.kev_refresh import kev_sources
+from boxmunge.cve.kev_config import kev_config
 from boxmunge.health_checks.alerts import check_alerts
 from boxmunge.paths import BoxPaths
 from boxmunge.userns.offset import RemapError, recorded_offset
@@ -68,7 +68,7 @@ def _said(paths: BoxPaths, capsys) -> str:
 
     with patch("boxmunge.notify.send_notification", send):
         attempt(lambda: load_config(paths, strict=True), ConfigError)
-        attempt(lambda: kev_sources(paths), ConfigError)
+        attempt(lambda: kev_config(paths).sources, ConfigError)
         attempt(lambda: recorded_offset(paths), RemapError)
         attempt(platform_info, ActionError)
         host_config_alert.report_at_start(paths, "upgrade")

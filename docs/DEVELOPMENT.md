@@ -157,6 +157,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `cve/breaker.py` | `read_held`, `alert_pending` | `cve-breaker.json` | `state/` |
 | `cve/kev.py` | `load_kev` | `kev/catalog.json` | `state/` |
 | `cve/exploited.py` | `_read_cache` | `kev/enisa.json`, `kev/vulncheck.json` | `state/` |
+| `cve/kev_enisa.py` | `_cached` | `kev/enisa.json`, for its validators and entries before they are renewed | `state/` |
 | `cve/kev_withdrawals.py` | `_entries` | `kev/withdrawn.json` | `state/` |
 | `cve/kev_source_history.py` | `_entries` | `kev/sources.json` | `state/` |
 | `cve/quarantine.py` | `read_quarantine_state` | `deploy/<p>.quarantined.json` | `state/` |
