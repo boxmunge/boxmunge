@@ -1081,6 +1081,106 @@ Webhook POSTs and the `resume` smoke-failure alert are sent without holding the 
 slow or unreachable endpoint cannot block other operations. A failed webhook delivery is logged as a
 warning (scheme and host only, never the URL path) and does not fail the command.
 
+A job (see [Jobs](#jobs)) does not fail at once on a held lock: it waits up to 2 minutes for it.
+
+---
+
+## Jobs
+
+A job is an action boxmunge runs in the background, outside your SSH session: `project.backup`,
+`project.restore`, `project.stage`, `project.promote`, `project.unstage`, `project.deploy`,
+`project.rollback`, `project.pause`, `project.resume`, and the govern actions `project.recover` and
+`project.abandon_install`. Closing the session does not stop it. The job runner
+(`boxmunge-jobs.path` and `boxmunge-jobs.service`) starts one worker per queued job, at most 4 at a
+time, and the worker takes the project lock, runs the action and records the outcome. Every call is
+recorded in the action audit log, with the job's id. The direct commands (`backup`, `stage`,
+`prod-deploy` and the rest) still run in your session, as before.
+
+### Starting and following a job
+
+```bash
+boxmunge job run project.backup '{"project":"myapp"}'
+```
+
+The parameters are one JSON object (quote it for the shell); `project.deploy` takes the same choices
+as `prod-deploy`, e.g. `'{"project":"myapp","no_pull":true}'`. The command prints
+`job <id> queued`, then follows the job: its output and its steps (`[lock] started: waiting for
+myapp's lock, held by ...`) as they come, once a second. It ends with `job <id> succeeded` and the
+result (exit 0), or `ERROR: <code>: <message>` (exit 1). A call refused before it is queued (an
+unknown project, parameters that do not match, an upgrade running) prints `ERROR:` and the reason,
+queues nothing, and exits 1; a usage error exits 2.
+
+`--detach` queues the job and returns at once. Ctrl-C while following stops following, never the
+job, and prints the command that picks it up again:
+
+```bash
+boxmunge job show <id> --events    # the record and everything it printed
+boxmunge job show <id> --json      # the record as JSON
+boxmunge jobs                      # the newest 50 jobs
+boxmunge jobs --running            # every queued and running job
+boxmunge jobs --project myapp
+```
+
+If a job is still queued after 30 seconds, the follower says once
+`still queued after 30 s: is the job runner active? systemctl status boxmunge-jobs.path`. Check the
+unit (as the supervisor) and `boxmunge health` (`jobs-runner`); once the runner is active, the job
+starts.
+
+### busy: the project lock stayed held
+
+A job waits up to 2 minutes for its project's lock, long enough for a health tick or a CVE scan to
+finish, but short enough that a command someone is running is reported to you instead of waited
+out. While it waits, `[lock] started` names what holds the lock. If the lock is still held after
+2 minutes, the job fails `busy` and runs none of the action: the message names the holder (e.g.
+`pid 4242: boxmunge backup myapp`) and ends with the exact command that retries it, such as
+`boxmunge job run project.backup '{"project":"myapp"}'`. Run it once the holder has finished.
+
+### Output that was cut off
+
+A job's output is everything the action and the commands it starts print. If a process it started
+keeps that output open after the action's work has ended (a `docker compose logs -f` left running,
+a hung build step), the worker waits 5 seconds, then finishes the job anyway and says `Output was
+cut off: ...` in the events and in the error of a failed job. The outcome stands; anything that
+process printed later is not shown. A failed command's error quotes the last lines of its output
+and ends `Full output: boxmunge job show <id> --events`.
+
+### A job stopped by SIGTERM
+
+A service stop or a shutdown sends the worker SIGTERM. The job fails, and the message says how far
+it got:
+
+- **Stopped before it started** (it was waiting for the lock): nothing was changed. The message
+  ends with the command that runs it again.
+- **Stopped mid-work**: it may have done part of its work, and it is never run again
+  automatically. The message, and a high-priority alert, give the way out for that action: for
+  example `run 'boxmunge backup myapp' again`, or, for a deploy that left an install open, that
+  install's own options (rerun it, `prod-deploy myapp --abandon`, or `rollback myapp`), as
+  [An interrupted or failed install](#an-interrupted-or-failed-install) describes.
+- **Stopped after its work finished**, while its follow-up steps ran: the outcome stands, and the
+  message says that some of those steps may not have run.
+
+### worker_lost
+
+If the worker disappears without finishing (the box restarted, or the worker was killed), the job
+fails with `worker_lost`. `job show` and `jobs` report it as soon as the worker is gone, and the
+runner writes the failure and sends an alert. A lost job is never re-run: a half-done
+action must not repeat itself. The alert names the way out for that action, as for a job stopped
+mid-work; for a deploy that left an install open, the install's options. Check what it changed
+(`boxmunge status myapp`, `boxmunge job show <id> --events`), then follow the alert.
+
+### Upgrades and jobs
+
+A platform upgrade and jobs never overlap:
+
+- While an upgrade runs, new jobs are refused (`unavailable`: `boxmunge is being upgraded, so new
+  jobs are refused until the upgrade finishes ...`). Run the same `job run` again once it has
+  finished (`boxmunge log --component upgrade`).
+- An upgrade waits up to 60 minutes for running jobs to finish, printing `Waiting up to 60 minutes
+  for running jobs to finish`; if they are still running then, it installs nothing and stops (see
+  UPGRADING.md).
+- A job queued just as an upgrade started stays queued and runs after the upgrade, once, on the new
+  code: the runner restarts on the installed release before starting it.
+
 ---
 
 ## Pause and Resume

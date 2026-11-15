@@ -76,6 +76,8 @@ Key features:
     deploy/                   # per-project deploy state; <p>.binds.json, <p>.users.json (who each service runs as),
                               # <p>.paused.json, <p>.quarantined.json
     scans/                    # per-project CVE scan state
+    jobs/                     # jobs (OPERATIONS.md, Jobs): finished records <id>.json, events
+                              # <id>.events.jsonl, queue/ of queued and running jobs; `jobs` lists them
     projects.txt              # the project registry (allowlist of project names)
   docs/                       # on-server documentation (root:root 755)
   logs/                       # boxmunge operational logs (deploy:deploy 755)
