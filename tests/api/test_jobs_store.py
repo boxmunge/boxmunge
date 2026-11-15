@@ -3,14 +3,38 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from pathlib import Path
 
 import pytest
 
 from boxmunge.api.jobs import EVENT_SCHEMA, JOB_SCHEMA, JobStore
 from boxmunge.api.schema import INTEGER, check_schema, obj
+from boxmunge.api.worker_identity import WorkerIdentity
+from boxmunge.fileutil import exclusive_lock, shared_lock
 from boxmunge.state import StateError
 from tests.api.fakes import registry_results
+
+
+BOOT = "11111111-2222-3333-4444-555555555555"
+WORKER = {"boot_id": BOOT, "pid": 4242, "start_time": 987654}
+
+
+def _proc(tmp_path: Path, *, alive: bool = True) -> Path:
+    """A fake /proc in which the worker WORKER is (or is not) running."""
+    proc = tmp_path / "proc"
+    (proc / "sys/kernel/random").mkdir(parents=True)
+    (proc / "sys/kernel/random/boot_id").write_text(BOOT + "\n")
+    if alive:
+        (proc / "4242").mkdir()
+        fields = ["S"] + ["0"] * 18 + ["987654"] + ["0"] * 5
+        (proc / "4242/stat").write_text("4242 (boxmunge) " + " ".join(fields) + "\n")
+    return proc
+
+
+def _running(n: int, **fields) -> dict:
+    return _record(n, state="running", finished_at=None, worker=WORKER, **fields)
 
 
 def _id(n: int) -> str:
@@ -24,6 +48,7 @@ def _record(n: int, **fields) -> dict:
         "created_at": f"2026-10-14T0{n}:00:00Z",
         "started_at": f"2026-10-14T0{n}:00:05Z",
         "finished_at": f"2026-10-14T0{n}:01:30Z", "error": None, "result": None,
+        "params": '{"project":"shop"}', "worker": None,
     }
     record.update(fields)
     return record
@@ -39,10 +64,10 @@ def test_schemas_are_inside_the_subset() -> None:
     check_schema(EVENT_SCHEMA)
 
 
-def test_get_finds_finished_and_unfinished_jobs(paths) -> None:
+def test_get_finds_finished_and_unfinished_jobs(paths, tmp_path) -> None:
     _write(paths.jobs_dir, _record(1))
-    _write(paths.jobs_queue, _record(2, state="running", finished_at=None))
-    store = JobStore(paths, result_schemas=registry_results)
+    _write(paths.jobs_queue, _running(2))
+    store = JobStore(paths, result_schemas=registry_results, proc=_proc(tmp_path))
     assert store.get(_id(1))["state"] == "succeeded"
     assert store.get(_id(2))["state"] == "running"
     assert store.get(_id(3)) is None
@@ -62,7 +87,7 @@ def test_recent_is_newest_first_filtered_and_limited(paths) -> None:
 
 def test_the_terminal_copy_wins_while_a_job_is_being_finished(paths) -> None:
     _write(paths.jobs_dir, _record(1))
-    _write(paths.jobs_queue, _record(1, state="running", finished_at=None))
+    _write(paths.jobs_queue, _running(1))
     store = JobStore(paths, result_schemas=registry_results)
     assert [j["state"] for j in store.recent().jobs] == ["succeeded"]
     assert store.get(_id(1))["state"] == "succeeded"
@@ -72,7 +97,7 @@ def test_a_job_finishing_between_the_two_scans_is_never_missed(paths, monkeypatc
     """The finish step links the record into jobs/ and then unlinks it from
     queue/. Scanning queue/ first means a job that moves mid-listing is
     found in jobs/ afterwards."""
-    _write(paths.jobs_queue, _record(1, state="running", finished_at=None))
+    _write(paths.jobs_queue, _running(1))
     real_glob = Path.glob
 
     def glob_then_finish(self, pattern):
@@ -115,6 +140,90 @@ def test_a_record_without_its_result_field_is_corrupt(paths) -> None:
     del record["result"]
     _write(paths.jobs_dir, record)
     with pytest.raises(StateError, match="missing required property 'result'"):
+        JobStore(paths, result_schemas=registry_results).get(_id(1))
+
+
+def test_reader_reports_a_dead_running_worker_as_worker_lost(paths, tmp_path) -> None:
+    _write(paths.jobs_queue, _running(1))
+    on_disk = (paths.jobs_queue / f"{_id(1)}.json").read_text()
+    store = JobStore(paths, result_schemas=registry_results, proc=_proc(tmp_path, alive=False))
+    for job in (store.get(_id(1)), store.recent().jobs[0]):
+        assert job["state"] == "failed"
+        assert job["error"]["code"] == "worker_lost"
+        assert "4242" in job["error"]["message"] and "not re-run" in job["error"]["message"]
+        assert job["worker"] == WORKER
+    assert (paths.jobs_queue / f"{_id(1)}.json").read_text() == on_disk
+
+
+def test_reader_leaves_a_live_running_worker_running(paths, tmp_path) -> None:
+    _write(paths.jobs_queue, _running(1))
+    store = JobStore(paths, result_schemas=registry_results, proc=_proc(tmp_path))
+    assert store.get(_id(1))["state"] == "running"
+    assert store.recent().jobs[0]["error"] is None
+    assert WorkerIdentity.from_record(store.get(_id(1))["worker"]).pid == 4242
+
+
+@pytest.mark.parametrize("field", ["params", "worker"])
+def test_record_without_params_or_worker_is_corrupt(paths, field) -> None:
+    record = _record(1)
+    del record[field]
+    _write(paths.jobs_dir, record)
+    with pytest.raises(StateError, match=f"missing required property '{field}'"):
+        JobStore(paths, result_schemas=registry_results).get(_id(1))
+
+
+@pytest.mark.parametrize("record,message", [
+    (_record(1, state="running", finished_at=None), "running but names no worker"),
+    (_record(1, state="queued", started_at=None, finished_at=None, worker=WORKER),
+     "queued but names a worker"),
+    (_record(1, params={"project": "shop"}), "$.params: expected string"),
+])
+def test_inconsistent_records_are_corrupt(paths, record, message) -> None:
+    _write(paths.jobs_queue, record)
+    with pytest.raises(StateError, match="is corrupt") as excinfo:
+        JobStore(paths, result_schemas=registry_results).get(_id(1))
+    assert message in str(excinfo.value)
+
+
+def test_a_read_waits_out_a_writer_holding_the_job_lock(paths) -> None:
+    """Mid-publish the record has a second link (the temp); a read waits
+    for the writer instead of reporting the record corrupt."""
+    _write(paths.jobs_queue, _record(1, state="queued", started_at=None, finished_at=None))
+    temp = paths.jobs_dir / f".{_id(1)}.x.tmp"
+    store = JobStore(paths, result_schemas=registry_results)
+    got: list = []
+    with exclusive_lock(paths.job_lock(_id(1))):
+        os.link(paths.jobs_queue / f"{_id(1)}.json", temp)
+        reader = threading.Thread(target=lambda: got.append(store.get(_id(1))))
+        reader.start()
+        reader.join(timeout=0.3)
+        assert reader.is_alive() and got == []
+        temp.unlink()
+    reader.join(timeout=5)
+    assert [j["state"] for j in got] == ["queued"]
+
+
+def test_readers_share_the_job_lock(paths) -> None:
+    _write(paths.jobs_dir, _record(1))
+    store = JobStore(paths, result_schemas=registry_results)
+    with shared_lock(paths.job_lock(_id(1))):
+        assert store.get(_id(1))["state"] == "succeeded"
+
+
+def test_a_finish_that_crashed_mid_move_is_read_from_both_names(paths) -> None:
+    _write(paths.jobs_dir, _record(1))
+    paths.jobs_queue.mkdir(parents=True)
+    os.link(paths.jobs_dir / f"{_id(1)}.json", paths.jobs_queue / f"{_id(1)}.json")
+    store = JobStore(paths, result_schemas=registry_results)
+    assert store.get(_id(1))["state"] == "succeeded"
+    listing = store.recent()
+    assert [j["id"] for j in listing.jobs] == [_id(1)] and listing.unreadable == []
+
+
+def test_a_second_link_from_elsewhere_is_refused(paths, tmp_path) -> None:
+    _write(paths.jobs_dir, _record(1))
+    os.link(paths.jobs_dir / f"{_id(1)}.json", tmp_path / "elsewhere.json")
+    with pytest.raises(StateError, match="2 links"):
         JobStore(paths, result_schemas=registry_results).get(_id(1))
 
 

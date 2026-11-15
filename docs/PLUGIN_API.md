@@ -201,10 +201,22 @@ polling it. `project.get` and `status.get` report the result of the platform's o
 ### Jobs
 
 A job is the record of a long-running action. Its record has `id` (a ULID), `action`, `principal`,
-`project`, `state` (`queued`, `running`, `succeeded`, `failed`), `created_at`, `started_at`,
-`finished_at`, `error` (`{code, message}` or null) and `result` (the action's result once the job
-has succeeded, in the shape of that action's catalog `result` schema, as `x-result-of-action`
-declares; null until then, and always null in this release). Events have `seq` (from 1), `ts` and `type`:
+`project`, `state` (`queued`, `running`, `succeeded`, `failed`), `params`, `worker`, `created_at`,
+`started_at`, `finished_at`, `error` (`{code, message}` or null) and `result` (the action's result
+once the job has succeeded, in the shape of that action's catalog `result` schema, as
+`x-result-of-action` declares; null until then, and always null in this release).
+
+- `params` is the call's params as compact JSON text (keys sorted, no spaces), so
+  `json.loads(job["params"])` gives the object back. It is a string because record schemas are
+  closed and allow no open object.
+- `worker` is null until the job is claimed, then `{boot_id, pid, start_time}`: the boot, process
+  id and process start time of the worker running it. Together they say whether that exact process
+  is still alive, where a pid alone could have been reused or outlived by a reboot.
+- A `running` job whose worker is gone is reported as `failed` with the error code `worker_lost`.
+  Such a job is never re-run, since repeating half of a deploy or restore could do harm: check what
+  it changed before starting it again.
+
+Events have `seq` (from 1), `ts` and `type`:
 
 - `log`: a line of output, in `message`;
 - `step`: a named step (`step`) that `started`, `succeeded` or `failed` (`status`), with an optional

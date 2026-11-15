@@ -477,6 +477,55 @@ class TestDurability:
             durable_rename(tmp, tmp_path / "missing-dir" / "data")
         assert not isinstance(caught.value, RenamedNotSyncedError)
 
+    def _record_link(self, events: list[str]):
+        real_link, real_unlink = os.link, os.unlink
+
+        def link(src, dst) -> None:
+            events.append("link")
+            real_link(src, dst)
+
+        def unlink(path) -> None:
+            events.append("unlink")
+            real_unlink(path)
+
+        return (patch("boxmunge.fileutil.os.link", link),
+                patch("boxmunge.fileutil.os.unlink", unlink))
+
+    def test_durable_link_syncs_the_destination_dir_after_linking(self, tmp_path: Path) -> None:
+        from boxmunge.fileutil import durable_link
+        src, dest = tmp_path / "a" / "rec.json", tmp_path / "b" / "rec.json"
+        src.parent.mkdir()
+        dest.parent.mkdir()
+        src.write_text("x")
+        events: list[str] = []
+        fsync_patch, _ = self._record(events)
+        link_patch, _ = self._record_link(events)
+        with fsync_patch, link_patch:
+            durable_link(src, dest)
+        assert events == ["link", "fsync-dir"]
+        assert os.path.samefile(src, dest)
+
+    def test_durable_link_refuses_an_existing_destination(self, tmp_path: Path) -> None:
+        from boxmunge.fileutil import durable_link
+        src, dest = tmp_path / "src", tmp_path / "dest"
+        src.write_text("new")
+        dest.write_text("old")
+        with pytest.raises(FileExistsError):
+            durable_link(src, dest)
+        assert dest.read_text() == "old"
+
+    def test_durable_unlink_syncs_the_directory_after_unlinking(self, tmp_path: Path) -> None:
+        from boxmunge.fileutil import durable_unlink
+        target = tmp_path / "rec.json"
+        target.write_text("x")
+        events: list[str] = []
+        fsync_patch, _ = self._record(events)
+        _, unlink_patch = self._record_link(events)
+        with fsync_patch, unlink_patch:
+            durable_unlink(target)
+        assert events == ["unlink", "fsync-dir"]
+        assert not target.exists()
+
     def test_mode_and_owner_are_set_before_the_file_is_visible(self, tmp_path: Path) -> None:
         target = tmp_path / "secret.yml"
         seen: list[tuple[str, int]] = []
