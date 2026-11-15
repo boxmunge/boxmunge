@@ -81,7 +81,7 @@ def fchown_deploy(fd: int, what: str) -> None:
 
 
 def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600, *,
-                          dir_fd: int | None = None) -> int:
+                          dir_fd: int | None = None, links: int = 1) -> int:
     """os.open that refuses a symlink, a non-regular file or an extra hard link.
 
     For root opening a name in a directory the deploy user can write: a
@@ -90,6 +90,10 @@ def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600, *,
     so a planted FIFO is refused at once instead of blocking the open; the
     flag is cleared once the file is known to be regular, so callers get an
     ordinary blocking descriptor.
+
+    ``links`` is the exact link count required: 1, unless the caller has
+    already established, under a lock, which names the file's other links
+    are (a job record mid-move is in queue/ and jobs/ at once).
     """
     try:
         fd = os.open(path, flags | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, mode,
@@ -102,7 +106,7 @@ def open_regular_nofollow(path: Path, flags: int, mode: int = 0o600, *,
                               "refusing to use it. Remove it so it can be recreated.") from e
         raise
     st = os.fstat(fd)
-    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != links:
         os.close(fd)
         raise OSError(
             f"{path} is not a plain regular file (mode {oct(st.st_mode)}, "
@@ -152,13 +156,13 @@ def open_resolved_nofollow(path: Path, flags: int) -> int:
 READ_LIMIT_BYTES = 64 * 1024 * 1024
 
 
-def read_bytes_nofollow(path: Path, *, limit: int = READ_LIMIT_BYTES) -> bytes:
+def read_bytes_nofollow(path: Path, *, limit: int = READ_LIMIT_BYTES, links: int = 1) -> bytes:
     """A file's bytes, read without following a link (see
     open_regular_nofollow) and refused past ``limit`` bytes. The one way
     root reads a file by name in a directory deploy can write (state/,
     a project's tree). Raises OSError; a missing file raises
     FileNotFoundError, as Path.read_bytes does."""
-    with os.fdopen(open_regular_nofollow(path, os.O_RDONLY), "rb") as f:
+    with os.fdopen(open_regular_nofollow(path, os.O_RDONLY, links=links), "rb") as f:
         data = f.read(limit + 1)
     if len(data) > limit:
         raise OSError(f"{path} is larger than {limit} bytes; refusing to read it. "
@@ -166,13 +170,14 @@ def read_bytes_nofollow(path: Path, *, limit: int = READ_LIMIT_BYTES) -> bytes:
     return data
 
 
-def read_text_nofollow(path: Path, *, limit: int = READ_LIMIT_BYTES) -> str:
+def read_text_nofollow(path: Path, *, limit: int = READ_LIMIT_BYTES, links: int = 1) -> str:
     """read_bytes_nofollow, as UTF-8 text. Raises OSError or
     UnicodeDecodeError."""
-    return read_bytes_nofollow(path, limit=limit).decode("utf-8")
+    return read_bytes_nofollow(path, limit=limit, links=links).decode("utf-8")
 
 
-def read_text_nofollow_or_none(path: Path, *, limit: int = READ_LIMIT_BYTES) -> str | None:
+def read_text_nofollow_or_none(path: Path, *, limit: int = READ_LIMIT_BYTES,
+                               links: int = 1) -> str | None:
     """read_text_nofollow, or None when nothing is at the name: the one
     existence rule for root's readers of deploy-writable records. Anything
     there, a link whose target is gone included, is read or refused, never
@@ -180,7 +185,7 @@ def read_text_nofollow_or_none(path: Path, *, limit: int = READ_LIMIT_BYTES) -> 
     Absence is the no-follow open's own ENOENT, so there is no window
     between a check and the read."""
     try:
-        return read_text_nofollow(path, limit=limit)
+        return read_text_nofollow(path, limit=limit, links=links)
     except FileNotFoundError:
         return None
 

@@ -348,3 +348,17 @@ def exclusive_lock(lock_path: Path) -> Iterator[None]:
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
+
+
+@contextmanager
+def shared_lock(lock_path: Path) -> Iterator[None]:
+    """Hold a shared flock on lock_path for the block. Blocking. Readers
+    take it beside writers' exclusive_lock: they wait out a write, never
+    each other."""
+    fd = open_shared_lockfile(lock_path)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)

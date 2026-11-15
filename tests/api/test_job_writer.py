@@ -13,7 +13,7 @@ import pytest
 
 from boxmunge.api import job_writer
 from boxmunge.api.jobs import JOB_SCHEMA
-from boxmunge.api.schema import validate
+from boxmunge.api.schema import INTEGER, obj, validate
 from boxmunge.api.worker_identity import WorkerIdentity
 from boxmunge.state import StateError
 
@@ -158,7 +158,8 @@ def test_claim_rewrites_running_with_identity_and_syncs_queue(paths) -> None:
     job_writer.publish(paths, _record())
     with _Recorder(paths) as rec:
         claimed = job_writer.claim(paths, JOB_ID, WORKER, LATER)
-    assert rec.events == [("fsync", "file"), ("rename", f"queue/{NAME}"), ("fsync", "queue/")]
+    assert rec.events == [("fsync", "file"), ("rename", f"queue/{NAME}"), ("fsync", "queue/"),
+                          ("fsync", "jobs/")]
     assert claimed["state"] == "running"
     assert claimed["worker"] == WORKER.as_record()
     assert claimed["started_at"] == "2026-11-15T12:05:00Z"
@@ -190,7 +191,7 @@ def test_finish_order_is_queue_sync_then_jobs_link_sync_then_unlink_sync(paths) 
         done = job_writer.finish(paths, JOB_ID, state="succeeded", error=None,
                                  result=None, now=LATER)
     assert rec.events == [
-        ("fsync", "file"), ("rename", f"queue/{NAME}"), ("fsync", "queue/"),
+        ("fsync", "file"), ("rename", f"queue/{NAME}"), ("fsync", "queue/"), ("fsync", "jobs/"),
         ("link", f"jobs/{NAME}"), ("fsync", "jobs/"),
         ("unlink", f"queue/{NAME}"), ("fsync", "queue/"),
     ]
@@ -216,10 +217,44 @@ def test_finish_refuses_a_state_that_is_not_terminal(paths, state) -> None:
         job_writer.finish(paths, JOB_ID, state=state, error=None, result=None, now=LATER)
 
 
-def test_finish_of_a_missing_job_is_a_state_error(paths) -> None:
-    with pytest.raises(StateError, match="not in the queue"):
-        job_writer.finish(paths, JOB_ID, state="failed",
-                          error={"code": "x", "message": "y"}, result=None, now=LATER)
+def test_finish_of_a_missing_or_unclaimed_job_is_a_state_error(paths) -> None:
+    error = {"code": "x", "message": "y"}
+    with pytest.raises(StateError, match="only a running job can, .* holds nothing"):
+        job_writer.finish(paths, JOB_ID, state="failed", error=error, result=None, now=LATER)
+    job_writer.publish(paths, _record())
+    with pytest.raises(StateError, match="holds a queued record"):
+        job_writer.finish(paths, JOB_ID, state="failed", error=error, result=None, now=LATER)
+    assert _read(_queued(paths))["state"] == "queued"
+
+
+@pytest.mark.parametrize("state,error,result,message", [
+    ("failed", None, None, "needs an error"),
+    ("failed", {"code": "x", "message": "y"}, {"n": 1}, "no result"),
+    ("succeeded", {"code": "x", "message": "y"}, None, "has no error"),
+    ("succeeded", None, {"n": 1}, "only be written with result_schemas"),
+])
+def test_finish_refuses_an_outcome_that_does_not_add_up(paths, state, error, result,
+                                                        message) -> None:
+    job_writer.publish(paths, _record())
+    job_writer.claim(paths, JOB_ID, WORKER, LATER)
+    with pytest.raises(ValueError, match=message):
+        job_writer.finish(paths, JOB_ID, state=state, error=error, result=result, now=LATER)
+    assert _read(_queued(paths))["state"] == "running"
+
+
+def test_finish_checks_a_result_against_its_action(paths) -> None:
+    schemas = {"project.deploy": obj({"count": INTEGER})}.get
+    job_writer.publish(paths, _record())
+    job_writer.claim(paths, JOB_ID, WORKER, LATER)
+    with pytest.raises(ValueError, match=r"\$.result.count: expected integer"):
+        job_writer.finish(paths, JOB_ID, state="succeeded", error=None, result={"count": "3"},
+                          now=LATER, result_schemas=schemas)
+    with pytest.raises(ValueError, match="no registered result schema"):
+        job_writer.finish(paths, JOB_ID, state="succeeded", error=None, result={"count": 3},
+                          now=LATER, result_schemas=lambda action: None)
+    done = job_writer.finish(paths, JOB_ID, state="succeeded", error=None, result={"count": 3},
+                             now=LATER, result_schemas=schemas)
+    assert _read(_done(paths))["result"] == {"count": 3} == done["result"]
 
 
 def test_complete_finish_moves_a_terminal_record_left_in_queue(paths) -> None:
@@ -235,15 +270,63 @@ def test_complete_finish_moves_a_terminal_record_left_in_queue(paths) -> None:
     assert _read(_done(paths)) == terminal and not _queued(paths).exists()
 
 
-def test_complete_finish_after_a_crash_between_link_and_unlink(paths) -> None:
-    terminal = _record(state="succeeded", worker=WORKER.as_record(),
-                       started_at="2026-11-15T12:00:05Z", finished_at="2026-11-15T12:01:00Z")
-    _queued(paths).parent.mkdir(parents=True)
-    _queued(paths).write_text(json.dumps(terminal))
-    os.link(_queued(paths), _done(paths))
+def _crash_after(paths, step: str) -> None:
+    """Make every real durable_unlink after the first link of *step* the
+    crash point: the step stops there, as a reboot would stop it."""
+    class Crash(Exception):
+        pass
+
+    def crash(path):
+        raise Crash(path)
+
+    with patch.object(job_writer, "durable_unlink", crash), pytest.raises(Crash):
+        if step == "publish":
+            job_writer.publish(paths, _record())
+        else:
+            job_writer.finish(paths, JOB_ID, state="succeeded", error=None, result=None,
+                              now=LATER)
+
+
+def test_reboot_after_the_publish_link_leaves_a_job_that_is_claimed(paths) -> None:
+    _crash_after(paths, "publish")
+    assert os.stat(_queued(paths)).st_nlink == 2
+    assert job_writer.load_for_recovery(paths, JOB_ID)["state"] == "queued"
+    assert not list(paths.jobs_dir.glob("*.tmp"))
+    claimed = job_writer.claim(paths, JOB_ID, WORKER, LATER)
+    assert claimed["state"] == "running" and os.stat(_queued(paths)).st_nlink == 1
+
+
+def test_claim_itself_clears_a_crashed_publish(paths) -> None:
+    _crash_after(paths, "publish")
+    assert job_writer.claim(paths, JOB_ID, WORKER, LATER)["state"] == "running"
+    assert not list(paths.jobs_dir.glob("*.tmp"))
+
+
+def test_reboot_after_the_finish_link_recovers_as_a_finish_to_complete(paths) -> None:
+    job_writer.publish(paths, _record())
+    job_writer.claim(paths, JOB_ID, WORKER, LATER)
+    _crash_after(paths, "finish")
+    assert os.path.samefile(_queued(paths), _done(paths))
+    found = job_writer.load_for_recovery(paths, JOB_ID)
+    assert found["state"] == "succeeded"
     job_writer.complete_finish(paths, JOB_ID)
-    assert _read(_done(paths)) == terminal and not _queued(paths).exists()
+    assert _read(_done(paths)) == found and not _queued(paths).exists()
     assert os.stat(_done(paths)).st_nlink == 1
+    assert job_writer.load_for_recovery(paths, JOB_ID) is None
+
+
+def test_load_for_recovery_refuses_a_record_linked_from_elsewhere(paths, tmp_path) -> None:
+    job_writer.publish(paths, _record())
+    os.link(_queued(paths), tmp_path / "elsewhere.json")
+    with pytest.raises(StateError, match="2 links"):
+        job_writer.load_for_recovery(paths, JOB_ID)
+
+
+def test_a_record_under_the_wrong_name_is_refused(paths) -> None:
+    _queued(paths).parent.mkdir(parents=True)
+    _queued(paths).write_text(json.dumps({**_record(), "id": "01J" + "B" * 23}))
+    with pytest.raises(StateError, match="holds the id"):
+        job_writer.claim(paths, JOB_ID, WORKER, LATER)
 
 
 def test_complete_finish_refuses_a_different_record_already_in_jobs(paths) -> None:

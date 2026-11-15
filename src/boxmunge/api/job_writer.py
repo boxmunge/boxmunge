@@ -8,13 +8,20 @@ and then every directory whose names it changed before it returns, so after
 a power loss the record is never older than the last step that returned:
 
   publish   temp in jobs/ synced; link() into queue/; sync queue/; drop temp
-  claim     temp synced; rename() over the queued record; sync queue/
+  claim     temp synced; rename() over the queued record; sync queue/, jobs/
   finish    as claim, with the terminal state; link() into jobs/; sync
             jobs/; unlink() from queue/; sync queue/
 
 Temp files are written in state/jobs/ as .<id>.<token>.tmp, never in
 queue/, so queue/ only ever holds <id>.json names. Every file is 0640 and
 deploy-owned, so a root-run step never locks the deploy worker out.
+
+With the job's lock held, any .<id>.*.tmp is left over from a step that
+crashed, so every step first removes them. That also clears the second link
+a publish that crashed before dropping its temp leaves on the queued
+record. A finish that crashed between its link and unlink leaves one file
+under both names, which jobs.read_record_text accepts and _move_to_done
+completes. The job runner's queue scan calls load_for_recovery.
 """
 from __future__ import annotations
 
@@ -26,12 +33,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from boxmunge.api.jobs import JOB_ID_PATTERN, JOB_SCHEMA, TERMINAL_STATES, worker_problems
-from boxmunge.api.schema import validate
+from boxmunge.api.jobs import (
+    JOB_ID_PATTERN, JOB_SCHEMA, TERMINAL_STATES, is_mid_move, read_record_text, worker_problems,
+)
+from boxmunge.api.schema import ResultSchemas, validate
 from boxmunge.api.timefmt import format_utc
 from boxmunge.api.worker_identity import WorkerIdentity
 from boxmunge.fileutil import durable_link, durable_unlink, exclusive_lock, fsync_dir
-from boxmunge.fs_nofollow import fchown_deploy, mkdir_p_deploy, read_text_nofollow_or_none
+from boxmunge.fs_nofollow import fchown_deploy, mkdir_p_deploy
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError
 
@@ -61,6 +70,7 @@ def publish(paths: BoxPaths, record: dict[str, Any]) -> bool:
                          f"{'; '.join(violations) or 'state ' + repr(record['state'])}")
     queued, done = _queued(paths, job_id), _done(paths, job_id)
     with exclusive_lock(paths.job_lock(job_id)):
+        _sweep_temps(paths, job_id)
         if _exists(queued) or _exists(done):
             return False
         mkdir_p_deploy(paths.jobs_queue)
@@ -68,10 +78,11 @@ def publish(paths: BoxPaths, record: dict[str, Any]) -> bool:
         try:
             durable_link(tmp, queued)
         except FileExistsError:
-            # Only a writer that ignored the job lock could have put it there.
             tmp.unlink()
-            raise StateError(f"Job {job_id} appeared in {paths.jobs_queue} while it was "
-                             f"being published, though its lock was held.") from None
+            raise StateError(
+                f"{queued} appeared while job {job_id} was being published under its lock, "
+                f"so something wrote it without the lock. Inspect {queued}; if it is not "
+                f"this job's record, remove it and make the call again.") from None
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
@@ -85,7 +96,8 @@ def claim(paths: BoxPaths, job_id: str, identity: WorkerIdentity,
     the job is not in the queue or is not queued (another worker has it)."""
     queued = _queued(paths, _checked(job_id))
     with exclusive_lock(paths.job_lock(job_id)):
-        record = _load(queued)
+        _sweep_temps(paths, job_id)
+        record = _load(paths, job_id, queued)
         if record is None or record["state"] != "queued":
             return None
         record = {**record, "state": "running", "worker": identity.as_record(),
@@ -95,22 +107,28 @@ def claim(paths: BoxPaths, job_id: str, identity: WorkerIdentity,
 
 
 def finish(paths: BoxPaths, job_id: str, *, state: str, error: dict[str, str] | None,
-           result: dict[str, Any] | None, now: datetime) -> dict[str, Any]:
-    """Write the job's terminal state over its queued record, then move it
-    to state/jobs/<id>.json, each step synced before the next."""
-    if state not in TERMINAL_STATES:
-        raise ValueError(f"finish needs a terminal state, not {state!r}")
+           result: dict[str, Any] | None, now: datetime,
+           result_schemas: ResultSchemas | None = None) -> dict[str, Any]:
+    """Write the running job's terminal state over its queued record, then
+    move it to state/jobs/<id>.json, each step synced before the next.
+
+    A failed job has an error and no result; a succeeded one has no error.
+    A non-null result is checked against its action's result schema, which
+    *result_schemas* resolves, so a bad result fails here, not on a read.
+    """
+    _check_outcome(state, error, result, result_schemas is not None)
     queued = _queued(paths, _checked(job_id))
     with exclusive_lock(paths.job_lock(job_id)):
-        record = _load(queued)
-        if record is None:
-            raise StateError(f"Job {job_id} is not in the queue ({queued}), so it cannot "
-                             f"be finished.")
-        if record["state"] in TERMINAL_STATES:
-            raise StateError(f"Job {job_id} in {queued} is already {record['state']}; "
-                             f"complete_finish moves it, finish never rewrites it.")
+        _sweep_temps(paths, job_id)
+        record = _load(paths, job_id, queued)
+        if record is None or record["state"] != "running":
+            found = "nothing" if record is None else f"a {record['state']} record"
+            raise StateError(f"Job {job_id} cannot be finished: only a running job can, and "
+                             f"{queued} holds {found}.")
         record = {**record, "state": state, "error": error, "result": result,
                   "finished_at": format_utc(now)}
+        if result_schemas is not None:
+            _check_result(record, result_schemas)
         _replace(paths, queued, record)
         _move_to_done(paths, job_id)
     return record
@@ -119,7 +137,41 @@ def finish(paths: BoxPaths, job_id: str, *, state: str, error: dict[str, str] | 
 def complete_finish(paths: BoxPaths, job_id: str) -> None:
     """Finish the move of a terminal record a crash left in queue/."""
     with exclusive_lock(paths.job_lock(_checked(job_id))):
+        _sweep_temps(paths, job_id)
         _move_to_done(paths, job_id)
+
+
+def load_for_recovery(paths: BoxPaths, job_id: str) -> dict[str, Any] | None:
+    """The record of *job_id* in queue/, after clearing what a crashed step
+    left (its temps), or None if the job is not in the queue. A terminal
+    record returned here is one whose finish crashed: complete_finish it."""
+    queued = _queued(paths, _checked(job_id))
+    with exclusive_lock(paths.job_lock(job_id)):
+        _sweep_temps(paths, job_id)
+        return _load(paths, job_id, queued)
+
+
+def _check_outcome(state: str, error: dict[str, str] | None, result: dict[str, Any] | None,
+                   checkable: bool) -> None:
+    if state not in TERMINAL_STATES:
+        raise ValueError(f"finish needs a terminal state, not {state!r}")
+    if state == "failed" and (error is None or result is not None):
+        raise ValueError("A failed job needs an error and no result.")
+    if state == "succeeded" and error is not None:
+        raise ValueError("A succeeded job has no error.")
+    if result is not None and not checkable:
+        raise ValueError("A job's result can only be written with result_schemas, which "
+                         "check it against its action's result schema.")
+
+
+def _check_result(record: dict[str, Any], result_schemas: ResultSchemas) -> None:
+    if record["result"] is not None and result_schemas(record["action"]) is None:
+        raise ValueError(f"Action {record['action']} has no registered result schema, so its "
+                         f"result cannot be written.")
+    violations = validate(JOB_SCHEMA, record, result_schemas=result_schemas)
+    if violations:
+        raise ValueError(f"Job {record['id']}'s result breaks its schema: "
+                         f"{'; '.join(violations)}")
 
 
 def _move_to_done(paths: BoxPaths, job_id: str) -> None:
@@ -127,13 +179,14 @@ def _move_to_done(paths: BoxPaths, job_id: str) -> None:
     crash came between the two, jobs/<id>.json is already the same file and
     only the unlink is left. Holds the job lock (the caller's)."""
     queued, done = _queued(paths, job_id), _done(paths, job_id)
-    if _exists(done):
-        if not os.path.samefile(queued, done):
-            raise StateError(f"{done} already holds a different record than {queued}. "
-                             f"Compare the two and remove the wrong one.")
+    if is_mid_move(paths, job_id):
         durable_unlink(queued)
         return
-    record = _load(queued)
+    if _exists(done):
+        raise StateError(f"{done} already holds a different record than {queued}, so job "
+                         f"{job_id} cannot be moved out of the queue. Compare the two files "
+                         f"and remove the one that is not the job's finished record.")
+    record = _load(paths, job_id, queued)
     if record is None:
         raise StateError(f"Job {job_id} is not in the queue ({queued}).")
     if record["state"] not in TERMINAL_STATES:
@@ -143,9 +196,16 @@ def _move_to_done(paths: BoxPaths, job_id: str) -> None:
     durable_unlink(queued)
 
 
+def _sweep_temps(paths: BoxPaths, job_id: str) -> None:
+    """Remove the job's temps. Called with its lock held, when no step of
+    this job is running, so every one is left over from a crash."""
+    for tmp in sorted(paths.jobs_dir.glob(f".{job_id}.*.tmp")):
+        durable_unlink(tmp)
+
+
 def _replace(paths: BoxPaths, target: Path, record: dict[str, Any]) -> None:
     """rename() a synced temp holding *record* over *target*, then sync
-    target's directory."""
+    target's directory and the temp's (state/jobs/, which lost a name)."""
     _check_schema(record, str(target))
     tmp = _write_temp(paths, record)
     try:
@@ -154,6 +214,7 @@ def _replace(paths: BoxPaths, target: Path, record: dict[str, Any]) -> None:
         tmp.unlink(missing_ok=True)
         raise
     fsync_dir(target.parent)
+    fsync_dir(paths.jobs_dir)
 
 
 def _write_temp(paths: BoxPaths, record: dict[str, Any]) -> Path:
@@ -174,14 +235,14 @@ def _write_temp(paths: BoxPaths, record: dict[str, Any]) -> Path:
     return tmp
 
 
-def _load(path: Path) -> dict[str, Any] | None:
-    """The record at *path*, or None if nothing is there. A record that
-    breaks JOB_SCHEMA is a StateError naming the file. Its result is not
-    checked against its action here: the writer has no registry, and the
-    reader (JobStore) checks it."""
+def _load(paths: BoxPaths, job_id: str, path: Path) -> dict[str, Any] | None:
+    """Job *job_id*'s record at *path*, or None if nothing is there. A record
+    that breaks JOB_SCHEMA, or holds another id, is a StateError naming the
+    file. Its result is not checked against its action here (the writer has
+    no registry); JobStore checks it on every read."""
     try:
-        text = read_text_nofollow_or_none(path)
-    except (OSError, UnicodeDecodeError) as e:
+        text = read_record_text(paths, job_id, path)
+    except UnicodeDecodeError as e:
         raise StateError(f"Cannot read job record {path}: {e}") from e
     if text is None:
         return None
@@ -189,7 +250,11 @@ def _load(path: Path) -> dict[str, Any] | None:
         record = json.loads(text)
     except ValueError as e:
         raise StateError(f"Job record {path} is not JSON: {e}") from e
+    except RecursionError as e:
+        raise StateError(f"Job record {path} is nested too deeply") from e
     _check_schema(record, str(path))
+    if record["id"] != job_id:
+        raise StateError(f"Job record {path} holds the id {record['id']}")
     return record
 
 

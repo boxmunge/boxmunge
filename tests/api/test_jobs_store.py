@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -10,6 +12,7 @@ import pytest
 from boxmunge.api.jobs import EVENT_SCHEMA, JOB_SCHEMA, JobStore
 from boxmunge.api.schema import INTEGER, check_schema, obj
 from boxmunge.api.worker_identity import WorkerIdentity
+from boxmunge.fileutil import exclusive_lock, shared_lock
 from boxmunge.state import StateError
 from tests.api.fakes import registry_results
 
@@ -180,6 +183,48 @@ def test_inconsistent_records_are_corrupt(paths, record, message) -> None:
     with pytest.raises(StateError, match="is corrupt") as excinfo:
         JobStore(paths, result_schemas=registry_results).get(_id(1))
     assert message in str(excinfo.value)
+
+
+def test_a_read_waits_out_a_writer_holding_the_job_lock(paths) -> None:
+    """Mid-publish the record has a second link (the temp); a read waits
+    for the writer instead of reporting the record corrupt."""
+    _write(paths.jobs_queue, _record(1, state="queued", started_at=None, finished_at=None))
+    temp = paths.jobs_dir / f".{_id(1)}.x.tmp"
+    store = JobStore(paths, result_schemas=registry_results)
+    got: list = []
+    with exclusive_lock(paths.job_lock(_id(1))):
+        os.link(paths.jobs_queue / f"{_id(1)}.json", temp)
+        reader = threading.Thread(target=lambda: got.append(store.get(_id(1))))
+        reader.start()
+        reader.join(timeout=0.3)
+        assert reader.is_alive() and got == []
+        temp.unlink()
+    reader.join(timeout=5)
+    assert [j["state"] for j in got] == ["queued"]
+
+
+def test_readers_share_the_job_lock(paths) -> None:
+    _write(paths.jobs_dir, _record(1))
+    store = JobStore(paths, result_schemas=registry_results)
+    with shared_lock(paths.job_lock(_id(1))):
+        assert store.get(_id(1))["state"] == "succeeded"
+
+
+def test_a_finish_that_crashed_mid_move_is_read_from_both_names(paths) -> None:
+    _write(paths.jobs_dir, _record(1))
+    paths.jobs_queue.mkdir(parents=True)
+    os.link(paths.jobs_dir / f"{_id(1)}.json", paths.jobs_queue / f"{_id(1)}.json")
+    store = JobStore(paths, result_schemas=registry_results)
+    assert store.get(_id(1))["state"] == "succeeded"
+    listing = store.recent()
+    assert [j["id"] for j in listing.jobs] == [_id(1)] and listing.unreadable == []
+
+
+def test_a_second_link_from_elsewhere_is_refused(paths, tmp_path) -> None:
+    _write(paths.jobs_dir, _record(1))
+    os.link(paths.jobs_dir / f"{_id(1)}.json", tmp_path / "elsewhere.json")
+    with pytest.raises(StateError, match="2 links"):
+        JobStore(paths, result_schemas=registry_results).get(_id(1))
 
 
 def test_no_job_directories_means_no_jobs(paths) -> None:

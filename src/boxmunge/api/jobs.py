@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,7 @@ from boxmunge.api.schema import (
 )
 from boxmunge.api.timefmt import NULLABLE_TIMESTAMP, TIMESTAMP
 from boxmunge.api.worker_identity import PROC, WORKER_SCHEMA, WorkerIdentity, is_alive
-from boxmunge.fileutil import exclusive_lock
+from boxmunge.fileutil import shared_lock
 from boxmunge.fs_nofollow import read_text_nofollow_or_none
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError
@@ -180,10 +181,10 @@ class JobStore:
     def _load(self, path: Path, job_id: str) -> dict[str, Any] | None:
         """The record at *path*, or None if there is none there (any more).
 
-        Read under the job's lock: while job_writer publishes or finishes a
-        job, the record briefly has a second hard link, which the no-follow
-        read refuses. Nothing at the name means no record, and no lock file
-        is created for it.
+        Read under a shared hold of the job's lock, so never in the middle
+        of a job_writer step (publish and finish briefly give the record a
+        second hard link, which the no-follow read refuses). Nothing at the
+        name means no record, and no lock file is created for it.
         """
         try:
             os.lstat(path)
@@ -191,8 +192,8 @@ class JobStore:
             return None
         except OSError as e:
             raise StateError(f"Cannot read job record {path}: {e}") from e
-        with exclusive_lock(self._paths.job_lock(job_id)):
-            text = _read(path, "job record")
+        with shared_lock(self._paths.job_lock(job_id)):
+            text = read_record_text(self._paths, job_id, path)
         if text is None:
             return None
         try:
@@ -225,12 +226,39 @@ def worker_problems(record: dict[str, Any]) -> list[str]:
     return []
 
 
-def _read(path: Path, what: str) -> str | None:
+def read_record_text(paths: BoxPaths, job_id: str, path: Path) -> str | None:
+    """The text of job *job_id*'s record at *path* (in queue/ or jobs/), or
+    None if nothing is there. The caller holds the job's lock.
+
+    A finish that crashed between its link into jobs/ and its unlink from
+    queue/ leaves one file under both names, with two links. That record is
+    read, from either name; any other extra link is refused.
+    """
+    return _read(path, "job record", links=2 if is_mid_move(paths, job_id) else 1)
+
+
+def is_mid_move(paths: BoxPaths, job_id: str) -> bool:
+    """Whether queue/<id>.json and jobs/<id>.json are one regular file. With
+    exactly two links (read_record_text requires that) those are its only
+    names, so it is the job's own record, never a file linked in from
+    elsewhere."""
+    try:
+        queued = os.lstat(paths.jobs_queue / f"{job_id}.json")
+        done = os.lstat(paths.jobs_dir / f"{job_id}.json")
+    except FileNotFoundError:
+        return False
+    except OSError as e:
+        raise StateError(f"Cannot read job record {job_id} in {paths.jobs_dir}: {e}") from e
+    return stat.S_ISREG(queued.st_mode) and (queued.st_dev, queued.st_ino) == (
+        done.st_dev, done.st_ino)
+
+
+def _read(path: Path, what: str, *, links: int = 1) -> str | None:
     """The file's text, or None if nothing is at the name. deploy writes
     state/jobs/, so a link, a FIFO or an oversized file there is refused
     (StateError naming the file), never followed or waited on."""
     try:
-        return read_text_nofollow_or_none(path)
+        return read_text_nofollow_or_none(path, links=links)
     except (OSError, UnicodeDecodeError) as e:
         raise StateError(f"Cannot read {what} {path}: {e}") from e
 
