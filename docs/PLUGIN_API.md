@@ -238,7 +238,7 @@ In this release no job can be started through the API, so jobs come from the fix
 
 Operate actions (stage, promote, unstage, deploy, rollback, pause, resume, backup, restore) will
 be served to plugins granted `operate`. Each runs as a job holding the project lock and does what
-its CLI command does, without a dry run. The release actions are defined:
+its CLI command does, without a dry run. These are defined:
 
 | Action | Parameters | Returns | CLI |
 |---|---|---|---|
@@ -247,10 +247,24 @@ its CLI command does, without a dry run. The release actions are defined:
 | `project.unstage` | `project` | nothing | `unstage` |
 | `project.deploy` | `project`, `ref`?, `no_snapshot`?, `no_pull`?, `redeploy`?, `accept_stale_kev`?, `allow_security_regression`? | nothing | `prod-deploy` |
 | `project.rollback` | `project`, `allow_security_regression`? | nothing | `rollback` |
+| `project.pause` | `project`, `reason`?, `no_snapshot`? | nothing | `pause` |
+| `project.resume` | `project`, `skip_security_checks`?, `no_start`? | nothing | `resume` |
+| `project.backup` | `project` | `snapshot`, the name of the snapshot it took | `backup` |
+| `project.restore` | `project`, `snapshot`? (the newest when omitted), `no_safety_snapshot`? | nothing | `restore` |
 
-`allow_security_regression` (the reason, logged and alerted), `accept_stale_kev` and
-`no_snapshot` (a later rollback would have no data to restore) weaken a control, so they carry `x-tier: "govern"`: a caller without govern gets `forbidden`, naming the
-command the operator runs over SSH instead.
+`allow_security_regression` (the reason, logged and alerted), `accept_stale_kev`, `no_snapshot`
+(a later rollback would have no data to restore), `no_safety_snapshot` and
+`skip_security_checks` weaken a control, so they carry `x-tier: "govern"`: a caller without govern
+gets `forbidden`, naming the command the operator runs over SSH instead. `project.resume` refuses
+`no_start` with `skip_security_checks` as `invalid_params`, since it starts nothing. A backup that
+writes no snapshot (its backup type is `none`, the project is quarantined, or an open install
+leaves unclear what to dump) fails, saying which. A blank `reason` on `project.pause` is
+`invalid_params`.
+
+Two govern actions run as jobs the same way, and are not open to agents: `project.recover`
+(`project`; restarts the build the health monitor stopped, as `recover`) and
+`project.abandon_install` (`project`; undoes an open install before its hook ran, as
+`prod-deploy --abandon`). Both return nothing.
 
 Each call will need the operator's fresh approval:
 

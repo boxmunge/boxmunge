@@ -42,17 +42,24 @@ class BackupResult:
     """What one run of the backup core did.
 
     rc 0 with a snapshot: it was published at exactly that path. rc 0
-    without one: none was due (type none, a quarantined project), unless
-    `cause` says backup_source skipped it, which it alerted. rc 1: the
-    backup failed, and `cause` says why."""
+    without one: `skipped` says why none was written (type none, a
+    quarantined project, a backup_source skip). When that skip alerted,
+    `cause` says it too, and the run is not excused. rc 1: the backup
+    failed, and `cause` says why."""
 
     rc: int
     snapshot: Path | None = None
     cause: str | None = None
+    skipped: str | None = None
 
     def __post_init__(self) -> None:
         if self.rc != 0 and not self.cause:
             raise ValueError("a failed backup must say why")
+
+    @property
+    def excused(self) -> bool:
+        """rc 0 with nothing due: no snapshot, and a skip that did not alert."""
+        return self.rc == 0 and self.snapshot is None and self.cause is None
 
 
 def _failed(cause: str) -> BackupResult:
@@ -191,7 +198,8 @@ def snapshot_locked(
             "backup", block.skip_message,
             paths, project=project_name,
         )
-        return BackupResult(0)
+        return BackupResult(0, skipped="it is CVE-quarantined (`boxmunge security resume` "
+                                       "lifts it, or deploy a fixed release)")
     project_dir = paths.project_dir(project_name)
     if not project_dir.exists():
         return _failed(f"Project not found: {project_name}")
@@ -213,8 +221,8 @@ def snapshot_locked(
             if source.alert:
                 notify(paths, f"{project_name}: backup skipped", source.skip,
                        component="backup", project=project_name, priority=1)
-                return BackupResult(0, cause=source.skip)
-            return BackupResult(0)
+                return BackupResult(0, cause=source.skip, skipped=source.skip)
+            return BackupResult(0, skipped=source.skip)
         manifest, compose_file = source.manifest, source.compose_file
 
     backup_conf = manifest.get("backup", {})
@@ -222,7 +230,7 @@ def snapshot_locked(
 
     if backup_type == "none":
         print(f"{project_name}: no backup configured (type: none)")
-        return BackupResult(0)
+        return BackupResult(0, skipped="no backup configured (type: none)")
 
     dump_command = backup_conf.get("dump_command", "")
     if not dump_command:
@@ -307,8 +315,8 @@ def _attempt_locked_backup(name: str, paths: BoxPaths) -> BackupAttemptResult:
     if result.rc != 0:
         record_failure(paths, name, str(result.cause))
         return BackupAttemptResult.FAILED
-    if result.snapshot is None and result.cause is None:
-        record_excused(paths, name)   # none was due; a skip (cause) is not excused
+    if result.excused:
+        record_excused(paths, name)   # none was due; a skip that alerted is not excused
     return BackupAttemptResult.OK
 
 
