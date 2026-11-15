@@ -6,8 +6,9 @@ from __future__ import annotations
 from typing import Any
 
 from boxmunge.api.actions._common import (
-    NO_PARAMS, PROJECT_PARAM, QUARANTINE_SCHEMA, SEVERITY, deployed_project, machine_enum,
-    machine_value, quarantine_view, severity_value,
+    AUTOFIXING_SCHEMA, NO_PARAMS, PATCH_RECORD_SCHEMA, PROJECT_PARAM, QUARANTINE_SCHEMA,
+    SEVERITY, autofix_view, deployed_project, machine_enum, machine_value,
+    quarantine_view, severity_value,
 )
 from boxmunge.api.context import ActionContext
 from boxmunge.api.principal import Tier
@@ -95,6 +96,8 @@ PROJECT_SECURITY = obj({
         "added": STRING, "scope": enum("project", "host"),
     })),
     "off_services": arr(obj({"service": STRING, "reason": STRING})),
+    "patches": arr(PATCH_RECORD_SCHEMA),
+    "autofixing": nullable(AUTOFIXING_SCHEMA),
 })
 
 
@@ -164,6 +167,7 @@ def _security_project(params: dict[str, Any], ctx: ActionContext) -> dict[str, A
         ],
         "off_services": [{"service": service, "reason": reason}
                          for service, reason in services_with_off_profile(view.manifest)],
+        **autofix_view(ctx.paths, name, view.patches, view.autofixing),
     }
 
 
@@ -204,7 +208,8 @@ ACTIONS = (
     ),
     Action(
         name="security.project", tier=Tier.OBSERVE,
-        summary="One project's CVE findings, dispositions, quarantine and suppressions.",
+        summary="One project's CVE findings, dispositions, quarantine, suppressions and "
+                "autofix patches.",
         params=obj({"project": PROJECT_PARAM}), result=PROJECT_SECURITY,
         handler=_security_project, cli="security", mcp=True,
     ),

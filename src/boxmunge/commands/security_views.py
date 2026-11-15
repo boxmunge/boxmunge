@@ -11,6 +11,8 @@ import json
 from datetime import datetime
 from typing import Any
 
+from boxmunge.cve.autofix_record import AutofixingMarker, PatchRecord
+from boxmunge.cve.autofix_view import autofixing_summary, patch_lines, record_view
 from boxmunge.cve.policy import Disposition
 from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
 from boxmunge.security_overlay import (
@@ -134,6 +136,8 @@ def format_project_text(
     scan_state: dict[str, Any] | None,
     active_suppressions: tuple[Any, ...],
     users: dict[str, Any],
+    patches: tuple[PatchRecord, ...],
+    autofixing: AutofixingMarker | None,
 ) -> str:
     """Render the per-project text view.
 
@@ -221,6 +225,8 @@ def format_project_text(
         lines.append("")
         lines.extend(_format_findings_block(scan_state))
 
+    lines.extend(patch_lines(patches, autofixing))
+
     if active_suppressions:
         lines.append("")
         lines.append("  Active suppressions:")
@@ -247,6 +253,8 @@ def format_project_json(
     scan_state: dict[str, Any] | None,
     active_suppressions: tuple[Any, ...],
     users: dict[str, Any],
+    patches: tuple[PatchRecord, ...],
+    autofixing: AutofixingMarker | None,
 ) -> str:
     """Render the per-project JSON view.
 
@@ -297,6 +305,8 @@ def format_project_json(
         "stopped_reason": (scan_state or {}).get("stopped_reason"),
         "findings": findings_payload,
         "quarantine": quarantine_state if quarantined else None,
+        "patches": [record_view(r) for r in patches],
+        "autofixing": autofixing_summary(autofixing),
         "active_suppressions": [
             {
                 "cve_id": s.cve_id,

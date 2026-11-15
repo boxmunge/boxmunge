@@ -2,13 +2,16 @@
 """Pieces the action families share: parameter schemas and project lookup."""
 from __future__ import annotations
 
+from collections.abc import Sequence
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from boxmunge.api.result import ActionError, ErrorCode
-from boxmunge.api.schema import BOOLEAN, STRING, enum, obj
+from boxmunge.api.schema import BOOLEAN, STRING, arr, enum, obj
 from boxmunge.api.timefmt import TIMESTAMP, utc_timestamp
+from boxmunge.cve.autofix_record import AutofixingMarker, PatchRecord
+from boxmunge.cve.autofix_view import autofixing_summary, record_view
 from boxmunge.cve.quarantine import QUARANTINE_TEXT_FIELDS, checked_quarantine_record
 from boxmunge.cve.scan_state import stored_enum
 from boxmunge.cve.scanner import Severity
@@ -50,6 +53,39 @@ QUARANTINE_SCHEMA = obj({
     "image_ref": STRING,
     "action_complete": BOOLEAN,
 })
+
+
+# What autofix shows of a project (cve.autofix_view): a patch in progress,
+# the summary of what it patched, and each patch record in full.
+AUTOFIXING_SCHEMA = obj({"started_at": TIMESTAMP, "cves": arr(STRING), "downtime": BOOLEAN})
+PATCHED_SCHEMA = obj({"since": TIMESTAMP, "cves": arr(STRING), "packages": arr(STRING)})
+PATCH_RECORD_SCHEMA = obj({
+    "service": STRING, "base_ref": STRING, "base_digest": STRING, "patched_ref": STRING,
+    "patched_image_id": STRING,
+    "packages": arr(obj({"name": STRING, "before": STRING, "after": STRING})),
+    "cves": arr(STRING), "created_at": TIMESTAMP, "trigger": enum("urgent", "nightly"),
+})
+
+
+def autofix_timestamps(view: dict[str, Any] | None, key: str, where: str) -> dict[str, Any] | None:
+    """An autofix view (cve.autofix_view) with its *key* timestamp in the
+    API's format; None stays None."""
+    if view is None:
+        return None
+    return {**view, key: utc_timestamp(view[key], f"{where} {key}")}
+
+
+def autofix_view(paths: BoxPaths, name: str, records: Sequence[PatchRecord],
+                 marker: AutofixingMarker | None) -> dict[str, Any]:
+    """{patches, autofixing}: every patch record in full and a patch in
+    progress, timestamps in the API's format."""
+    records_file = str(paths.project_autofix_records(name))
+    return {
+        "patches": [autofix_timestamps(record_view(r), "created_at", records_file)
+                    for r in records],
+        "autofixing": autofix_timestamps(autofixing_summary(marker), "started_at",
+                                         str(paths.project_autofix_marker(name))),
+    }
 
 
 def project_path(paths: BoxPaths, name: str) -> Path:

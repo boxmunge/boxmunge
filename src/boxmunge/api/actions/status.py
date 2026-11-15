@@ -6,7 +6,9 @@ from __future__ import annotations
 from typing import Any
 
 from boxmunge.api import API_VERSION
-from boxmunge.api.actions._common import NO_PARAMS, SEVERITY, severity_value
+from boxmunge.api.actions._common import (
+    AUTOFIXING_SCHEMA, NO_PARAMS, PATCHED_SCHEMA, SEVERITY, autofix_timestamps, severity_value,
+)
 from boxmunge.api.context import ActionContext
 from boxmunge.api.principal import Tier
 from boxmunge.api.registry import Action
@@ -40,6 +42,9 @@ STATUS_ROW = obj({
         "cve_id": STRING, "severity": SEVERITY, "explanation": STRING,
         "quarantined_at": TIMESTAMP,
     })),
+    # The project runs images autofix patched; a patch is in progress.
+    "patched": nullable(PATCHED_SCHEMA),
+    "autofixing": nullable(AUTOFIXING_SCHEMA),
     "error": NULLABLE_STRING,
 })
 
@@ -91,11 +96,16 @@ def _status_row(row: dict[str, Any], paths: BoxPaths) -> dict[str, Any]:
                     quarantine["quarantined_at"],
                     f"{paths.project_quarantine_state(name)} quarantined_at"),
             },
+            "patched": autofix_timestamps(row["patched"], "since",
+                                          str(paths.project_autofix_records(name))),
+            "autofixing": autofix_timestamps(row["autofixing"], "started_at",
+                                             str(paths.project_autofix_marker(name))),
             "error": row["error"],
         }
     except StateError as e:
         return {"project": name, "status": "error", "last_check": None, "deployed_at": None,
-                "quarantine": None, "error": f"{name}: {e}"}
+                "quarantine": None, "patched": None, "autofixing": None,
+                "error": f"{name}: {e}"}
 
 
 def _projects_list(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
@@ -115,7 +125,8 @@ ACTIONS = (
     ),
     Action(
         name="status.get", tier=Tier.OBSERVE,
-        summary="One dashboard row per project: lifecycle, health and last deploy.",
+        summary="One dashboard row per project: lifecycle, health, last deploy, and "
+                "whether autofix patched it or is patching it.",
         params=NO_PARAMS, result=obj({"projects": arr(STATUS_ROW)}), handler=_status_get,
         cli="status", mcp=True,
     ),

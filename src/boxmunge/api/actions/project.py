@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 from boxmunge.api.actions._common import (
-    PROJECT_PARAM, QUARANTINE_SCHEMA, deployed_project, project_not_found, project_path,
-    quarantine_view,
+    AUTOFIXING_SCHEMA, PATCH_RECORD_SCHEMA, PROJECT_PARAM, QUARANTINE_SCHEMA, autofix_view,
+    deployed_project, project_not_found, project_path, quarantine_view,
 )
 from boxmunge.api.context import ActionContext
 from boxmunge.api.principal import Tier
@@ -19,6 +19,7 @@ from boxmunge.api.timefmt import NULLABLE_TIMESTAMP, TIMESTAMP, utc_timestamp
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.inbox_cmd import collect_inbox
 from boxmunge.commands.status import HEALTH_STATES
+from boxmunge.cve.autofix_record import read_autofixing, read_records
 from boxmunge.cve.quarantine import read_quarantine_state
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.pause import read_paused_state
@@ -55,6 +56,9 @@ PROJECT_VIEW = obj({
     "paused": nullable(obj({"paused_at": TIMESTAMP, "reason": NULLABLE_STRING})),
     "quarantine": nullable(QUARANTINE_SCHEMA),
     "install": INSTALL_VIEW,
+    # Every patch autofix applied to the running release, and one in progress.
+    "patches": arr(PATCH_RECORD_SCHEMA),
+    "autofixing": nullable(AUTOFIXING_SCHEMA),
 })
 
 CHECK_RESULT = obj({
@@ -132,6 +136,7 @@ def _project_get(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
         "quarantine": None if quarantine is None else quarantine_view(
             quarantine, paths.project_quarantine_state(name)),
         "install": _install_view(paths, name),
+        **autofix_view(paths, name, read_records(paths, name), read_autofixing(paths, name)),
     }
 
 
@@ -170,7 +175,7 @@ ACTIONS = (
     Action(
         name="project.get", tier=Tier.OBSERVE,
         summary="One project: lifecycle state, health, deploy history, staging, "
-                "pause and quarantine.",
+                "pause, quarantine and autofix patches.",
         params=obj({"project": PROJECT_PARAM}), result=PROJECT_VIEW,
         handler=_project_get, mcp=True,
     ),

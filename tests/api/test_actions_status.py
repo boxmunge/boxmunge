@@ -51,7 +51,8 @@ def test_status_get_returns_machine_values_not_display_labels(fixture_paths) -> 
         "newapp": "pre_registered"}
     assert rows["newapp"] == {"project": "newapp", "status": "pre_registered",
                               "last_check": None, "deployed_at": None,
-                              "quarantine": None, "error": None}
+                              "quarantine": None, "error": None,
+                              "patched": None, "autofixing": None}
     assert rows["billing"]["quarantine"]["cve_id"] == "CVE-2026-32003"
     assert TIMESTAMP_RE.fullmatch(rows["billing"]["quarantine"]["quarantined_at"])
     for row in rows.values():
@@ -179,3 +180,18 @@ def test_a_health_status_that_is_not_text_is_an_error_row(fixture_paths) -> None
 def test_quarantine_severity_is_a_lowercase_machine_value(fixture_paths) -> None:
     rows = {r["project"]: r for r in _call(fixture_paths, "status.get")["projects"]}
     assert rows["billing"]["quarantine"]["severity"] == "critical"
+
+
+def test_status_row_schema_includes_patch_fields(fixture_paths) -> None:
+    from tests.autofix_helpers import mark_patching, write_patches
+    write_patches(fixture_paths, "shop")
+    mark_patching(fixture_paths, "billing", ("CVE-2026-2",), downtime=True)
+    rows = {r["project"]: r for r in _call(fixture_paths, "status.get")["projects"]}
+    assert rows["shop"]["patched"] == {"since": "2026-11-14T03:10:00Z",
+                                       "cves": ["CVE-2026-1"], "packages": ["openssl"]}
+    assert rows["shop"]["autofixing"] is None
+    assert rows["billing"]["patched"] is None
+    autofixing = rows["billing"]["autofixing"]
+    assert autofixing["cves"] == ["CVE-2026-2"] and autofixing["downtime"] is True
+    assert TIMESTAMP_RE.fullmatch(autofixing["started_at"])
+    assert rows["newapp"]["patched"] is None and rows["newapp"]["autofixing"] is None

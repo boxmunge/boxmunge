@@ -89,6 +89,16 @@ def test_load_project_security_reads_posture_and_state(paths) -> None:
     view = load_project_security("shop", paths)
     assert (view.posture, view.quarantined, view.scan_state) == ("strict", False, None)
     assert view.active_suppressions == ()
+    assert (view.patches, view.autofixing) == ((), None)
+
+
+def test_load_project_security_reads_the_patch_records(paths) -> None:
+    from tests.autofix_helpers import mark_patching, patch_record, write_patches
+    _deploy(paths, "shop")
+    write_patches(paths, "shop", patch_record("shop"))
+    mark_patching(paths, "shop")
+    view = load_project_security("shop", paths)
+    assert view.patches == (patch_record("shop"),) and view.autofixing.cves == ("CVE-2026-2",)
 
 
 @pytest.mark.parametrize("manifest_text,message", [

@@ -114,3 +114,44 @@ class TestStatusQuarantined:
         assert myapp["severity"] == "Critical"
         assert "no upstream fix" in myapp["explanation"]
         assert myapp["quarantined_at"].startswith("2026-05-28")
+
+
+class TestStatusAutofix:
+    def test_status_shows_patched_and_autofixing(self, tmp_path, capsys):
+        from tests.autofix_helpers import mark_patching, patch_record, write_patches
+        paths = _setup(tmp_path)
+        write_patches(paths, "myapp", patch_record("myapp", "web"), patch_record(
+            "myapp", "worker", cves=("CVE-2026-3",),
+            packages=(("openssl", "3.0.1-1", "3.0.2-1"), ("zlib", "1.3-1", "1.3-2"))))
+        mark_patching(paths, "myapp", ("CVE-2026-4",), downtime=False)
+        run_status(paths)
+        out = capsys.readouterr().out
+        assert ("patched: running image differs from the release (2 packages upgraded for "
+                "CVE-2026-1, CVE-2026-3, since 2026-11-14)") in out
+        assert "bring the fix into the repo" in out and "boxmunge security myapp" in out
+        assert "autofixing: patching CVE-2026-4" in out and "site up" in out
+
+        run_status(paths, as_json=True)
+        [row] = json.loads(capsys.readouterr().out)
+        assert row["patched"] == {"since": "2026-11-14T03:10:00+00:00",
+                                  "cves": ["CVE-2026-1", "CVE-2026-3"],
+                                  "packages": ["openssl", "zlib"]}
+        assert row["autofixing"]["cves"] == ["CVE-2026-4"]
+        assert row["autofixing"]["downtime"] is False
+
+    def test_unpatched_project_has_neither(self, tmp_path, capsys):
+        paths = _setup(tmp_path)
+        run_status(paths, as_json=True)
+        [row] = json.loads(capsys.readouterr().out)
+        assert row["patched"] is None and row["autofixing"] is None
+        run_status(paths)
+        assert "patched:" not in capsys.readouterr().out
+
+    def test_an_unreadable_patch_record_is_an_error_row(self, tmp_path, capsys):
+        paths = _setup(tmp_path)
+        record = paths.project_autofix_records("myapp")
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text("{not json")
+        assert run_status(paths, as_json=True) == 1
+        [row] = json.loads(capsys.readouterr().out)
+        assert row["raw_status"] == "error" and str(record) in row["error"]

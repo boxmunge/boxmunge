@@ -57,6 +57,17 @@ class TestLoadAllProjectStatus:
         assert len(result) == 1
         assert result[0].status == "unknown"
         assert result[0].current_ref == ""
+        assert (result[0].patched, result[0].autofixing) == (False, False)
+
+    def test_patched_and_autofixing_projects(self, paths: BoxPaths) -> None:
+        from tests.autofix_helpers import mark_patching, write_patches
+        _create_project(paths, "alpha")
+        _create_project(paths, "beta")
+        write_patches(paths, "alpha")
+        mark_patching(paths, "beta")
+        rows = {p.name: p for p in load_all_project_status(paths)}
+        assert (rows["alpha"].patched, rows["alpha"].autofixing) == (True, False)
+        assert (rows["beta"].patched, rows["beta"].autofixing) == (False, True)
 
 
 @pytest.mark.usefixtures("docker_down")  # the host panel asks Docker whether Caddy runs

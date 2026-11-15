@@ -8,6 +8,10 @@ from typing import Any
 
 from boxmunge.commands.argv import parse_args
 from boxmunge.commands.health_state import MONITOR_STOPPED
+from boxmunge.cve.autofix_record import read_autofixing, read_records
+from boxmunge.cve.autofix_view import (
+    BRING_INTO_REPO, autofixing_line, autofixing_summary, patched_line, patched_summary,
+)
 from boxmunge.cve.quarantine import (
     checked_quarantine_record, is_quarantined, read_quarantine_state,
 )
@@ -51,8 +55,10 @@ class StatusSnapshot:
     """Every project's dashboard row, and the projects that could not be read.
 
     Rows hold machine values: "state" is one of ROW_STATES, timestamps are
-    as stored or None when absent, "quarantine" and "error" are None unless
-    they apply. display_rows() turns them into what `status` prints.
+    as stored or None when absent, "quarantine", "patched" (the project runs
+    images autofix patched: cve.autofix_view.patched_summary), "autofixing"
+    (a patch is in progress) and "error" are None unless they apply.
+    display_rows() turns them into what `status` prints.
     """
 
     projects_dir_exists: bool
@@ -62,9 +68,11 @@ class StatusSnapshot:
 
 def _row(name: str, state: str, *, last_check: str | None = None,
          deployed_at: str | None = None, quarantine: dict[str, str] | None = None,
+         patched: dict[str, Any] | None = None, autofixing: dict[str, Any] | None = None,
          error: str | None = None) -> dict[str, Any]:
     return {"project": name, "state": state, "last_check": last_check,
-            "deployed_at": deployed_at, "quarantine": quarantine, "error": error}
+            "deployed_at": deployed_at, "quarantine": quarantine, "patched": patched,
+            "autofixing": autofixing, "error": error}
 
 
 def collect_status(paths: BoxPaths) -> StatusSnapshot:
@@ -98,9 +106,10 @@ def collect_status(paths: BoxPaths) -> StatusSnapshot:
     return snapshot
 
 
-def display_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
+def display_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The rows as `status` and `status --json` print them: display labels,
-    "-" for an absent value, and raw_status alongside."""
+    "-" for an absent value, raw_status alongside, and "patched" and
+    "autofixing" as the row holds them (null when they do not apply)."""
     shown = []
     for row in rows:
         state = row["state"]
@@ -110,6 +119,8 @@ def display_rows(rows: list[dict[str, Any]]) -> list[dict[str, str]]:
             "last_check": row["last_check"] or "-",
             "deployed_at": row["deployed_at"] or "-",
             "raw_status": "pre-registered" if state == "pre_registered" else state,
+            "patched": row["patched"],
+            "autofixing": row["autofixing"],
         }
         if row["quarantine"] is not None:
             item.update(row["quarantine"])
@@ -150,6 +161,8 @@ def run_status(paths: BoxPaths, as_json: bool = False) -> int:
 def _project_row(name: str, paths: BoxPaths) -> dict[str, Any]:
     """Build one deployed project's dashboard row from its state files."""
     deploy = read_state(paths.project_deploy_state(name))
+    autofix = {"patched": patched_summary(read_records(paths, name)),
+               "autofixing": autofixing_summary(read_autofixing(paths, name))}
     deployed_at = deploy.get("deployed_at")
     # Quarantine takes precedence over pause if both markers exist
     # (mirrors lifecycle.is_blocked ordering — the security action is
@@ -162,20 +175,21 @@ def _project_row(name: str, paths: BoxPaths) -> dict[str, Any]:
             "severity": qstate["effective_severity"] or qstate["severity"],
             "explanation": qstate["explanation"],
             "quarantined_at": qstate["quarantined_at"],
-        })
+        }, **autofix)
     if is_paused(name, paths):
         state = ("pause_incomplete" if pause_incomplete(name, paths) else
                  "awaiting_deploy" if awaiting_deploy(name, paths) else "paused")
-        return _row(name, state, deployed_at=deployed_at)
+        return _row(name, state, deployed_at=deployed_at, **autofix)
     health = read_state(paths.project_health_state(name))
     state = health.get("status", "unknown")
     if state not in HEALTH_STATES:
         raise StateError(f"Health state {paths.project_health_state(name)} has the status "
                          f"{state!r}; boxmunge writes one of {', '.join(HEALTH_STATES)}")
-    return _row(name, state, last_check=health.get("last_check"), deployed_at=deployed_at)
+    return _row(name, state, last_check=health.get("last_check"), deployed_at=deployed_at,
+                **autofix)
 
 
-def _print_table(rows: list[dict[str, str]]) -> None:
+def _print_table(rows: list[dict[str, Any]]) -> None:
     """Human-readable dashboard."""
     # Trim timestamps to the second; widen STATUS to fit
     # "CRITICAL (stopped)" (18 chars) and "PRE-REGISTERED" (14 chars).
@@ -219,6 +233,24 @@ def _print_table(rows: list[dict[str, str]]) -> None:
                 print(f"    reason: {explanation}")
             print(f"    lift with: a deploy of a fixed release, or security resume "
                   f"{row['project']}")
+    _print_autofix(rows)
+
+
+def _print_autofix(rows: list[dict[str, Any]]) -> None:
+    """The projects running images autofix patched (the fix belongs in the
+    repo), and those being patched now."""
+    touched = [r for r in rows if r["patched"] or r["autofixing"]]
+    if not touched:
+        return
+    print()
+    print("Autofix:")
+    for row in touched:
+        name = row["project"]
+        if row["autofixing"]:
+            print(f"  {name}: {autofixing_line(row['autofixing'])}")
+        if row["patched"]:
+            print(f"  {name}: {patched_line(row['patched'])}")
+            print(f"    {BRING_INTO_REPO}; details: boxmunge security {name}")
 
 
 def cmd_status(args: list[str]) -> None:

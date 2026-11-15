@@ -59,6 +59,10 @@ class DashboardScreen(Screen):
         projects = load_all_project_status(self.paths)
         for p in projects:
             status_text = STATUS_DISPLAY.get(p.status, f"● {p.status.upper()}")
+            if p.autofixing:
+                status_text += " (autofixing)"
+            elif p.patched:
+                status_text += " (patched)"
             table.add_row(
                 p.name,
                 status_text,
