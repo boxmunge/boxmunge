@@ -2160,7 +2160,19 @@ rollback, and the older release ignores what is left.
 
 A rollback swaps the venvs back, restores the stash the upgrade made (never just the newest in
 `stashes/`), and re-runs `upgrade --apply` with the previous release, so its overlays and Caddy sites are regenerated and projects restarted on
-them. Pause and quarantine markers are not restored from the stash: a project you resumed after
+them. It also puts back the previous release's systemd units: each venv slot keeps a copy of
+its release's units (`env-<slot>/boxmunge-systemd`), so the units the newer release added (in
+0.12, `boxmunge-maintenance.timer`, `boxmunge-kev-watch.timer` and `boxmunge-autofix.service`)
+are disabled and removed, and the ones it retired come back enabled. The next upgrade then runs
+the new release's `install.sh` again. Shims before 0.11.11 do not do this, which is why 0.12
+installs only over 0.11.11 or later: the shim running that upgrade is one that does. Every
+`check-probation` and upgrade also checks that the live units are the live slot's and, if not,
+puts the slot's back (within minutes, on the health timer). So it also reverts hand edits
+to the `boxmunge-*` unit files in `/etc/systemd/system`: put local changes in drop-ins
+(`sudo systemctl edit boxmunge-<unit>`), which it leaves alone. A slot with no copy keeps the
+newer units, logged as an error: reinstall the running release to put its own units back. A
+copy that lacks `boxmunge-health.timer` is refused as damaged, and the live units are left as
+they are (logged as an error). Pause and quarantine markers are not restored from the stash: a project you resumed after
 the upgrade stays resumed. Nor are the users records: a service you gave to a new user with
 `data chown` after the upgrade keeps running as that user. If either the restore or the re-apply fails, you get a "ROLLBACK
 PARTIAL" alert and the shim exits 2; inspect the box as `supervisor`.

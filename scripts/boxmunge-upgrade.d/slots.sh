@@ -386,6 +386,7 @@ complete_rollback() {
         "re-apply of the previous release" "$rc" "$output"
 
     refresh_docs_for_slot "$prev_slot"
+    restore_slot_units "$prev_slot" || true   # a refused record is logged; the rollback goes on
     # The box is back on the previous release. Drop the marker before any
     # bookkeeping, the interruption count included: if that fails (a corrupt
     # interrupted.json, say), the next fire must not restore and re-apply
