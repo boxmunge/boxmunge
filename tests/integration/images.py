@@ -25,9 +25,11 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 
 IMAGES = frozenset({
+    "alpine:3.19.0",
     "alpine:3.20",
     "busybox:1.36",
     "caddy:2-alpine",
+    "debian:bookworm-20240110-slim",
     "debian:trixie",
     "mysql:8.4",
     "nginx:1",
@@ -52,6 +54,7 @@ NOT_IMAGES = frozenset({
     "deploy:deploy", "root:docker",    # user:group
     "example.com/app:c", "example.com/app:cache",  # never pulled: config only
     "host:port.", "host:repo",         # prose
+    "ignored:1", "nginx:1.27",         # never pulled: config only
     "myapp-frontend:3000",             # host:port
     "myapp-web:2",                     # built by the test
     "no-new-privileges:true", "no-new-privileges:true.",  # security_opt

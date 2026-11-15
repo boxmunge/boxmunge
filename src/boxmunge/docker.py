@@ -23,6 +23,8 @@ from boxmunge.paths import (
 )
 
 _COMPOSE_UP_TIMEOUT = 300
+# A one-off build fetches its packages afresh (no layer cache).
+_IMAGE_BUILD_TIMEOUT = 900
 _CADDY_RELOAD_TIMEOUT = 30
 # Audit D-NEW-2: caddy_validate previously inherited the 120s default. Under
 # the reload lock, that meant a crashed Caddy could block every other deploy
@@ -385,6 +387,14 @@ def compose_pull(
                           project_directory=project_directory, env_file=env_file)
     cmd.extend(["pull", "--ignore-buildable", *services])
     _run(cmd, cwd=project_dir, timeout=_COMPOSE_UP_TIMEOUT)
+
+
+def build_image(context: Path, dockerfile: Path, tag: str) -> None:
+    """Run `docker build --no-cache -t <tag> -f <dockerfile> <context>`: an
+    image built outside Compose (autofix's patch layer). No layer cache, so
+    every RUN fetches from its mirrors afresh; output is kept for the error."""
+    _run(["docker", "build", "--no-cache", "-t", tag, "-f", str(dockerfile), str(context)],
+         capture=True, timeout=_IMAGE_BUILD_TIMEOUT)
 
 
 def tag_image(source: str, target: str) -> None:
