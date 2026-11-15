@@ -132,6 +132,10 @@ class BoxPaths:
         self.upgrade_root = root / "upgrade-root"
         self.upgrade_lock = self.upgrade_root / "upgrade.lock"
         self.userns_journal = self.upgrade_root / "userns-migration.json"
+        # Root's records about the audit log (api.audit_seal): that this host
+        # cannot set its append-only attribute, and a rotation in progress.
+        self.audit_append_unsupported = self.upgrade_root / "audit-append-unsupported"
+        self.audit_rotating = self.upgrade_root / "audit-rotating"
         # Root's, world-readable, in the root-only-writable top directory:
         # while it exists no command may change a project (lifecycle).
         self.userns_marker = root / "userns-migrating"

@@ -142,6 +142,8 @@ class TestAllowedCommands:
         INTENTIONALLY_RESTRICTED = {
             "init-host",         # Bootstrap-only, runs as root before deploy user exists.
             "_discover-update",  # Internal JSON dispatcher used by the upgrade shim.
+            "_audit-seal",  # Sets the audit log's append-only attribute: root only.
+            "_audit-rotate",  # The monthly rotation timer's command, as root.
             "stash",             # Root-context only; reached via the upgrade shim.
             "container-update",  # Triggered by systemd timer, not by operators.
             "bundle",            # Local-dev only — packages a project on the developer's machine.

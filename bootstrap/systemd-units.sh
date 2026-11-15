@@ -73,6 +73,7 @@ done
 cp "${SRC}/"*.service "${SRC}/"*.timer "${DEST}/"
 systemctl daemon-reload
 systemctl enable --now \
+    boxmunge-audit-rotate.timer \
     boxmunge-auto-update.timer \
     boxmunge-backup-sync.timer \
     boxmunge-backup.timer \

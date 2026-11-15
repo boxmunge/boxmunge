@@ -1,0 +1,11 @@
+[Unit]
+Description=boxmunge monthly audit log rotation timer
+
+[Timer]
+# Just after midnight on the 1st; a month missed while the box was off is
+# rotated at the next boot.
+OnCalendar=*-*-01 00:15:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

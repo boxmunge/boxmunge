@@ -382,6 +382,19 @@ Usage: boxmunge _discover-update --json [--auto]
 Internal: report an available release as JSON (used by the upgrade shim).
 Without --auto, the newest release of any class. With --auto, what
 auto-update would apply under this box's auto_update policy.""",
+    "_audit-seal": """\
+Usage: boxmunge _audit-seal
+
+Make logs/audit.jsonl deploy's, mode 0640 and append-only (chattr +a),
+creating it if it is missing. install.sh runs it; run it again when health
+reports the audit log missing or not append-only. On a host that cannot set
+the attribute it records why and warns. Operator-only: run it as root, as
+boxmunge-server.""",
+    "_audit-rotate": """\
+Usage: boxmunge _audit-rotate
+
+Internal: move the audit log to audit.jsonl.<date> and start a new sealed
+one, keeping 12 archives (the monthly boxmunge-audit-rotate timer, as root).""",
     "mcp-serve": """\
 Usage: boxmunge mcp-serve
 
