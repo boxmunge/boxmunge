@@ -76,6 +76,9 @@ Key features:
     deploy/                   # per-project deploy state; <p>.binds.json, <p>.users.json (who each service runs as),
                               # <p>.paused.json, <p>.quarantined.json
     scans/                    # per-project CVE scan state
+    jobs/                     # jobs (OPERATIONS.md, Jobs): finished records <id>.json, events
+                              # <id>.events.jsonl, queue/ of queued and running jobs; `jobs` lists them
+      rejected/               # queue entries the job runner set aside as not job records (alerted)
     projects.txt              # the project registry (allowlist of project names)
   docs/                       # on-server documentation (root:root 755)
   logs/                       # boxmunge operational logs (deploy:deploy 755)
@@ -319,8 +322,11 @@ Recurring operations run via systemd timers:
 | `boxmunge-maintenance.timer` | Daily at 02:30 (up to 30 min jitter) | `security scan`, then `container-update`, in one unit |
 | `boxmunge-kev-watch.timer` | Every 30 minutes (up to 2 min jitter) | `security kev-watch` |
 | `boxmunge-auto-update.timer` | Every 4 hours (up to 30 min jitter) | `auto-update` |
+| `boxmunge-audit-rotate.timer` | Monthly, 00:15 on the 1st | `_audit-rotate` (as root: rotates the append-only audit log) |
 
-One unit has no timer: `boxmunge-autofix.service` (`security autofix-queue`) patches the urgent known-exploited findings a scan queued. The nightly scan, the KEV watch and a supervisor's single-project scan start it when they queue a patch, without waiting for it. It runs as root with a 6-hour limit, outside the scans' own units, and takes no lock beyond each project's own.
+Two units have no timer. `boxmunge-autofix.service` (`security autofix-queue`) patches the urgent known-exploited findings a scan queued. The nightly scan, the KEV watch and a supervisor's single-project scan start it when they queue a patch, without waiting for it. It runs as root with a 6-hour limit, outside the scans' own units, and takes no lock beyond each project's own.
+
+The other is the job runner, `boxmunge-jobs.service` (`boxmunge-server _job-runner`, as deploy), which runs the jobs the action API queues. `boxmunge-jobs.path` starts it whenever `state/jobs/queue/` holds a record (`DirectoryNotEmpty=`), and at boot; the service has no `[Install]` of its own. The runner starts each queued job as its own worker process (`boxmunge-server _run-job <id>`). It exits once the queue is empty, and systemd checks the directory again when it stops, so a job queued while it was exiting starts it again. It also exits once a worker exits 75: an upgrade held the jobs gate, and the job was left queued so that the restarted runner runs it on the newly installed code. A worker that exits with any other code without claiming its job has that job failed by the runner, never retried. One unit, not a template, keeps two runners from running at once. A stop signals every worker (the default `control-group` kill mode), with 5 minutes to finish (`TimeoutStopSec=300`). A runner that keeps failing to start is rate-limited at 20 starts in 10 minutes (`StartLimitBurst=20`, `StartLimitIntervalSec=600`). The path unit then fails, and the `jobs-runner` health check reports it as an error with the commands that start it again. Install makes `state/jobs/` and `state/jobs/queue/` (deploy, 0750) and the jobs gate `state/jobs/gate.lock` (deploy, 0660) before it installs the units (`bootstrap/jobs-dirs.sh`). Each slot's record of its release's units includes its path units, so a rollback by the 0.12 shim to a release without the job runner disables and removes `boxmunge-jobs.path` (and stops and removes `boxmunge-jobs.service`). 0.11.11's shim knows only `.service` and `.timer` units, so a rollback it runs, or a downgrade (`upgrade target 0.11.11`), leaves `boxmunge-jobs.path` behind. After such a rollback the 0.12 shim's heal removes it at its next `check-probation`; after a downgrade nothing does. The unit is inert on 0.11.11, since nothing there writes the queue; to tidy it, run `sudo systemctl disable --now boxmunge-jobs.path; sudo rm /etc/systemd/system/boxmunge-jobs.*`.
 
 The other autofix findings are patched in the maintenance window. These are fixable OS-package findings that are not known exploited and that the posture alerts on (`relaxed` patches at `balanced`'s threshold). `container-update` visits every deployed project with `security.autofix` on, whether or not its container updates are switched on, and even when its own run stops early (a failed Caddy update, a configuration error) or finds another `container-update` running. It patches what that night's scan stored, with the site up and 30 minutes per project, after the project's own container update and under the same project lock (`commands/autofix_nightly.py`). When the update brought in an upstream image that already fixes a CVE, the digest says so. A failed update holds the patch back only when it may have left the project on other images: a recreate that was not rolled back healthy, or a tag that was not pointed back. No patch starts in the last 40 minutes of a 3-hour window counted from the start of `container-update`; the projects it does not reach are deferred to the next night. Nothing is patched during upgrade probation (even on a forced run). Nothing is patched for a project that is quarantined, paused, migrating or stopped by the health monitor. Nothing is patched for a project with an urgent patch queued or an interrupted run's journal left, since the autofix unit handles those. A paused project, or one another operation holds, is listed as skipped. Each run sends one quiet digest, with one line per project: patched, already fixed, could not patch, skipped (and why), or deferred. A failed patch whose rollback did not finish is alerted at high priority instead.
 
@@ -330,7 +336,7 @@ All timers but the KEV watch use `Persistent=true` so a missed run (e.g., server
 
 Host security patching is handled by unattended-upgrades, configured to install security updates automatically and reboot during a configurable maintenance window (default 04:00). Because an enabled service proves nothing about updates arriving, the `auto-updates` health check and every `auto-update` run look for evidence (a recent successful `apt-get update`, a recent successful `unattended-upgrade` run, successful apt-daily runs), and `auto-update` sends a Pushover alert when it is missing.
 
-`doctor` and the `timers` health check verify that every timer above is active.
+`doctor` and the `timers` health check verify that every timer above is active; the `jobs-runner` health check verifies the job runner's path unit.
 
 ---
 
@@ -424,6 +430,14 @@ Beyond per-container hardening, boxmunge runs a CVE policy engine that scans dep
 - **Per-project scan budget** — each project gets a 600-second wall-clock budget across its image scans. Exceeding it skips remaining images (logged at WARNING) and resumes on the next tick.
 
 See `agent-help cve` (CVE_POLICY.md) for posture tiers, hardening penalty, suppression schema, recovery flow, and alerts.
+
+---
+
+## Jobs and the audit log
+
+An operate action through the action API (`project.deploy`, `project.backup`, `project.stage` and the rest) is a job: `invoke` checks the call, writes the `accepted` audit record with the job's id, and publishes the job durably into `state/jobs/queue/`, then returns at once (202 over HTTP). `boxmunge job run`, `job show` and `jobs` are the operator's front end to the same path. `boxmunge-jobs.path` starts the runner (`boxmunge-jobs.service`) whenever the queue holds a record; it starts one `_run-job` worker per job, at most 4 at once and one per project. The worker holds the jobs gate shared, claims the job, waits up to 2 minutes for the project lock, runs the action with its output captured as the job's events (`state/jobs/<id>.events.jsonl`), then finishes the record into `state/jobs/<id>.json` and writes the outcome audit record. Publish, claim and finish each sync before returning, so a crash leaves one of three states, each with one recovery: a queued job runs once; a claimed job whose worker is gone fails `worker_lost` and is never re-run (its alert names the way out); a finish cut off mid-move is completed. An upgrade takes the gate exclusively, so it waits for running jobs and new jobs are refused while it runs. See OPERATIONS.md, [Jobs](OPERATIONS.md#jobs) and [Upgrades and jobs](OPERATIONS.md#upgrades-and-jobs).
+
+Every call through the action API that changes something, job or not, is recorded in `logs/audit.jsonl`. Install seals the log append-only (`chattr +a`), root rotates it monthly (`boxmunge-audit-rotate.timer`, 12 archives kept), and the `audit-log` health check reports an unsealed log as an error, or a warning on a host recorded as unable to set the attribute. See OPERATIONS.md, [The action audit log](OPERATIONS.md#the-action-audit-log).
 
 ---
 

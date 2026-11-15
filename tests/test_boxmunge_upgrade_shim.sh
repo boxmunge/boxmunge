@@ -43,7 +43,7 @@ fi
 
 BOXMUNGE_ROOT="$(mktemp -d)"
 export BOXMUNGE_ROOT
-mkdir -p "$BOXMUNGE_ROOT/upgrade-state"
+mkdir -p "$BOXMUNGE_ROOT/upgrade-state" "$BOXMUNGE_ROOT/state"
 echo "a" > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
 assert_exit 0 "check-probation exits 0 with no probation file" bash "$SHIM" check-probation
 rm -rf "$BOXMUNGE_ROOT"
@@ -53,7 +53,7 @@ rm -rf "$BOXMUNGE_ROOT"
 if command -v flock >/dev/null 2>&1; then
     BOXMUNGE_ROOT="$(mktemp -d)"
     export BOXMUNGE_ROOT
-    mkdir -p "$BOXMUNGE_ROOT/upgrade-state"
+    mkdir -p "$BOXMUNGE_ROOT/upgrade-state" "$BOXMUNGE_ROOT/state"
     # Active slot is "a" (default), so standby is "b". The live slot must be
     # a working venv, or the shim refuses to delete the other one.
     echo "a" > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
@@ -80,7 +80,7 @@ fi
 
 test_dir="$(mktemp -d)"
 export BOXMUNGE_ROOT="$test_dir"
-mkdir -p "$BOXMUNGE_ROOT/upgrade-state" "$BOXMUNGE_ROOT/env-a/bin"
+mkdir -p "$BOXMUNGE_ROOT/upgrade-state" "$BOXMUNGE_ROOT/state" "$BOXMUNGE_ROOT/env-a/bin"
 echo "a" > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
 
 # Helper: install a mock boxmunge-server that returns canned JSON for
@@ -178,7 +178,7 @@ done
 # Using a noop $BOXMUNGE_ROOT means cmd_run will fail at preflight, which is fine.
 test_dir="$(mktemp -d)"
 export BOXMUNGE_ROOT="$test_dir"
-mkdir -p "$BOXMUNGE_ROOT/upgrade-state" "$BOXMUNGE_ROOT/env-a/bin"
+mkdir -p "$BOXMUNGE_ROOT/upgrade-state" "$BOXMUNGE_ROOT/state" "$BOXMUNGE_ROOT/env-a/bin"
 echo "a" > "$BOXMUNGE_ROOT/upgrade-state/active-slot"
 
 # Mock boxmunge-server so --version probe in cmd_run doesn't fail

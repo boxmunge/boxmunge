@@ -47,7 +47,11 @@ from boxmunge.commands.upgrade_howto_cmd import cmd_upgrade_howto
 from boxmunge.commands.auto_update_cmd import cmd_auto_update
 from boxmunge.commands.container_update_cmd import cmd_container_update
 from boxmunge.commands.discover_update_cmd import cmd_discover_update
+from boxmunge.commands.audit_cmd import cmd_audit_rotate, cmd_audit_seal
 from boxmunge.commands.readiness_cmd import cmd_upgrade_readiness
+from boxmunge.commands.job_runner_cmd import cmd_job_runner
+from boxmunge.commands.run_job_cmd import cmd_run_job
+from boxmunge.commands.job_cmd import cmd_job, cmd_jobs
 from boxmunge.commands.mcp_serve_cmd import cmd_mcp_serve
 from boxmunge.commands.project_cmd import cmd_project_add, cmd_project_list
 from boxmunge.commands.handshake_cmd import cmd_handshake
@@ -102,6 +106,12 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "auto-update": cmd_auto_update,
     "container-update": cmd_container_update,
     "_discover-update": cmd_discover_update,
+    "_audit-seal": cmd_audit_seal,
+    "_audit-rotate": cmd_audit_rotate,
+    "_run-job": cmd_run_job,
+    "job": cmd_job,
+    "jobs": cmd_jobs,
+    "_job-runner": cmd_job_runner,
     "upgrade-readiness": cmd_upgrade_readiness,
     "mcp-serve": cmd_mcp_serve,
     "project-add": cmd_project_add,
@@ -126,6 +136,7 @@ UNWIND_ON_SIGTERM = frozenset({
     "add-git-project", "pause", "resume", "recover", "staging-teardown-all",
     "backup", "backup-all", "restore", "test-restore", "self-test",
     "check", "check-all", "security", "container-update", "upgrade", "auto-update", "userns",
+    "_run-job",
 })
 
 

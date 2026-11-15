@@ -87,12 +87,17 @@ def test_health_reports_it_and_exits_warn_not_error(box, capsys):
 
     from boxmunge.commands import health_cmd
     from boxmunge.commands.health_cmd import HealthCheck, run_health
-    from boxmunge.health_checks import container_updates, hardening, security, sshd
+    from boxmunge.health_checks import (
+        audit_log, container_updates, hardening, jobs_runner, security, sshd,
+    )
 
     ok = HealthCheck("stub", "ok", "")
     _write(box, _blocked())
     with ExitStack() as stack:
-        for module in (health_cmd, container_updates, hardening, security, sshd):
+        # jobs_runner asks systemd for boxmunge-jobs.path: on a host with
+        # systemd and no such unit, that is an error of its own.
+        for module in (health_cmd, audit_log, container_updates, hardening, jobs_runner,
+                       security, sshd):
             for name in dir(module):
                 if name.startswith("check_"):
                     stack.enter_context(patch.object(module, name, return_value=ok))

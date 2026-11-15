@@ -1,6 +1,7 @@
 # shellcheck shell=bash
 # state.sh — validation of everything the shim reads, the active slot, the
-# lock, the blocklist, per-version failure counts, and the upgrade policy.
+# blocklist, per-version failure counts, and the upgrade policy (the locks are
+# in locks.sh).
 # Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
 # the shim that releases ship.
 
@@ -17,9 +18,6 @@
 # ---------------------------------------------------------------------------
 SEMVER_RE='^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
 ACTIVE_SLOT=""
-LOCK_HELD=0
-# How long the auto-update timer's run waits for upgrade.lock (acquire_lock).
-LOCK_WAIT_SECS=900
 
 printable() { local s="${1:0:80}"; printf '%s' "${s//[^[:alnum:]._+-]/?}"; }
 
@@ -126,107 +124,6 @@ load_active_slot() {
 
 standby_slot() { [[ "$ACTIVE_SLOT" == "a" ]] && echo "b" || echo "a"; }
 active_venv() { echo "$BOXMUNGE_ROOT/env-$ACTIVE_SLOT"; }
-
-# acquire_lock [skip|try|wait]: take upgrade.lock once per run. With "skip",
-# a busy lock exits 0 (the health timer retries on its next fire); with "try"
-# (a readiness check), it returns 1 and counts no skip; with "wait" (the
-# auto-update timer's run, whose discovery waited the same), it waits up to
-# LOCK_WAIT_SECS, as a readiness check holds the lock for up to ten minutes,
-# then dies, logged; otherwise it dies at once. Only "try" leaves
-# check-probation's skip count (lock-skips) alone when it takes the lock: a
-# readiness check is not a check-probation run.
-#
-# upgrade.lock is in root-only upgrade-root/, so deploy cannot replace it to
-# let a second upgrade run. Every shim and release an upgrade can start from
-# excludes the others on it. Every bash redirection follows a link, and the
-# writing ones create a missing target, so bash never opens it:
-# open_lock_and_reexec has Python open it without following a link or
-# blocking on a FIFO, refuse anything but a plain regular file of root's, put
-# it on fd 9 and run this shim again with the same arguments. That run finds
-# BM_UPGRADE_LOCK_FD=9 and checks fd 9 is the lock file before it takes the
-# flock.
-acquire_lock() {
-    [[ "$LOCK_HELD" -eq 1 ]] && return 0
-    if [[ "${BM_UPGRADE_LOCK_FD:-}" != 9 ]]; then
-        refuse_symlink "$UPGRADE_ROOT_DIR"
-        [[ -d "$UPGRADE_ROOT_DIR" ]] || mkdir -m 0700 "$UPGRADE_ROOT_DIR"
-        refuse_symlink "$LOCK_FILE"
-        open_lock_and_reexec
-    fi
-    unset BM_UPGRADE_LOCK_FD  # children inherit fd 9, never the claim that it is checked
-    local why
-    why="$(python3 -c 'import os, stat, sys
-path = sys.argv[1]
-try:
-    held, name = os.fstat(9), os.lstat(path)
-except OSError:
-    sys.exit(f"fd 9 is not {path}")
-if not (stat.S_ISREG(held.st_mode) and (held.st_dev, held.st_ino) == (name.st_dev, name.st_ino)):
-    sys.exit(f"fd 9 is not {path}")' "$LOCK_FILE" 2>&1)" \
-        || die "$why (it was replaced, or the descriptor came from elsewhere); refusing to lock it. Remove it and re-run."
-    if [[ "${1:-}" == wait ]]; then
-        if ! flock -w "$LOCK_WAIT_SECS" 9; then
-            die_logged "upgrade.lock was held for the whole $((LOCK_WAIT_SECS / 60)) minutes the auto-update timer waited, so nothing was installed; it tries again on its next run. Find the holder as supervisor: sudo lslocks | grep upgrade.lock"
-        fi
-    elif ! flock -n 9; then
-        [[ "${1:-}" != "skip" ]] || lock_busy_skip "upgrade.lock is held"
-        [[ "${1:-}" != "try" ]] || return 1
-        die "Another upgrade is in progress"
-    fi
-    [[ "${1:-}" == "try" ]] || rm -f "$LOCK_SKIPS_FILE"
-    LOCK_HELD=1
-}
-
-# lock_busy_skip <why>: check-probation could not take upgrade.lock (<why>),
-# and retries on the next health-timer fire (every five minutes). One skip is routine;
-# LOCK_SKIPS_ALERT in a row (an hour) is not: no upgrade holds the lock that
-# long, so something else does, and no
-# probation is promoted or rolled back meanwhile. The count is kept in
-# root-only upgrade-root/ (only the health timer skips, one run at a time),
-# and an error goes to the operational log at every LOCK_SKIPS_ALERT.
-LOCK_SKIPS_FILE="$UPGRADE_ROOT_DIR/lock-skips"
-LOCK_SKIPS_ALERT=12
-lock_busy_skip() {
-    local count
-    count="$(cat "$LOCK_SKIPS_FILE" 2>/dev/null)" || true
-    [[ "$count" =~ ^[0-9]+$ ]] || count=0
-    count=$((count + 1))
-    write_root_file "$LOCK_SKIPS_FILE" "$count"
-    log "Another upgrade is in progress; skipping ($count in a row: $1)"
-    [[ $((count % LOCK_SKIPS_ALERT)) -ne 0 ]] || bm_log error upgrade \
-        "check-probation could not take upgrade.lock $count times in a row (last: $1), so no probation is promoted or rolled back. Find the holder as supervisor: sudo lslocks | grep upgrade.lock"
-    exit 0
-}
-
-# open_lock_and_reexec: see acquire_lock. Replaces this process; prints a
-# FATAL line like die() when a lock file cannot be used.
-open_lock_and_reexec() {
-    exec python3 -c '
-import errno, os, stat, sys, time
-path, shell, shim, args = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
-
-def fatal(what):
-    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    sys.exit(f"{now} boxmunge-upgrade: FATAL: {path} {what}; refusing to use it as root. Remove it and re-run.")
-
-try:
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
-except OSError as e:
-    fatal("is a symlink" if e.errno == errno.ELOOP else f"cannot be opened ({e.strerror})")
-st = os.fstat(fd)
-if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-    fatal("is not a plain regular file")
-if st.st_uid != os.geteuid():
-    fatal("is not root\x27s")
-os.set_blocking(fd, True)
-if fd != 9:
-    os.dup2(fd, 9)
-    os.close(fd)
-os.set_inheritable(9, True)
-os.environ["BM_UPGRADE_LOCK_FD"] = "9"
-os.execv(shell, [shell, shim, *args])
-' "$LOCK_FILE" "$BASH" "$SHIM_PATH" "${SHIM_ARGS[@]+"${SHIM_ARGS[@]}"}"
-}
 
 # is_blocklisted <version>: 0 if listed, 1 if not. A blocklist that is not a
 # JSON object keyed by semver strings is corrupt or tampered with: stop.

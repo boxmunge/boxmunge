@@ -1,0 +1,9 @@
+[Unit]
+Description=boxmunge audit log rotation (clears and sets the append-only attribute)
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/boxmunge/bin/boxmunge-server _audit-rotate
+StandardOutput=journal
+StandardError=journal

@@ -346,6 +346,8 @@ def _checks(paths: BoxPaths) -> list[tuple[str, Callable[[], HealthCheck]]]:
         ("config-drift", _in("projects", "check_config_drift", paths)),
         ("recent-errors", lambda: check_recent_errors(paths)),
         ("operational-log", _in("operational_log", "check_operational_log", paths)),
+        ("audit-log", _in("audit_log", "check_audit_log", paths)),
+        ("jobs-runner", _in("jobs_runner", "check_jobs_runner", paths)),
         ("alerts", _in("alerts", "check_alerts", paths)),
         ("host-config", _in("host_config", "check_host_config", paths)),
         ("backup-freshness", _in("backup_freshness", "check_backup_freshness", paths)),

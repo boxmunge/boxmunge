@@ -401,6 +401,10 @@ Container hardening is one half of the protection model — the other is respond
 
 See [CVE_POLICY.md](CVE_POLICY.md) for posture tiers, the suppression workflow, and the recovery flow after a quarantine.
 
+## The audit log is append-only
+
+The action audit log (`/opt/boxmunge/logs/audit.jsonl`) carries the filesystem's append-only attribute, which only root can set or clear. `deploy` writes it (the API daemon, the CLI and MCP all run as `deploy`), but cannot truncate, rewrite, rename or delete it. Someone who takes over `deploy` therefore cannot erase the record of what was done, and rotation runs as root. The attribute protects against erasure, not against false entries: whoever controls `deploy` can still append lines that never happened. Read the log as a complete record of what was appended, not as proof that each line is true. The monthly rotation clears the attribute for a moment while it moves the log aside, as root. On a host that cannot set the attribute (some filesystems and containers), install records this and `health` warns that `deploy` can rewrite the log there. See OPERATIONS.md, "The action audit log".
+
 ## Supply-chain protection (release signing)
 
 Every boxmunge release tarball's `SHA256SUMS` is keyless-signed by the GitHub Actions release workflow using Sigstore (Fulcio + Rekor). The upgrade shim verifies that signature against a pinned certificate identity (the release workflow on a `vX.Y.Z` tag of this exact repo, issued by GitHub's OIDC) BEFORE running `sha256sum -c`. cosign is hard-required: if it's missing, the upgrade aborts noisily rather than degrading to checksum-only. This breaks the circularity of "verify the tarball with a hash file pulled from the same release" — an attacker who replaces both files in lockstep can no longer pass verification without also forging a Fulcio certificate tying the signature to this repo's release workflow. An unsigned release (e.g. one where the cosign install step in CI failed) will be refused by the shim, not silently installed.

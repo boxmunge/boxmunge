@@ -623,6 +623,16 @@ A line in a log file that is not a JSON entry (torn by a crash, hand-edited, or 
 
 A log file or archive that is a symlink, a FIFO or a file with a second hard link is not read: the query fails with an error naming it, as it does for one it has no permission to read. `logs/` is writable by deploy, and boxmunge never writes its log through such a name. Remove it and re-run.
 
+### The action audit log
+
+Every call through the action API that changes something is recorded in `/opt/boxmunge/logs/audit.jsonl`, one JSON object per line: who asked, which action, its parameters (secrets redacted) and the outcome. Refusals are recorded too. The file belongs to `deploy`, mode 0640, and carries the filesystem's append-only attribute (`chattr +a`, shown by `lsattr`): every writer can add lines, but nobody, `deploy` included, can truncate, rewrite, rename or delete it. Only root can set or clear the attribute. The installer sets it (`boxmunge-server _audit-seal`, as root), creating the file if it is missing; `_audit-seal` also sets it again on every archive. If the log cannot be written, the call is refused with `unavailable` and nothing runs; no writer ever recreates a missing log.
+
+`boxmunge-audit-rotate.timer` rotates it at 00:15 on the 1st of each month (a month missed while the box was off is rotated at the next boot). As root, it clears the attribute, moves the log to `audit.jsonl.YYYY-MM-DD`, sets the attribute on that archive, starts a new sealed log and deletes archives beyond the newest 12, clearing each one's attribute first. An empty log is left alone. While the log is moved aside, root's marker `upgrade-root/audit-rotating` says so, and `health` warns "rotation in progress" instead of reporting the log missing (a marker older than 10 minutes, left by a rotation that was killed, is ignored). A step that fails is logged and alerted at high priority, naming the step and its fix: usually `sudo boxmunge-server _audit-seal`; for an archive name that is already taken, moving that archive aside; for an archive that is a link, removing it. After either of the last two, `sudo systemctl start boxmunge-audit-rotate.service` runs the rotation again.
+
+`health` reports the log as an error (`audit-log`) when it is missing, is a link or not a plain file, or has lost the attribute: install sets all of these, so the error means a control is off, and an upgrade in probation that finds it rolls back. The fix is `sudo boxmunge-server _audit-seal`. A name in `logs/` that looks like an archive (`audit.jsonl.YYYY-MM-DD`) but is a link or not a plain file is left alone by the seal, which warns and alerts naming it; remove it if it is not an archive.
+
+Some hosts cannot set the attribute at all: a filesystem without it, or a container whose root lacks `CAP_LINUX_IMMUTABLE`. There, install still completes. `_audit-seal` records the reason in `upgrade-root/audit-append-unsupported` (root's, in a directory only root can write), leaves the log `deploy`'s with mode 0640, and prints a warning that `deploy` can rewrite the audit log on this host. `health` then warns, and never errors, so the box can still upgrade. Rotation works the same way but skips the attribute steps. If the host later supports the attribute (the box moved to another filesystem), a run of `_audit-seal` that sets it removes the record. A record root does not own is refused, so `health` still reports an error. Both records are root-only, so `health` run from the deploy shell reports the check as needing root when the log is not sealed; the root health timer gives the verdict.
+
 ### Caddy access log
 
 Every site's access log is JSON on the Caddy container's stdout; Caddy's own messages go to its
@@ -1070,6 +1080,132 @@ skipped project, so one that is skipped day after day shows up as stale in `heal
 Webhook POSTs and the `resume` smoke-failure alert are sent without holding the project lock, so a
 slow or unreachable endpoint cannot block other operations. A failed webhook delivery is logged as a
 warning (scheme and host only, never the URL path) and does not fail the command.
+
+A job (see [Jobs](#jobs)) does not fail at once on a held lock: it waits up to 2 minutes for it.
+
+---
+
+## Jobs
+
+A job is an action boxmunge runs in the background, outside your SSH session: `project.backup`,
+`project.restore`, `project.stage`, `project.promote`, `project.unstage`, `project.deploy`,
+`project.rollback`, `project.pause`, `project.resume`, and the govern actions `project.recover` and
+`project.abandon_install`. Closing the session does not stop it. The job runner
+(`boxmunge-jobs.path` and `boxmunge-jobs.service`) starts one worker per queued job, at most 4 at a
+time and one at a time per project (a backup queued behind a running restore of the same project
+waits for it), and the worker takes the project lock, runs the action and records the outcome. Every call is
+recorded in the action audit log, with the job's id. The direct commands (`backup`, `stage`,
+`prod-deploy` and the rest) still run in your session, as before.
+
+### Starting and following a job
+
+```bash
+boxmunge job run project.backup '{"project":"myapp"}'
+```
+
+The parameters are one JSON object (quote it for the shell); `project.deploy` takes the same choices
+as `prod-deploy`, e.g. `'{"project":"myapp","no_pull":true}'`. The command prints
+`job <id> queued`, then follows the job: its output and its steps (`[lock] started: waiting for
+myapp's lock, held by ...`) as they come, once a second. It ends with `job <id> succeeded` and the
+result (exit 0), or `ERROR: <code>: <message>` (exit 1). A call refused before it is queued (an
+unknown project, parameters that do not match, an upgrade running) prints `ERROR: <code>: <reason>`,
+queues nothing, and exits 1; a usage error exits 2.
+
+In a one-shot `ssh deploy@<host> job run ...` the deploy shell splits the command line a second
+time, which strips the JSON's double quotes; quote the whole command once more
+(`ssh deploy@<host> "job run project.backup '{\"project\":\"myapp\"}'"`), or run it in an
+interactive session. `job run` recognises stripped quotes and says so.
+
+`--detach` queues the job and returns at once. Ctrl-C while following stops following, never the
+job, and prints the command that picks it up again:
+
+```bash
+boxmunge job show <id> --events    # the record and everything it printed
+boxmunge job show <id> --json      # the record as JSON
+boxmunge jobs                      # the newest 50 jobs
+boxmunge jobs --running            # every queued and running job
+boxmunge jobs --project myapp
+```
+
+If a job is still queued after 30 seconds, the follower says once why it is likely waiting:
+`waiting for job <id> (<action>) on <project> to finish` when another job of the same project is
+running, `waiting for one of the 4 running jobs to finish` when every runner slot is busy, and,
+with nothing running, `still queued after 30 s: is the job runner active? systemctl status
+boxmunge-jobs.path`. For the last, check the unit (as the supervisor) and `boxmunge health`
+(`jobs-runner`); once the runner is active, the job starts.
+
+### busy: the project lock stayed held
+
+A job waits up to 2 minutes for its project's lock, long enough for a health tick or a CVE scan to
+finish, but short enough that a command someone is running is reported to you instead of waited
+out. While it waits, `[lock] started` names what holds the lock. If the lock is still held after
+2 minutes, the job fails `busy` and runs none of the action: the message names the holder (e.g.
+`pid 4242: boxmunge backup myapp`) and ends with the exact command that retries it, such as
+`boxmunge job run project.backup '{"project":"myapp"}'`. Run it once the holder has finished.
+
+### Output that was cut off
+
+A job's output is everything the action and the commands it starts print. If a process it started
+keeps that output open after the action's work has ended (a `docker compose logs -f` left running,
+a hung build step), the worker waits 5 seconds, then finishes the job anyway and says `Output was
+cut off: ...` in the events and in the error of a failed job. The outcome stands; anything that
+process printed later is not shown. A failed command's error quotes the last lines of its output
+and ends `Full output: boxmunge job show <id> --events`.
+
+### A job stopped by SIGTERM
+
+A service stop or a shutdown sends the worker SIGTERM. The job fails, and the message says how far
+it got:
+
+- **Stopped before it started** (it was waiting for the lock): nothing was changed. The message
+  ends with the command that runs it again.
+- **Stopped mid-work**: it may have done part of its work, and it is never run again
+  automatically. The message, and a high-priority alert, give the way out for that action: for
+  example `run 'boxmunge backup myapp' again`, or, for a deploy that left an install open, that
+  install's own options (rerun it, `prod-deploy myapp --abandon`, or `rollback myapp`), as
+  [An interrupted or failed install](#an-interrupted-or-failed-install) describes.
+- **Stopped after its work finished**, while its follow-up steps ran: the outcome stands, and the
+  message says that some of those steps may not have run.
+
+### worker_lost
+
+If the worker disappears without finishing (the box restarted, or the worker was killed), the job
+fails with `worker_lost`. `job show` and `jobs` report it as soon as the worker is gone, and the
+runner writes the failure and sends an alert. A lost job is never re-run: a half-done
+action must not repeat itself. The alert names the way out for that action, as for a job stopped
+mid-work; for a deploy that left an install open, the install's options. Check what it changed
+(`boxmunge status myapp`, `boxmunge job show <id> --events`), then follow the alert.
+
+### expired
+
+A job still queued 2 hours after it was created (it waited out a platform rollback, or a job runner
+that was down) is failed with `expired` and never run, with an alert. Its message names when it was
+queued and the `boxmunge job run ...` command that makes the same call again, if it is still wanted.
+
+### A job's audit lines
+
+A job writes two audit lines with its id: `accepted` when it is queued, and its outcome once it has
+finished. If the worker dies while moving the finished record out of the queue, the runner completes
+the move and writes the outcome line from the record (without the parameters, which the
+`accepted` line carries), and logs that it recovered it. One narrow window remains: a worker that
+dies after the move but before it appends the outcome line leaves a finished job whose record holds
+the outcome while the audit log shows only `accepted`. `boxmunge job show <id>` is then the record
+of what happened.
+
+### Upgrades and jobs
+
+A platform upgrade and jobs never overlap:
+
+- While an upgrade runs, new jobs are refused (`unavailable`: `boxmunge is being upgraded, so new
+  jobs are refused until the upgrade finishes ...`). Run the same `job run` again once it has
+  finished (`boxmunge log --component upgrade`). The probation check after an upgrade refuses
+  them only while it changes a slot or the systemd units (a rollback or promotion), not for the
+  whole probation.
+- An upgrade waits up to 60 minutes for running jobs to finish, printing `Waiting up to 60 minutes
+  for running jobs to finish`; if they are still running then, it installs nothing and stops (see
+  UPGRADING.md).
+- A job queued just as an upgrade started stays queued and runs after the upgrade, once, on the new
+  code: the runner restarts on the installed release before starting it.
 
 ---
 
@@ -1646,22 +1782,26 @@ unless `health` also ran past its budget before the upgrade.
 | `registry` | a registered project's directory is gone but its deploy, scan or health state is not (a removal that did not finish); a name never deployed is ok | the supervisor user runs `sudo boxmunge-server project-forget <project>` |
 | `sshd-hardening`, `sshd-deploy-env` | `00-boxmunge.conf` is missing or changed, or `sshd -T` shows a later setting widening what deploy accepts (error; `sshd-deploy-env` needs root); `sshd -T` itself fails or times out (warning) | the supervisor user re-runs the installer, or removes the widening setting; `sudo sshd -t` names a config error |
 | `operational-log` | the active log file's first line is not a log entry, which stops all logging | move the file aside (see [Reading Logs](#reading-logs)) |
+| `audit-log` | `logs/audit.jsonl` is missing, a link or not a plain file, or has lost its append-only attribute on a host that supports it (error: every audited call is refused, or the log can be rewritten); on a host recorded as unable to set the attribute, a warning naming the reason; while the monthly rotation has the log moved aside, a warning (`rotation in progress`) | the supervisor user runs `sudo boxmunge-server _audit-seal`; see [The action audit log](#the-action-audit-log) |
+| `jobs-runner` | the job runner's path unit, `boxmunge-jobs.path`, is not active, so no queued job starts (error: install enables it). The detail gives its result; `unit-start-limit-hit` means the runner failed to start 20 times in 10 minutes and systemd stopped starting it. A warning when a job has been queued for more than 10 minutes without starting, or a record in `state/jobs/queue/` cannot be read | the supervisor user runs `sudo systemctl reset-failed boxmunge-jobs.path boxmunge-jobs.service && sudo systemctl start boxmunge-jobs.path`, then `journalctl -u boxmunge-jobs.service` says why the runner failed |
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
 | `kev-watch` | the KEV watch has not run for 75 minutes (or its timer is installed and it has never run), its record cannot be read, or a known-exploited source that is turned on (the EU list, VulnCheck) is stale or was never fetched | the supervisor user runs `systemctl status boxmunge-kev-watch.timer`; for a source, `log --component cve-scan` names its error. See `agent-help cve`, "Known-exploited sources" |
 | `cve-hardening` | under posture `strict` or `paranoid`, a finding will quarantine from 0.12 because a compose-only service lacks `read_only: true` (or the manifest adds `cap_add` / `no_new_privileges: false`); not quarantined now | add `read_only: true` in compose.yml, or declare the service in the manifest; to accept the risk instead, suppress the CVE after review or choose `security.posture: balanced` (KEV-only quarantine); `security <project>` names it |
 | `autofix-queue` | an urgent autofix has waited 2 hours since it was found without starting (the autofix unit does not start, or another operation keeps holding the project), or a queue entry cannot be read | the supervisor user runs `journalctl -u boxmunge-autofix` and `systemctl start boxmunge-autofix.service`; `log --component autofix` says why. The scans have stopped holding the quarantine back |
 | `ufw`, `crowdsec`, `aide`, `auditd`, `sysctl` | a host hardening component is off or misconfigured | `doctor`, then the supervisor user |
 | `auto-updates` | OS security updates are not being fetched or installed | see [OS security updates](#os-security-updates) |
-| `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, maintenance, kev-watch) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
+| `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, maintenance, kev-watch, audit-rotate) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
 
-Because an error during probation that was not there before the upgrade rolls it back, only two
+Because an error during probation that was not there before the upgrade rolls it back, only three
 things report an error. One is a
 platform component a probe saw broken: Docker not running (`docker info` fails) or its CLI
 missing, Caddy missing, stopped, restarting or from another compose project, the system container
 missing or wrong (a missing, stopped or restarting container only if a second probe 5 seconds later
 agrees), the backup key missing or unreadable, sshd's drop-in changed or widened, the
-firewall off or not installed, or the userns remap inconsistent. The other is a defect in the
-release's own code: a check whose module cannot be imported, or that hits a missing name or module
+firewall off or not installed, or the userns remap inconsistent. Another is a platform control
+install sets being off: the audit log missing, linked, or without its append-only attribute on a
+host that supports it (`audit-log`; a host recorded as unable to set the attribute, or a rotation
+in progress, warns). The third is a defect in the release's own code: a check whose module cannot be imported, or that hits a missing name or module
 attribute or a syntax error, is an error naming what is broken, so the release is rolled back.
 Everything else warns:
 
@@ -2150,7 +2290,8 @@ A rollback swaps the venvs back, restores the stash the upgrade made (never just
 `stashes/`), and re-runs `upgrade --apply` with the previous release, so its overlays and Caddy sites are regenerated and projects restarted on
 them. It also puts back the previous release's systemd units: each venv slot keeps a copy of
 its release's units (`env-<slot>/boxmunge-systemd`), so the units the newer release added (in
-0.12, `boxmunge-maintenance.timer`, `boxmunge-kev-watch.timer` and `boxmunge-autofix.service`)
+0.12, `boxmunge-maintenance.timer`, `boxmunge-kev-watch.timer`, `boxmunge-audit-rotate.timer`
+and `boxmunge-autofix.service`)
 are disabled and removed, and the ones it retired come back enabled. The next upgrade then runs
 the new release's `install.sh` again. Shims before 0.11.11 do not do this, which is why 0.12
 installs only over 0.11.11 or later: the shim running that upgrade is one that does. Every

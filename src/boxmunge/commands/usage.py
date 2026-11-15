@@ -382,6 +382,51 @@ Usage: boxmunge _discover-update --json [--auto]
 Internal: report an available release as JSON (used by the upgrade shim).
 Without --auto, the newest release of any class. With --auto, what
 auto-update would apply under this box's auto_update policy.""",
+    "_audit-seal": """\
+Usage: boxmunge _audit-seal
+
+Make logs/audit.jsonl deploy's, mode 0640 and append-only (chattr +a),
+creating it if it is missing. install.sh runs it; run it again when health
+reports the audit log missing or not append-only. On a host that cannot set
+the attribute it records why and warns. Operator-only: run it as root, as
+boxmunge-server.""",
+    "_audit-rotate": """\
+Usage: boxmunge _audit-rotate
+
+Internal: move the audit log to audit.jsonl.<date> and start a new sealed
+one, keeping 12 archives (the monthly boxmunge-audit-rotate timer, as root).""",
+    "job": """\
+Usage: boxmunge job run <action> [<params-json>] [--detach]
+       boxmunge job show <id> [--events] [--json]
+
+job run queues a job action (project.backup, project.deploy, ...) with its
+params as one JSON object, e.g. '{"project":"myapp"}', prints
+`job <id> queued`, then follows it: its output and steps as they come.
+Exits 0 when it succeeds, 1 when it fails (ERROR: <code>: <message>) or is
+refused, 2 on a usage error. --detach queues it and returns. Ctrl-C stops
+following, never the job. A job that waits for the project lock gives up
+after 2 minutes (busy) and names the command that retries it.
+job show prints one job's record; --events adds its events; --json prints
+the record (with --events: {"job": ..., "events": [...]}).""",
+    "jobs": """\
+Usage: boxmunge jobs [--project P] [--running] [--json]
+
+Recent jobs (the newest 50), newest first. --running lists every queued
+and running job instead. --project P: only that project's. Exits 1 if a job
+record cannot be read (named on stderr). Read-only.""",
+    "_run-job": """\
+Usage: boxmunge _run-job <job-id>
+
+Internal: run one queued action API job (used by the job runner). Exits 0
+once the job has finished, 75 when an upgrade held the jobs gate and the
+job was left queued for the new code, 1 when the job is not queued.""",
+    "_job-runner": """\
+Usage: boxmunge _job-runner
+
+Internal: run every queued action API job, one worker each (used by
+boxmunge-jobs.service). Fails and alerts jobs whose worker was lost or
+crashed before starting, and exits 0 once the queue is empty, or after an
+upgrade so the service restarts on the new code.""",
     "mcp-serve": """\
 Usage: boxmunge mcp-serve
 

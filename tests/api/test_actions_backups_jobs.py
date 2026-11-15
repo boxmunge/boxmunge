@@ -101,7 +101,8 @@ def test_a_job_result_is_served_when_it_matches_its_action(fixture_paths) -> Non
 
 @pytest.mark.parametrize("changes,problem", [
     ({"action": "projects.list", "result": {"projects": "shop"}}, "expected array"),
-    ({"result": {"ok": True}}, "action project.deploy is no longer registered"),
+    ({"action": "project.retired", "result": {"ok": True}},
+     "action project.retired is no longer registered"),
     ({"state": "finished"}, "must be one of"),
 ])
 def test_one_bad_job_record_does_not_fail_the_list(fixture_paths, changes, problem) -> None:

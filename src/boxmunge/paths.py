@@ -98,6 +98,10 @@ class BoxPaths:
         # unfinished (queued or running) record under queue/.
         self.jobs_dir = self.state / "jobs"
         self.jobs_queue = self.jobs_dir / "queue"
+        # What the job runner found in queue/ that is not a job record.
+        self.jobs_rejected = self.jobs_dir / "rejected"
+        # Held shared by every running job, exclusively by the upgrade shim.
+        self.jobs_gate = self.jobs_dir / "gate.lock"
         self.templates = root / "templates" / "project"
         self.docs = root / "docs"
         self.logs = root / "logs"
@@ -130,6 +134,10 @@ class BoxPaths:
         self.upgrade_root = root / "upgrade-root"
         self.upgrade_lock = self.upgrade_root / "upgrade.lock"
         self.userns_journal = self.upgrade_root / "userns-migration.json"
+        # Root's records about the audit log (api.audit_seal): that this host
+        # cannot set its append-only attribute, and a rotation in progress.
+        self.audit_append_unsupported = self.upgrade_root / "audit-append-unsupported"
+        self.audit_rotating = self.upgrade_root / "audit-rotating"
         # Root's, world-readable, in the root-only-writable top directory:
         # while it exists no command may change a project (lifecycle).
         self.userns_marker = root / "userns-migrating"
@@ -178,6 +186,10 @@ class BoxPaths:
         self.backup_sync_state = self.state / "backup-sync.json"
         # When notify() last logged that Pushover is not configured.
         self.alerts_unconfigured_state = self.state / "alerts-unconfigured.json"
+
+    def job_lock(self, job_id: str) -> Path:
+        """The flock every step of one job's publish, claim and finish holds."""
+        return self.jobs_dir / f"{job_id}.lock"
 
     def container_update_target_state(self, name: str) -> Path:
         return self.container_update_state / f"{name}.json"

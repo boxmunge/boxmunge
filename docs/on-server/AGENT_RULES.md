@@ -90,13 +90,20 @@ These operations are safe to run without human confirmation:
 | Show effective container security posture | `security <project> [--json]` |
 | Audit overall platform health | `health` |
 | Show server boxmunge version | `version` |
+| See what is running in the background (jobs) | `jobs --running` (one job: `job show <id> --events`) |
 | List registered project names | `project-list` |
 | Health-check every project | `check-all` (state-mutating; use `check-all --read-only` for pure introspection) |
 | Compatibility info for client handshake | `handshake` |
 | Prepare for a platform upgrade (what to change, per project) | `upgrade-howto` |
 | Check the box is ready for a platform upgrade | `upgrade-check --version X.Y.Z` |
 
-Several commands accept a `--json` flag for machine-readable output, useful when an agent needs to parse rather than render: `check --json`, `validate --json`, `inbox --json`, `project-list --json`, plus `status --json`, `doctor --json`, `health --json`, `self-test --json`, `security [<project>] --json`, and `log --json`.
+Keep using the direct commands above (`stage`, `promote`, `prod-deploy`, `backup` and the rest):
+they run in your session and print their result. `job run` is the operator's way to start the same
+actions in the background. Before changing a project, check `jobs --running`: a job holding the
+project's lock makes your command fail with "Another operation is in progress"; wait for the job to
+finish rather than retrying in a loop.
+
+Several commands accept a `--json` flag for machine-readable output, useful when an agent needs to parse rather than render: `check --json`, `validate --json`, `inbox --json`, `project-list --json`, plus `status --json`, `doctor --json`, `health --json`, `self-test --json`, `security [<project>] --json`, `jobs --json`, `job show <id> --json`, and `log --json`.
 
 ### Deploying a project (standard workflow)
 

@@ -118,17 +118,33 @@ POST /v1/actions/project.get
 `params` is required; send `{}` for an action that takes none. The only other field allowed is
 `approval` (planned, operate calls only).
 
+Invoking a job action does not run it. Once the call is admitted, the server checks that the
+project exists (`not_found`), writes the accepted audit record naming the new job's id, and queues
+the job durably before it answers: `data` is the job record, in state `queued`. Follow it with
+`job.get` and `job.events`. The job runner takes the project lock and writes the outcome to the
+audit log when the job ends. While a boxmunge upgrade is running, a new job is refused with
+`unavailable` and a message that says the upgrade is under way, how to follow it
+(`boxmunge log --component upgrade`), and to make the same call again once it finishes. Jobs
+already queued run after the upgrade, on the new code.
+
 ## Schemas
 
 Parameter and result schemas use a small JSON Schema subset: `type`, `properties`, `required`,
 `additionalProperties`, `enum`, `pattern`, `minimum`, `maximum`, `minLength`, `maxLength`, `items`,
-`const`, plus the annotations `description` and `secret`, and one keyword of boxmunge's own:
+`const`, plus the annotations `description` and `secret`, and two keywords of boxmunge's own:
 
 - `x-result-of-action: true` appears only on a job record's `result` property, beside its `action`
   property. It means the value is null or the result of the action that `action` names, matching
   that action's catalog `result` schema (an unknown action is invalid). Its `type` is
   `["object", "null"]`. A client that does not understand the keyword can
   treat `result` as any JSON value or null.
+- `x-tier: "govern"` marks a parameter that weakens a control, such as resuming a project
+  without its security checks. It never affects validation. `govern` is its only value, and it
+  sits only on an operate action's optional parameters: a boolean, which counts when it is
+  `true`, or a string, which counts when it is present. A call that uses such a parameter needs that tier rather than the action's own.
+  Plugins never hold `govern`, so a plugin can call the action but not with that parameter: the
+  call is refused with `forbidden`, naming the parameter and the SSH command the operator runs
+  instead. Leave the parameter out, or send `false`.
 
 - Every object schema sets `additionalProperties: false`. Unknown parameters are refused. The
   server checks every result it sends against the schema it publishes, but within `1.x` a
@@ -160,7 +176,7 @@ Parameter and result schemas use a small JSON Schema subset: `type`, `properties
 | `stale_approval` | 409 | The project changed after the operator approved; request a new approval |
 | `governed_change` | 403 | A plugin deploy would change the project's policy; the operator deploys it over SSH |
 | `failed` | 500 | The action ran and failed, or box state could not be read; the message says why |
-| `unavailable` | 503 | A dependency is down (Docker, the audit log), a job action has no runner yet, or the server has too many connections open; retry shortly |
+| `unavailable` | 503 | A dependency is down (Docker, the audit log), a job action has no runner yet, an upgrade is running (new jobs wait for it), a job could not be queued, or the server has too many connections open; retry shortly |
 
 A request the HTTP layer cannot parse (an over-long header line, say) gets its HTTP status, such
 as 400 or 431, with the same JSON envelope and code `invalid_params`.
@@ -194,10 +210,26 @@ polling it. `project.get` and `status.get` report the result of the platform's o
 ### Jobs
 
 A job is the record of a long-running action. Its record has `id` (a ULID), `action`, `principal`,
-`project`, `state` (`queued`, `running`, `succeeded`, `failed`), `created_at`, `started_at`,
-`finished_at`, `error` (`{code, message}` or null) and `result` (the action's result once the job
-has succeeded, in the shape of that action's catalog `result` schema, as `x-result-of-action`
-declares; null until then, and always null in this release). Events have `seq` (from 1), `ts` and `type`:
+`project`, `state` (`queued`, `running`, `succeeded`, `failed`), `params`, `worker`, `created_at`,
+`started_at`, `finished_at`, `error` (`{code, message}` or null) and `result` (the action's result
+once the job has succeeded, in the shape of that action's catalog `result` schema, as
+`x-result-of-action` declares; null until then, and always null in this release).
+
+- `params` is the call's params as compact JSON text (keys sorted, no spaces), so
+  `json.loads(job["params"])` gives the object back. It is a string because record schemas are
+  closed and allow no open object.
+- `worker` is null until the job is claimed, then `{boot_id, pid, start_time}`: the boot, process
+  id and process start time of the worker running it. Together they say whether that exact process
+  is still alive, where a pid alone could have been reused or outlived by a reboot.
+- A `running` job whose worker is gone is reported as `failed` with the error code `worker_lost`.
+  Such a job is never re-run, since repeating half of a deploy or restore could do harm: check what
+  it changed before starting it again.
+- A `queued` job that has not started 2 hours after its `created_at` is failed, never run, with
+  the error code `expired` (it may no longer be wanted, for example after a platform rollback or
+  a job runner outage). Its message names when it was queued and the command that makes the same
+  call again.
+
+Events have `seq` (from 1), `ts` and `type`:
 
 - `log`: a line of output, in `message`;
 - `step`: a named step (`step`) that `started`, `succeeded` or `failed` (`status`), with an optional
@@ -209,7 +241,36 @@ In this release no job can be started through the API, so jobs come from the fix
 ## Operate actions and approvals (planned)
 
 Operate actions (stage, promote, unstage, deploy, rollback, pause, resume, backup, restore) will
-be served to plugins granted `operate`, and each call will need the operator's fresh approval:
+be served to plugins granted `operate`. Each runs as a job holding the project lock and does what
+its CLI command does, without a dry run. These are defined:
+
+| Action | Parameters | Returns | CLI |
+|---|---|---|---|
+| `project.stage` | `project`, `ref`?, `no_pull`?, `allow_security_regression`? | `ref` and `id` of the staged release | `stage` |
+| `project.promote` | `project`, `no_pull`?, `allow_security_regression`? | nothing | `promote` |
+| `project.unstage` | `project` | nothing | `unstage` |
+| `project.deploy` | `project`, `ref`?, `no_snapshot`?, `no_pull`?, `redeploy`?, `accept_stale_kev`?, `allow_security_regression`? | nothing | `prod-deploy` |
+| `project.rollback` | `project`, `allow_security_regression`? | nothing | `rollback` |
+| `project.pause` | `project`, `reason`?, `no_snapshot`? | nothing | `pause` |
+| `project.resume` | `project`, `skip_security_checks`?, `no_start`? | nothing | `resume` |
+| `project.backup` | `project` | `snapshot`, the name of the snapshot it took | `backup` |
+| `project.restore` | `project`, `snapshot`? (the newest when omitted), `no_safety_snapshot`? | nothing | `restore` |
+
+`allow_security_regression` (the reason, logged and alerted), `accept_stale_kev`, `no_snapshot`
+(a later rollback would have no data to restore), `no_safety_snapshot` and
+`skip_security_checks` weaken a control, so they carry `x-tier: "govern"`: a caller without govern
+gets `forbidden`, naming the command the operator runs over SSH instead. `project.resume` refuses
+`no_start` with `skip_security_checks` as `invalid_params`, since it starts nothing. A backup that
+writes no snapshot (its backup type is `none`, the project is quarantined, or an open install
+leaves unclear what to dump) fails, saying which. A blank `reason` on `project.pause` is
+`invalid_params`.
+
+Two govern actions run as jobs the same way, and are not open to agents: `project.recover`
+(`project`; restarts the build the health monitor stopped, as `recover`) and
+`project.abandon_install` (`project`; undoes an open install before its hook ran, as
+`prod-deploy --abandon`). Both return nothing.
+
+Each call will need the operator's fresh approval:
 
 1. `POST /v1/approvals` with `{"action": "project.rollback", "params": {"project": "shop"}}`.
    The server resolves the call into a plan (the exact release and snapshot) and returns

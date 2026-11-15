@@ -43,7 +43,7 @@ def make_invoker(paths: BoxPaths, *, registry: Registry | None = None,
     if registry is None:
         from boxmunge.api.actions import build_registry
         registry = build_registry()
-    return Invoker(registry, paths, host or StubHost(), AuditLog(paths.audit_log),
+    return Invoker(registry, paths, host or StubHost(), AuditLog(paths.audit_log, create=True),
                    served_tiers=served_tiers)
 
 

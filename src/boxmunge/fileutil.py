@@ -18,8 +18,9 @@ To rule out deadlock, a process only ever acquires them in this order
    migration, item 5).
 4. Short blocking locks, always innermost: ``state/.registry.lock``
    (``registry_lock``), ``state/.caddy.lock`` (inside ``caddy_reload``),
-   and ``state/secrets-locks/*.lock`` (one per
-   secrets file, around every write of it). None of them is held while
+   ``state/secrets-locks/*.lock`` (one per
+   secrets file, around every write of it), and ``state/jobs/<id>.lock``
+   (one per job, around each write or read of its record). None of them is held while
    acquiring any other lock, and none is held across slow work.
 5. The user-namespace migration (``boxmunge-server userns migrate|rollback``,
    root, run by the upgrade shim under ``upgrade.lock``) is the one process
@@ -49,8 +50,10 @@ import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator
+import time
+from typing import TYPE_CHECKING, Callable, Iterator
 
+from boxmunge.lock_holder import lock_holder
 from boxmunge.fs_nofollow import fchown_deploy, mkdir_p_deploy, open_regular_nofollow
 
 if TYPE_CHECKING:
@@ -127,6 +130,22 @@ def durable_rename(tmp_path: Path, path: Path) -> None:
         raise RenamedNotSyncedError(
             e.errno, f"{tmp_path.name} was renamed to {path}, but {path.parent} was not "
             f"synced: {e.strerror or e}") from e
+
+
+def durable_link(src: Path, dest: Path) -> None:
+    """link() src to dest, then sync dest's directory, so the new name
+    survives a crash once this returns. Raises FileExistsError when dest
+    exists: a link never replaces anything. src's data must already be
+    synced (the link adds a name, not content)."""
+    os.link(src, dest)
+    fsync_dir(dest.parent)
+
+
+def durable_unlink(path: Path) -> None:
+    """unlink() path, then sync its directory, so the name cannot come back
+    after a crash once this returns."""
+    os.unlink(path)
+    fsync_dir(path.parent)
 
 
 class LinkedTargetError(OSError):
@@ -297,6 +316,61 @@ def project_lock(project_name: str, paths: "BoxPaths") -> Iterator[None]:
         os.close(fd)
 
 
+LOCK_POLL_SECONDS = 1
+
+
+class LockWaitTimeout(LockError):
+    """The project lock stayed held for the whole bounded wait."""
+
+    def __init__(self, project: str, waited_seconds: float, holder: str | None) -> None:
+        self.project = project
+        self.waited_seconds = waited_seconds
+        self.holder = holder
+        who = holder or "an unknown process"
+        super().__init__(
+            f"'{project}' stayed locked for {waited_seconds:.0f}s, held by {who}."
+        )
+
+
+@contextmanager
+def project_lock_wait(
+    project: str, paths: "BoxPaths", *, timeout: float,
+    on_wait: Callable[[str | None], None],
+) -> Iterator[None]:
+    """Like project_lock, but poll for up to ``timeout`` seconds.
+
+    ``on_wait(holder)`` is called once, on the first refusal, with the
+    holder's description (or None). Raises LockWaitTimeout when the wait
+    runs out.
+    """
+    lock_path = paths.project_lock_file(project)
+    fd = open_shared_lockfile(lock_path)
+    start = time.monotonic()
+    announced = False
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                holder = lock_holder(lock_path)
+                if not announced:
+                    announced = True
+                    on_wait(holder)
+                waited = time.monotonic() - start
+                if waited >= timeout:
+                    raise LockWaitTimeout(project, waited, holder)
+                time.sleep(LOCK_POLL_SECONDS)
+    except BaseException:
+        os.close(fd)
+        raise
+    try:
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 @contextmanager
 def registry_lock(paths: "BoxPaths") -> Iterator[None]:
     """Acquire an exclusive registry-wide lock. Blocking.
@@ -327,6 +401,20 @@ def exclusive_lock(lock_path: Path) -> Iterator[None]:
     fd = open_shared_lockfile(lock_path)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+@contextmanager
+def shared_lock(lock_path: Path) -> Iterator[None]:
+    """Hold a shared flock on lock_path for the block. Blocking. Readers
+    take it beside writers' exclusive_lock: they wait out a write, never
+    each other."""
+    fd = open_shared_lockfile(lock_path)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_SH)
         yield
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)

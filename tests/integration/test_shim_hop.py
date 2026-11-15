@@ -183,7 +183,9 @@ def test_below_the_floor_the_release_is_refused_and_the_bridge_release_still_ins
 FLOOR_SHIM = ("boxmunge-upgrade-v0.11.11", "0.11.11")
 # The units this release adds, and the timers it retires (shim_hop.sh's box
 # starts with the previous release's).
-ADDED = ("boxmunge-autofix.service", "boxmunge-kev-watch.service", "boxmunge-kev-watch.timer",
+ADDED = ("boxmunge-audit-rotate.service", "boxmunge-audit-rotate.timer",
+         "boxmunge-autofix.service", "boxmunge-jobs.path", "boxmunge-jobs.service",
+         "boxmunge-kev-watch.service", "boxmunge-kev-watch.timer",
          "boxmunge-maintenance.service", "boxmunge-maintenance.timer")
 RETIRED = ("boxmunge-container-update.timer", "boxmunge-cve-scan.timer")
 
@@ -201,6 +203,8 @@ def test_old_shim_hop_leaves_a_working_shim(
     # function that was never defined.
     assert "unbuilt source shim" not in log and "command not found" not in log, log
     assert facts["check-probation_rc"] == "0", log
+    # 0.11.11 had no jobs gate: the new shim made it, deploy's, as install does.
+    assert facts["JOBS_GATE"] == "deploy:deploy:750,deploy:deploy:660", log
     # install.sh, run by the shim, leaves the previous release (the rollback
     # target) alone: nothing installed into it.
     assert facts["ENV_A_PIP_CALLS"] == "0", log
@@ -227,6 +231,7 @@ def test_old_shim_hop_leaves_a_working_shim(
         # The live units are this release's, and the new shim leaves them be.
         assert facts["UNITS"] == facts["UNITS_AFTER_INSTALL_SH"], log
         assert "restoring them" not in facts["check-probation_out"], log
+        assert facts["UNITS_AFTER_COMMANDS"] == facts["UNITS"], log
     else:
         # install.sh failed: the upgrade stops before the swap.
         assert facts["hop_rc"] == "1", log
@@ -250,13 +255,18 @@ def test_a_failed_hop_from_the_floor_puts_the_previous_units_back(bundle: Path, 
     # install.sh put this release's units in place before the swap...
     after_install = facts["UNITS_AFTER_INSTALL_SH"].split(",")
     assert set(ADDED) <= set(after_install) and not set(RETIRED) & set(after_install), log
-    # ...and the rollback put back exactly the previous release's: the added
-    # timers disabled and removed, the retired ones back and enabled.
-    assert facts["UNITS"] == facts["UNITS_BEFORE"], log
+    # ...and the rollback put back the previous release's: the added timers
+    # disabled and removed, the retired ones back and enabled. 0.11.11's
+    # restore knows only .service and .timer units, so it leaves the job
+    # runner's path unit behind...
+    assert facts["UNITS"].split(",") == sorted(
+        facts["UNITS_BEFORE"].split(",") + ["boxmunge-jobs.path"]), log
     assert set(facts["DISABLED"].split(",")) == {u for u in ADDED if u.endswith(".timer")}, log
     assert set(RETIRED) <= set(facts["ENABLED"].split(",")), log
-    # The new shim, on disk since before the swap, finds the live units are
-    # the live slot's: nothing to heal.
+    # ...which the new shim, on disk since before the swap, removes at its
+    # first check-probation: the live slot's record does not have it.
     assert facts["SHIM_IS"] == "boxmunge-upgrade", log
     assert facts["check-probation_rc"] == "0", log
-    assert "restoring them" not in facts["check-probation_out"], log
+    assert "Removed boxmunge-jobs.path: the release on slot a does not ship it" in \
+        facts["check-probation_out"], log
+    assert facts["UNITS_AFTER_COMMANDS"] == facts["UNITS_BEFORE"], log

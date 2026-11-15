@@ -67,6 +67,9 @@ Project operations:
   restore <project>       Restore from a backup snapshot
   test-restore <project>  Verify latest backup decrypts (no restore run)
   caddy-status            Show Caddy sites and certificate expiry
+  job run <action> [params]  Queue a job action and follow it (--detach: don't)
+  job show <id>           One job's record (--events, --json)
+  jobs                    Recent jobs (--running, --project P, --json)
   console                 Open the boxmunge TUI
 
 Container security & CVE policy:
@@ -103,6 +106,8 @@ Operator only (as root, not in the deploy shell):
   container-update        Pull and recreate Caddy and project image: containers
   install-txn <p> --drop  Drop a stale install record
   project-forget <p>      Drop a registry entry whose project directory is gone
+  _audit-seal             Make the action audit log append-only again (install
+                          does it; health's audit-log check names it)
   bundle <dir>            Build a bundle on this machine (the client's
                           'boxmunge bundle' is the usual way)
   boxmunge-upgrade force-target VER
@@ -112,8 +117,9 @@ Operator only (as root, not in the deploy shell):
   boxmunge-upgrade userns-migrate [--check] | userns-rollback | userns-commit
                           Remap Docker's user namespaces (OPERATIONS.md)
 
-Internal (run by the upgrade shim, not by hand): stash, _discover-update,
-staging-teardown-all
+Internal (run by the upgrade shim, a timer or the job runner, not by hand):
+stash, _discover-update, staging-teardown-all, _audit-rotate, _run-job,
+_job-runner
 
 Options (run 'help <command>' to see exactly which a command accepts):
   -h, --help              Show a command's usage; never runs the command
@@ -188,7 +194,7 @@ Secrets:  secrets set <project> DB_URL="postgres://..."
 Maintenance:  pause <project>   (serves a maintenance page)
               resume <project>  (pulls latest images first)
 
-First moves:  status, doctor, inbox, log --tail 50
+First moves:  status, doctor, inbox, jobs --running, log --tail 50
 
 Topics (agent-help <topic>):
   images        Choosing a base image (read before writing a Dockerfile)

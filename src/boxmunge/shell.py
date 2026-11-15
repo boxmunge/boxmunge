@@ -61,6 +61,8 @@ ALLOWED_COMMANDS: set[str] = {
     "console",
     # Health audit
     "health",
+    # Jobs: start a job action and follow it; list what is queued or running
+    "job", "jobs",
     # Self-test
     "self-test",
     # Upgrade (auto-update is root's: its timer runs it, and it locks

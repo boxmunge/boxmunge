@@ -21,7 +21,7 @@ import os
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -33,7 +33,11 @@ from boxmunge import (
     overlay_users, pause, release, release_txn, run_as, staged_release,
     upgrade_state, user_drift,
 )
+from boxmunge.api import job_writer
+from boxmunge.api.job_events import EventLog
+from boxmunge.api.job_retention import JOB_RETAIN_COUNT, prune
 from boxmunge.api.jobs import JobStore
+from boxmunge.api.worker_identity import WorkerIdentity
 from boxmunge.backup_evidence import project_evidence, sync_evidence
 from boxmunge.bind_sources import read_record
 from boxmunge.blocked_update import read_blocked_state
@@ -46,6 +50,7 @@ from boxmunge.cve import (
 from boxmunge.discovery_freshness import stale_discovery_warning
 from boxmunge.health_checks.backup_freshness import check_backup_freshness
 from boxmunge.health_checks.container_updates import check_container_updates
+from boxmunge.health_checks.jobs_runner import check_jobs_runner
 from boxmunge.notify import _unconfigured_logged_recently
 from boxmunge.os_update_alert import read_os_update_state
 from boxmunge.paths import BoxPaths
@@ -106,12 +111,51 @@ JOB_ID = "01J" + "A" * 23
 JOB = {"id": JOB_ID, "action": "project.deploy", "principal": "plugin:webui", "project": P,
        "state": "succeeded", "created_at": "2026-10-14T01:00:00Z",
        "started_at": "2026-10-14T01:00:05Z", "finished_at": "2026-10-14T01:01:30Z",
-       "error": None, "result": None}
+       "error": None, "result": None, "params": "{}", "worker": None}
 JOB_EVENT = json.dumps({"seq": 1, "ts": "2026-10-14T01:00:06Z", "type": "log", "message": "m"}) + "\n"
+
+
+QUEUED_JOB = {**JOB, "state": "queued", "started_at": None, "finished_at": None}
+
+
+def _claim(paths: BoxPaths) -> Any:
+    return job_writer.claim(paths, JOB_ID, WorkerIdentity("boot", 1, 1), NOW)
 
 
 def _jobs(paths: BoxPaths) -> JobStore:
     return JobStore(paths, result_schemas=registry_results)
+
+
+def _prune_oldest(paths: BoxPaths) -> list[str]:
+    """The job at the row's name is the oldest of 201 finished jobs, so it is
+    pruned if (and only if) its record is read. The record is put back, as the
+    harness moves it around after a read."""
+    for n in range(JOB_RETAIN_COUNT):
+        job_id = f"01J{n:023d}"
+        stamp = (NOW - timedelta(minutes=n)).isoformat()
+        (paths.jobs_dir / f"{job_id}.json").write_text(
+            json.dumps({"id": job_id, "state": "succeeded", "finished_at": stamp}))
+    name = paths.jobs_dir / f"{JOB_ID}.json"
+    kept = name.read_text() if name.is_file() and not name.is_symlink() else None
+    deleted = prune(paths, NOW)
+    if kept is not None and not name.exists():
+        name.write_text(kept)
+    return deleted
+
+
+def _jobs_runner(paths: BoxPaths) -> str:
+    """The check's detail, with the path unit active (systemctl is faked)."""
+    active = {"boxmunge-jobs.path": {"ActiveState": "active", "Result": "success"}}
+    return check_jobs_runner(paths, show=lambda: active, now=NOW).detail
+
+
+def _event_log_resumed(paths: BoxPaths) -> int:
+    """The worker reopening a job's event log numbers on from its last line."""
+    log = EventLog(paths, JOB_ID)
+    try:
+        return log.log("m")
+    finally:
+        log.close()
 
 
 def _alerted(paths: BoxPaths) -> bool:
@@ -278,8 +322,20 @@ READERS = [
            lambda p: project_evidence(p, P)),
     Reader("job record", lambda p: p.jobs_dir / f"{JOB_ID}.json", JOB,
            lambda p: _jobs(p).get(JOB_ID)),
+    # An unreadable record is kept and logged, never pruned as if it were old.
+    Reader("job retention", lambda p: p.jobs_dir / f"{JOB_ID}.json", JOB, _prune_oldest,
+           dangling=lambda o, p: o == ("value", []) and str(p.jobs_dir) in p.log_file.read_text()),
     Reader("job events", lambda p: p.jobs_dir / f"{JOB_ID}.events.jsonl", JOB_EVENT,
            lambda p: _jobs(p).events(JOB_ID)),
+    Reader("job event log", lambda p: p.jobs_dir / f"{JOB_ID}.events.jsonl", JOB_EVENT,
+           _event_log_resumed),
+    Reader("queued job record (claim)", lambda p: p.jobs_queue / f"{JOB_ID}.json", QUEUED_JOB,
+           _claim),
+    # A queued job that waits too long warns naming it; one it cannot read
+    # warns that it cannot be read.
+    Reader("health jobs_runner", lambda p: p.jobs_queue / f"{JOB_ID}.json", QUEUED_JOB,
+           _jobs_runner,
+           dangling=lambda o, _p: o[0] == "value" and "cannot be read" in o[1]),
     Reader("backup sync evidence", lambda p: p.backup_sync_state, {"synced_at": ISO},
            sync_evidence),
     Reader("health backup_freshness", lambda p: p.project_backup_state(P),

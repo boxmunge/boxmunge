@@ -45,6 +45,8 @@ BASE_ARGS: dict[str, list[str]] = {
     "validate": ["myapp"],
     "userns": ["check"],
     "_discover-update": ["--json"],
+    "_run-job": ["01J" + "A" * 23],
+    "job": ["run", "project.backup"],
 }
 
 # Subcommand forms that need their own coverage.
@@ -67,6 +69,8 @@ EXTRA_FORMS: list[list[str]] = [
     ["logs", "--boxmunge"],
     ["help", "status"],
     ["agent-help", "rules"],
+    ["job", "show", "01J" + "A" * 23],
+    ["job", "run", "project.backup", '{"project":"myapp"}'],
 ]
 
 

@@ -17,7 +17,7 @@ import yaml
 from boxmunge import compose_inventory
 from boxmunge.commands import health_cmd
 from boxmunge.commands.health_cmd import HealthCheck, run_guarded, run_health
-from boxmunge.health_checks import hardening, sshd, userns
+from boxmunge.health_checks import audit_log, hardening, jobs_runner, sshd, userns
 from boxmunge.health_checks.projects import check_project_containers
 from boxmunge.paths import BoxPaths
 
@@ -42,6 +42,8 @@ def platform_ok(monkeypatch):
         (sshd, "check_sshd_deploy_env", "sshd-deploy-env"),
         (userns, "check_docker_userns", "docker-userns"),
         (hardening, "check_ufw", "ufw"),
+        (audit_log, "check_audit_log", "audit-log"),   # install seals it
+        (jobs_runner, "check_jobs_runner", "jobs-runner"),   # install enables its path unit
     ):
         monkeypatch.setattr(module, attr, _ok(name))
 
@@ -137,6 +139,7 @@ def test_every_probe_timing_out_is_warnings_not_critical(paths, monkeypatch, cap
     """A busy host where every command times out: no traceback, no exit 2."""
     monkeypatch.setattr(health_cmd, "check_age_key", _ok("age-key"))
     monkeypatch.setattr(sshd, "check_sshd_hardening", _ok("sshd-hardening"))
+    monkeypatch.setattr(audit_log, "check_audit_log", _ok("audit-log"))
     monkeypatch.setattr(subprocess, "run", _raise_timeout)
     monkeypatch.setattr(sshd, "check_sshd_deploy_env",
                         functools.partial(sshd.check_sshd_deploy_env, run=_raise_timeout))

@@ -81,14 +81,14 @@ def test_dev_apid_end_to_end(tmp_path, sock_path) -> None:
         assert status == 200 and len(body["data"]["projects"]) == 5
         status, body = call(sock_path, "POST", "/v1/actions/project.rollback",
                             {"params": {"project": "shop"}})
-        assert status == 404 and body["error"]["code"] == "not_found"
+        assert status == 403 and body["error"]["code"] == "forbidden"
     assert apid.returncode == 0, apid.stderr
     assert "DEV MODE" in apid.stderr
     assert not sock_path.exists()
     audit = [json.loads(line) for line in
              (tmp_path / "box" / "logs" / "audit.jsonl").read_text().splitlines()]
     assert [(r["principal"], r["action"], r["outcome"], r["code"]) for r in audit] == [
-        ("plugin:webui", "project.rollback", "refused", "not_found")]
+        ("plugin:webui", "project.rollback", "refused", "forbidden")]
 
 
 def test_a_failing_test_body_still_stops_the_server(tmp_path, sock_path) -> None:
@@ -264,13 +264,25 @@ def _imports_of_the_api(path: Path) -> list[str]:
     return found
 
 
+# Modules outside boxmunge.api that route through it, each added deliberately.
+API_FRONTENDS = frozenset({
+    "commands/audit_cmd.py",  # _audit-seal / _audit-rotate: root seal and rotation of the audit log
+    "health_checks/audit_log.py",  # the audit-log health check reads the seal's state
+    "health_checks/jobs_runner.py",  # the jobs-runner health check reads the job queue
+    "commands/run_job_cmd.py",  # _run-job: the job worker, started by the job runner
+    "commands/job_cmd.py",  # job run/show and jobs: the operator's job frontend (Invoker, JobStore)
+    "commands/job_runner_cmd.py",  # _job-runner: the job runner, boxmunge-jobs.service
+})
+
+
 def test_nothing_outside_the_api_package_imports_it() -> None:
-    """Phase A ships inert: no CLI command, shell, MCP tool or timer routes
-    through boxmunge.api, so production boxes behave exactly as before. The
-    only way in is the boxmunge-apid console script. Update this
-    deliberately when a frontend converts."""
+    """Phase A shipped inert: no CLI command, shell, MCP tool or timer routed
+    through boxmunge.api. The only ways in are the boxmunge-apid console
+    script and API_FRONTENDS. Update this deliberately when a frontend
+    converts."""
     src = REPO / "src" / "boxmunge"
-    outside = [p for p in src.rglob("*.py") if (src / "api") not in p.parents]
+    outside = [p for p in src.rglob("*.py") if (src / "api") not in p.parents
+               and p.relative_to(src).as_posix() not in API_FRONTENDS]
     assert len(outside) > 50
     assert [hit for module in outside for hit in _imports_of_the_api(module)] == []
     for module in ("cli.py", "shell.py", "mcp_server.py", "mcp_tools.py"):

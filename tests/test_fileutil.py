@@ -8,7 +8,12 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.fileutil import atomic_write_bytes, atomic_write_text
-from boxmunge.fileutil import open_shared_lockfile, project_lock, LockError
+import threading
+
+from boxmunge import fileutil
+from boxmunge.fileutil import (
+    LockError, LockWaitTimeout, open_shared_lockfile, project_lock, project_lock_wait,
+)
 from boxmunge.fs_nofollow import mkdir_p_deploy
 from boxmunge.paths import BoxPaths
 
@@ -264,6 +269,69 @@ class TestProjectLock:
             pass  # should not raise
 
 
+class TestProjectLockWait:
+    def _paths(self, tmp_path: Path) -> BoxPaths:
+        paths = BoxPaths(root=tmp_path)
+        paths.state.mkdir(parents=True, exist_ok=True)
+        return paths
+
+    def test_wait_succeeds_when_the_holder_releases(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(fileutil, "LOCK_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(fileutil, "lock_holder", lambda _p: None)
+        paths = self._paths(tmp_path)
+        held, release = threading.Event(), threading.Event()
+
+        def hold() -> None:
+            with project_lock("myapp", paths):
+                held.set()
+                release.wait(5)
+
+        t = threading.Thread(target=hold)
+        t.start()
+        held.wait(5)
+        threading.Timer(0.1, release.set).start()
+        with project_lock_wait("myapp", paths, timeout=5, on_wait=lambda _h: None):
+            pass
+        t.join()
+
+    def test_wait_times_out_naming_the_holder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(fileutil, "LOCK_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(fileutil, "lock_holder", lambda _p: "pid 4242: boxmunge backup")
+        paths = self._paths(tmp_path)
+        with project_lock("myapp", paths):
+            with pytest.raises(LockWaitTimeout, match="pid 4242: boxmunge backup") as e:
+                with project_lock_wait("myapp", paths, timeout=0.05, on_wait=lambda _h: None):
+                    pass
+        assert isinstance(e.value, LockError)
+        assert e.value.holder == "pid 4242: boxmunge backup"
+        assert e.value.project == "myapp"
+        assert e.value.waited_seconds >= 0.05
+
+    def test_on_wait_called_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(fileutil, "LOCK_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(fileutil, "lock_holder", lambda _p: "pid 1")
+        paths = self._paths(tmp_path)
+        seen: list[str | None] = []
+        with project_lock("myapp", paths):
+            with pytest.raises(LockWaitTimeout):
+                with project_lock_wait("myapp", paths, timeout=0.1, on_wait=seen.append):
+                    pass
+        assert seen == ["pid 1"]
+
+    def test_lock_released_after_wait_block(self, tmp_path: Path) -> None:
+        paths = self._paths(tmp_path)
+        with project_lock_wait("myapp", paths, timeout=1, on_wait=lambda _h: None):
+            pass
+        with project_lock("myapp", paths):
+            pass
+
+
 class TestChownDeployErrorClass:
     """Audit I-NEW-1 / C-NEW-4: KeyError silent, OSError logs warning.
 
@@ -407,6 +475,55 @@ class TestDurability:
         with pytest.raises(OSError) as caught:
             durable_rename(tmp, tmp_path / "missing-dir" / "data")
         assert not isinstance(caught.value, RenamedNotSyncedError)
+
+    def _record_link(self, events: list[str]):
+        real_link, real_unlink = os.link, os.unlink
+
+        def link(src, dst) -> None:
+            events.append("link")
+            real_link(src, dst)
+
+        def unlink(path) -> None:
+            events.append("unlink")
+            real_unlink(path)
+
+        return (patch("boxmunge.fileutil.os.link", link),
+                patch("boxmunge.fileutil.os.unlink", unlink))
+
+    def test_durable_link_syncs_the_destination_dir_after_linking(self, tmp_path: Path) -> None:
+        from boxmunge.fileutil import durable_link
+        src, dest = tmp_path / "a" / "rec.json", tmp_path / "b" / "rec.json"
+        src.parent.mkdir()
+        dest.parent.mkdir()
+        src.write_text("x")
+        events: list[str] = []
+        fsync_patch, _ = self._record(events)
+        link_patch, _ = self._record_link(events)
+        with fsync_patch, link_patch:
+            durable_link(src, dest)
+        assert events == ["link", "fsync-dir"]
+        assert os.path.samefile(src, dest)
+
+    def test_durable_link_refuses_an_existing_destination(self, tmp_path: Path) -> None:
+        from boxmunge.fileutil import durable_link
+        src, dest = tmp_path / "src", tmp_path / "dest"
+        src.write_text("new")
+        dest.write_text("old")
+        with pytest.raises(FileExistsError):
+            durable_link(src, dest)
+        assert dest.read_text() == "old"
+
+    def test_durable_unlink_syncs_the_directory_after_unlinking(self, tmp_path: Path) -> None:
+        from boxmunge.fileutil import durable_unlink
+        target = tmp_path / "rec.json"
+        target.write_text("x")
+        events: list[str] = []
+        fsync_patch, _ = self._record(events)
+        _, unlink_patch = self._record_link(events)
+        with fsync_patch, unlink_patch:
+            durable_unlink(target)
+        assert events == ["unlink", "fsync-dir"]
+        assert not target.exists()
 
     def test_mode_and_owner_are_set_before_the_file_is_visible(self, tmp_path: Path) -> None:
         target = tmp_path / "secret.yml"

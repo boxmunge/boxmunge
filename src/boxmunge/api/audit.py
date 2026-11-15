@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from boxmunge.api.principal import Principal
 from boxmunge.api.schema import schema_types
 
 AUDIT_MODE = 0o640
@@ -32,15 +32,31 @@ class AuditError(Exception):
 
 
 class AuditLog:
-    def __init__(self, path: Path) -> None:
+    """*create* is True only for the dev apid and tests. In production the
+    log is made, sealed append-only, by install; a missing one is an error."""
+
+    def __init__(self, path: Path, *, create: bool) -> None:
         self.path = path
+        self._create = create
 
     def append(self, record: dict[str, Any]) -> None:
         """Append one record and fsync it. Raises AuditError on any failure."""
         line = (json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n").encode()
+        flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
+        if self._create:
+            flags |= os.O_CREAT
         try:
-            fd = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, AUDIT_MODE)
             try:
+                fd = os.open(self.path, flags, AUDIT_MODE)
+            except FileNotFoundError:
+                if self._create:
+                    raise
+                raise AuditError(
+                    f"{self.path}: logs/audit.jsonl is missing. "
+                    "Recreate it as root with: boxmunge-server _audit-seal") from None
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise AuditError(f"cannot append to {self.path}: not a regular file")
                 written = os.write(fd, line)
                 if written != len(line):
                     raise AuditError(f"short write to {self.path}: {written} of {len(line)} bytes")
@@ -51,15 +67,16 @@ class AuditLog:
             raise AuditError(f"cannot append to {self.path}: {e}") from e
 
 
-def audit_record(principal: Principal, action: str, outcome: str, *,
+def audit_record(principal_id: str, action: str, outcome: str, *,
                  params: dict[str, Any] | None = None,
-                 code: str | None = None, message: str | None = None) -> dict[str, Any]:
+                 code: str | None = None, message: str | None = None,
+                 job: str | None = None) -> dict[str, Any]:
     """One audit line. *params* must already be redacted."""
     if outcome not in OUTCOMES:
         raise ValueError(f"unknown audit outcome {outcome!r}")
     record: dict[str, Any] = {
         "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-        "principal": principal.id,
+        "principal": principal_id,
         "action": action,
         "outcome": outcome,
         "params": params,
@@ -68,6 +85,8 @@ def audit_record(principal: Principal, action: str, outcome: str, *,
         record["code"] = code
     if message is not None:
         record["message"] = message
+    if job is not None:
+        record["job"] = job
     return record
 
 

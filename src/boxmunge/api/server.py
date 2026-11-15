@@ -76,7 +76,7 @@ class ApiApp:
         """Serve one request; returns (HTTP status, JSON body)."""
         path = urlsplit(target).path
         try:
-            return 200, self._route(method, path, body)
+            return self._route(method, path, body)
         except ActionError as e:
             return e.http_status, error_body(e)
         except Exception as e:
@@ -87,19 +87,21 @@ class ApiApp:
                                 f"log has the traceback.")
             return error.http_status, error_body(error)
 
-    def _route(self, method: str, path: str, body: bytes | None) -> dict[str, Any]:
+    def _route(self, method: str, path: str,
+               body: bytes | None) -> tuple[int, dict[str, Any]]:
         if method == "GET" and path == "/v1/actions":
-            return ok_body({"principal": self._principal.id, "mode": self._mode,
-                            "actions": self._invoker.catalog(self._principal)})
+            return 200, ok_body({"principal": self._principal.id, "mode": self._mode,
+                                 "actions": self._invoker.catalog(self._principal)})
         if method == "POST" and path.startswith(_ACTIONS_PREFIX):
             params, approval = parse_invoke_body(body)
             result = self._invoker.invoke(path[len(_ACTIONS_PREFIX):], params,
                                           self._principal, approval)
-            return ok_body(result.data, action=result.action)
+            # 202: a job action was queued, and data is its job record.
+            return 202 if result.job else 200, ok_body(result.data, action=result.action)
         if method == "GET" and path.startswith(_JOBS_PREFIX) and path.count("/") == 3:
             result = self._invoker.invoke("job.get", {"id": path[len(_JOBS_PREFIX):]},
                                           self._principal)
-            return ok_body(result.data, action=result.action)
+            return 200, ok_body(result.data, action=result.action)
         raise ActionError(ErrorCode.NOT_FOUND,
                           f"No endpoint {method} {path}. docs/PLUGIN_API.md lists the "
                           f"endpoints.")

@@ -119,6 +119,7 @@ MCP still keep their own tables, so adding a command means touching several plac
 | `/opt/boxmunge/state/` | deploy | registry, locks, health, deploy, staging, scan, KEV, container-update, platform-update and OS-update state, and the unconfigured-alerts log throttle |
 | `/opt/boxmunge/upgrade-state/` | root:deploy | active venv slot, probation, blocklist |
 | `/opt/boxmunge/logs/boxmunge.log` | deploy, group-writable | structured JSON-lines operational log, written by root and deploy |
+| `/opt/boxmunge/logs/audit.jsonl` | deploy, 0640, append-only (+a) | the action audit log, one JSON object per line. Root seals it at install (`_audit-seal`) and rotates it monthly to `audit.jsonl.<YYYY-MM-DD>` (12 kept, each append-only); on a host that cannot set the attribute, root's `upgrade-root/audit-append-unsupported` says why, and `upgrade-root/audit-rotating` marks a rotation in progress |
 | `/opt/boxmunge/caddy/` | root:deploy | Caddyfile and generated `sites/*.conf` |
 
 `src/boxmunge/paths.py` is the source of truth for every path.
@@ -188,15 +189,20 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `tui/project_detail.py` | `_caddy_text` | `<p>.conf`, shown (the site cap) | `caddy/sites/` |
 | `compose_up_steps.py` | `sweep_live_scripts` | the generated compose overlay, searched for one string (1 MiB) | `projects/<p>/` |
 | `secrets.py` | `_parse` | a project's `secrets.env`. Cap: 1 MiB | `projects/<p>/` |
-| `api/jobs.py` | `_read` | a job's record and events | `state/jobs/` |
+| `api/jobs.py` | `_read` | a job's record and events; the record under the job's lock, for `JobStore` (the `jobs.*` actions, and root's `jobs-runner` health check, which reads every record in `queue/`) and for `api/job_writer.py` before a claim, finish or recovery (a record mid-move, one file under both names, is read with its two links) | `state/jobs/`, `state/jobs/queue/` |
+| `api/job_retention.py` | `_finished_at` | a finished job's record: its id and `finished_at` | `state/jobs/` |
+| `api/job_events.py` | `_last_seq` | a job's events, so a reopened log numbers on from its last line | `state/jobs/` |
 | `commands/logs.py` | `_show_boxmunge_logs` | `boxmunge.log` and its archives | `logs/` |
 | `commands/quarantine_gate.py` | `lift_after_deploy` | `<p>.conf`, the site a lift republishes (capped at the size of a site file) | `caddy/sites/` |
 
-Of the action-API modules, `api/jobs.py` has a row above (its reads of `state/jobs/`). Two need
+Of the action-API modules, `api/jobs.py` (its reads of `state/jobs/`, `api/job_writer.py`'s included), `api/job_retention.py` and `api/job_events.py` have rows above. Two need
 none: `api/actions/logs.py` reads nothing itself (the operational log goes through
 `commands/log_cmd.parse_log_file` below, the manifest through `load_manifest`), and
 `api/dev/fixture_host.py` (3 reads) serves canned answers from `dev/` of a fixture box, which `apid`
 dev mode accepts only with the fixture marker, never a real box, and which no deploy user writes.
+
+`lock_holder.py` (2 reads) takes `/proc/locks` and `/proc/<pid>/cmdline`, kernel files no deploy user
+writes, to name the process holding a project lock (`fileutil.project_lock_wait`).
 
 A project's YAML files go through `project_yaml.load_project_yaml` (`read_project_bytes` for the
 bytes), as the `caddy.read_override` rules: a git project's `manifest.yml` and `compose.yml` are
@@ -226,6 +232,7 @@ These open a no-follow, non-blocking descriptor themselves (`open_regular_nofoll
 | `commands/upgrade_offline.py` | `_read` |
 | `commands/userns_cmd.py` | `_held_on` |
 | `health_checks/userns.py` | `_alert_state` |
+| `api/audit_seal.py` | `open_log` (`logs/audit.jsonl` and its archives `audit.jsonl.<YYYY-MM-DD>`, for their attribute: seal, rotation and the `audit-log` health check), `read_unsupported` (`upgrade-root/audit-append-unsupported`, root-only, refused unless root's; 4 KiB) |
 
 An uploaded bundle in `inbox/` is the other deploy-written input. `bundle.inspect_bundle` is its
 one bounded reader, shared by reception and extraction (the limits are at the top of `bundle.py`).
@@ -253,11 +260,13 @@ added again under the same name reuses them. Create a new lock under `state/` wi
 | `state/secrets-locks/.host.lock` | `SecretsFile.locked` | writes of the host secrets file | kept for good |
 | `state/.registry.lock` | `fileutil.registry_lock` | read, change and save of `projects.txt` | kept for good |
 | `state/.cve-fleet.lock` | `cve.fleet_lock.fleet_lock`: the KEV watch doesn't wait (skips its tick); the fleet `security scan` blocks until it is free; the watch service's 1h `TimeoutStartSec` bounds that | one fleet-wide CVE run at a time; the urgent autofix queue runs outside it, in `boxmunge-autofix.service` (`commands/autofix_urgent.py` takes each project's lock in turn and leaves a busy one for the next run) | kept for good |
+| `state/jobs/<id>.lock` | `api/job_writer.py`, exclusive (blocks; each step is a few small writes), and `JobStore` reads, shared (blocks) | publish, claim, finish and the finishing move of one job's record, and every read of that record | kept with the job's record |
 | `state/.caddy.lock` | `docker.caddy_config_lock` | writing Caddy site config and reloading | kept for good |
 | `state/.legacy-stages.lock` | nothing since 0.11.7: `legacy-stage` took it, up to 0.11.6 | (the legacy-stage records) | left on a box where an older release made it |
 | `state/container-updates/.lock` | `commands/container_update_cmd.py` (doesn't wait) | one container-update run at a time | kept for good |
 | `logs/.<log name>.lock` | `log_rotation` (doesn't wait) | rotating that log | kept for good |
 | `upgrade-root/upgrade.lock` | the upgrade shim, `upgrade_state.upgrade_lock` (doesn't wait: `UpgradeInProgress`) | one platform upgrade at a time | kept for good |
+| `state/jobs/gate.lock` | shared by every running job, from before its claim to after its finish (`api/job_gate.job_gate`, through `fileutil.open_shared_lockfile`); exclusively by the upgrade shim, after `upgrade-root/upgrade.lock`, for an upgrade's whole run (`acquire_lock` and `take_jobs_gate` in `scripts/boxmunge-upgrade.d/locks.sh`: it waits up to 60 minutes for running jobs; `check-probation` takes it, `take_jobs_gate skip`, only right before a step that changes a slot or the units, never across its health run; the readiness check doesn't take it). The shim opens it read-only for the `flock` alone and never reads it: `state/` and `jobs/` without following a link, the gate no-follow and non-blocking, a regular file only. A missing `jobs/` (deploy:deploy 0750) or gate (deploy:deploy 0660) is made as install makes them. `check-probation` skips while jobs run, or while an upgrade waits for them, without feeding the `lock-skips` count behind the held-lock alert | running jobs against a platform upgrade: no job runs while an upgrade does, and an upgrade waits for running jobs | kept for good |
 | `upgrade-state/upgrade.lock` | nothing since 0.12: shims up to 0.11.11 took it with the one above | (upgrades started by a shim from 0.10.1 or earlier) | left on a box where an older shim made it |
 | `state/.cve-grace.lock` | nothing: retired | (the v0.6 grace window) | deleted by the CVE scan where an old release left it |
 

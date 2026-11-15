@@ -152,7 +152,7 @@ def _write_jobs(paths: BoxPaths, now: datetime) -> None:
         created = now - timedelta(hours=hours)
         write_json(paths.jobs_dir / f"{job_id}.json", {
             "id": job_id, "action": action, "principal": principal, "project": project,
-            "state": state, "created_at": format_utc(created),
+            "state": state, "params": "{}", "worker": None, "created_at": format_utc(created),
             "started_at": format_utc(created + timedelta(seconds=5)),
             "finished_at": format_utc(created + timedelta(seconds=90)), "error": error,
             "result": None,
