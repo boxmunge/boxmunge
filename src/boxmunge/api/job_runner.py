@@ -148,9 +148,21 @@ class _Runner:
                       f"no more jobs and exits once its {len(self._children)} running "
                       f"worker(s) finish", self._paths,
                       detail={"traceback": traceback.format_exc()})
-            while self._children:
-                self._reap(timeout=None)
+            self._drain()
             raise
+
+    def _drain(self) -> None:
+        """Wait for every running worker. A worker's exit whose follow-up
+        fails (failing its unclaimed job, say) is logged, and the wait goes
+        on: exiting would have systemd stop the others mid-job."""
+        while self._children:
+            try:
+                self._reap(timeout=None)
+            except Exception as e:
+                log_error(COMPONENT, f"while the job runner waited for its workers to finish, "
+                          f"handling a worker's exit failed: {type(e).__name__}: {e}; it "
+                          f"still waits for {len(self._children)} running worker(s)",
+                          self._paths, detail={"traceback": traceback.format_exc()})
 
     def _loop(self) -> int:
         while True:

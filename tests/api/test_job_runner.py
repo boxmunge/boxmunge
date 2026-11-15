@@ -408,6 +408,35 @@ def test_an_error_mid_run_waits_for_running_workers_then_raises(box, monkeypatch
     assert any("running worker" in e for e in box.errors)
 
 
+def test_a_failed_follow_up_while_draining_is_logged_and_the_drain_goes_on(box, monkeypatch):
+    first, crashing, last = box.publish(0), box.publish(1, project="blog"), box.publish(2, None)
+    box.scripts[first] = work(0.05)
+
+    def crash_late(_box: Box, _job_id: str) -> int:
+        time.sleep(0.3)
+        return 1  # died before its claim
+    box.scripts[crashing] = crash_late
+    box.scripts[last] = work(0.6)
+    real = job_runner.recover_queue
+    calls: list[int] = []
+
+    def failing(paths, alive):
+        calls.append(1)
+        if len(calls) > 1:
+            raise OSError("queue/ cannot be listed")
+        return real(paths, alive)
+
+    def follow_up_fails(_paths, job_id, _code):
+        raise OSError(f"cannot fail {job_id}")
+
+    monkeypatch.setattr(job_runner, "recover_queue", failing)
+    monkeypatch.setattr(job_runner, "_fail_if_unclaimed", follow_up_fails)
+    with pytest.raises(OSError, match="cannot be listed"):
+        box.run()
+    assert box.record(last)["state"] == "succeeded"  # still waited for
+    assert any(f"cannot fail {crashing}" in e for e in box.errors)
+
+
 def test_a_lost_job_another_runner_failed_first_is_left_to_it(box, monkeypatch):
     job_id = _lost_running(box, 0)
     theirs = {"code": "worker_lost", "message": "failed by the other runner"}
