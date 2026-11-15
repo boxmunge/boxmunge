@@ -166,10 +166,9 @@ Operating safely:
   - QUARANTINED or STILL_RUNNING_AT_RISK in any output: stop and follow
     agent-help cve-incident. AWAITING_FIX needs nothing: no fix yet, not
     exploited, the site stays up.
-  - security.posture is what a project accepts CVE downtime for: balanced
-    (default) and strict only an actively exploited (CISA KEV) CVE, strict
-    alerting from Medium and giving an available fix 7 days before
-    quarantine; paranoid also unexploited risk. -> agent-help cve
+  - security.posture = CVE downtime accepted: balanced (default) and
+    strict only for an exploited (CISA KEV) CVE; paranoid unexploited too.
+    strict alerts from Medium, 7 days to apply a fix. -> agent-help cve
 
 Deploying a bundle-based project (the recommended path):
   1. Build locally:  boxmunge bundle ./myproject
