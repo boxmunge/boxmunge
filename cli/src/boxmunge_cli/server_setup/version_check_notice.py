@@ -9,7 +9,7 @@ CLI is released separately and cannot import the server.
 NOTICE = """\
 boxmunge's version-check service (boxmunge.dev)
 
-What it sends: every 6 hours, and on a plain `upgrade`, the box asks for
+What it sends: every 4 hours, and on a plain `upgrade`, the box asks for
 /v1/check?v=<installed version> with User-Agent boxmunge/<installed version>.
 When an upgrade fails, it also reports the version it tried, the version it
 came from, the step that failed and a short reason. No hostname, machine ID or

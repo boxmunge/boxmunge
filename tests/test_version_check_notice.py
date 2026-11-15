@@ -38,7 +38,7 @@ def test_cli_copy_is_identical():
 def test_notice_states_the_documented_facts():
     ops = _flat((ROOT / "docs/on-server/OPERATIONS.md").read_text())
     section = ops.split("### What boxmunge sends home")[1]
-    for fact in ("every 6 hours", "/v1/check?v=<installed version>", "boxmunge/<installed version>",
+    for fact in ("every 4 hours", "/v1/check?v=<installed version>", "boxmunge/<installed version>",
                  "IPv4 /24, IPv6 /48", "90 days", "not anonymous", "hostname, machine ID or project names",
                  "upgrade --target X.Y.Z"):
         assert fact in _flat(NOTICE) and fact in section, fact
