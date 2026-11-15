@@ -1,0 +1,304 @@
+# SPDX-License-Identifier: Apache-2.0
+"""The autofix runner: scan, probe, build, scan, swap, health, record, and
+an unconditional rollback on any failure.
+
+Docker is faked at the runner's own seams (the deployed inventory, the
+release-image scan, the builder, the pins, the recreate and the health
+wait): one fake box keeps the containers (with their IDs), the images and
+the pins, so each test can see exactly what a run changed. The patch
+builder, the pins and the recreate have their own tests on real Docker.
+"""
+from __future__ import annotations
+
+import itertools
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+from boxmunge.commands.security_scan_core import ProjectScan
+from boxmunge.commands.security_scan_inputs import ScanTarget
+from boxmunge.cve import autofix_plan, autofix_run
+from boxmunge.cve.autofix_build import NotPatchable, Patchable, PatchedImage
+from boxmunge.cve.autofix_record import PackageChange, PatchRecord, read_records, write_records
+from boxmunge.cve.autofix_run import autofix_project_locked
+from boxmunge.cve.policy_types import Disposition, FindingDisposition, ProjectDecision
+from boxmunge.cve.scanner import PkgClass, Severity
+from boxmunge.deployed_inventory import DeployedInventory, DeployedService
+from boxmunge.docker_containers import ProjectContainer
+from boxmunge.docker_run import DockerError
+from boxmunge.fileutil import project_lock
+from boxmunge.image_pins import ImagePin, pin_ref
+from tests.test_commands.cve_helpers import finding
+
+NAME = "shop"
+CVE = "CVE-2026-1111"
+WEB, DB = "sha256:" + "a" * 64, "sha256:" + "d" * 64
+
+
+def _fd(cve: str = CVE, *, pkg: str = "openssl", fix: str | None = "3.0.9",
+        disposition: Disposition = Disposition.QUARANTINE,
+        pkg_class: PkgClass = PkgClass.OS) -> FindingDisposition:
+    f = replace(finding(cve, pkg=pkg, fix=fix), pkg_class=pkg_class)
+    return FindingDisposition(f, Severity.CRITICAL, 0, Severity.CRITICAL, disposition, None, "")
+
+
+class Box:
+    """A fake production: {service: (container ID, image ID)}, the images a
+    scan finds findings in, and the pins."""
+
+    def __init__(self, monkeypatch) -> None:
+        self.release = {"web": WEB, "db": DB}
+        self.containers = {svc: (f"c-{svc}-0", img) for svc, img in self.release.items()}
+        self.findings: dict[str, list[FindingDisposition]] = {WEB: [_fd()], DB: []}
+        self.patched_findings: dict[str, list[FindingDisposition]] = {}
+        self.pins: tuple[ImagePin, ...] = ()
+        self.refs: dict[str, str] = {}
+        self.built: list[tuple[str, str, dict]] = []
+        self.removed: list[str] = []
+        self.recreates = 0
+        self.build_error: Exception | None = None
+        self.unhealthy_on_patched = False
+        self.probe_result: Patchable | NotPatchable = Patchable("apk", "")
+        self.on_health = None
+        self.log: list[tuple[str, str, dict]] = []
+        self._ids = itertools.count(1)
+        for name, fake in [("load_deployed_inventory", self._inventory),
+                           ("scan_release_images", self._scan),
+                           ("load_kev", lambda paths: None)]:
+            monkeypatch.setattr(autofix_plan, name, fake)
+        for name, fake in [("load_project_meta", lambda paths, project: object()),
+                           ("probe", lambda ref: self.probe_result),
+                           ("build_patched", self._build),
+                           ("remove_patched", lambda pin: self.removed.append(pin.ref)),
+                           ("read_pins", lambda paths, project: self.pins),
+                           ("write_pins", self._write_pins),
+                           ("clear_pins", self._clear_pins),
+                           ("recreate_project", self._recreate),
+                           ("wait_healthy", self._wait_healthy),
+                           ("log_operation", self._logger("op")),
+                           ("log_error", self._logger("error"))]:
+            monkeypatch.setattr(autofix_run, name, fake)
+
+    def _logger(self, level):
+        def log(component, message, paths, project=None, detail=None):
+            self.log.append((level, message, detail or {}))
+        return log
+
+    def _inventory(self, project_dir, files, project):
+        return DeployedInventory(project, {svc: DeployedService(
+            svc, f"example/{svc}:1", False, True, (ProjectContainer(
+                f"{project}-{svc}-1", svc, img, (), True, "healthy", False, None, "always"),))
+            for svc, (_cid, img) in self.containers.items()})
+
+    def _scan(self, paths, target, meta, starts, unnamed, kev):
+        decisions, targets, ids = [], [], {}
+        for svc, start in starts.items():
+            image = self.refs.get(start.scan_ref, start.scan_ref)
+            found = self.findings[image] if image in self.findings \
+                else self.patched_findings.get(svc, [])
+            ids[svc] = image
+            targets.append(ScanTarget(svc, image))
+            decisions.append(ProjectDecision(NAME, image, tuple(found), False, False,
+                                             datetime.now(timezone.utc)))
+        return (ProjectScan(NAME, "balanced", False, tuple(decisions), ()), ids, targets, None)
+
+    def _build(self, project, service, base, packages, patchability):
+        if self.build_error is not None:
+            raise self.build_error
+        image_id = "sha256:" + f"{next(self._ids):x}".rjust(64, "e")
+        ref = pin_ref(project, service, image_id)
+        self.refs[ref] = image_id
+        self.built.append((service, base, dict(packages)))
+        return PatchedImage(ref, image_id, {p: "3.0.9-r0" for p in packages})
+
+    def _write_pins(self, paths, project, pins):
+        self.pins = tuple(sorted(pins, key=lambda p: p.service))
+
+    def _clear_pins(self, paths, project):
+        self.pins = ()
+
+    def _recreate(self, paths, project, files, *, component):
+        self.recreates += 1
+        pinned = {p.service: p.image_id for p in self.pins}
+        for svc, (cid, img) in list(self.containers.items()):
+            want = pinned.get(svc, self.release[svc])
+            if want != img:
+                self.containers[svc] = (f"c-{svc}-{next(self._ids)}", want)
+
+    def _wait_healthy(self, project, services, one_shots=frozenset()):
+        if self.on_health is not None:
+            self.on_health()
+        bad = [svc for svc, (_c, img) in self.containers.items()
+               if self.unhealthy_on_patched and img not in self.release.values()]
+        return (not bad, bad)
+
+    def running(self) -> dict[str, str]:
+        return {svc: img for svc, (_c, img) in self.containers.items()}
+
+
+@pytest.fixture
+def box(monkeypatch) -> Box:
+    return Box(monkeypatch)
+
+
+def _run(paths, findings=None, *, deadline=None, trigger="urgent"):
+    with project_lock(NAME, paths):
+        return autofix_project_locked(
+            paths, NAME, findings if findings is not None else [_fd()], trigger=trigger,
+            deadline=deadline or datetime.now(timezone.utc) + timedelta(minutes=30))
+
+
+def test_success_writes_pins_and_records(paths, box) -> None:
+    outcome = _run(paths)
+    assert (outcome.ok, outcome.failed_step) == (True, None), outcome.reason
+    (svc, base, packages), = box.built
+    assert (svc, base, packages) == ("web", WEB, {"openssl": "3.0.9"})
+    (pin,) = box.pins
+    assert pin.service == "web" and box.running()["web"] == pin.image_id
+    assert box.running()["db"] == DB
+    (record,) = outcome.records
+    assert (record.service, record.base_digest, record.patched_ref, record.cves,
+            record.trigger) == ("web", WEB, pin.ref, (CVE,), "urgent")
+    assert record.packages == (PackageChange("openssl", "1", "3.0.9-r0"),)
+    assert read_records(paths, NAME) == outcome.records
+    assert box.removed == []
+    (start_level, start, start_detail), (level, done, detail) = box.log
+    assert start_level == "op" and NAME in start and CVE in start
+    assert start_detail["cves"] == [CVE]
+    assert level == "op" and "web" in done and CVE in done
+    assert (detail["services"], detail["step"], detail["cves"]) == (["web"], None, [CVE])
+
+
+def test_build_failure_leaves_service_running(paths, box) -> None:
+    """The distro mirror is unreachable: the build fails with the package
+    manager's stderr tail, and the running containers are untouched."""
+    box.build_error = DockerError(
+        "Command failed (exit 1): docker build --no-cache -t x -\n"
+        "WARNING: fetching https://dl-cdn.alpinelinux.org/alpine/v3.19/main: "
+        "temporary error (try again later)")
+    before = dict(box.containers)
+    outcome = _run(paths)
+    assert (outcome.ok, outcome.failed_step) == (False, "build")
+    assert "temporary error (try again later)" in outcome.reason
+    assert box.containers == before          # the same container IDs, same images
+    assert box.recreates == 0 and box.pins == () and box.removed == []
+    assert read_records(paths, NAME) == ()
+    level, message, detail = box.log[-1]
+    assert level == "error" and detail["step"] == "build" and detail["services"] == ["web"]
+    assert "temporary error" in detail["reason"]
+
+
+def test_health_failure_rolls_back_even_with_leave_broken(paths, box) -> None:
+    """The runner never reads the container-update strategy: whatever it is
+    (leave_broken is the default), a patch that fails its health check is
+    rolled back, the previous pins restored exactly."""
+    other = ImagePin("db", pin_ref(NAME, "db", "sha256:" + "f" * 64), "sha256:" + "f" * 64,
+                     "autofix")
+    box.pins = (other,)
+    box.release["db"] = other.image_id   # db already runs its earlier patch
+    box.containers["db"] = ("c-db-0", other.image_id)
+    box.findings[other.image_id] = []
+    write_records(paths, NAME, [PatchRecord(
+        NAME, "db", "example/db:1", DB, other.ref, other.image_id,
+        (PackageChange("zlib", "1.2", "1.3"),), ("CVE-2026-0002",),
+        datetime.now(timezone.utc), "nightly")])
+    box.unhealthy_on_patched = True
+    outcome = _run(paths)
+    assert (outcome.ok, outcome.failed_step) == (False, "health")
+    assert "web" in outcome.reason
+    assert box.pins == (other,)
+    assert box.running() == {"web": WEB, "db": other.image_id}
+    assert box.recreates == 2
+    (built_ref,) = [ref for ref in box.refs]
+    assert box.removed == [built_ref]
+    assert [r.service for r in read_records(paths, NAME)] == ["db"]
+
+
+def test_budget_exceeded_rolls_back_with_step_budget(paths, box, monkeypatch) -> None:
+    """The deadline passes while the health wait runs: the wait finishes,
+    then the run rolls back."""
+    clock = [datetime.now(timezone.utc)]
+    monkeypatch.setattr(autofix_run, "_now", lambda: clock[0])
+    deadline = clock[0] + timedelta(minutes=30)
+
+    def late() -> None:
+        clock[0] = deadline + timedelta(seconds=1)
+    box.on_health = late
+    outcome = _run(paths, deadline=deadline)
+    assert (outcome.ok, outcome.failed_step) == (False, "budget")
+    assert box.pins == () and box.running() == {"web": WEB, "db": DB}
+    assert len(box.removed) == 1 and read_records(paths, NAME) == ()
+
+
+def test_scan_still_finding_cve_fails_at_scan(paths, box) -> None:
+    box.patched_findings["web"] = [_fd(disposition=Disposition.IGNORED_FIXED)]
+    before = dict(box.containers)
+    outcome = _run(paths)
+    assert (outcome.ok, outcome.failed_step) == (False, "scan")
+    assert CVE in outcome.reason and "still in openssl" in outcome.reason
+    assert box.containers == before and box.recreates == 0 and box.pins == ()
+    assert len(box.removed) == 1
+
+
+def test_new_quarantine_level_finding_fails_at_scan(paths, box) -> None:
+    box.patched_findings["web"] = [_fd("CVE-2026-9999", pkg="libcrypto3")]
+    outcome = _run(paths)
+    assert outcome.failed_step == "scan" and "CVE-2026-9999" in outcome.reason
+
+
+def test_not_patchable_fails_at_probe(paths, box) -> None:
+    box.probe_result = NotPatchable("no shell or package manager in the image")
+    outcome = _run(paths)
+    assert outcome.failed_step == "probe" and "no shell" in outcome.reason
+    assert box.built == [] and box.recreates == 0
+
+
+def test_language_package_fails_at_probe(paths, box) -> None:
+    box.findings[WEB] = [_fd(pkg="requests", pkg_class=PkgClass.LANG)]
+    outcome = _run(paths)
+    assert outcome.failed_step == "probe" and "not an OS package" in outcome.reason
+
+
+def test_pinned_service_is_patched_again_from_its_records_base(paths, box) -> None:
+    old = "sha256:" + "b" * 64
+    pin = ImagePin("web", pin_ref(NAME, "web", old), old, "autofix")
+    box.pins, box.release["web"] = (pin,), old
+    box.containers["web"] = ("c-web-0", old)
+    box.findings[old] = [_fd()]
+    write_records(paths, NAME, [PatchRecord(
+        NAME, "web", "example/web:1", WEB, pin.ref, old, (PackageChange("zlib", "1.2", "1.3"),),
+        ("CVE-2026-0002",), datetime.now(timezone.utc), "nightly")])
+    outcome = _run(paths)
+    assert outcome.ok, outcome.reason
+    assert box.built == [("web", WEB, {"openssl": "3.0.9", "zlib": "1.3"})]
+    (record,) = outcome.records
+    assert record.cves == ("CVE-2026-0002", CVE) and record.base_digest == WEB
+
+
+def test_unexpected_error_rolls_back_and_raises(paths, box, monkeypatch) -> None:
+    def broken(*a, **k):
+        raise KeyError("a bug")
+    monkeypatch.setattr(autofix_run, "wait_healthy", broken)
+    with pytest.raises(KeyError):
+        _run(paths)
+    assert box.pins == () and box.running() == {"web": WEB, "db": DB}
+    assert len(box.removed) == 1
+
+
+def test_rollback_failure_is_added_to_the_reason(paths, box, monkeypatch) -> None:
+    box.unhealthy_on_patched = True
+
+    def refuses(pin):
+        raise DockerError("image is in use by a container")
+    monkeypatch.setattr(autofix_run, "remove_patched", refuses)
+    outcome = _run(paths)
+    assert outcome.failed_step == "health"
+    assert "rollback could not remove the patched image" in outcome.reason
+
+
+def test_refuses_without_the_project_lock(paths, box) -> None:
+    with pytest.raises(RuntimeError, match="project lock"):
+        autofix_project_locked(paths, NAME, [_fd()], trigger="nightly",
+                               deadline=datetime.now(timezone.utc) + timedelta(minutes=5))
+    assert box.built == [] and box.log == []
