@@ -6,8 +6,9 @@ and result schemas, a tier, the locks it needs, and whether it runs as a
 job. Only the API daemon's catalog (GET /v1/actions) is derived from the
 registry today: the CLI's command table, the deploy shell's allowlist and
 the MCP tool list are still kept by hand. An Action's `cli` and `mcp`
-fields are there for deriving those three, and nothing in src/ reads them
-yet.
+fields are there for deriving those three. Today only `cli` is read: a
+refusal for an x-tier parameter names it as the command the operator runs
+over SSH (param_tiers).
 
 A handler is a plain function (params, ctx) -> dict. It never prints and
 never calls sys.exit; it raises ActionError to refuse or fail.

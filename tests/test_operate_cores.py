@@ -5,15 +5,12 @@ lock and a ``*_locked`` core that assumes it is held. A caller that already
 holds the lock (promote composing deploy and unstage, the job worker of the
 action API) runs cores directly. Here each core runs a real operation with
 ``project_lock`` replaced everywhere by a function that records the attempt
-and raises, so a core reaching for the lock fails the test even if the
-error is swallowed.
+and raises (lock_attempts, tests/conftest_locks.py), so a core reaching for
+the lock fails the test even if the error is swallowed.
 """
 from __future__ import annotations
 
-import sys
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 import boxmunge.commands.backup_cmd as backup_cmd
 import boxmunge.commands.deploy as deploy
@@ -32,7 +29,6 @@ import boxmunge.commands.unstage_cmd as unstage_cmd
 import boxmunge.commands.upgrade_steps as upgrade_steps
 import boxmunge.container_update as container_update
 from tests.test_commands.cve_helpers import render_site
-from boxmunge import fileutil
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.pause import is_paused, write_paused_state
 from boxmunge.project_registry import add_project
@@ -46,27 +42,6 @@ from tests.stage_helpers import V1, V2, staging_docker_off as _docker
 from tests.test_lifecycle_locks import _cu_target, _setup
 
 NAME = "myapp"
-
-
-@pytest.fixture
-def lock_attempts(monkeypatch) -> list[str]:
-    """Replace project_lock in every loaded boxmunge module."""
-    attempts: list[str] = []
-
-    def forbidden(name, paths):
-        attempts.append(name)
-        raise AssertionError(f"an operate core took the project lock for {name!r}")
-
-    real = fileutil.project_lock
-    patched = []
-    for module in list(sys.modules.values()):
-        if (getattr(module, "__name__", "").startswith("boxmunge")
-                and getattr(module, "project_lock", None) is real):
-            patched.append(module.__name__)
-            monkeypatch.setattr(module, "project_lock", forbidden)
-    assert "boxmunge.commands.deploy" in patched and "boxmunge.fileutil" in patched
-    yield attempts
-    assert attempts == [], "a core acquired the project lock"
 
 
 def _deployed_v1(paths) -> None:
