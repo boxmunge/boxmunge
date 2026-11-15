@@ -167,7 +167,7 @@ def test_non_observe_call_is_audited_with_secrets_redacted(paths) -> None:
 def test_unwritable_audit_log_refuses_and_runs_nothing(paths) -> None:
     calls = Calls()
     invoker = Invoker(_registry(_action("secret.set", Tier.GOVERN, handler=calls.handler())),
-                      paths, StubHost(), AuditLog(paths.root / "no-such-dir" / "audit.jsonl"))
+                      paths, StubHost(), AuditLog(paths.root / "no-such-dir" / "audit.jsonl", create=True))
     with pytest.raises(ActionError) as excinfo:
         invoker.invoke("secret.set", {}, OPERATOR)
     assert excinfo.value.code is ErrorCode.UNAVAILABLE
@@ -263,7 +263,7 @@ def test_lost_outcome_record_is_logged_and_alerted(paths, monkeypatch) -> None:
     monkeypatch.setattr("boxmunge.api.invoke.notify",
                         lambda paths, title, body, **kw: alerts.append((title, body)))
     invoker = Invoker(_registry(_action("secret.set", Tier.GOVERN)), paths, StubHost(),
-                      FailsAfterFirst(paths.audit_log))
+                      FailsAfterFirst(paths.audit_log, create=True))
     assert invoker.invoke("secret.set", {}, OPERATOR).data == {"ok": True}
     assert alerts and "disk full" in alerts[0][1]
     assert "could not record the outcome" in paths.log_file.read_text()

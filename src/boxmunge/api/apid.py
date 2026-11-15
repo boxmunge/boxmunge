@@ -39,7 +39,7 @@ def build_dev_app(root: Path, plugin: str) -> ApiApp:
     require_fixture(root)
     paths = BoxPaths(root.resolve())
     invoker = Invoker(build_registry(), paths, FixtureHost(paths),
-                      AuditLog(paths.audit_log), served_tiers=DEV_SERVED_TIERS)
+                      AuditLog(paths.audit_log, create=True), served_tiers=DEV_SERVED_TIERS)
     return ApiApp(invoker, Principal.plugin(plugin, Tier.OBSERVE), mode="dev")
 
 
