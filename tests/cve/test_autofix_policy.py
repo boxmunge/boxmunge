@@ -41,7 +41,7 @@ def _f(*, sev: Severity = Severity.HIGH, fix: str | None = "2", cvss: float | No
         cve_id="CVE-2026-0001", severity=sev, package="openssl", installed_version="1",
         fixed_version=fix, title="", primary_url=None, attack_vector=av,
         status=VulnStatus.AFFECTED, vendor_severities={"debian": sev},
-        pkg_class=pkg_class, cvss_score=cvss,
+        pkg_class=pkg_class, cvss_score=cvss, pkg_type="debian",
     )
 
 
