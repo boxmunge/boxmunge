@@ -5,6 +5,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from boxmunge.cve.autofix_record import clear_autofixing, clear_records
 from boxmunge.image_pins import forget_pins
 from boxmunge.log import log_error, log_warning
 from boxmunge.manifest import ManifestError, load_manifest
@@ -78,10 +79,13 @@ def record_deploy_state(
 def clear_release_overrides(paths: BoxPaths, project_name: str) -> None:
     """Production runs the release just recorded (a redeploy of the same
     one included), from its own images: what ran on top of the release
-    before goes, its image pins. The switch rendered its overlay without
-    them already, so only the record goes (image_pins.forget_pins): nothing
-    is rendered and Docker is not asked."""
+    before goes, its image pins and the patch records and marker autofix
+    kept for them. The switch rendered its overlay without the pins
+    already, so only the records go (image_pins.forget_pins): nothing is
+    rendered and Docker is not asked."""
     forget_pins(paths, project_name)
+    clear_records(paths, project_name)
+    clear_autofixing(paths, project_name)
 
 
 def snapshot_wanted(manifest: dict) -> bool:

@@ -22,3 +22,15 @@ def test_delete_removes_pins_fix_deadlines_and_the_start_alert_throttle(
             patch("boxmunge.commands.project_delete_cmd.caddy_reload"):
         assert delete_locked("myapp", paths, force=False) == 0
     assert [p for p in left if p.exists()] == []
+
+
+def test_delete_removes_autofix_records_and_marker(paths, fake_containers) -> None:
+    prod_and_stage(paths)
+    left = [paths.project_autofix_records("myapp"), paths.project_autofix_marker("myapp")]
+    for path in left:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n")
+    with patch("boxmunge.commands.project_delete_cmd.compose_down"), \
+            patch("boxmunge.commands.project_delete_cmd.caddy_reload"):
+        assert delete_locked("myapp", paths, force=False) == 0
+    assert [p for p in left if p.exists()] == []

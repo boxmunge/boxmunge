@@ -49,6 +49,8 @@ def project_state_files(paths: BoxPaths, name: str) -> list[Path]:
         paths.project_scan_state(name),
         paths.project_fix_grace(name),
         paths.project_image_pins(name),
+        paths.project_autofix_records(name),
+        paths.project_autofix_marker(name),
         record_path(paths, name),
         paths.project_backup_state(name),
         paths.container_update_target_state(name),

@@ -258,6 +258,16 @@ class BoxPaths:
         name = _checked(name)
         return self.state / "image_pins" / f"{name}.json"
 
+    def project_autofix_records(self, name: str) -> Path:
+        """The patches autofix applied to a project (cve.autofix_record)."""
+        name = _checked(name)
+        return self.state / "autofix" / f"{name}.json"
+
+    def project_autofix_marker(self, name: str) -> Path:
+        """Present while autofix is patching a project (cve.autofix_record)."""
+        name = _checked(name)
+        return self.state / "autofix" / f"{name}.active"
+
     def project_fix_grace(self, name: str) -> Path:
         """Strict's fix deadlines for a project (cve.fix_grace)."""
         name = _checked(name)

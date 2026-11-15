@@ -40,8 +40,8 @@ from boxmunge.blocked_update import read_blocked_state
 from boxmunge.commands.security_scan_inputs import project_suppressions_path
 from boxmunge.container_update_targets import read_target_state
 from boxmunge.cve import (
-    breaker, exploited, fix_grace, kev, kev_enisa, kev_source_history, kev_withdrawals, quarantine,
-    scan_state, suppressions,
+    autofix_record, breaker, exploited, fix_grace, kev, kev_enisa, kev_source_history,
+    kev_withdrawals, quarantine, scan_state, suppressions,
 )
 from boxmunge.discovery_freshness import stale_discovery_warning
 from boxmunge.health_checks.backup_freshness import check_backup_freshness
@@ -131,6 +131,13 @@ _PINS = {"version": 1, "pins": [{"service": "web", "ref": _PIN_REF,
                                  "image_id": "sha256:" + "a" * 64, "reason": "autofix"}]}
 
 
+_PATCHES = {"version": 1, "records": [{
+    "project": P, "service": "web", "base_ref": "nginx:1.27", "base_digest": "sha256:" + "b" * 64,
+    "patched_ref": _PIN_REF, "patched_image_id": "sha256:" + "a" * 64,
+    "packages": [{"name": "openssl", "before": "1", "after": "2"}], "cves": ["CVE-1"],
+    "created_at": "2026-10-14T01:00:00+00:00", "trigger": "urgent"}]}
+
+
 def _pinned_start(paths: BoxPaths) -> Any:
     """What a production start of web finds wrong with its pinned image."""
     pins = paths.project_image_pins(P)
@@ -182,6 +189,11 @@ READERS = [
            {"entries": [{"cve_id": "CVE-1", "package": "openssl", "first_seen": ISO,
                          "warned_at": None}]},
            lambda p: fix_grace.FixGrace.load(p, P).first_seen(("CVE-1", "openssl"))),
+    Reader("autofix_record", lambda p: p.project_autofix_records(P), _PATCHES,
+           lambda p: autofix_record.read_records(p, P)),
+    Reader("autofix_marker", lambda p: p.project_autofix_marker(P),
+           {"started_at": ISO, "cves": ["CVE-1"], "downtime": False},
+           lambda p: autofix_record.read_autofixing(p, P)),
     Reader("image_pins", lambda p: p.project_image_pins(P), _PINS,
            lambda p: image_pins.read_pins(p, P)),
     # The overlay a pinned start runs; one it cannot read is the refusal.
