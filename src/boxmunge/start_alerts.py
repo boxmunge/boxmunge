@@ -13,6 +13,8 @@ from boxmunge.fs_nofollow import mkdir_p_deploy, read_text_nofollow
 from boxmunge.log import log_warning
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from boxmunge.paths import BoxPaths
 
 # A persistently tampered project is checked on every timer tick (container
@@ -23,9 +25,14 @@ if TYPE_CHECKING:
 _ALERT_INTERVAL = timedelta(hours=24)
 
 
+def record_path(paths: BoxPaths, project_name: str) -> Path:
+    """The project's refused-start alert throttle."""
+    return paths.state / "start-refused" / f"{project_name}.json"
+
+
 def alerted_recently(paths: BoxPaths, project_name: str, reason: str, now: datetime,
                      within: timedelta = _ALERT_INTERVAL) -> bool:
-    path = paths.state / "start-refused" / f"{project_name}.json"
+    path = record_path(paths, project_name)
     key = hashlib.sha256(reason.encode()).hexdigest()[:16]
     try:
         doc = json.loads(read_text_nofollow(path))
@@ -39,7 +46,7 @@ def alerted_recently(paths: BoxPaths, project_name: str, reason: str, now: datet
 
 
 def record(paths: BoxPaths, project_name: str, reason: str, now: datetime) -> None:
-    path = paths.state / "start-refused" / f"{project_name}.json"
+    path = record_path(paths, project_name)
     key = hashlib.sha256(reason.encode()).hexdigest()[:16]
     mkdir_p_deploy(path.parent)
     try:

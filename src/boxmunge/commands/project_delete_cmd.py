@@ -26,6 +26,7 @@ from boxmunge.paths import BoxPaths
 from boxmunge.project_alerts import ALERT_KINDS, alert_state
 from boxmunge.project_registry import is_registered, remove_project as registry_remove
 from boxmunge.staged_release import has_slot, refuse_planted, staging_target
+from boxmunge.start_alerts import record_path
 
 
 def project_state_files(paths: BoxPaths, name: str) -> list[Path]:
@@ -46,6 +47,9 @@ def project_state_files(paths: BoxPaths, name: str) -> list[Path]:
         paths.project_paused_state(name),
         paths.project_quarantine_state(name),
         paths.project_scan_state(name),
+        paths.project_fix_grace(name),
+        paths.project_image_pins(name),
+        record_path(paths, name),
         paths.project_backup_state(name),
         paths.container_update_target_state(name),
         *(alert_state(paths, name, kind) for kind in ALERT_KINDS),
