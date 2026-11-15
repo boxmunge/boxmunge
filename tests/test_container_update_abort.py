@@ -71,7 +71,7 @@ def _backup_fails(paths, monkeypatch, docker):
 
 
 def _compose_refuses(paths, monkeypatch, docker):
-    monkeypatch.setattr(cu, "compose_up_checked", _raiser(ComposeRefused("a mount changed")))
+    monkeypatch.setattr("boxmunge.container_recreate.compose_up_checked", _raiser(ComposeRefused("a mount changed")))
 
 
 def _pull_fails_partway(paths, monkeypatch, docker):

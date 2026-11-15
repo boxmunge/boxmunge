@@ -15,6 +15,7 @@ import pytest
 import yaml
 
 import boxmunge.container_update as cu
+from boxmunge import container_recreate
 from boxmunge.commands.container_update_cmd import update_project
 from boxmunge.container_update_targets import UpdateTarget
 from boxmunge.paths import BoxPaths
@@ -31,8 +32,8 @@ pytestmark = [pytest.mark.integration, skip_no_docker]
 @pytest.fixture
 def project(tmp_path, monkeypatch):
     """(paths, name, project_dir, tags): a project dir; tags are removed after."""
-    monkeypatch.setattr(cu, "_NO_HEALTHCHECK_GRACE_SEC", 0)
-    monkeypatch.setattr(cu, "_HEALTHCHECK_POLL_INTERVAL_SEC", 1)
+    monkeypatch.setattr(container_recreate, "NO_HEALTHCHECK_GRACE_SEC", 0)
+    monkeypatch.setattr(container_recreate, "HEALTHCHECK_POLL_INTERVAL_SEC", 1)
     name = f"bmupd-{uuid.uuid4().hex[:8]}"
     paths = BoxPaths(root=tmp_path / "bm")
     for d in (paths.state, paths.deploy_state, paths.log_file.parent):

@@ -291,7 +291,7 @@ class TestContainerUpdateLock:
              patch("boxmunge.compose_guard.compose_up", up), \
              patch.object(cu, "backup_locked", backup), \
              patch.object(cu, "detect_image_changes", return_value={"web": "sha256:new"}), \
-             patch.object(cu, "_wait_healthy", return_value=(True, [])):
+             patch.object(cu, "wait_healthy", return_value=(True, [])):
             with hold_project_lock(NAME, paths):
                 result = update_project(paths, _cu_target(paths, has_backup=True), dry_run=False)
         assert result["status"] != "succeeded"
@@ -323,7 +323,7 @@ class TestContainerUpdateLock:
              patch.object(cu, "compose_pull", pull), \
              patch("boxmunge.compose_guard.compose_up", up), \
              patch.object(cu, "tag_image", tag), \
-             patch.object(cu, "_wait_healthy", health), \
+             patch.object(cu, "wait_healthy", health), \
              patch.object(cu, "detect_image_changes", return_value={"web": "sha256:new"}):
             result = update_project(
                 paths, _cu_target(paths, has_backup=True, strategy="rollback_to_previous"),

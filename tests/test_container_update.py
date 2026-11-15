@@ -161,7 +161,7 @@ class FakeDocker:
         monkeypatch.setattr("boxmunge.docker_containers.local_image", self._local_image)
         monkeypatch.setattr(cu, "tag_image", self._tag)
         monkeypatch.setattr("boxmunge.container_update_tags.tag_image", self._tag)
-        monkeypatch.setattr(cu, "_HEALTHCHECK_POLL_INTERVAL_SEC", 0)
+        monkeypatch.setattr("boxmunge.container_recreate.HEALTHCHECK_POLL_INTERVAL_SEC", 0)
         self._recreate()
 
     def _recreate(self):
@@ -311,23 +311,23 @@ class TestUpdateTarget:
 
     def test_unhealthy_wait_reads_containers_by_label(self, paths, caddy, fake_containers):
         """A stopped container fails the health wait whatever its name."""
-        from boxmunge.container_update import _wait_healthy
+        from boxmunge.container_recreate import wait_healthy
         fake_containers.remove("caddy")
         fake_containers.run("caddy", "caddy", _OLD, name="boxmunge-caddy", running=False)
-        assert _wait_healthy(_caddy_target(paths), ["caddy"]) == (False, ["caddy"])
+        assert wait_healthy("caddy", ["caddy"]) == (False, ["caddy"])
 
     def test_one_shot_that_finished_again_is_healthy(self, paths, caddy, fake_containers):
-        from boxmunge.container_update import _wait_healthy
+        from boxmunge.container_recreate import wait_healthy
         fake_containers.run("caddy", "migrate", _OLD, running=False, exit_code=0,
                             restart_policy="no")
-        assert _wait_healthy(_caddy_target(paths), ["caddy", "migrate"],
+        assert wait_healthy("caddy", ["caddy", "migrate"],
                              frozenset({"migrate"})) == (True, [])
 
     def test_one_shot_that_failed_is_unhealthy(self, paths, caddy, fake_containers):
-        from boxmunge.container_update import _wait_healthy
+        from boxmunge.container_recreate import wait_healthy
         fake_containers.run("caddy", "migrate", _OLD, running=False, exit_code=3,
                             restart_policy="no")
-        assert _wait_healthy(_caddy_target(paths), ["caddy", "migrate"],
+        assert wait_healthy("caddy", ["caddy", "migrate"],
                              frozenset({"migrate"})) == (False, ["migrate"])
 
     def test_long_running_service_that_now_exits_zero_is_unhealthy(
@@ -335,11 +335,11 @@ class TestUpdateTarget:
     ):
         """Restart "no" is Compose's default: exit 0 is only fine for a
         service that was a finished one-shot before the update too."""
-        from boxmunge.container_update import _wait_healthy
+        from boxmunge.container_recreate import wait_healthy
         fake_containers.remove("caddy")
         fake_containers.run("caddy", "caddy", _NEW, running=False, exit_code=0,
                             restart_policy="no")
-        assert _wait_healthy(_caddy_target(paths), ["caddy"]) == (False, ["caddy"])
+        assert wait_healthy("caddy", ["caddy"]) == (False, ["caddy"])
 
     def test_one_shots_are_judged_on_the_pre_update_containers(self, fake_containers):
         from boxmunge.container_update import one_shot_services

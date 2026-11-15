@@ -192,7 +192,7 @@ def test_container_update_core(tmp_path, lock_attempts) -> None:
     with patch.object(container_update, "backup_locked", return_value=0), \
             patch.object(container_update, "compose_pull"), \
             patch("boxmunge.compose_guard.compose_up") as up, \
-            patch.object(container_update, "_wait_healthy", return_value=(True, [])), \
+            patch.object(container_update, "wait_healthy", return_value=(True, [])), \
             patch.object(container_update, "detect_image_changes",
                          return_value={"web": "sha256:new"}):
         result = container_update._update_locked(
