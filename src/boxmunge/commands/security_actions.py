@@ -26,6 +26,7 @@ from boxmunge.cve.alerting import (
     send_alerts,
 )
 from boxmunge.commands.security_kev import refresh_kev_and_alert
+from boxmunge.cve.fleet_lock import FLEET_WAIT_SECONDS, FleetLockBusy, fleet_lock
 from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.scan_state import last_scanned_at
 from boxmunge.cve.policy import Disposition, ProjectDecision
@@ -118,6 +119,10 @@ class FleetRun:
     # Low-urgency alerts held back for the one digest sent at the end.
     digest: list[Alert] = field(default_factory=list)
 
+
+# FleetRun.problems key for a circuit breaker that failed: no new quarantine
+# of the run was applied.
+BREAKER_PROBLEM = "(circuit breaker)"
 
 # FleetRun.problems key for a damaged project registry: a fleet-level
 # problem, since a bad line names no project that can be scanned.
@@ -293,7 +298,7 @@ def _enforce_fleet(paths: BoxPaths, run: FleetRun) -> None:
         phase2 = apply_new_quarantines(paths, run.scans)
     except BreakerError as e:
         print(f"ERROR: {e} — no new quarantine was applied this run", file=sys.stderr)
-        run.problems["(circuit breaker)"] = [f"{e}; no new quarantine was applied"]
+        run.problems[BREAKER_PROBLEM] = [f"{e}; no new quarantine was applied"]
         return
     for name, error in sorted(phase2.errors.items()):
         print(f"{name}: ERROR — {error}")
@@ -304,17 +309,26 @@ def _enforce_fleet(paths: BoxPaths, run: FleetRun) -> None:
               f"({', '.join(sorted(run.held[name]))}) — still running")
 
 
-def scan_projects(paths: BoxPaths, targets: list[str], *, kev: KevCatalog) -> FleetRun:
+def scan_projects(paths: BoxPaths, targets: list[str], *, kev: KevCatalog,
+                  quiet: frozenset[str] = frozenset()) -> FleetRun:
     """The scan loop of a fleet run over exactly ``targets``: scan each,
     send the digest, apply the new quarantines through the circuit breaker
-    and send the run's alerts. Raises TrivyNotInstalledError."""
+    and send the run's alerts (but not the failure of a ``quiet`` project).
+    Raises TrivyNotInstalledError.
+
+    The circuit breaker sees only ``targets`` here, so its trip threshold
+    (a share of the projects scanned, here only the affected ones) is
+    smaller than in the nightly run: for non-KEV candidates a few projects
+    hit by one listing can trip it. Deliberate (one CVE hitting many
+    projects is what it guards against); KEV candidates are never held, and
+    a held quarantine is the operator's to apply (`scan --apply-held`)."""
     run = FleetRun()
     try:
         _scan_each(paths, targets, kev=kev, run=run)
     finally:
         _send_digest(paths, run)
     _enforce_fleet(paths, run)
-    _alert_fleet(paths, run)
+    _alert_fleet(paths, run, quiet=quiet)
     return run
 
 
@@ -334,12 +348,15 @@ def _cmd_apply_held(paths: BoxPaths) -> int:
     return 1 if result.errors else 0
 
 
-def _alert_fleet(paths: BoxPaths, run: FleetRun) -> None:
+def _alert_fleet(paths: BoxPaths, run: FleetRun, *, quiet: frozenset[str] = frozenset()) -> None:
     """Once-per-run alerts: scan failures (audit B-11), expired host-scope
-    suppressions (once, not once per project — B-14)."""
+    suppressions (once, not once per project — B-14). ``quiet`` names
+    projects whose scan failure is not alerted again (the KEV watch, once a
+    day)."""
     alerts = []
-    if run.problems:
-        alerts.append(format_scan_failure_alert(run.problems))
+    problems = {p: r for p, r in run.problems.items() if p not in quiet}
+    if problems:
+        alerts.append(format_scan_failure_alert(problems))
     if run.unrecorded:
         last: dict[str, str | None] = {}
         unreadable: dict[str, str] = {}
@@ -400,6 +417,20 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
         return 1
     if args == ["--apply-held"]:
         return _cmd_apply_held(paths)
+    if args:  # one project: its own lock is the whole guard
+        return _scan_targets_cmd(args, paths)
+    try:
+        with fleet_lock(paths, wait_seconds=FLEET_WAIT_SECONDS):
+            return _scan_targets_cmd(args, paths)
+    except FleetLockBusy as e:
+        # Not run beside the watch, and not skipped silently: the scan is the
+        # box's CVE enforcement, so the failure is loud.
+        print(f"ERROR: {e}; waited {FLEET_WAIT_SECONDS:.0f}s. Scan not run.", file=sys.stderr)
+        log_warning("cve-scan", f"fleet scan not run: {e}", paths)
+        return 1
+
+
+def _scan_targets_cmd(args: list[str], paths: BoxPaths) -> int:
     parsed = _parse_scan_targets(args, paths)
     if isinstance(parsed, int):
         return parsed

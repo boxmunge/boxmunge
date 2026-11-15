@@ -4,21 +4,39 @@ findings contain it, and only those."""
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import yaml
 
-from boxmunge.commands import kev_watch
+from boxmunge.commands import kev_watch, security_actions
+from boxmunge.cve.breaker import BreakerError
 from boxmunge.cve.exploited import ExploitedIndex, ExploitedSource
+from boxmunge.cve.fleet_lock import FleetLockBusy, fleet_lock
 from boxmunge.cve.kev import KevCatalog
-from boxmunge.cve.kev_watch_state import WatchState, read_watch, write_watch
+from boxmunge.cve.kev_watch_state import Failing, WatchState, read_watch, write_watch
+from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
+from boxmunge.cve.scan_state import write_scan_state
+from boxmunge.cve.scanner import Severity
 from boxmunge.fileutil import LockError
+from boxmunge.health_checks import security as health_security
 from boxmunge.health_checks.security import check_kev_watch_freshness
 from boxmunge.state import StateError
-from tests.test_commands.cve_helpers import make_box
+from tests.test_commands.cve_helpers import finding, make_box
 
 NOW = datetime(2026, 11, 15, 12, 0, tzinfo=timezone.utc)
 CISA = frozenset({ExploitedSource.CISA})
+
+
+def _decision(project: str, *cves: str) -> ProjectDecision:
+    return ProjectDecision(
+        project_name=project, image_ref=f"{project}-web:1", quarantine_required=False,
+        at_risk_running=False, scanned_at=NOW,
+        findings=tuple(FindingDisposition(
+            finding=finding(c), base_severity=Severity.CRITICAL, hardening_penalty=0,
+            effective_severity=Severity.CRITICAL, disposition=Disposition.AWAITING_FIX,
+            suppression=None, explanation="x") for c in cves))
 
 
 class Env:
@@ -31,7 +49,7 @@ class Env:
         self.locked: set[str] = set()
         self.stale: dict = {}
         kev = KevCatalog(frozenset(), NOW, NOW, "https://kev.example/feed.json")
-        monkeypatch.setattr(kev_watch, "refresh_kev_and_alert", lambda p, n: kev)
+        monkeypatch.setattr(kev_watch, "refresh_kev_and_alert", lambda p, n, **kw: kev)
         monkeypatch.setattr(
             kev_watch, "load_exploited",
             lambda p, today, cisa=None: ExploitedIndex({c: CISA for c in self.listed}, self.stale))
@@ -43,14 +61,15 @@ class Env:
         self.scanned.append(project)
         return _Scan()
 
-    def store(self, project: str, *cves: str) -> None:
+    def store(self, project: str, *cves: str, at: datetime = NOW,
+              unscanned: tuple[str, ...] = ()) -> None:
         path = self.paths.project_scan_state(project)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"scanned_at": NOW.isoformat(), "decisions": [
-            {"image_ref": f"{project}-web:1", "findings": [{"cve_id": c} for c in cves]}]}))
+        write_scan_state(path, decisions=(_decision(project, *cves),), scanned_at=at,
+                         unscanned=unscanned)
 
-    def seen(self, *cves: str, at: datetime = NOW) -> None:
-        write_watch(self.paths, WatchState(at, frozenset(cves)))
+    def seen(self, *cves: str, at: datetime = NOW, failing: dict | None = None) -> None:
+        write_watch(self.paths, WatchState(at, frozenset(cves), failing or {}))
 
     def tick(self):
         return kev_watch.run_kev_watch(self.paths, NOW)
@@ -166,17 +185,128 @@ def test_malformed_watch_record_is_a_state_error(env) -> None:
         env.tick()
 
 
+def test_unusable_stored_scans_are_skipped_naming_the_project(env, capsys) -> None:
+    env.store("shop", "CVE-2")
+    env.paths.project_scan_state("blog").parent.mkdir(parents=True, exist_ok=True)
+    env.paths.project_scan_state("blog").write_text('{"scanned_at": "2026-11-15T00:00:00+00:00",'
+                                                    ' "decisions": [{"findings": [{"cve_id": 1}]}]}')
+    env.seen("CVE-1")
+    env.listed = {"CVE-1", "CVE-2"}
+    env.tick()
+    assert env.scanned == ["shop"]
+    assert "blog skipped, its stored scan is unusable" in capsys.readouterr().err
+    env.paths.project_scan_state("blog").write_text("{truncated")
+    env.seen("CVE-1")
+    env.scanned.clear()
+    env.tick()
+    assert env.scanned == ["shop"]
+
+
+def test_a_circuit_breaker_failure_holds_every_hit_back(env, monkeypatch) -> None:
+    env.store("shop", "CVE-2")
+    env.store("blog", "CVE-3")
+    env.seen("CVE-1")
+    env.listed = {"CVE-1", "CVE-2", "CVE-3"}
+
+    def broken(paths, scans):
+        raise BreakerError("breaker state unreadable")
+
+    monkeypatch.setattr(security_actions, "apply_new_quarantines", broken)
+    result = env.tick()
+    assert set(result.failed) == {"shop", "blog"}
+    watch = read_watch(env.paths)
+    assert watch.cve_ids == {"CVE-1"}
+    assert set(watch.failing) == {"shop", "blog", security_actions.BREAKER_PROBLEM}
+
+
+def test_a_failed_rescan_is_retried_until_a_nightly_scan_covers_it(env, monkeypatch) -> None:
+    env.store("shop", "CVE-2", at=NOW - timedelta(days=1))
+    env.seen("CVE-1")
+    env.listed = {"CVE-1", "CVE-2"}
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.scan_one_project",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("trivy failed")))
+    assert env.tick().failed == ("shop",)
+    assert read_watch(env.paths).cve_ids == {"CVE-1"}
+    assert env.tick().failed == ("shop",)  # still retried: nothing newer has scanned it
+    # an incomplete scan newer than the attempt does not cover it
+    env.store("shop", "CVE-2", at=NOW + timedelta(hours=1), unscanned=("img",))
+    assert env.tick().failed == ("shop",)
+    # the nightly scan, complete and newer, does: no rescan, the set advances
+    env.store("shop", "CVE-2", at=NOW + timedelta(hours=2))
+    monkeypatch.setattr("boxmunge.commands.security_actions.scan_one_project", env._scan)
+    result = env.tick()
+    assert result.failed == () and env.scanned == []
+    watch = read_watch(env.paths)
+    assert watch.cve_ids == {"CVE-1", "CVE-2"} and watch.failing == {}
+
+
+def test_a_scan_failure_is_alerted_once_a_day(env, monkeypatch) -> None:
+    from tests.test_commands.cve_helpers import Pushover
+    pushover = Pushover(monkeypatch, env.paths)
+    env.store("shop", "CVE-2")
+    env.seen("CVE-1")
+    env.listed = {"CVE-1", "CVE-2"}
+    monkeypatch.setattr(
+        "boxmunge.commands.security_actions.scan_one_project",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("trivy failed")))
+    env.tick()
+    first = len(pushover.sent)
+    assert first >= 1
+    env.tick()  # same day, same failure: not alerted again
+    assert len(pushover.sent) == first
+    next_day = NOW + timedelta(days=1)
+    kev_watch.run_kev_watch(env.paths, next_day)
+    assert len(pushover.sent) > first
+
+
+def test_a_tick_skips_itself_while_the_fleet_lock_is_held(env) -> None:
+    env.store("shop", "CVE-2")
+    env.seen("CVE-1", at=NOW - timedelta(hours=1))
+    env.listed = {"CVE-1", "CVE-2"}
+    with fleet_lock(env.paths):
+        result = env.tick()
+    assert result.skipped and env.scanned == []
+    assert read_watch(env.paths).cve_ids == {"CVE-1"}  # not advanced
+    assert read_watch(env.paths).seen_at == NOW - timedelta(hours=1)
+
+
+def test_the_fleet_scan_holds_the_lock_and_waits_for_it(env, monkeypatch, capsys) -> None:
+    held: list[bool] = []
+
+    def inner(args, paths):
+        try:
+            with fleet_lock(paths):
+                held.append(False)
+        except FleetLockBusy:
+            held.append(True)
+        return 0
+
+    monkeypatch.setattr(security_actions, "_scan_targets_cmd", inner)
+    monkeypatch.setattr("boxmunge.lifecycle.migration_refusal", lambda what, paths: None)
+    assert security_actions.cmd_security_scan([], env.paths) == 0
+    assert held == [True]  # the whole fleet run holds it
+    held.clear()
+    security_actions.cmd_security_scan(["shop"], env.paths)
+    assert held == [False]  # a single-project scan does not
+
+    monkeypatch.setattr(security_actions, "FLEET_WAIT_SECONDS", 0.0)
+    monkeypatch.setattr(security_actions, "_scan_targets_cmd",
+                        lambda a, p: pytest.fail("ran beside the watch"))
+    with fleet_lock(env.paths):
+        assert security_actions.cmd_security_scan([], env.paths) == 1
+    assert "Scan not run" in capsys.readouterr().err
+
+
 def _box(tmp_path, monkeypatch, kev_block):
-    import yaml
-    from boxmunge.health_checks import security
     paths = make_box(tmp_path)
-    paths.config_file.write_text(yaml.safe_dump({"hostname": "box.example.com", "admin_email": "ops@example.com", "kev": kev_block}))
+    paths.config_file.write_text(yaml.safe_dump(
+        {"hostname": "box.example.com", "admin_email": "ops@example.com", "kev": kev_block}))
     timer = tmp_path / "kev-watch.timer"
     timer.write_text("")
     old = NOW.timestamp() - 3600 * 5
-    import os
     os.utime(timer, (old, old))
-    monkeypatch.setattr(security, "KEV_WATCH_TIMER", timer)
+    monkeypatch.setattr(health_security, "KEV_WATCH_TIMER", timer)
     return paths
 
 
@@ -196,7 +326,7 @@ def test_watch_freshness_warns_after_two_missed_ticks(tmp_path, monkeypatch) -> 
 
 def test_watch_freshness_without_the_timer_installed_is_quiet(tmp_path, monkeypatch) -> None:
     paths = _box(tmp_path, monkeypatch, EU_OFF)
-    monkeypatch.setattr("boxmunge.health_checks.security.KEV_WATCH_TIMER", tmp_path / "absent")
+    monkeypatch.setattr(health_security, "KEV_WATCH_TIMER", tmp_path / "absent")
     assert check_kev_watch_freshness(paths, now=NOW).status == "ok"
 
 

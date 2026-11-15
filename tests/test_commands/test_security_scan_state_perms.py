@@ -87,7 +87,7 @@ def test_a_kev_found_by_a_run_whose_write_fails_is_still_enforced_and_alerted(
                         lambda ref, timeout: scan_result(ref, [finding(cve)]))
     kev = KevCatalog(frozenset({cve}), datetime.now(timezone.utc), datetime.now(timezone.utc), 'test')
     monkeypatch.setattr("boxmunge.commands.security_kev.load_kev", lambda p: kev)
-    monkeypatch.setattr("boxmunge.commands.security_kev.refresh_kev", lambda p: KevRefresh(source="test"))
+    monkeypatch.setattr("boxmunge.commands.security_kev.refresh_kev", lambda p, **kw: KevRefresh(source="test"))
     _unwritable_scans(paths)
 
     assert cmd_security_scan([], paths) == 1

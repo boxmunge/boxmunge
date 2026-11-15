@@ -2,6 +2,8 @@
 Description=boxmunge KEV watch timer
 
 [Timer]
+# No Persistent= on purpose: a missed tick is not replayed, because the first
+# tick after boot comes within about 32 minutes anyway.
 OnCalendar=*:00/30
 RandomizedDelaySec=120
 

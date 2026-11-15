@@ -258,11 +258,12 @@ def _no_kev_network(monkeypatch):
     from boxmunge.cve.kev_refresh import KevRefresh
 
     monkeypatch.setattr(
-        "boxmunge.cve.kev_refresh.refresh_kev", lambda paths: KevRefresh(source=None),
+        "boxmunge.cve.kev_refresh.refresh_kev",
+        lambda paths, **kw: KevRefresh(source=None),
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_kev.refresh_kev",
-        lambda paths: KevRefresh(source=None),
+        lambda paths, **kw: KevRefresh(source=None),
     )
     # The real refresh_kev also refreshes ENISA's list; tests of the CISA
     # refresh have no answer for it (test_kev_enisa.py puts the real one back).
