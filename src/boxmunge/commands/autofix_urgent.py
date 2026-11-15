@@ -295,16 +295,17 @@ def _conclude(paths: BoxPaths, project: str, job: _Job, outcome: AutofixOutcome)
     if outcome.nothing_to_patch and not outcome.rollback_problems:
         _nothing_to_patch(paths, project, cves, outcome.reason)
         return
+    repeat = None
     if outcome.ok:
         forget(paths, project, "urgent")
         site, settled, urgent = _succeeded(paths, project, job)
         alert = format_autofix_patched_alert(project, cves, outcome.records, site=site,
                                              urgent=urgent, timing=timing)
     else:
-        if job.meta.autofix:   # what it depends on must change before it is tried again
-            remember(paths, project, "urgent", [(d, fd) for d in job.decisions
-                                                for fd in d.findings if fd in job.findings],
-                     outcome, _now())
+        if job.meta.autofix:   # held back from the next scans (cve.autofix_failed)
+            repeat = remember(paths, project, "urgent", [
+                (d, fd) for d in job.decisions for fd in d.findings if fd in job.findings],
+                outcome, _now())
         site, settled = _fallback(paths, project, job)
         alert = format_autofix_failed_alert(
             project, cves, step=outcome.failed_step, reason=outcome.reason, site=site,
@@ -318,6 +319,12 @@ def _conclude(paths: BoxPaths, project: str, job: _Job, outcome: AutofixOutcome)
         except StateError as e:
             log_error(_COMPONENT, f"{project}: {e}", paths, project=project)
             note = f"Clearing the queue entry or the autofixing marker failed: {e}"
+    if repeat is not None and settled and note is None and not outcome.rollback_problems:
+        log_operation(_COMPONENT, f"{project}: the retried urgent autofix failed again at "
+                      f"{outcome.failed_step or 'an unexpected error'}, as it did first on "
+                      f"{repeat.at.date().isoformat()}; not alerted again", paths,
+                      project=project)
+        return
     _send(paths, with_note(alert, note))
 
 

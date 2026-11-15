@@ -653,3 +653,32 @@ def test_repatch_on_upstream_failure_keeps_the_old_patch(paths, box) -> None:
 def test_repatch_on_upstream_names_a_service_that_is_not_pinned(paths, box) -> None:
     with pytest.raises(ValueError, match="not pinned"):
         _run_on_upstream(paths)
+
+
+# ---------- whether a failure would happen again (cve.autofix_failed) ----------
+
+
+def test_what_would_fail_the_same_way_again_is_deterministic(paths, box) -> None:
+    from boxmunge.cve.autofix_build import PatchBuildError, PatchNotFixed
+    box.probe_result = NotPatchable("no package manager")
+    assert _run(paths).deterministic                                  # not patchable
+    box.probe_result = Patchable("apk", "")
+    box.check_error = PatchNotFixed("openssl 3.0.9 is below the fixed 3.0.10")
+    box.findings[WEB] = [_fd(fix="3.0.10"), _fd("CVE-2026-2222", fix="3.0.9")]
+    assert _run(paths, [_fd(), _fd("CVE-2026-2222")]).deterministic  # not fixed
+    box.check_error = PatchBuildError("unexpected version check output")
+    assert not _run(paths, [_fd(), _fd("CVE-2026-2222")]).deterministic
+    box.check_error = None
+    box.findings[WEB] = [_fd()]
+    box.unhealthy_on_patched = True
+    outcome = _run(paths)
+    assert outcome.failed_step == "health" and outcome.deterministic
+    box.unhealthy_on_patched = False
+    box.build_error = DockerError("temporary error (try again later)")
+    assert not _run(paths).deterministic                              # a mirror outage
+    box.build_error = None
+    box.patched_findings["web"] = [_fd()]
+    outcome = _run(paths)
+    assert outcome.failed_step == "scan" and outcome.deterministic    # still vulnerable
+    box.scan_error = DockerError("trivy timed out")
+    assert not _run(paths).deterministic

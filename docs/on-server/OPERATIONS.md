@@ -2496,7 +2496,9 @@ A patch queued 2 hours ago that has not started (the unit does not start, or the
 busy) is alerted `Urgent autofix could not start` once a day, the `autofix-queue` health check
 warns, and the scans no longer hold its quarantine back. A patch that failed is remembered in
 `state/autofix/<project>.failed` and not tried again until its image, its fixed versions or its
-CVEs change; the nightly digest lists it as `still unpatched since <date>`.
+CVEs change, or, for a failure that may pass next time (the time limit, a mirror or Docker
+error), until 24 hours after its last try; the nightly digest lists it as `still unpatched since
+<date>`, and a retry that fails the same way is not alerted again.
 
 While a patch runs, `state/autofix/<project>.active` marks it (`status` shows `autofixing`).
 Just before it swaps images in, it writes `state/autofix/<project>.journal`, and removes it once

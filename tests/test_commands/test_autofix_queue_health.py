@@ -217,3 +217,68 @@ def test_the_nightly_digest_lists_an_urgent_patch_still_unpatched(tmp_path,
     [line] = attempts
     assert autofix_nightly.describe(line).startswith(
         f"still unpatched since {_now().date().isoformat()}: demo: build: ")
+
+
+DETERMINISTIC = AutofixOutcome(False, "probe", "no package manager", (), deterministic=True)
+
+
+def _tried(box, hours: float) -> None:
+    """The remembered urgent failure was last tried `hours` ago."""
+    from boxmunge.cve.autofix_record import read_failed, write_failed
+    failed = read_failed(box.paths, "demo")
+    failed["urgent"] = replace(failed["urgent"], last_tried=_now() - timedelta(hours=hours))
+    write_failed(box.paths, "demo", failed)
+
+
+def test_a_transient_failure_is_retried_after_a_day_without_a_repeat_alert(
+        tmp_path, monkeypatch) -> None:
+    box = _box(tmp_path, monkeypatch, "balanced", cvss=7.5)
+    box.scan()
+    box.runner.outcome = FAILED
+    box.run()
+    first = remembered(box.paths, "demo", "urgent")
+    assert first.kind == "transient"
+    _tried(box, 23)
+    box.scan()
+    assert read_queue_entry(box.paths, "demo") is None      # held within the day
+    _tried(box, 25)
+    box.scan()
+    assert read_queue_entry(box.paths, "demo") is not None  # due again
+    box.run()
+    assert len(box.runner.calls) == 2
+    assert len(box.sent("Autofix FAILED")) == 1 and len(box.sent("patching")) == 1
+    again = remembered(box.paths, "demo", "urgent")
+    assert again.at == first.at and again.last_tried > first.last_tried
+    assert is_quarantined("demo", box.paths)                # table B still applies
+
+
+def test_a_deterministic_failure_is_held_until_its_signature_changes(tmp_path,
+                                                                    monkeypatch) -> None:
+    box = _box(tmp_path, monkeypatch, "relaxed")
+    box.scan()
+    box.runner.outcome = DETERMINISTIC
+    box.run()
+    assert remembered(box.paths, "demo", "urgent").kind == "deterministic"
+    _tried(box, 24 * 30)
+    box.scan()
+    assert read_queue_entry(box.paths, "demo") is None
+    box.found = [replace(f, fixed_version="3") for f in box.found]
+    box.scan()
+    assert read_queue_entry(box.paths, "demo") is not None
+
+
+def test_a_transient_failure_that_turns_deterministic_alerts_once(tmp_path,
+                                                                 monkeypatch) -> None:
+    box = _box(tmp_path, monkeypatch, "relaxed")
+    box.scan()
+    box.runner.outcome = FAILED
+    box.run()
+    _tried(box, 25)
+    box.scan()
+    box.runner.outcome = DETERMINISTIC
+    box.run()
+    assert len(box.sent("Autofix FAILED")) == 2
+    assert remembered(box.paths, "demo", "urgent").kind == "deterministic"
+    _tried(box, 25)
+    box.scan()
+    assert box.run() == [] and len(box.sent("Autofix FAILED")) == 2

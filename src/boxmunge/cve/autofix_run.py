@@ -62,7 +62,8 @@ from boxmunge.container_update import one_shot_services
 from boxmunge.commands.security_scan_inputs import load_project_meta
 from boxmunge.cve import autofix_plan
 from boxmunge.cve.autofix_build import (
-    NotPatchable, Patchable, PatchBuildError, PatchedImage, build_patched, check_versions,
+    NotPatchable, Patchable, PatchBuildError, PatchedImage, PatchNotFixed, build_patched,
+    check_versions,
     probe, remove_patched,
 )
 from boxmunge.cve.autofix_plan import PROD, ServicePlan, Step, StepFailed
@@ -93,7 +94,8 @@ class AutofixOutcome:
     `started_at`: when the findings were found and the attempt began, set
     by the flow that queued them (None from the runner itself).
     `nothing_to_patch`: the run failed because no running image carries the
-    CVEs any more (autofix_plan.NothingToPatch)."""
+    CVEs any more (autofix_plan.NothingToPatch). `deterministic`: the step
+    that failed would fail the same way again (StepFailed.deterministic)."""
     ok: bool
     failed_step: Step | None
     reason: str
@@ -102,6 +104,7 @@ class AutofixOutcome:
     detected_at: datetime | None = None
     started_at: datetime | None = None
     nothing_to_patch: bool = False
+    deterministic: bool = False
 
 
 @dataclass
@@ -201,7 +204,8 @@ def _autofix(paths: BoxPaths, project: str, findings: Sequence[FindingDispositio
         # The rollback's problems have their own field (and the oplog's detail).
         return _outcome(paths, run, cves, AutofixOutcome(
             False, e.step, str(e), (), problems,
-            nothing_to_patch=isinstance(e, autofix_plan.NothingToPatch)))
+            nothing_to_patch=isinstance(e, autofix_plan.NothingToPatch),
+            deterministic=e.deterministic))
     except BaseException as e:
         problems = _rollback(paths, run)
         _finish(paths, project)
@@ -339,7 +343,8 @@ def _probe(p: ServicePlan) -> Patchable:
     except DockerError as e:
         raise StepFailed("probe", f"probing {p.service}'s image failed: {e}") from e
     if isinstance(found, NotPatchable):
-        raise StepFailed("probe", f"{p.service}'s image cannot be patched: {found.reason}")
+        raise StepFailed("probe", f"{p.service}'s image cannot be patched: {found.reason}",
+                         deterministic=True)
     return found
 
 
@@ -351,6 +356,9 @@ def _build(run: _Run, p: ServicePlan, patchability: Patchable) -> None:
         run.built.append((p.service, image))
         for floors in p.check_floors():
             check_versions(image.image_id, patchability, floors)
+    except PatchNotFixed as e:
+        raise StepFailed("build", f"building {p.service}'s patched image failed: {e}",
+                         deterministic=True) from e
     except (PatchBuildError, DockerError) as e:
         raise StepFailed("build", f"building {p.service}'s patched image failed: {e}") from e
 
@@ -399,7 +407,8 @@ def _health(run: _Run, images: str) -> None:
         raise StepFailed("health", f"the health check could not read the containers: "
                          f"{e}") from e
     if not healthy:
-        raise StepFailed("health", f"not healthy on {images}: {', '.join(unhealthy)}")
+        raise StepFailed("health", f"not healthy on {images}: {', '.join(unhealthy)}",
+                         deterministic=True)
 
 
 def _record(paths: BoxPaths, project: str, plans: Sequence[ServicePlan],

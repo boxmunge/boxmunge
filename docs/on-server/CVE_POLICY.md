@@ -635,10 +635,17 @@ cannot be started is alerted the same way.
 
 **A patch that fails every time.** A failed patch is remembered,
 `state/autofix/<project>.failed`, with the CVEs, the images that carried
-them and their fixed versions. While none of those change, the scans do not
-queue that urgent patch again and the nightly run does not try that nightly
-patch again: the posture's own rule stands, nothing is alerted again, and
-the nightly digest lists it as `still unpatched since <date>: <reason>`. A
+them and their fixed versions, the step and whether the failure would happen
+again the same way. A failure that would (the image cannot be patched, the
+patch does not fix it, the patched images are not healthy) holds the patch
+until one of those changes. Any other (the time limit, a mirror or Docker
+error, a scan or swap failure) holds it for 24 hours after its last try,
+then the patch is tried again. While it is held, the scans do not queue that
+urgent patch and the nightly run does not try that nightly patch: the
+posture's own rule stands and the nightly digest lists it as `still
+unpatched since <date>: <reason>`. A retry that fails again at the same
+step, the same way, is not alerted again (the fallback still applies); one
+that fails differently is. A
 new base image, a new fixed version or another CVE is a change, and the
 patch is tried again. A patch that passes, one with nothing left to patch,
 a release switch and a project delete forget it.

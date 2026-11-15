@@ -31,8 +31,8 @@ A journal left behind means the run was killed; the next run undoes it
 first (cve.autofix_run.recover_interrupted).
 
 The last patch of each trigger that failed is remembered in
-`state/autofix/<project>.failed`, {"urgent"|"nightly": {at, cves, images,
-fixes, failed_step, reason}}, so the same patch is not retried (and
+`state/autofix/<project>.failed`, {"urgent"|"nightly": {at, last_tried,
+cves, images, fixes, failed_step, kind, reason}}, so the same patch is not retried (and
 alerted) every run while nothing it depends on changed
 (cve.autofix_failed).
 
@@ -424,18 +424,24 @@ def journaled_projects(paths: BoxPaths) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class FailedPatch:
-    """A patch that failed: when, what it was for (the CVEs, the exact
-    images that carried them, each fix as "<cve> <package> <fixed version>"),
-    the step and why."""
+    """A patch that failed: when first (`at`) and last (`last_tried`), what
+    it was for (the CVEs, the exact images that carried them, each fix as
+    "<cve> <package> <fixed version>"), the step, whether it would fail the
+    same way again (`kind`) and why."""
     at: datetime
+    last_tried: datetime
     cves: tuple[str, ...]
     images: tuple[str, ...]
     fixes: tuple[str, ...]
     failed_step: str | None
+    kind: FailureKind
     reason: str
 
 
-_FAILED_KEYS = frozenset({"at", "cves", "images", "fixes", "failed_step", "reason"})
+FailureKind = Literal["deterministic", "transient"]
+_KINDS = ("deterministic", "transient")
+_FAILED_KEYS = frozenset({"at", "last_tried", "cves", "images", "fixes", "failed_step", "kind",
+                          "reason"})
 
 
 def read_failed(paths: BoxPaths, project: str) -> dict[Trigger, FailedPatch]:
@@ -454,10 +460,13 @@ def read_failed(paths: BoxPaths, project: str) -> dict[Trigger, FailedPatch]:
             step = row["failed_step"]
             if step is not None:
                 _text(step, "failed_step")
+            if row["kind"] not in _KINDS:
+                raise ValueError(f"{trigger}: kind {row['kind']!r} is not one of {_KINDS}")
             failed[trigger] = FailedPatch(
-                _time(row["at"], "at"), _strings(row["cves"], "cves"),
-                _strings(row["images"], "images"), _strings(row["fixes"], "fixes"),
-                step, _text(row["reason"], "reason"))
+                _time(row["at"], "at"), _time(row["last_tried"], "last_tried"),
+                _strings(row["cves"], "cves"), _strings(row["images"], "images"),
+                _strings(row["fixes"], "fixes"), step, row["kind"],
+                _text(row["reason"], "reason"))
         return failed
     except (ValueError, KeyError, TypeError) as e:
         raise StateError(f"{path} is not an autofix failure record: {e!r}") from e
@@ -469,8 +478,9 @@ def write_failed(paths: BoxPaths, project: str, failed: dict[Trigger, FailedPatc
         clear_failed(paths, project)
         return
     _write_doc(paths.project_autofix_failed(project), {
-        trigger: {"at": f.at.isoformat(), "cves": list(f.cves), "images": list(f.images),
-                  "fixes": list(f.fixes), "failed_step": f.failed_step, "reason": f.reason}
+        trigger: {"at": f.at.isoformat(), "last_tried": f.last_tried.isoformat(),
+                  "cves": list(f.cves), "images": list(f.images), "fixes": list(f.fixes),
+                  "failed_step": f.failed_step, "kind": f.kind, "reason": f.reason}
         for trigger, f in sorted(failed.items())}, "autofix failure record")
 
 

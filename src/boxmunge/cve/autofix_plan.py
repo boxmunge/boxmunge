@@ -54,11 +54,15 @@ PROD = ["compose.yml", "compose.boxmunge.yml"]
 
 
 class StepFailed(Exception):
-    """An autofix step failed; `step` is the one, the message why."""
+    """An autofix step failed; `step` is the one, the message why.
+    `deterministic`: trying again on the same images and fixes fails the
+    same way (the image cannot be patched, the patch does not fix it, the
+    patched images are not healthy); else it may pass (cve.autofix_failed)."""
 
-    def __init__(self, step: Step, reason: str) -> None:
+    def __init__(self, step: Step, reason: str, *, deterministic: bool = False) -> None:
         super().__init__(reason)
         self.step: Step = step
+        self.deterministic = deterministic
 
 
 class NothingToPatch(StepFailed):
@@ -156,7 +160,7 @@ def _fixes(decision: ProjectDecision, cves: Collection[str],
             why = ("no fixed version is published" if f.fixed_version is None
                    else f"{f.package} is not an OS package ({f.pkg_class.value})")
             raise StepFailed("probe", f"{f.cve_id} in service {service} cannot be patched: "
-                             f"{why}")
+                             f"{why}", deterministic=True)
         found.add(f.cve_id)
         fixed.setdefault(f.package, set()).add(f.fixed_version)
         before[f.package] = f.installed_version
@@ -198,7 +202,7 @@ def plan(now: Running, cves: Collection[str], pins: Collection[ImagePin],
             if prior is None:
                 raise StepFailed("probe", f"service {service} runs a pinned patched image "
                                  f"with no patch record, so the image it was built from is "
-                                 f"unknown")
+                                 f"unknown", deterministic=True)
             base_ref, base = prior.base_ref, prior.base_digest
             for change in prior.packages:
                 packages.setdefault(change.name, set()).add(change.after)
@@ -231,4 +235,5 @@ def judge_patched(plans: Collection[ServicePlan], before: Mapping[str, ProjectDe
                                 f"{fd.finding.installed_version} into service {p.service}, "
                                 f"quarantine-level under the project's posture")
     if problems:
-        raise StepFailed("scan", "the patched image is not fixed: " + "; ".join(problems))
+        raise StepFailed("scan", "the patched image is not fixed: " + "; ".join(problems),
+                         deterministic=True)

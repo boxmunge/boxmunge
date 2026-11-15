@@ -3,13 +3,20 @@
 
 When an urgent or a nightly patch fails, what it was for is remembered per
 trigger (cve.autofix_record, `state/autofix/<project>.failed`): the CVEs,
-the exact images that carried them, and each fixed version. While all
-three are unchanged, the scan does not queue that urgent patch again (the
-policy's own disposition stands, as when autofix cannot help), the nightly
-flow does not attempt it again, and neither alerts it again; the nightly
-digest lists it, "still unpatched since <date>: <reason>". Any change (a
-new base image, a new fixed version, another CVE) forgets it, and the
-patch is tried again. A patch that succeeds, or finds nothing left to
+the exact images that carried them, each fixed version, the step, and
+whether that failure would happen again the same way (`deterministic`: the
+image cannot be patched, the patch does not fix it, the patched images are
+not healthy) or may not (`transient`: the time budget, a mirror or Docker
+error, a scan or swap failure). While the three are unchanged, a
+deterministic failure holds the patch until something changes; a transient
+one holds it for RETRY_TRANSIENT after its last try, then it is tried again.
+While held, the scan does not queue that urgent patch (the policy's own
+disposition stands, as when autofix cannot help) and the nightly flow does
+not attempt it; the nightly digest lists it, "still unpatched since <date>:
+<reason>". A retry that fails again at the same step, the same way, is not
+alerted again (the fallback still applies); a different step or kind is.
+Any change (a new base image, a new fixed version, another CVE) forgets it,
+and the patch is tried again. A patch that succeeds, or finds nothing left to
 patch, forgets it too; a release switch and a project delete remove the
 record.
 
@@ -19,8 +26,8 @@ written is logged as an error and the patch is tried as if there were none.
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from boxmunge.cve.autofix_record import FailedPatch, Trigger, read_failed, write_failed
@@ -33,6 +40,8 @@ if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 _COMPONENT = "autofix"
+# A transient failure is tried again this long after its last try.
+RETRY_TRANSIENT = timedelta(hours=24)
 
 Pairs = Iterable[tuple["ProjectDecision", "FindingDisposition"]]
 
@@ -74,16 +83,20 @@ def _write(paths: BoxPaths, project: str, failed: dict[Trigger, FailedPatch]) ->
         log_error(_COMPONENT, f"{project}: {e}", paths, project=project)
 
 
-def still_failing(paths: BoxPaths, project: str, trigger: Trigger,
-                  pairs: Pairs) -> FailedPatch | None:
-    """The remembered failure of this trigger's patch of `pairs` when
-    nothing it depends on changed since; a change forgets it (logged), and
-    None says to try the patch."""
+def still_failing(paths: BoxPaths, project: str, trigger: Trigger, pairs: Pairs,
+                  now: datetime) -> FailedPatch | None:
+    """The remembered failure of this trigger's patch of `pairs` when it
+    still holds the patch back: nothing it depends on changed, and it is
+    deterministic or was last tried less than RETRY_TRANSIENT ago. A change
+    forgets it (logged); None says to try the patch."""
     failed = _read(paths, project)
     if not failed or trigger not in failed:
         return None
     if Signature.of(pairs).matches(failed[trigger]):
-        return failed[trigger]
+        f = failed[trigger]
+        if f.kind == "deterministic" or now - f.last_tried < RETRY_TRANSIENT:
+            return f
+        return None   # kept: a retry that fails the same way is not alerted again
     del failed[trigger]
     _write(paths, project, failed)
     log_operation(_COMPONENT, f"{project}: what its failed {trigger} patch depends on "
@@ -92,15 +105,33 @@ def still_failing(paths: BoxPaths, project: str, trigger: Trigger,
 
 
 def remember(paths: BoxPaths, project: str, trigger: Trigger, pairs: Pairs,
-             outcome: AutofixOutcome, now: datetime) -> None:
-    """Record this trigger's failed patch of `pairs`."""
+             outcome: AutofixOutcome, now: datetime) -> FailedPatch | None:
+    """Record this trigger's failed patch of `pairs`. Returns the record
+    when this is a repeat (the same signature, step and kind as the one
+    remembered: compared by those, never by the reason's text), which is not
+    alerted again; None for a new failure."""
     failed = _read(paths, project)
     if failed is None:
-        return
+        return None
     sig = Signature.of(pairs)
-    failed[trigger] = FailedPatch(now, sig.cves, sig.images, sig.fixes,
-                                  outcome.failed_step, outcome.reason or "no reason given")
+    kind = "deterministic" if outcome.deterministic else "transient"
+    prior = failed.get(trigger)
+    if prior is not None and sig.matches(prior) and (prior.failed_step, prior.kind) == (
+            outcome.failed_step, kind):
+        failed[trigger] = replace(prior, last_tried=now)
+        _write(paths, project, failed)
+        return failed[trigger]
+    failed[trigger] = FailedPatch(now, now, sig.cves, sig.images, sig.fixes,
+                                  outcome.failed_step, kind, outcome.reason or "no reason given")
     _write(paths, project, failed)
+    return None
+
+
+def is_retry(paths: BoxPaths, project: str, trigger: Trigger, pairs: Pairs) -> bool:
+    """The patch of `pairs` is a retry of the remembered failure (a
+    transient one, due again): its start is not announced again."""
+    failed = remembered(paths, project, trigger)
+    return failed is not None and Signature.of(pairs).matches(failed)
 
 
 def forget(paths: BoxPaths, project: str, trigger: Trigger) -> None:

@@ -46,7 +46,7 @@ from boxmunge.commands.security_scan_inputs import ProjectMeta
 from boxmunge.compose_images import image_phrase
 from boxmunge.cve.alerting import Alert, format_autofix_started_alert
 from boxmunge.cve.autofix_build import NotPatchable, probe
-from boxmunge.cve.autofix_failed import forget, still_failing, unpatched
+from boxmunge.cve.autofix_failed import forget, is_retry, still_failing, unpatched
 from boxmunge.cve.autofix_policy import (
     AUTOFIX_QUEUE_MAX_WAIT, AutofixUrgency, downtime_while_patching, urgency,
 )
@@ -129,7 +129,7 @@ def prepare_urgent(paths: BoxPaths, project: str, meta: ProjectMeta,
         blocker = f"what it may patch cannot be read ({e})"
         existing, downtime = None, None
     if blocker is None and existing is None:
-        failed = still_failing(paths, project, "urgent", urgent)
+        failed = still_failing(paths, project, "urgent", urgent, now)
         if failed is not None:
             blocker = (f"the same patch failed and nothing it depends on has changed, "
                        f"{unpatched(failed)}; it is tried again when the image or the fix "
@@ -160,7 +160,9 @@ def prepare_urgent(paths: BoxPaths, project: str, meta: ProjectMeta,
         log_warning(_COMPONENT, f"{project}: autofix of {', '.join(cves)} not queued: {e}",
                     paths, project=project)
         return UrgentPlan(cves, note=f"Autofix cannot help: it could not be queued ({e}).")
-    if not downtime or quarantined:   # else the QUARANTINED alert says it (quarantine_note)
+    # Else the QUARANTINED alert says it (quarantine_note); a retry of a
+    # remembered failure is not announced again.
+    if (not downtime or quarantined) and not is_retry(paths, project, "urgent", urgent):
         alerts.append(format_autofix_started_alert(project, cves, downtime=downtime))
     return UrgentPlan(cves, queued=True, downtime=downtime)
 

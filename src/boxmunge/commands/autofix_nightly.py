@@ -258,7 +258,7 @@ def run_nightly_autofix(paths: BoxPaths, project: str, *, until: datetime,
                 if any(r.outcome != "kept" for r in upstream) else None)
     findings = [fd for _, fd in pairs]
     cves = _cves(findings)
-    failed = still_failing(paths, project, "nightly", pairs)
+    failed = still_failing(paths, project, "nightly", pairs, _now())
     if failed is not None:
         log_operation(_COMPONENT, f"{project}: nightly autofix not tried again: nothing it "
                       f"depends on changed since it failed", paths, project=project)
@@ -280,10 +280,13 @@ def run_nightly_autofix(paths: BoxPaths, project: str, *, until: datetime,
         outcome = AutofixOutcome(False, None, f"{type(e).__name__}: {e}", (),
                                  tuple(getattr(e, "__notes__", ())))
     print(f"{project}: nightly autofix " + _said(outcome))
+    repeat = None
     if outcome.ok or outcome.nothing_to_patch:
         forget(paths, project, "nightly")
     else:
-        remember(paths, project, "nightly", pairs, outcome, _now())
+        repeat = remember(paths, project, "nightly", pairs, outcome, _now())
+    if repeat is not None and not outcome.rollback_problems:   # failed again the same way
+        return NightlyAttempt(project, cves, None, upstream=upstream, unpatched=repeat)
     return NightlyAttempt(project, cves, replace(outcome, started_at=started),
                           updated=update is not None and update["status"] == "succeeded",
                           upstream=upstream)
