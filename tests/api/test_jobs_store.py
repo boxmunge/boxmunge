@@ -186,11 +186,11 @@ def test_a_record_nested_too_deeply_is_corrupt_naming_the_file(paths) -> None:
 
 
 def test_a_non_null_result_is_checked_against_its_action(paths) -> None:
-    _write(paths.jobs_dir, _record(1, result={"count": 3}))
-    with pytest.raises(StateError, match="action project.deploy is no longer registered"):
+    _write(paths.jobs_dir, _record(1, action="project.retired", result={"count": 3}))
+    with pytest.raises(StateError, match="action project.retired is no longer registered"):
         JobStore(paths, result_schemas=registry_results).get(_id(1))
-    schemas = {"project.deploy": obj({"count": INTEGER})}.get
+    schemas = {"project.retired": obj({"count": INTEGER})}.get
     assert JobStore(paths, result_schemas=schemas).get(_id(1))["result"] == {"count": 3}
-    _write(paths.jobs_dir, _record(1, result={"count": "3"}))
+    _write(paths.jobs_dir, _record(1, action="project.retired", result={"count": "3"}))
     with pytest.raises(StateError, match=r"\$.result.count: expected integer"):
         JobStore(paths, result_schemas=schemas).get(_id(1))

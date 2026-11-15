@@ -81,14 +81,14 @@ def test_dev_apid_end_to_end(tmp_path, sock_path) -> None:
         assert status == 200 and len(body["data"]["projects"]) == 5
         status, body = call(sock_path, "POST", "/v1/actions/project.rollback",
                             {"params": {"project": "shop"}})
-        assert status == 404 and body["error"]["code"] == "not_found"
+        assert status == 403 and body["error"]["code"] == "forbidden"
     assert apid.returncode == 0, apid.stderr
     assert "DEV MODE" in apid.stderr
     assert not sock_path.exists()
     audit = [json.loads(line) for line in
              (tmp_path / "box" / "logs" / "audit.jsonl").read_text().splitlines()]
     assert [(r["principal"], r["action"], r["outcome"], r["code"]) for r in audit] == [
-        ("plugin:webui", "project.rollback", "refused", "not_found")]
+        ("plugin:webui", "project.rollback", "refused", "forbidden")]
 
 
 def test_a_failing_test_body_still_stops_the_server(tmp_path, sock_path) -> None:

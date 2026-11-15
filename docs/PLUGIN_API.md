@@ -216,7 +216,22 @@ In this release no job can be started through the API, so jobs come from the fix
 ## Operate actions and approvals (planned)
 
 Operate actions (stage, promote, unstage, deploy, rollback, pause, resume, backup, restore) will
-be served to plugins granted `operate`, and each call will need the operator's fresh approval:
+be served to plugins granted `operate`. Each runs as a job holding the project lock and does what
+its CLI command does, without a dry run. The release actions are defined:
+
+| Action | Parameters | Returns | CLI |
+|---|---|---|---|
+| `project.stage` | `project`, `ref`?, `no_pull`?, `allow_security_regression`? | `ref` and `id` of the staged release | `stage` |
+| `project.promote` | `project`, `no_pull`?, `allow_security_regression`? | nothing | `promote` |
+| `project.unstage` | `project` | nothing | `unstage` |
+| `project.deploy` | `project`, `ref`?, `no_snapshot`?, `no_pull`?, `redeploy`?, `accept_stale_kev`?, `allow_security_regression`? | nothing | `prod-deploy` |
+| `project.rollback` | `project`, `allow_security_regression`? | nothing | `rollback` |
+
+`allow_security_regression` (the reason, logged and alerted) and `accept_stale_kev` weaken a
+control, so they carry `x-tier: "govern"`: a caller without govern gets `forbidden`, naming the
+command the operator runs over SSH instead.
+
+Each call will need the operator's fresh approval:
 
 1. `POST /v1/approvals` with `{"action": "project.rollback", "params": {"project": "shop"}}`.
    The server resolves the call into a plan (the exact release and snapshot) and returns
