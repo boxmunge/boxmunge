@@ -33,6 +33,7 @@ from tests.test_commands.cve_helpers import (
     CRIT, Docker, Pushover, finding, make_box, render_site, scan_result, seed_quarantine,
 )
 
+ACCEPT = "--accept-stale-kev"
 KEV_CVE = CRIT.cve_id  # the CVE seed_quarantine records
 OTHER_CVE = "CVE-2026-9999"
 TODAY = date(2026, 11, 9)
@@ -97,28 +98,42 @@ class TestRule:
 
 
 class TestListingSources:
+    """A stale optional source is judged like a stale CISA catalog: it refuses
+    only while a CVE it listed is still in the images."""
     EU = ExploitedSource.EU
 
-    def _check(self, listed_by, stale, kev=None):
+    def _check(self, listing, stale, *found, kev=None):
         return check_exploited_for_lift(
-            OTHER_CVE, _decisions(), kev or _catalog(age_days=0), TODAY,
-            listed_by=frozenset(listed_by), stale=stale)
+            OTHER_CVE, _decisions(*found), kev or _catalog(age_days=0), TODAY,
+            listing={c: frozenset(s) for c, s in listing.items()}, stale=stale)
 
-    def test_a_stale_listing_source_refuses_and_names_it(self) -> None:
-        check = self._check({self.EU}, {self.EU: "never fetched"})
-        assert check.refusal is not None and "EU KEV list is stale (never fetched)" in check.refusal
-        assert check.stale_sources == (self.EU,) and not check.acceptable
+    def test_a_stale_source_refuses_while_its_cve_is_still_in_the_images(self) -> None:
+        check = self._check({KEV_CVE: {self.EU}}, {self.EU: "never fetched"}, KEV_CVE)
+        assert check.refusal is not None
+        assert "EU KEV list is stale (never fetched)" in check.refusal and KEV_CVE in check.refusal
+        assert check.acceptable and check.stale_sources == (self.EU,)
+
+    def test_a_cve_the_fix_removed_never_blocks_and_names_the_gap(self) -> None:
+        check = self._check({KEV_CVE: {self.EU}}, {self.EU: "stale"}, "CVE-2026-1111")
+        assert check.refusal is None
+        assert "EU KEV list is stale" in check.gap and "could not be checked" in check.gap
 
     def test_a_stale_source_that_did_not_list_it_does_not_matter(self) -> None:
-        check = self._check({ExploitedSource.CISA}, {self.EU: "never fetched"})
-        assert check.refusal is None
+        check = self._check({KEV_CVE: {ExploitedSource.CISA}}, {self.EU: "stale"}, KEV_CVE)
+        assert check.refusal is None and check.gap is None
 
-    def test_a_fresh_listing_source_lifts(self) -> None:
-        assert self._check({self.EU}, {}).refusal is None
+    def test_a_fresh_source_lifts(self) -> None:
+        assert self._check({KEV_CVE: {self.EU}}, {}, KEV_CVE).refusal is None
 
     def test_stale_cisa_keeps_todays_rule_with_a_fresh_eu(self) -> None:
-        check = self._check({self.EU}, {}, kev=_catalog(KEV_CVE, age_days=20))
+        check = self._check({KEV_CVE: {self.EU}}, {}, "CVE-2026-1111",
+                            kev=_catalog(KEV_CVE, age_days=20))
         assert check.refusal is None and "could not be checked" in check.gap
+
+    def test_a_cisa_refusal_is_returned_unchanged(self) -> None:
+        check = self._check({KEV_CVE: {self.EU}}, {self.EU: "stale"}, KEV_CVE,
+                            kev=_catalog(KEV_CVE, age_days=20))
+        assert "CISA KEV catalog is stale" in check.refusal and not check.acceptable
 
 
 # ---- security resume ----
@@ -313,12 +328,34 @@ def test_staging_is_not_judged_against_the_catalog(gate_box) -> None:
     assert clearance.kev_gap is None
 
 
-def test_resume_refuses_an_eu_caused_quarantine_while_the_eu_list_is_stale(
+def test_resume_refuses_an_eu_listed_cve_still_present_naming_eu(
         tmp_path, monkeypatch, capsys) -> None:
-    paths = _resume_box(tmp_path, monkeypatch, [], cve=OTHER_CVE, exploited_by=["eu_kev"])
-    _write_kev(paths, KEV_CVE, age_days=0)  # CISA fresh; the EU cache was never fetched
-    assert cmd_security_resume(["demo", "--accept-stale-kev"], paths) == 1
+    paths = _resume_box(tmp_path, monkeypatch, [CRIT], exploited_by={KEV_CVE: ["eu_kev"]})
+    _write_kev(paths, OTHER_CVE, age_days=0)  # CISA fresh; the EU cache was never fetched
+    assert cmd_security_resume(["demo"], paths) == 1
     assert is_quarantined("demo", paths)
     err = capsys.readouterr().err
     assert "EU KEV list is stale" in err and "stays in place" in err
-    assert "prod-deploy" not in err
+    assert ACCEPT in err
+
+
+def test_resume_accept_stale_kev_lifts_past_a_stale_eu_list_logged_and_alerted(
+        tmp_path, monkeypatch, capsys) -> None:
+    paths = _resume_box(tmp_path, monkeypatch, [CRIT], exploited_by={KEV_CVE: ["eu_kev"]})
+    _write_kev(paths, OTHER_CVE, age_days=0)
+    assert cmd_security_resume(["demo", ACCEPT], paths) == 0
+    assert not is_quarantined("demo", paths)
+    assert "EU KEV list is stale" in capsys.readouterr().out
+    assert "EU KEV list is stale" in paths.log_file.read_text()
+    alerts = [(t, p) for t, _, p in paths.pushover.sent if ACCEPT in t]
+    assert alerts and alerts[0][1] == 1
+
+
+def test_resume_lifts_when_the_fix_removed_the_eu_listed_cve(
+        tmp_path, monkeypatch, capsys) -> None:
+    paths = _resume_box(tmp_path, monkeypatch, [], exploited_by={KEV_CVE: ["eu_kev"]})
+    _write_kev(paths, OTHER_CVE, age_days=0)
+    assert cmd_security_resume(["demo"], paths) == 0
+    assert not is_quarantined("demo", paths)
+    assert "EU KEV list is stale" in capsys.readouterr().out
+    assert [t for t, _, p in paths.pushover.sent if "stale KEV catalog" in t]

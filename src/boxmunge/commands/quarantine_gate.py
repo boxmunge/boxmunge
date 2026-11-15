@@ -276,7 +276,7 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
         raise QuarantineRefused(held)
     today = datetime.now(timezone.utc).date()
     kev_check = KevLiftCheck() if target.staging else check_exploited_for_lift(
-        cve, scan.decisions, kev, today, listed_by=recorded_exploited_by(record),
+        cve, scan.decisions, kev, today, listing=recorded_exploited_by(record),
         stale=load_exploited(paths, today, cisa=kev).stale)
     accepted = None if target.staging else accept_at_gate(project, kev_check, paths)
     if kev_check.refusal is not None and accepted is None:

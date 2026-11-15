@@ -184,7 +184,7 @@ def test_a_quarantine_an_eu_listing_caused_is_not_lifted_while_the_eu_list_is_st
         box) -> None:
     """A stale list reads as "nothing exploited": it cannot lift what it caused."""
     paths, pushover = box()
-    seed_quarantine(paths, exploited_by=["eu_kev"])
+    seed_quarantine(paths, exploited_by={_CVE: ["eu_kev"]})
     scan = _scan(paths)  # CISA fresh and clear; the EU cache was never fetched
     assert is_quarantined("demo", paths) and "compose_up" not in paths.docker.calls
     assert scan.kept is not None and "EU KEV list is stale" in scan.kept
@@ -193,14 +193,14 @@ def test_a_quarantine_an_eu_listing_caused_is_not_lifted_while_the_eu_list_is_st
 
 def test_a_quarantine_caused_by_cisa_lifts_while_only_the_eu_list_is_stale(box) -> None:
     paths, pushover = box()
-    seed_quarantine(paths, exploited_by=["cisa_kev"])
+    seed_quarantine(paths, exploited_by={_CVE: ["cisa_kev"]})
     _scan(paths)
     assert not is_quarantined("demo", paths)
 
 
 def test_a_fresh_eu_list_lets_an_eu_caused_quarantine_lift(box) -> None:
     paths, pushover = box()
-    seed_quarantine(paths, exploited_by=["eu_kev"])
+    seed_quarantine(paths, exploited_by={_CVE: ["eu_kev"]})
     now = datetime.now(timezone.utc).isoformat()
     paths.kev_enisa.parent.mkdir(parents=True, exist_ok=True)
     paths.kev_enisa.write_text(json.dumps({"fetched_at": now, "etag": None,

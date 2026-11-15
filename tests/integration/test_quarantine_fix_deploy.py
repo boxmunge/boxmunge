@@ -95,7 +95,7 @@ def _quarantine(paths, p: str) -> None:
     quarantine_project(p, paths, project_dir=paths.project_dir(p),
                        hosts=[f"{p}.example.com"],
                        compose_files=["compose.yml", "compose.boxmunge.yml"],
-                       exploited_by=frozenset(), headline=headline, image_ref="app", policy=BALANCED)
+                       exploited_by={}, headline=headline, image_ref="app", policy=BALANCED)
 
 
 def _stub_scanner(monkeypatch) -> Trivy:

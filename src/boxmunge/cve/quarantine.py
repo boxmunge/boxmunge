@@ -69,13 +69,20 @@ QUARANTINE_TEXT_FIELDS = (
 
 
 def _listing_problem(stored: Any) -> bool:
-    return not (isinstance(stored, list)
-                and all(v in {s.value for s in ExploitedSource} for v in stored))
+    values = {s.value for s in ExploitedSource}
+    return not (isinstance(stored, dict) and all(
+        isinstance(srcs, list) and all(v in values for v in srcs)
+        for srcs in stored.values()))
 
 
-def recorded_exploited_by(record: Mapping[str, Any]) -> frozenset[ExploitedSource]:
-    """The sources that listed the quarantine's findings (a checked record's)."""
-    return frozenset(ExploitedSource(v) for v in record.get("exploited_by", []))
+def recorded_exploited_by(record: Mapping[str, Any]) -> dict[str, frozenset[ExploitedSource]]:
+    """The sources that listed each CVE of the quarantine (a checked record's).
+
+    A record without the field predates 0.12, when CISA was the only source,
+    and the CISA rule (lift_rule.check_kev_for_lift) already judges that: so
+    it reads as listing nothing here."""
+    return {cve: frozenset(ExploitedSource(v) for v in srcs)
+            for cve, srcs in record.get("exploited_by", {}).items()}
 
 
 def checked_quarantine_record(state: dict[str, Any] | None, path: Path) -> dict[str, Any]:
@@ -143,15 +150,15 @@ def write_quarantine_state(
     paths: BoxPaths,
     *,
     headline: FindingDisposition,
-    exploited_by: frozenset[ExploitedSource],
+    exploited_by: Mapping[str, frozenset[ExploitedSource]],
     image_ref: str,
     policy: dict[str, Any],
 ) -> dict[str, Any]:
     """Record quarantine state with ``action_complete: false``; return it.
 
     `headline` is the most-severe FindingDisposition that triggered the
-    quarantine; `exploited_by` every known-exploited source that lists a
-    quarantine-level finding, kept so a stale source cannot lift it; `policy` the security policy it was judged under
+    quarantine; `exploited_by` the known-exploited sources that list each
+    quarantine-level CVE, kept so a lift can judge a source that is stale; `policy` the security policy it was judged under
     (cve.security_policy), kept so a later release that lifts the quarantine
     can be shown to have relaxed it. Overwrites existing state with the new headline if called
     again; the action is then incomplete until re-asserted.
@@ -163,7 +170,8 @@ def write_quarantine_state(
         "effective_severity": headline.effective_severity.value,
         "explanation": headline.explanation,
         "image_ref": image_ref,
-        "exploited_by": sorted(s.value for s in exploited_by),
+        "exploited_by": {cve: sorted(s.value for s in srcs)
+                         for cve, srcs in sorted(exploited_by.items())},
         "policy": policy,
         "action_complete": False,
     }
@@ -222,7 +230,7 @@ def quarantine_project(
     hosts: list[str],
     compose_files: list[str],
     headline: FindingDisposition,
-    exploited_by: frozenset[ExploitedSource],
+    exploited_by: Mapping[str, frozenset[ExploitedSource]],
     image_ref: str,
     policy: dict[str, Any],
 ) -> None:

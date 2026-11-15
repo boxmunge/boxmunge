@@ -33,7 +33,8 @@ from boxmunge.cve.alerting import (
     send_alerts,
 )
 from boxmunge.cve.exploited import ExploitedSource
-from boxmunge.cve.lift_rule import stale_listing_refusal
+from boxmunge.cve.lift_rule import stale_listers
+from boxmunge.cve.policy_types import listing_label
 from boxmunge.cve.policy import Disposition, FindingDisposition, Posture, ProjectDecision
 from boxmunge.cve.quarantine import (
     QuarantineError,
@@ -68,7 +69,7 @@ def enforce(
     paths: BoxPaths, project: str, *,
     hosts: list[str], compose_files: list[str], policy: dict[str, Any],
     headline: tuple[ProjectDecision, FindingDisposition] | None,
-    exploited_by: frozenset[ExploitedSource],
+    exploited_by: Mapping[str, frozenset[ExploitedSource]],
     defer_new: bool,
     cleared: Sequence[ProjectDecision] | None = None,
     stale_sources: Mapping[ExploitedSource, str] | None = None,
@@ -130,21 +131,34 @@ def clears_quarantine(posture: Posture, decisions: Sequence[ProjectDecision], *,
                         for f in findings))
 
 
-def quarantine_listing(decisions: Sequence[ProjectDecision]) -> frozenset[ExploitedSource]:
-    """Every known-exploited source listing a quarantine-level finding."""
-    return frozenset(s for d in decisions for f in d.findings
-                     if f.disposition is Disposition.QUARANTINE for s in f.exploited_by)
+def quarantine_listing(
+    decisions: Sequence[ProjectDecision],
+) -> dict[str, frozenset[ExploitedSource]]:
+    """The known-exploited sources listing each quarantine-level CVE."""
+    out: dict[str, frozenset[ExploitedSource]] = {}
+    for d in decisions:
+        for f in d.findings:
+            if f.disposition is Disposition.QUARANTINE and f.exploited_by:
+                out[f.finding.cve_id] = out.get(f.finding.cve_id, frozenset()) | f.exploited_by
+    return out
 
 
 def listing_hold(paths: BoxPaths, project: str,
                  stale_sources: Mapping[ExploitedSource, str]) -> str | None:
     """Why a cleared quarantine is kept because a source that listed it is
-    stale (it reads as "nothing is exploited"), or None. CISA is judged by
-    ``clears_quarantine`` itself."""
+    stale (it reads as "nothing is exploited"), or None. Like a stale CISA
+    catalog, an unattended lift takes only the fresh case (``clears_quarantine``
+    judges CISA itself); `security resume` judges the CVEs still present."""
     record = checked_quarantine_record(read_quarantine_state(project, paths),
                                        paths.project_quarantine_state(project))
-    refusal = stale_listing_refusal(recorded_exploited_by(record), stale_sources)
-    return None if refusal is None else f"quarantine kept: {refusal}"
+    stale_by = stale_listers(recorded_exploited_by(record), stale_sources)
+    if not stale_by:
+        return None
+    named = "; ".join(f"the {listing_label(frozenset({s}))} list is stale ({stale_sources[s]})"
+                      for s in stale_by)
+    return (f"quarantine kept: {named}, and it listed this quarantine's findings; "
+            f"refresh it with `boxmunge security scan`, or judge the risk with "
+            f"`boxmunge security resume {project} --accept-stale-kev`")
 
 
 def _lift_blocker(paths: BoxPaths, project: str) -> str | None:

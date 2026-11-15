@@ -171,7 +171,7 @@ class TestRunRestore:
             explanation="critical CVE",
         )
         write_quarantine_state(
-            "myapp", paths, exploited_by=frozenset(), headline=disposition,
+            "myapp", paths, exploited_by={}, headline=disposition,
             image_ref="myapp:1.0",
             policy={"posture": "balanced", "dangerously_disable_quarantine": False, "runtimes": None},
         )

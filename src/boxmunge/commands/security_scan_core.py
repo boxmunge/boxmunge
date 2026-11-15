@@ -374,7 +374,7 @@ def scan_one_project_locked(
         # Audit-only (resume re-scan, audit A-3) leaves the prior alone.
         record_error = None
         if not audit_only:
-            outcome = _enforce(paths, project, meta, None, frozenset(), defer_new=defer_new)
+            outcome = _enforce(paths, project, meta, None, {}, defer_new=defer_new)
             record_error = _record(
                 scan_state_path, decisions=(),
                 unscanned=tuple(_unscanned(unidentified=unidentified)), **basis,
@@ -467,7 +467,7 @@ def _record(path, **kwargs) -> str | None:
 def _enforce(
     paths: BoxPaths, project: str, meta: ProjectMeta,
     headline: tuple[ProjectDecision, FindingDisposition] | None,
-    exploited_by: frozenset[ExploitedSource],
+    exploited_by: Mapping[str, frozenset[ExploitedSource]],
     *, defer_new: bool, cleared: tuple[ProjectDecision, ...] | None = None,
     stale_sources: Mapping[ExploitedSource, str] | None = None,
 ) -> Enforcement:

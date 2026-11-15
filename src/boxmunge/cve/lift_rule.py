@@ -56,7 +56,7 @@ class KevLiftCheck:
     refusal: str | None = None
     acceptable: bool = False
     gap: str | None = None
-    # The non-CISA sources (EU, VulnCheck) behind a refusal: only fresh data helps.
+    # The non-CISA sources (EU, VulnCheck) that are stale and listed the quarantine.
     stale_sources: tuple[ExploitedSource, ...] = ()
 
 
@@ -71,8 +71,6 @@ def fresh_data_advice() -> str:
 def resume_exits(project: str, check: KevLiftCheck) -> list[str]:
     """What gets a project ``security resume`` refused out of quarantine."""
     exits = [f"{fresh_data_advice()}, then retry."]
-    if check.stale_sources:
-        return exits
     if check.acceptable:
         exits.append(f"Or, having judged the risk, lift it anyway: `boxmunge security resume "
                      f"{project} {ACCEPT_FLAG}` (logged and alerted). It brings the images "
@@ -86,38 +84,50 @@ def resume_exits(project: str, check: KevLiftCheck) -> list[str]:
     return exits
 
 
-def stale_listing_refusal(listed_by: frozenset[ExploitedSource],
-                          stale: Mapping[ExploitedSource, str]) -> str | None:
-    """Why a quarantine that ``listed_by`` named cannot be lifted while a
-    source among them is stale, or None. A stale list reads as "nothing is
-    exploited", so it cannot show the listing has gone. CISA is judged by
-    ``check_kev_for_lift``."""
-    held = [s for s in ExploitedSource
-            if s is not ExploitedSource.CISA and s in listed_by and s in stale]
-    if not held:
-        return None
-    named = "; ".join(f"the {listing_label(frozenset({s}))} list is stale ({stale[s]})"
-                      for s in held)
-    return (f"{named}, and it listed this quarantine's findings as actively exploited; "
-            f"a stale list cannot show that has changed")
+def stale_listers(listing: Mapping[str, frozenset[ExploitedSource]],
+                  stale: Mapping[ExploitedSource, str]) -> tuple[ExploitedSource, ...]:
+    """The non-CISA sources (CISA is judged by ``check_kev_for_lift``) that
+    listed some CVE of a quarantine (``listing``, from its record) and are
+    stale now."""
+    return tuple(s for s in ExploitedSource
+                 if s is not ExploitedSource.CISA and s in stale
+                 and any(s in srcs for srcs in listing.values()))
+
+
+def _stale_named(sources: Sequence[ExploitedSource], stale: Mapping[ExploitedSource, str]) -> str:
+    return "; ".join(f"the {listing_label(frozenset({s}))} list is stale ({stale[s]})"
+                     for s in sources)
 
 
 def check_exploited_for_lift(
     quarantined_cve: str, decisions: Sequence[ProjectDecision], kev: KevCatalog,
-    today: date, *, listed_by: frozenset[ExploitedSource],
+    today: date, *, listing: Mapping[str, frozenset[ExploitedSource]],
     stale: Mapping[ExploitedSource, str],
 ) -> KevLiftCheck:
-    """``check_kev_for_lift``, then the other sources that listed the
-    quarantine (``listed_by``, from its record): a stale one refuses the lift
-    and no flag overrides it."""
+    """``check_kev_for_lift``, then the same judgement for every other source
+    that listed a CVE of the quarantine (``listing``): a stale source refuses
+    the lift only when a CVE it listed is still in the images
+    (`--accept-stale-kev` accepts that); otherwise the lift goes ahead and
+    names the gap."""
     check = check_kev_for_lift(quarantined_cve, decisions, kev, today)
     if check.refusal is not None:
         return check
-    refusal = stale_listing_refusal(listed_by, stale)
-    if refusal is None:
+    stale_by = stale_listers(listing, stale)
+    if not stale_by:
         return check
-    held = tuple(s for s in listed_by if s is not ExploitedSource.CISA and s in stale)
-    return KevLiftCheck(check.stale, refusal=refusal, gap=check.gap, stale_sources=held)
+    named = _stale_named(stale_by, stale)
+    in_images = {f.finding.cve_id for d in decisions for f in d.findings}
+    held = sorted(cve for cve, srcs in listing.items()
+                  if cve in in_images and not srcs.isdisjoint(stale_by))
+    if held:
+        return KevLiftCheck(check.stale or named, acceptable=True, gap=check.gap,
+                            stale_sources=stale_by, refusal=(
+            f"{named}, and it listed {', '.join(held)}, still in the images, as actively "
+            f"exploited; a stale list cannot show that has changed"))
+    gap = (f"{named}. It listed no CVE still in the images, but CVEs it added since "
+           f"it was last fetched could not be checked")
+    return KevLiftCheck(check.stale or named, stale_sources=stale_by,
+                        gap=gap if check.gap is None else f"{check.gap}; {gap}")
 
 
 def check_kev_for_lift(quarantined_cve: str, decisions: Sequence[ProjectDecision],
