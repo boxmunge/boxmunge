@@ -24,6 +24,7 @@ from boxmunge.api.job_capture import CoreFailed
 from boxmunge.api.principal import Principal, Tier
 from boxmunge.api.result import ActionError, ErrorCode
 from boxmunge.api.schema import validate
+from boxmunge.backup_source import BackupSource
 from boxmunge.commands.deploy import deploy_locked
 from boxmunge.pause import awaiting_deploy, is_paused, mark_pause_complete, write_paused_state
 from boxmunge.project_registry import add_project
@@ -168,16 +169,6 @@ def test_resume_with_a_passing_smoke_registers_nothing(tmp_path, lock_attempts) 
     assert released == []
 
 
-def test_resume_smoke_failure_outside_the_worker_fails_noisily(tmp_path,
-                                                               lock_attempts) -> None:
-    paths = _setup(tmp_path)
-    write_paused_state(NAME, paths)
-    action = REGISTRY.get("project.resume")
-    with ExitStack() as stack, pytest.raises(RuntimeError, match="after_release"):
-        _resume_patches(stack, smoke=(False, "HTTP 502 on /"))
-        action.handler({"project": NAME}, _ctx(paths, None))
-
-
 def test_resume_no_start_hands_to_deploy(tmp_path, lock_attempts) -> None:
     paths = _setup(tmp_path)
     write_paused_state(NAME, paths)
@@ -207,11 +198,70 @@ def test_backup_result_names_the_snapshot(paths, monkeypatch) -> None:
     probation.assert_not_called()
 
 
-def test_a_backup_that_wrote_no_snapshot_fails_saying_why(paths, monkeypatch) -> None:
-    monkeypatch.setattr(operate_runtime, "snapshot_locked",
-                        lambda p, pa: backup_cmd.BackupResult(0, cause="its service is down"))
-    with pytest.raises(RuntimeError, match="wrote no snapshot: its service is down"):
+def _quarantined(paths) -> None:
+    write_state(paths.project_quarantine_state(NAME), {"cve_id": "CVE-2099-0001"})
+
+
+def _type_none(paths) -> None:
+    manifest = paths.project_manifest(NAME)
+    manifest.write_text(manifest.read_text().replace("type: db-dump", "type: none"))
+
+
+def _source_skips(alert: bool):
+    def setup(paths, monkeypatch) -> None:
+        monkeypatch.setattr(backup_cmd, "backup_source", lambda p, n: BackupSource(
+            None, skip="the first deploy (myapp-v1) is not running yet", alert=alert))
+        monkeypatch.setattr(backup_cmd, "notify", lambda *a, **k: None)
+    return setup
+
+
+@pytest.mark.parametrize("setup, why", [
+    (lambda paths, mp: _quarantined(paths), "it is CVE-quarantined"),
+    (lambda paths, mp: _type_none(paths), "no backup configured (type: none)"),
+    (_source_skips(alert=False), "the first deploy (myapp-v1) is not running yet"),
+    (_source_skips(alert=True), "the first deploy (myapp-v1) is not running yet"),
+], ids=["quarantined", "type-none", "source-skip", "source-skip-alerted"])
+def test_a_backup_that_wrote_no_snapshot_fails_naming_the_cores_reason(
+        paths, monkeypatch, lock_attempts, setup, why) -> None:
+    """The real core says why it wrote none; the job reports exactly that."""
+    _setup_project(paths)
+    setup(paths, monkeypatch)
+    with patch.object(backup_cmd, "_run_backup_inner") as inner, \
+            pytest.raises(RuntimeError) as excinfo:
         _run(paths, "project.backup")
+    inner.assert_not_called()
+    assert str(excinfo.value).startswith(f"The backup of {NAME} wrote no snapshot: {why}")
+
+
+def test_a_core_result_without_a_snapshot_or_a_reason_breaks_the_contract(
+        paths, monkeypatch) -> None:
+    monkeypatch.setattr(operate_runtime, "snapshot_locked",
+                        lambda p, pa: backup_cmd.BackupResult(0))
+    with pytest.raises(RuntimeError, match="neither a snapshot nor why it wrote none"):
+        _run(paths, "project.backup")
+
+
+def test_backup_all_still_excuses_only_a_skip_that_did_not_alert() -> None:
+    assert backup_cmd.BackupResult(0, skipped="type none").excused
+    assert not backup_cmd.BackupResult(0, skipped="ambiguous", cause="ambiguous").excused
+    assert not backup_cmd.BackupResult(0, snapshot=Path("/b/s.age")).excused
+
+
+def test_resume_outside_the_worker_fails_before_touching_the_project(
+        paths, monkeypatch) -> None:
+    calls: list = []
+    monkeypatch.setattr(operate_runtime, "resume_locked", lambda *a: calls.append(a))
+    with pytest.raises(RuntimeError, match="after_release"):
+        REGISTRY.get("project.resume").handler({"project": NAME}, _ctx(paths, None))
+    assert calls == []
+
+
+def test_a_blank_pause_reason_is_refused_before_anything_runs(paths) -> None:
+    with pytest.raises(ActionError) as excinfo:
+        make_invoker(paths).invoke("project.pause", {"project": NAME, "reason": "  "},
+                                   Principal.operator())
+    assert excinfo.value.code is ErrorCode.INVALID_PARAMS
+    assert "reason is blank" in excinfo.value.message
 
 
 @pytest.mark.parametrize("name, params, args, kwargs", [

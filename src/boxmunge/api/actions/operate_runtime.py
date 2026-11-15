@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from boxmunge.api.actions._operate import PROJECT, operate_job, run_core
+from boxmunge.api.actions._operate import PROJECT, non_blank, operate_job, run_core
 from boxmunge.api.context import ActionContext
 from boxmunge.api.principal import Tier
 from boxmunge.api.registry import Action, Handler
@@ -59,14 +59,15 @@ def _resume(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
     if params.get("no_start", False):
         run_core("resume", lambda: hand_to_deploy_locked(project, ctx.paths))
         return {}
+    after_release = ctx.after_release
+    if after_release is None:
+        raise RuntimeError("project.resume ran outside the job worker, which alone "
+                           "sets after_release for the smoke alert")
     rc, smoke_failure = resume_locked(project, ctx.paths,
                                       params.get("skip_security_checks", False))
     if smoke_failure is not None:
-        if ctx.after_release is None:
-            raise RuntimeError("project.resume ran outside the job worker, which alone "
-                               "sets after_release for the smoke alert")
         # Pushover is a network call: it waits until the project lock is released.
-        ctx.after_release(lambda: alert_smoke_failed(project, ctx.paths, smoke_failure))
+        after_release(lambda: alert_smoke_failed(project, ctx.paths, smoke_failure))
     run_core("resume", lambda: rc)
     return {}
 
@@ -82,9 +83,10 @@ def _backup(params: dict[str, Any], ctx: ActionContext) -> dict[str, Any]:
     result = snapshot_locked(project, ctx.paths)
     run_core("backup", lambda: result.rc)
     if result.snapshot is None:
-        why = result.cause or ("none was due: its backup type is none, or it is "
-                               "CVE-quarantined")
-        raise RuntimeError(f"The backup of {project} wrote no snapshot: {why}.")
+        if result.skipped is None:
+            raise RuntimeError(f"The backup core for {project} exited 0 with neither a "
+                               f"snapshot nor why it wrote none: a bug in snapshot_locked.")
+        raise RuntimeError(f"The backup of {project} wrote no snapshot: {result.skipped}.")
     return {"snapshot": result.snapshot.name}
 
 
@@ -120,7 +122,7 @@ ACTIONS = (
                        "description": "Why it is paused; logged (--reason)."},
             "no_snapshot": PAUSE_NO_SNAPSHOT,
         },
-        result=NO_RESULT, handler=_pause, cli="pause",
+        result=NO_RESULT, handler=_pause, cli="pause", param_check=non_blank("reason"),
     ),
     operate_job(
         "project.resume", "Bring a paused project back online (resume).",

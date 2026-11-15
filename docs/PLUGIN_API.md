@@ -248,7 +248,9 @@ its CLI command does, without a dry run. These are defined:
 `skip_security_checks` weaken a control, so they carry `x-tier: "govern"`: a caller without govern
 gets `forbidden`, naming the command the operator runs over SSH instead. `project.resume` refuses
 `no_start` with `skip_security_checks` as `invalid_params`, since it starts nothing. A backup that
-writes no snapshot (its backup type is `none`, or the project is quarantined) fails, saying why.
+writes no snapshot (its backup type is `none`, the project is quarantined, or an open install
+leaves unclear what to dump) fails, saying which. A blank `reason` on `project.pause` is
+`invalid_params`.
 
 Two govern actions run as jobs the same way, and are not open to agents: `project.recover`
 (`project`; restarts the build the health monitor stopped, as `recover`) and
