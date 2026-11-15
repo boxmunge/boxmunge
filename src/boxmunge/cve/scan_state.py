@@ -22,6 +22,7 @@ from boxmunge.cve.policy import (
 )
 from boxmunge.cve.scanner import AttackVector, Finding, PkgClass, Severity, VulnStatus
 from boxmunge.fileutil import atomic_write_text
+from boxmunge.cve.exploited import ExploitedSource
 from boxmunge.state import StateError, read_state
 from boxmunge.fs_nofollow import read_text_nofollow_or_none
 
@@ -73,7 +74,7 @@ def _serialize_disposition(d: Any) -> dict[str, Any]:
         "cvss_score": f.cvss_score,
         "vendor_severities": {k: v.value for k, v in f.vendor_severities.items()},
         "severity_source": f.severity_source,
-        "kev_listed": d.kev_listed,
+        "exploited_by": sorted(s.value for s in d.exploited_by),
         "fix_would_quarantine": d.fix_would_quarantine,
         "hardening_would_quarantine": d.hardening_would_quarantine,
     }
@@ -188,6 +189,20 @@ def stored_severities(raw: dict[str, Any]) -> tuple[Severity, Severity]:
             stored_enum(Severity, raw.get("effective_severity"), "effective_severity"))
 
 
+def _stored_exploited_by(raw: dict[str, Any]) -> frozenset[ExploitedSource]:
+    """The stored listing sources. The 0.11 ``kev_listed`` flag cannot say
+    which list named the CVE, so a state still carrying it is unreadable
+    until the next scan rewrites it."""
+    if "kev_listed" in raw:
+        raise StateError(
+            "stored finding has 'kev_listed': the scan state predates "
+            "'exploited_by'; the next `boxmunge security scan` rewrites it")
+    stored = raw.get("exploited_by", [])
+    if not isinstance(stored, list):
+        raise StateError(f"stored 'exploited_by' is {stored!r}, not a list")
+    return frozenset(stored_enum(ExploitedSource, v, "exploited_by") for v in stored)
+
+
 def _required_key(raw: dict[str, Any], key: str) -> Any:
     """A stored finding's value for a key every current scan writes (null is
     a valid value); StateError when the key is absent, i.e. the state was
@@ -271,7 +286,7 @@ def decisions_from_scan_state(
                     disposition=disposition,
                     suppression=None,
                     explanation=raw.get("explanation", "") or "",
-                    kev_listed=raw.get("kev_listed") is True,
+                    exploited_by=_stored_exploited_by(raw),
                     fix_would_quarantine=raw.get("fix_would_quarantine") is True,
                     hardening_would_quarantine=raw.get("hardening_would_quarantine") is True,
                 ),

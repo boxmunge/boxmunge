@@ -47,7 +47,7 @@ def _candidate(decisions: tuple[ProjectDecision, ...]) -> Candidate:
                     if f.disposition == Disposition.QUARANTINE]
     return Candidate(
         cves=frozenset(f.finding.cve_id for f in quarantining),
-        kev=any(f.kev_listed for f in quarantining),
+        kev=any(f.full_kev for f in quarantining),
     )
 
 

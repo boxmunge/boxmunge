@@ -66,6 +66,7 @@ from typing import Callable
 from boxmunge.cve.hardening import (
     HardeningProfile, UpcomingHardening, calculate_hardening_penalty,
 )
+from boxmunge.cve.exploited import ExploitedSource, is_full_kev
 from boxmunge.cve.hardening_upcoming import flag_upcoming
 from boxmunge.cve.relevance import irrelevant_ecosystem
 from boxmunge.cve.scanner import (
@@ -84,6 +85,7 @@ from boxmunge.cve.policy_types import (
     Posture,
     ProjectDecision,
     elevate_severity,
+    listing_label,
     parse_posture,
     severity_gate_quarantines,
 )
@@ -119,9 +121,9 @@ __all__ = [
 ]
 
 
-def _kev_never(_cve: str) -> bool:
-    """Default KEV predicate — nothing is known-exploited (keeps callers total)."""
-    return False
+def _kev_never(_cve: str) -> frozenset[ExploitedSource]:
+    """Default lookup — nothing is known-exploited (keeps callers total)."""
+    return frozenset()
 
 
 # Distro statuses that mean "not an actionable/urgent fix" → informational
@@ -145,10 +147,15 @@ def evaluate_finding(
     dangerously_disable_quarantine: bool,
     suppressions: tuple[Suppression, ...],
     today: date,
-    kev_lookup: Callable[[str], bool] = _kev_never,
+    exploited_lookup: Callable[[str], frozenset[ExploitedSource]] = _kev_never,
     runtimes: frozenset[str] | None = None,
 ) -> FindingDisposition:
     """Decide the disposition for a single finding (the trust ladder).
+
+    A finding listed only by VulnCheck (a weaker signal than CISA or EU KEV)
+    never takes the KEV override below paranoid: it follows the ordinary
+    ladder, and the disposition records the listing in ``exploited_by`` so
+    the alerts can flag it urgent.
 
     Order of checks (see the module docstring for the rationale of each):
     KEV override → QUARANTINE (fixable KEV under relaxed → IGNORED_FIXED);
@@ -160,10 +167,37 @@ def evaluate_finding(
     QUARANTINE / STILL_RUNNING_AT_RISK, balanced: AWAITING_FIX; below it
     INFORMATIONAL.
     """
+    sources = exploited_lookup(finding.cve_id)
+    d = _decide(
+        finding, sources, posture=posture, hardening_penalty=hardening_penalty,
+        dangerously_disable_quarantine=dangerously_disable_quarantine,
+        suppressions=suppressions, today=today,
+        exploited_lookup=exploited_lookup, runtimes=runtimes,
+    )
+    if d.exploited_by or not sources:
+        return d
+    return replace(d, exploited_by=sources, explanation=(
+        f"{d.explanation} {finding.cve_id} is also listed as exploited "
+        f"({listing_label(sources)}); a listing by VulnCheck alone does not "
+        f"quarantine under {_POSTURE_LABEL[posture]}, but it is alerted urgently."))
+
+
+def _decide(
+    finding: Finding,
+    sources: frozenset[ExploitedSource],
+    *,
+    posture: Posture,
+    hardening_penalty: int,
+    dangerously_disable_quarantine: bool,
+    suppressions: tuple[Suppression, ...],
+    today: date,
+    exploited_lookup: Callable[[str], frozenset[ExploitedSource]],
+    runtimes: frozenset[str] | None,
+) -> FindingDisposition:
     if posture is Posture.PARANOID:
-        base, sources = paranoid_severity(finding)
+        base, severity_sources = paranoid_severity(finding)
     else:
-        base, sources = finding.severity, ()
+        base, severity_sources = finding.severity, ()
     effective = elevate_severity(base, hardening_penalty)
 
     suppression = find_active_suppression(suppressions, finding.cve_id, today=today)
@@ -173,8 +207,9 @@ def evaluate_finding(
     # that exists but is not running (B-01). Relaxed is the one exception
     # for a fixable KEV finding: it stays up and is alerted every scan.
     # Under balanced this is the ONLY route to a quarantine.
-    if kev_lookup(finding.cve_id):
+    if is_full_kev(sources) or (sources and posture is Posture.PARANOID):
         fix = finding.fixed_version if finding.fix_available else None
+        listed_by = listing_label(sources)
         if dangerously_disable_quarantine:
             # The documented opt-out is honoured for KEV too (B-09); it is
             # never silent: the at-risk KEV alert repeats every scan.
@@ -182,16 +217,16 @@ def evaluate_finding(
                 finding=finding, base_severity=base,
                 hardening_penalty=hardening_penalty, effective_severity=effective,
                 disposition=Disposition.STILL_RUNNING_AT_RISK, suppression=None,
-                explanation=explain_kev_opted_out(finding.cve_id, fix),
-                kev_listed=True,
+                explanation=explain_kev_opted_out(finding.cve_id, fix, listed_by),
+                exploited_by=sources,
             )
         if fix is not None and posture is Posture.RELAXED:
             return FindingDisposition(
                 finding=finding, base_severity=base,
                 hardening_penalty=hardening_penalty, effective_severity=effective,
                 disposition=Disposition.IGNORED_FIXED, suppression=None,
-                explanation=explain_kev_fix_not_running(finding.cve_id, fix),
-                kev_listed=True,
+                explanation=explain_kev_fix_not_running(finding.cve_id, fix, listed_by),
+                exploited_by=sources,
             )
         return FindingDisposition(
             finding=finding,
@@ -201,11 +236,11 @@ def evaluate_finding(
             disposition=Disposition.QUARANTINE,
             suppression=None,
             explanation=explain_kev_quarantine(
-                finding.cve_id,
+                finding.cve_id, listed_by,
                 suppression.until.isoformat() if suppression else None,
                 fix,
             ),
-            kev_listed=True,
+            exploited_by=sources,
         )
 
     # 2. Upstream fix (not KEV): IGNORED_FIXED, flagged when the finding
@@ -217,7 +252,7 @@ def evaluate_finding(
             replace(finding, fixed_version=None), posture=posture,
             hardening_penalty=hardening_penalty,
             dangerously_disable_quarantine=dangerously_disable_quarantine,
-            suppressions=suppressions, today=today, kev_lookup=kev_lookup,
+            suppressions=suppressions, today=today, exploited_lookup=exploited_lookup,
             runtimes=runtimes,
         ).disposition
         would = but_for in (Disposition.QUARANTINE, Disposition.STILL_RUNNING_AT_RISK,
@@ -273,7 +308,7 @@ def evaluate_finding(
             posture,
             compare_sev=effective,
             dangerously_disable_quarantine=dangerously_disable_quarantine,
-            severity_sources=sources,
+            severity_sources=severity_sources,
         )
 
     # 6. Relaxed: KEV is the ONLY quarantine trigger (already handled at step
@@ -366,7 +401,7 @@ def evaluate_project(
     dangerously_disable_quarantine: bool,
     suppressions: tuple[Suppression, ...],
     today: date,
-    kev_lookup: Callable[[str], bool] = _kev_never,
+    exploited_lookup: Callable[[str], frozenset[ExploitedSource]] = _kev_never,
     runtimes: frozenset[str] | None = None,
     upcoming: UpcomingHardening | None = None,
 ) -> ProjectDecision:
@@ -394,7 +429,7 @@ def evaluate_project(
             dangerously_disable_quarantine=dangerously_disable_quarantine,
             suppressions=suppressions,
             today=today,
-            kev_lookup=kev_lookup,
+            exploited_lookup=exploited_lookup,
             runtimes=runtimes,
         )
 

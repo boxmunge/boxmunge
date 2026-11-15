@@ -204,7 +204,7 @@ def _finding_lines(scan: ProjectScan, services: dict[str, list[str]],
             if f.disposition != disposition:
                 continue
             key = (f.finding.cve_id, f.finding.package, decision.image_ref)
-            kev = ", CISA KEV: actively exploited" if f.kev_listed else ""
+            kev = f", {f.exploited_label}: actively exploited" if f.exploited_by else ""
             lines.setdefault(key, (
                 f"{f.finding.cve_id} ({f.effective_severity.value}{kev}) in "
                 f"{f.finding.package} {f.finding.installed_version}, service {service} "

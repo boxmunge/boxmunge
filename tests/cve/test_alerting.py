@@ -19,6 +19,7 @@ from boxmunge.cve.alerting import (
     format_suppression_expired_alert,
     send_alerts,
 )
+from boxmunge.cve.exploited import ExploitedSource
 from boxmunge.cve.policy import (
     Disposition,
     FindingDisposition,
@@ -69,7 +70,7 @@ def _disp(
         disposition=disposition,
         suppression=None,
         explanation="explained",
-        kev_listed=kev,
+        exploited_by=frozenset({ExploitedSource.CISA}) if kev else frozenset(),
     )
 
 
@@ -148,7 +149,7 @@ def test_quarantine_alert_describes_a_built_image_and_keeps_its_reference() -> N
     ref = "boxmunge.invalid/demo/frontend@sha256:" + "ba6a88c5" + "0" * 56
     fd = _disp("CVE-2026-1111", base=Severity.CRITICAL, package="libxslt", kev=True)
     alert = format_quarantine_alert("demo", [Hit(fd, ref)])
-    assert ("- CVE-2026-1111 (Critical, CISA KEV) in libxslt — demo's frontend image, "
+    assert ("- CVE-2026-1111 (Critical, known exploited (CISA KEV)) in libxslt — demo's frontend image, "
             "built on this box (digest ba6a88c50000)\n"
             f"  image: {ref}\n") in alert.body
     assert alert.body.count(ref) == 1

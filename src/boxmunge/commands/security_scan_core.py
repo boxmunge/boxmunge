@@ -37,6 +37,7 @@ from boxmunge.commands.security_enforce import (
 )
 from boxmunge.compose_images import image_phrase
 from boxmunge.cve.alerting import Alert, emit_scan_alerts
+from boxmunge.cve.exploited import ExploitedIndex, ExploitedSource, load_exploited
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
     FindingDisposition,
@@ -270,13 +271,12 @@ def _check_declared_runtimes(project: str, meta: ProjectMeta) -> None:
 def _evaluate(
     paths: BoxPaths, project: str, meta: ProjectMeta, profile: ProjectHardening,
     supps: tuple[Suppression, ...], results: list[ScanResult],
-    kev_ids: frozenset[str] | None, today: date,
+    exploited: ExploitedIndex, today: date,
 ) -> list[ProjectDecision]:
     """One decision per scanned image, under the project's policy.
-    ``kev_ids`` is KevCatalog.fresh_ids: None (stale) lists nothing."""
+    ``exploited`` lists only the fresh sources (cve.exploited)."""
     posture, dangerously, declared = meta.posture, meta.dangerously, meta.declared_runtimes
     decisions: list[ProjectDecision] = []
-    kev_lookup = (kev_ids or frozenset()).__contains__
 
     # Collected across every image but logged at most once per project scan.
     dropped_lang_types: set[str] = set()
@@ -296,7 +296,7 @@ def _evaluate(
             dangerously_disable_quarantine=dangerously,
             suppressions=supps,
             today=today,
-            kev_lookup=kev_lookup,
+            exploited_lookup=exploited.lookup,
             runtimes=runtimes,
         )
         decisions.append(decision)
@@ -305,7 +305,7 @@ def _evaluate(
         ):
             empty_runtime_exempted |= gate_exempted_packages(
                 decision, posture=posture, dangerously=dangerously,
-                suppressions=supps, today=today, kev_lookup=kev_lookup,
+                suppressions=supps, today=today, exploited_lookup=exploited.lookup,
             )
 
     log_relevance_gaps(paths, project, dropped_lang_types, empty_runtime_exempted)
@@ -325,7 +325,7 @@ def audit_targets(
     results, failed, skipped, warnings = _scan_targets(paths, project, targets)
     today = _today()
     decisions = _evaluate(paths, project, meta, profile, supps, results,
-                          kev.fresh_ids(today), today)
+                          load_exploited(paths, today, cisa=kev), today)
     return ProjectScan(
         project=project, posture=meta.posture.value, dangerously=meta.dangerously,
         decisions=tuple(decisions),
@@ -389,8 +389,8 @@ def scan_one_project_locked(
         paths, project, targets, scanned)
     warnings.extend(scan_warnings)
     today = _today()
-    kev_ids = kev.fresh_ids(today)
-    decisions = _evaluate(paths, project, meta, profile, supps, results, kev_ids, today)
+    exploited = load_exploited(paths, today, cisa=kev)
+    decisions = _evaluate(paths, project, meta, profile, supps, results, exploited, today)
 
     headline = headline_of(decisions)
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow
@@ -401,7 +401,7 @@ def scan_one_project_locked(
     if not audit_only:
         cleared = clears_quarantine(
             meta.posture, decisions, complete=not (failed or skipped or unidentified),
-            kev_fresh=kev_ids is not None)
+            kev_fresh=ExploitedSource.CISA not in exploited.stale)
         outcome = _enforce(
             paths, project, meta, headline, defer_new=defer_new,
             cleared=tuple(decisions) if cleared else None,

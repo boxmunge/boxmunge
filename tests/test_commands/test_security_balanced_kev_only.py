@@ -107,7 +107,7 @@ def test_a_kev_listing_quarantines_it(box) -> None:
     _scan(paths)
     pushover.clear()
     fd = _scan(paths, _kev(_CVE)).decisions[0].findings[0]
-    assert fd.disposition is Disposition.QUARANTINE and fd.kev_listed
+    assert fd.disposition is Disposition.QUARANTINE and fd.full_kev
     assert is_quarantined("demo", paths)
     [(title, _, priority)] = [m for m in pushover.sent if "QUARANTINED" in m[0]]
     assert priority == 1 and "CISA KEV" in title
@@ -249,7 +249,7 @@ def test_relaxed_keeps_a_kev_quarantine_whose_fix_is_published_not_deployed(box)
     seed_quarantine(paths)
     paths.found = [finding(fix="3.0.15-1")]
     fd = _scan(paths, _kev(_CVE)).decisions[0].findings[0]
-    assert fd.disposition is Disposition.IGNORED_FIXED and fd.kev_listed
+    assert fd.disposition is Disposition.IGNORED_FIXED and fd.full_kev
     assert is_quarantined("demo", paths) and "compose_up" not in paths.docker.calls
     assert not _titles(pushover, LIFTED_TITLE)
 
@@ -275,7 +275,7 @@ def test_balanced_with_any_kev_finding_keeps_the_quarantine(box, tmp_path) -> No
     paths.project_manifest("demo").write_text(yaml.safe_dump(data))
     seed_quarantine(paths)
     fd = _scan(paths, _kev(_CVE)).decisions[0].findings[0]
-    assert fd.disposition is Disposition.STILL_RUNNING_AT_RISK and fd.kev_listed
+    assert fd.disposition is Disposition.STILL_RUNNING_AT_RISK and fd.full_kev
     assert is_quarantined("demo", paths)
     assert not _titles(pushover, LIFTED_TITLE)
 

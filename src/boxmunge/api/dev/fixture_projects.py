@@ -34,7 +34,7 @@ def finding(cve: str, severity: str, disposition: str, package: str,
         "primary_url": f"https://cve.example.test/{cve}",
         "title": f"{package}: example vulnerability", "installed_version": "1.0.0-1",
         "attack_vector": "Network", "status": "fixed" if fixed else "affected",
-        "pkg_class": "os-pkgs", "pkg_type": "debian", "kev_listed": kev,
+        "pkg_class": "os-pkgs", "pkg_type": "debian", "exploited_by": ["cisa_kev"] if kev else [],
         "cvss_score": None, "vendor_severities": {}, "severity_source": None,
         "fix_would_quarantine": False,
         "hardening_would_quarantine": False,
@@ -82,10 +82,9 @@ PROJECTS: tuple[FixtureProject, ...] = (
         "billing", ("api", "db"), deploys_hours_ago=(20,), quarantine_cve=QUARANTINE_CVE,
         findings=(
             finding(QUARANTINE_CVE, "Critical", "quarantine", "libcurl",
-                    f"{QUARANTINE_CVE} is on the CISA Known Exploited Vulnerabilities "
-                    "(KEV) catalog — actively exploited in the wild; quarantined "
-                    "regardless of posture, distro status, attack vector, or severity "
-                    "threshold.", kev=True),
+                    f"{QUARANTINE_CVE} is known exploited (CISA KEV) — actively "
+                    "exploited in the wild; quarantined regardless of posture, distro "
+                    "status, attack vector, or severity threshold.", kev=True),
         ),
         backups=(("nightly", 6), ("prerestore", 48)),
         smoke=("warning", "smoke could not run (infrastructure, not app): "

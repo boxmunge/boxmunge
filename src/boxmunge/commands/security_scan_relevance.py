@@ -18,7 +18,7 @@ from boxmunge.paths import BoxPaths
 
 def gate_exempted_packages(
     decision: ProjectDecision, *, posture: Posture, dangerously: bool,
-    suppressions: tuple, today: date, kev_lookup,
+    suppressions: tuple, today: date, exploited_lookup,
 ) -> set[str]:
     """OS runtime packages the relevance gate de-escalated with an EMPTY
     inferred runtime set.
@@ -47,7 +47,7 @@ def gate_exempted_packages(
             dangerously_disable_quarantine=dangerously,
             suppressions=suppressions,
             today=today,
-            kev_lookup=kev_lookup,
+            exploited_lookup=exploited_lookup,
             runtimes=None,
         )
         if but_for.disposition != disp.disposition:

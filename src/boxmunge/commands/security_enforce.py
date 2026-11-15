@@ -115,7 +115,7 @@ def clears_quarantine(posture: Posture, decisions: Sequence[ProjectDecision], *,
     docstring for why only balanced)."""
     findings = [f for d in decisions for f in d.findings]
     return (posture is Posture.BALANCED and complete and kev_fresh
-            and not any(f.kev_listed or f.disposition is Disposition.QUARANTINE
+            and not any(f.full_kev or f.disposition is Disposition.QUARANTINE
                         for f in findings))
 
 

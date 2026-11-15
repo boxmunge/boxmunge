@@ -17,6 +17,7 @@ from boxmunge.cve.hardening import (
     calculate_hardening_penalty,
     hardening_profile_from_compose,
 )
+from boxmunge.cve.exploited import ExploitedSource
 from boxmunge.cve.suppressions import Suppression
 from boxmunge.cve.policy_types import _SEVERITY_GATES
 from boxmunge.cve.policy import (
@@ -35,6 +36,7 @@ from boxmunge.cve.policy import (
 
 
 _TODAY = date(2026, 5, 6)
+_CISA = frozenset({ExploitedSource.CISA})
 
 
 def _finding(
@@ -260,7 +262,7 @@ def test_unknown_severity_is_informational() -> None:
     "posture, severity, expected",
     [
         # RELAXED: KEV-only — no non-KEV finding quarantines regardless of
-        # severity (the default kev_lookup here is never-KEV).
+        # severity (the default exploited_lookup here is never-KEV).
         (Posture.RELAXED, Severity.CRITICAL, Disposition.INFORMATIONAL),
         (Posture.RELAXED, Severity.HIGH, Disposition.INFORMATIONAL),
         (Posture.RELAXED, Severity.MEDIUM, Disposition.INFORMATIONAL),
@@ -718,7 +720,7 @@ def _eval_ladder(f, posture, *, kev=False, penalty=0):
         dangerously_disable_quarantine=False,
         suppressions=(),
         today=_TODAY,
-        kev_lookup=(lambda _c: kev),
+        exploited_lookup=(lambda _c: _CISA if kev else frozenset()),
     )
 
 
@@ -845,7 +847,7 @@ def test_fixable_kev_quarantines_at_balanced() -> None:
     f = _finding(fixed_version="1.2")
     d = _eval_ladder(f, Posture.BALANCED, kev=True)
     assert d.disposition is Disposition.QUARANTINE
-    assert d.kev_listed is True
+    assert d.full_kev
     assert "fix is available (1.2)" in d.explanation
 
 
@@ -853,7 +855,7 @@ def test_fixable_kev_under_relaxed_stays_up_flagged() -> None:
     f = _finding(fixed_version="1.2")
     d = _eval_ladder(f, Posture.RELAXED, kev=True)
     assert d.disposition is Disposition.IGNORED_FIXED
-    assert d.kev_listed is True
+    assert d.full_kev
     assert "every scan" in d.explanation
 
 
@@ -880,12 +882,12 @@ def test_fixable_below_threshold_is_not_flagged() -> None:
 
 
 # --- KEV lookup defaults to never (existing callers unaffected) ---
-def test_kev_lookup_defaults_to_never() -> None:
+def test_exploited_lookup_defaults_to_never() -> None:
     f = _finding(
         status=VulnStatus.NOT_AFFECTED,
         vendor_severities={"nvd": Severity.HIGH},
     )
-    # No kev_lookup passed → default _kev_never → routes to deprioritized info.
+    # No exploited_lookup passed → default _kev_never → routes to deprioritized info.
     d = evaluate_finding(
         f,
         posture=Posture.BALANCED,
@@ -897,7 +899,7 @@ def test_kev_lookup_defaults_to_never() -> None:
     assert d.disposition is Disposition.INFORMATIONAL
 
 
-def test_evaluate_project_threads_kev_lookup() -> None:
+def test_evaluate_project_threads_exploited_lookup() -> None:
     f = _finding(
         status=VulnStatus.NOT_AFFECTED,
         vendor_severities={"nvd": Severity.LOW},
@@ -911,7 +913,7 @@ def test_evaluate_project_threads_kev_lookup() -> None:
         dangerously_disable_quarantine=False,
         suppressions=(),
         today=_TODAY,
-        kev_lookup=lambda _c: True,
+        exploited_lookup=lambda _c: _CISA,
     )
     assert decision.quarantine_required is True
     assert decision.findings[0].disposition is Disposition.QUARANTINE
@@ -1277,7 +1279,7 @@ def test_kev_override_beats_relevance():
         suppressions=(),
         today=date(2026, 8, 24),
         runtimes=frozenset({"python"}),
-        kev_lookup=lambda cid: True,
+        exploited_lookup=lambda cid: _CISA,
     )
     assert d.disposition is Disposition.QUARANTINE
 

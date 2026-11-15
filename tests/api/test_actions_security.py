@@ -79,11 +79,11 @@ def test_findings_from_older_scan_files_read_as_null(fixture_paths) -> None:
     path = fixture_paths.project_scan_state("shop")
     state = json.loads(path.read_text())
     for finding in state["decisions"][0]["findings"]:
-        for key in ("kev_listed", "fix_would_quarantine", "pkg_class", "status"):
+        for key in ("exploited_by", "fix_would_quarantine", "pkg_class", "status"):
             finding.pop(key)
     path.write_text(json.dumps(state))
     finding = _call(fixture_paths, "security.project", {"project": "shop"})["findings"][0]
-    assert finding["kev_listed"] is None and finding["pkg_class"] is None
+    assert finding["exploited_by"] is None and finding["pkg_class"] is None
 
 
 def test_manifest_without_schema_version_reads_as_1(fixture_paths) -> None:

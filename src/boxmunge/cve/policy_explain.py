@@ -38,7 +38,7 @@ def explain_awaiting_fix(
 
 
 def explain_kev_quarantine(
-    cve_id: str, overridden_until: str | None = None, fixed_version: str | None = None,
+    cve_id: str, listed_by: str, overridden_until: str | None = None, fixed_version: str | None = None,
 ) -> str:
     """Explanation for a KEV-override quarantine (actively exploited).
 
@@ -47,8 +47,8 @@ def explain_kev_quarantine(
     ``fixed_version`` is set when a fix exists that the image is not running.
     """
     text = (
-        f"{cve_id} is on the CISA Known Exploited Vulnerabilities (KEV) "
-        "catalog — actively exploited in the wild; quarantined regardless "
+        f"{cve_id} is known exploited ({listed_by}) — "
+        "actively exploited in the wild; quarantined regardless "
         "of posture, distro status, attack vector, or severity threshold."
     )
     if fixed_version is not None:
@@ -66,11 +66,11 @@ def explain_kev_quarantine(
     return text
 
 
-def explain_kev_opted_out(cve_id: str, fixed_version: str | None) -> str:
+def explain_kev_opted_out(cve_id: str, fixed_version: str | None, listed_by: str) -> str:
     """Explanation for a KEV finding on a project with quarantine disabled."""
     text = (
-        f"{cve_id} is on the CISA Known Exploited Vulnerabilities (KEV) "
-        "catalog — actively exploited in the wild — but this project sets "
+        f"{cve_id} is known exploited ({listed_by}) — "
+        "actively exploited in the wild — but this project sets "
         "dangerously_disable_quarantine: true, so it keeps running."
     )
     if fixed_version is not None:
@@ -81,11 +81,13 @@ def explain_kev_opted_out(cve_id: str, fixed_version: str | None) -> str:
     return text + " Alerted on every scan while the finding is live."
 
 
-def explain_kev_fix_not_running(cve_id: str, fixed_version: str | None) -> str:
+def explain_kev_fix_not_running(
+    cve_id: str, fixed_version: str | None, listed_by: str,
+) -> str:
     """Explanation for a fixable KEV finding under relaxed posture."""
     return (
-        f"{cve_id} is on the CISA Known Exploited Vulnerabilities (KEV) "
-        f"catalog — actively exploited in the wild — and a fix is available "
+        f"{cve_id} is known exploited ({listed_by}) — "
+        f"actively exploited in the wild — and a fix is available "
         f"({fixed_version}) that this image is not running. Under relaxed "
         "posture a fixable KEV finding does not quarantine; rebuild the image "
         "and redeploy now. Alerted on every scan until the fix is running."

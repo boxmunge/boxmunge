@@ -15,13 +15,16 @@ from datetime import date
 
 import pytest
 
+from boxmunge.cve.exploited import ExploitedSource
 from boxmunge.cve.policy import Disposition, Posture, evaluate_finding
 from boxmunge.cve.scanner import AttackVector as AV
 from boxmunge.cve.scanner import Finding, PkgClass, Severity
 from boxmunge.cve.scanner import VulnStatus as VS
 from boxmunge.cve.suppressions import Suppression
 
+_CISA = frozenset({ExploitedSource.CISA})
 _TODAY = date(2026, 10, 13)
+_CISA = frozenset({ExploitedSource.CISA})
 _SUP = (Suppression("CVE-2026-0001", date(2027, 1, 1), "reviewed", "ops", date(2026, 1, 1)),)
 
 R, B, S, P = Posture.RELAXED, Posture.BALANCED, Posture.STRICT, Posture.PARANOID
@@ -131,7 +134,7 @@ def _evaluate(finding: Finding, posture: Posture, *, kev: bool = False,
     return evaluate_finding(
         finding, posture=posture, hardening_penalty=pen,
         dangerously_disable_quarantine=ddq, suppressions=sup, today=_TODAY,
-        kev_lookup=lambda _cve: kev, runtimes=runtimes,
+        exploited_lookup=lambda _cve: _CISA if kev else frozenset(), runtimes=runtimes,
     ).disposition
 
 

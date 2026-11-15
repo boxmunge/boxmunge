@@ -44,7 +44,7 @@ def _lines(hit: Hit) -> list[str]:
     """The finding, naming its image as an operator reads it; a built
     image's raw reference follows on its own line, where it can be copied."""
     fd = hit.disposition
-    kev = ", CISA KEV" if fd.kev_listed else ""
+    kev = f", known exploited ({fd.exploited_label})" if fd.exploited_by else ""
     image = describe_image(hit.image_ref)
     lines = [f"- {fd.finding.cve_id} ({_sev(fd)}{kev}) in "
              f"{fd.finding.package or '?'} — {image}"]
@@ -73,7 +73,7 @@ def format_quarantine_alert(project: str, hits: Sequence[Hit]) -> Alert:
     hits = _ordered(hits)
     head = hits[0].disposition
     cve = head.finding.cve_id
-    why = ("actively exploited — CISA KEV" if head.kev_listed
+    why = (f"actively exploited — {head.exploited_label}" if head.exploited_by
            else head.effective_severity.value)
     title = (f"[boxmunge:{project}] QUARANTINED — {cve} ({why})"
              f"{_more(_cve_count(hits) - 1)}")
@@ -124,7 +124,7 @@ def format_kev_fix_pending_alert(project: str, hits: Sequence[Hit]) -> Alert:
     hits = _ordered(hits)
     head = hits[0].disposition
     title = (f"[boxmunge:{project}] ACTIVELY EXPLOITED — {head.finding.cve_id} "
-             f"fix available but not running (CISA KEV){_more(_cve_count(hits) - 1)}")
+             f"fix available but not running ({head.exploited_label}){_more(_cve_count(hits) - 1)}")
     body = "\n".join([
         f"Project: {project} — still running",
         *_listing(hits),
@@ -137,13 +137,33 @@ def format_kev_fix_pending_alert(project: str, hits: Sequence[Hit]) -> Alert:
     return Alert(kind="kev_fix_pending", title=title, body=body, priority=1)
 
 
+def format_exploited_listed_alert(project: str, hits: Sequence[Hit]) -> Alert:
+    """A CVE only a weaker list (VulnCheck) names as exploited, on a project
+    that stays up. Urgent, every scan, so it is neither quarantined nor quiet."""
+    hits = _ordered(hits)
+    head = hits[0].disposition
+    title = (f"[boxmunge:{project}] KNOWN EXPLOITED — {head.finding.cve_id} "
+             f"({head.exploited_label}), still running{_more(_cve_count(hits) - 1)}")
+    body = "\n".join([
+        f"Project: {project} — still running",
+        *_listing(hits),
+        "",
+        head.explanation,
+        "",
+        "Only VulnCheck lists it as exploited, so this posture does not take the",
+        "project down for it. Patch or rebuild when a fix is available; this alert",
+        "repeats on every scan while the finding is live.",
+    ])
+    return Alert(kind="exploited_listed", title=title, body=body, priority=1)
+
+
 def format_kev_at_risk_alert(project: str, hits: Sequence[Hit]) -> Alert:
     """An actively exploited CVE on a project that opted out of quarantine.
     Priority 1, every scan, naming the CVE and the opt-out."""
     hits = _ordered(hits)
     head = hits[0].disposition
     title = (f"[boxmunge:{project}] [STILL RUNNING — quarantine disabled by config] "
-             f"ACTIVELY EXPLOITED {head.finding.cve_id} (CISA KEV)"
+             f"ACTIVELY EXPLOITED {head.finding.cve_id} ({head.exploited_label})"
              f"{_more(_cve_count(hits) - 1)}")
     body = "\n".join([
         f"Project: {project} — dangerously_disable_quarantine: true",

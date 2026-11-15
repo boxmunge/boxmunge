@@ -55,6 +55,7 @@ from boxmunge.cve._alerting_formatters import (
     format_awaiting_fix_alert,
     format_fixable_alert,
     format_hardening_upcoming_alert,
+    format_exploited_listed_alert,
     format_kev_at_risk_alert,
     format_kev_fix_pending_alert,
     format_kev_withdrawal_hold_alert,
@@ -89,6 +90,7 @@ __all__ = [
     "format_new_findings_alert",
     "format_kev_fix_pending_alert",
     "format_kev_at_risk_alert",
+    "format_exploited_listed_alert",
     "format_awaiting_fix_alert",
     "format_fixable_alert",
     "format_hardening_upcoming_alert",
@@ -228,15 +230,20 @@ def detect_transitions(
     # Standing, not transitions: alerted on every scan while live (B-01, B-09).
     kev_fix_pending: list[Hit] = []
     kev_at_risk: list[Hit] = []
+    # Listed only by VulnCheck and not quarantined: urgent, every scan.
+    exploited_listed: list[Hit] = []
     for key, hit in now.items():
         fd = hit.disposition
         disp = fd.disposition
         old = before.get(key)
         changed = old is None or old.disposition.disposition != disp
-        if disp == Disposition.IGNORED_FIXED and fd.kev_listed:
+        if disp == Disposition.IGNORED_FIXED and fd.exploited_by:
             kev_fix_pending.append(hit)
-        elif disp == Disposition.STILL_RUNNING_AT_RISK and fd.kev_listed:
+        elif disp == Disposition.STILL_RUNNING_AT_RISK and fd.exploited_by:
             kev_at_risk.append(hit)
+        elif fd.exploited_by and disp in (Disposition.INFORMATIONAL,
+                                          Disposition.AWAITING_FIX):
+            exploited_listed.append(hit)
         elif disp == Disposition.IGNORED_FIXED and fd.fix_would_quarantine and (
             changed or not old.disposition.fix_would_quarantine
         ):
@@ -270,6 +277,8 @@ def detect_transitions(
         alerts.append(format_kev_at_risk_alert(project_name, kev_at_risk))
     if kev_fix_pending:
         alerts.append(format_kev_fix_pending_alert(project_name, kev_fix_pending))
+    if exploited_listed:
+        alerts.append(format_exploited_listed_alert(project_name, exploited_listed))
     if new_at_risk:
         alerts.append(format_still_running_alert(project_name, new_at_risk))
     if project_expired:

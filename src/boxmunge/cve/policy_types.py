@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from boxmunge.cve.exploited import ExploitedSource, is_full_kev
 from boxmunge.cve.scanner import SEVERITY_ORDER, Finding, Severity
 from boxmunge.cve.suppressions import Suppression
 
@@ -81,6 +82,18 @@ class PolicyError(ValueError):
     """Policy input is invalid (typically a bad posture string)."""
 
 
+_SOURCE_LABEL = {
+    ExploitedSource.CISA: "CISA KEV",
+    ExploitedSource.EU: "EU KEV",
+    ExploitedSource.VULNCHECK: "VulnCheck KEV",
+}
+
+
+def listing_label(sources: frozenset[ExploitedSource]) -> str:
+    """The lists that name a CVE, as an operator reads them: "CISA KEV, EU KEV"."""
+    return ", ".join(_SOURCE_LABEL[s] for s in ExploitedSource if s in sources)
+
+
 # ---------- value types ----------
 
 
@@ -95,8 +108,9 @@ class FindingDisposition:
     disposition: Disposition
     suppression: Suppression | None
     explanation: str
-    # The CVE was on a fresh CISA KEV catalog when this finding was judged.
-    kev_listed: bool = False
+    # The fresh known-exploited sources that listed the CVE when this finding
+    # was judged (CISA, EU, VulnCheck); empty when none did.
+    exploited_by: frozenset[ExploitedSource] = frozenset()
     # IGNORED_FIXED only: without the (not yet running) fix, this finding
     # would meet the posture's gate: quarantine, run at risk, or (balanced)
     # be alerted as AWAITING_FIX. The name predates balanced's alert-only gate.
@@ -105,6 +119,15 @@ class FindingDisposition:
     # the stricter hardening rule that takes full effect in 0.12: a warning
     # in 0.11.0, never a quarantine.
     hardening_would_quarantine: bool = False
+
+    @property
+    def full_kev(self) -> bool:
+        """Listed by CISA or the EU: the KEV override applies."""
+        return is_full_kev(self.exploited_by)
+
+    @property
+    def exploited_label(self) -> str:
+        return listing_label(self.exploited_by)
 
 
 @dataclass(frozen=True)
