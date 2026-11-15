@@ -4,13 +4,15 @@
 Pure functions, like the other formatters. The urgent flow
 (commands.autofix_urgent) sends one notice when it starts patching with the
 site up (a quarantine for the patch says so in its own alert), then one
-with the outcome; the nightly flow reuses the outcome formatters for
-its digest.
+with the outcome. The nightly flow (commands.autofix_nightly) puts each
+outcome on one line of a quiet digest (cve._alerting_digest), except a
+failure whose rollback did not finish, which is the urgent failure alert.
 """
 from __future__ import annotations
 
 from collections.abc import Sequence
 
+from boxmunge.cve._alerting_digest import DIGEST_PRIORITY
 from boxmunge.cve._alerting_types import Alert
 from boxmunge.cve.autofix_record import PatchRecord
 
@@ -115,3 +117,20 @@ def format_autofix_interrupted_alert(project: str, problems: Sequence[str], *,
                      site,
                      f"Details: boxmunge security {project}",
                  ]), priority=1)
+
+
+def format_nightly_patched_line(project: str, cves: Sequence[str],
+                                records: Sequence[PatchRecord]) -> Alert:
+    """A nightly patch that runs: one digest line, its title."""
+    n = sum(len(r.packages) for r in records)
+    line = f"patched: {project}: {_cves(cves)} ({n} package{'s' if n != 1 else ''})"
+    return Alert(kind="autofix_patched", title=line, body=line, priority=DIGEST_PRIORITY,
+                 project=project)
+
+
+def format_nightly_failed_line(project: str, *, step: str | None, reason: str) -> Alert:
+    """A nightly patch that failed and was rolled back cleanly: one digest
+    line, its title."""
+    line = f"could not patch: {project}: {step or 'unexpected error'}: {reason}"
+    return Alert(kind="autofix_failed", title=line, body=line, priority=DIGEST_PRIORITY,
+                 project=project)

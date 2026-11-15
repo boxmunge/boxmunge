@@ -57,6 +57,8 @@ from boxmunge.cve._alerting_autofix import (
     format_autofix_interrupted_alert,
     format_autofix_patched_alert,
     format_autofix_started_alert,
+    format_nightly_failed_line,
+    format_nightly_patched_line,
 )
 from boxmunge.cve._alerting_formatters import (
     format_awaiting_fix_alert,
@@ -76,6 +78,7 @@ from boxmunge.cve._alerting_formatters import (
 )
 from boxmunge.cve._alerting_types import Alert, AlertKind, Hit
 from boxmunge.cve._alerting_digest import (
+    format_autofix_digest,
     format_scan_digest,
     is_low_urgency,
 )
@@ -118,6 +121,9 @@ __all__ = [
     "format_scan_unrecorded_alert",
     "detect_transitions",
     "format_scan_digest",
+    "format_autofix_digest",
+    "format_nightly_patched_line",
+    "format_nightly_failed_line",
     "is_low_urgency",
     "send_alerts",
     "emit_scan_alerts",

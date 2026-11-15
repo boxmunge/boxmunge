@@ -6,6 +6,7 @@ import os
 import sys
 from typing import Any
 
+from boxmunge.commands.autofix_nightly import after_update, send_nightly_results
 from boxmunge.config import ConfigError
 from boxmunge.host_config_alert import load_for_job
 from boxmunge.commands.health_state import is_monitor_stopped
@@ -144,10 +145,15 @@ def _update_one(paths: BoxPaths, target: UpdateTarget, dry_run: bool) -> dict[st
 def update_project(paths: BoxPaths, target: UpdateTarget, dry_run: bool) -> dict[str, Any]:
     """One user project, entirely under its project lock: its lifecycle state
     is read while the lock is held, so a pause or quarantine that lands while
-    the run works on other targets is honoured."""
+    the run works on other targets is honoured. The nightly autofix runs
+    after the update, under the same lock (its attempt, if any, is the
+    result's "autofix")."""
     try:
         with project_lock(target.name, paths):
-            return _update_project_locked(paths, target, dry_run)
+            result = _update_project_locked(paths, target, dry_run)
+            if not dry_run:
+                result["autofix"] = after_update(paths, target.name, result)
+            return result
     except LockError:
         return lock_skipped(paths, target)
 
@@ -345,6 +351,7 @@ def run_container_update(
         )
         if failed:
             _send_summary_alert(paths, results)
+        send_nightly_results(paths, [r["autofix"] for r in results if r.get("autofix")])
         print(
             f"\nSummary: {len(succeeded)} succeeded, {len(failed)} failed, "
             f"{len(no_change)} no-change, {len(skipped)} skipped (busy)"
