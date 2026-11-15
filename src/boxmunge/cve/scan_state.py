@@ -70,6 +70,9 @@ def _serialize_disposition(d: Any) -> dict[str, Any]:
         "status": f.status.value,
         "pkg_class": f.pkg_class.value,
         "pkg_type": f.pkg_type,
+        "cvss_score": f.cvss_score,
+        "vendor_severities": {k: v.value for k, v in f.vendor_severities.items()},
+        "severity_source": f.severity_source,
         "kev_listed": d.kev_listed,
         "fix_would_quarantine": d.fix_would_quarantine,
         "hardening_would_quarantine": d.hardening_would_quarantine,
@@ -185,6 +188,34 @@ def stored_severities(raw: dict[str, Any]) -> tuple[Severity, Severity]:
             stored_enum(Severity, raw.get("effective_severity"), "effective_severity"))
 
 
+def _required_key(raw: dict[str, Any], key: str) -> Any:
+    """A stored finding's value for a key every current scan writes (null is
+    a valid value); StateError when the key is absent, i.e. the state was
+    written before the key existed."""
+    if key not in raw:
+        raise StateError(
+            f"stored finding has no {key!r}: the scan state predates it; "
+            f"the next `boxmunge security scan` rewrites it")
+    return raw[key]
+
+
+def _stored_vendor_severities(raw: dict[str, Any]) -> dict[str, Severity]:
+    stored = _required_key(raw, "vendor_severities")
+    if not isinstance(stored, dict):
+        raise StateError(f"stored 'vendor_severities' is {stored!r}, not an object")
+    return {source: stored_enum(Severity, value, f"vendor_severities[{source}]")
+            for source, value in stored.items()}
+
+
+def _stored_cvss_score(raw: dict[str, Any]) -> float | None:
+    score = _required_key(raw, "cvss_score")
+    if score is None:
+        return None
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        raise StateError(f"stored 'cvss_score' is {score!r}, not a number")
+    return float(score)
+
+
 def decisions_from_scan_state(
     state: dict[str, Any], *, project_name: str,
 ) -> tuple[ProjectDecision, ...]:
@@ -227,6 +258,9 @@ def decisions_from_scan_state(
                 status=stored_enum(VulnStatus, raw.get("status"), "status"),
                 pkg_class=stored_enum(PkgClass, raw.get("pkg_class"), "pkg_class"),
                 pkg_type=raw.get("pkg_type"),
+                cvss_score=_stored_cvss_score(raw),
+                vendor_severities=_stored_vendor_severities(raw),
+                severity_source=_required_key(raw, "severity_source"),
             )
             findings.append(
                 FindingDisposition(

@@ -198,6 +198,9 @@ class Finding:
     vendor_severities: dict[str, Severity] = field(default_factory=dict)
     severity_source: str | None = None
     pkg_class: PkgClass = PkgClass.UNKNOWN
+    # Highest CVSS v3 base score across Trivy's sources (v2 when none has a
+    # v3 score); None when Trivy gave no score.
+    cvss_score: float | None = None
     # Trivy's raw `Type` (e.g. "debian", "python-pkg"). Not read by any
     # decision path today — pkg_class is the field the relevance gate and
     # policy engine act on — but it's spec-mandated diagnostic payload
@@ -208,6 +211,10 @@ class Finding:
     @property
     def fix_available(self) -> bool:
         return self.fixed_version is not None
+
+    def downtime_score(self) -> float | None:
+        """The score a "CVSS N or above" downtime rule compares against."""
+        return self.cvss_score
 
 
 @dataclass(frozen=True)
@@ -360,6 +367,7 @@ def _parse_findings(payload: dict[str, Any]) -> tuple[Finding, ...]:
                 ),
                 severity_source=vuln.get("SeveritySource") or None,
                 pkg_class=pkg_class,
+                cvss_score=_parse_cvss_score(vuln.get("CVSS") or {}),
                 pkg_type=pkg_type,
             ))
 
@@ -449,6 +457,20 @@ def _parse_attack_vector(cvss: dict[str, Any]) -> AttackVector | None:
             av = _extract_av_from_vector(vector)
             if av is not None:
                 return av
+    return None
+
+
+def _parse_cvss_score(cvss: dict[str, Any]) -> float | None:
+    """Highest V3Score across a Trivy `CVSS` block's sources, or the highest
+    V2Score when no source has a V3 score, or None."""
+    if not isinstance(cvss, dict):
+        return None
+    for key in ("V3Score", "V2Score"):
+        scores = [e[key] for e in cvss.values()
+                  if isinstance(e, dict) and isinstance(e.get(key), (int, float))
+                  and not isinstance(e.get(key), bool)]
+        if scores:
+            return float(max(scores))
     return None
 
 
