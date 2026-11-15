@@ -22,11 +22,10 @@ raises StateError naming the file.
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.fs_nofollow import read_text_nofollow_or_none
