@@ -276,6 +276,28 @@ def test_corrupt_event_lines_are_reported(paths, line, message) -> None:
         JobStore(paths, result_schemas=registry_results).events(_id(1))
 
 
+_GOOD_EVENT = '{"seq": 1, "ts": "2026-10-14T00:00:01Z", "type": "state", "state": "running"}\n'
+
+
+@pytest.mark.parametrize("tail", [
+    '{"seq": 2, "ts": "2026-10-14T00:00:02Z", "ty',  # a write cut off mid-line
+    "{not json",  # unterminated, so not written yet, whatever it holds
+    "\0" * 40,  # a crash left the end of the file zero-filled
+    "\0" * 40 + "\n",
+])
+def test_a_final_line_not_yet_written_is_left_out(paths, tail) -> None:
+    paths.jobs_dir.mkdir(parents=True)
+    (paths.jobs_dir / f"{_id(1)}.events.jsonl").write_text(_GOOD_EVENT + tail)
+    assert [e["seq"] for e in JobStore(paths, result_schemas=registry_results).events(_id(1))] == [1]
+
+
+def test_a_malformed_line_before_the_last_is_still_corrupt(paths) -> None:
+    paths.jobs_dir.mkdir(parents=True)
+    (paths.jobs_dir / f"{_id(1)}.events.jsonl").write_text("{not json\n" + _GOOD_EVENT)
+    with pytest.raises(StateError, match=":1: not JSON"):
+        JobStore(paths, result_schemas=registry_results).events(_id(1))
+
+
 def test_an_unreadable_record_is_listed_not_raised(paths) -> None:
     _write(paths.jobs_dir, _record(1))
     _write(paths.jobs_dir, _record(2, state="done"))

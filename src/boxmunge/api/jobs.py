@@ -160,13 +160,20 @@ class JobStore:
         return records, unreadable
 
     def events(self, job_id: str, *, after: int = 0) -> list[dict[str, Any]]:
-        """The job's events with seq greater than *after*, in order."""
+        """The job's events with seq greater than *after*, in order.
+
+        A final line with no newline yet, or only NULs (a worker killed
+        mid-write, or a crash that left the file's end zero-filled), is
+        not written yet and is left out; any other bad line is corrupt."""
         path = self._done / f"{job_id}.events.jsonl"
         text = _read(path, "job events")
         if text is None:
             return []
+        lines = text.split("\n")[:-1]  # the last piece has no newline: not written yet
+        if lines and not lines[-1].strip("\0"):
+            lines.pop()
         events = []
-        for lineno, line in enumerate(text.splitlines(), start=1):
+        for lineno, line in enumerate(lines, start=1):
             if not line.strip():
                 continue
             try:
