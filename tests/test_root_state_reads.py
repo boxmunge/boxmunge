@@ -33,8 +33,8 @@ from boxmunge import (
     overlay_users, pause, release, release_txn, run_as, staged_release,
     upgrade_state, user_drift,
 )
-from boxmunge.api.job_retention import JOB_RETAIN_COUNT, prune
 from boxmunge.api.job_events import EventLog
+from boxmunge.api.job_retention import JOB_RETAIN_COUNT, prune
 from boxmunge.api.jobs import JobStore
 from boxmunge.backup_evidence import project_evidence, sync_evidence
 from boxmunge.bind_sources import read_record
