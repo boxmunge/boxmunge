@@ -1092,7 +1092,8 @@ A job is an action boxmunge runs in the background, outside your SSH session: `p
 `project.rollback`, `project.pause`, `project.resume`, and the govern actions `project.recover` and
 `project.abandon_install`. Closing the session does not stop it. The job runner
 (`boxmunge-jobs.path` and `boxmunge-jobs.service`) starts one worker per queued job, at most 4 at a
-time, and the worker takes the project lock, runs the action and records the outcome. Every call is
+time and one at a time per project (a backup queued behind a running restore of the same project
+waits for it), and the worker takes the project lock, runs the action and records the outcome. Every call is
 recorded in the action audit log, with the job's id. The direct commands (`backup`, `stage`,
 `prod-deploy` and the rest) still run in your session, as before.
 
@@ -1107,8 +1108,13 @@ as `prod-deploy`, e.g. `'{"project":"myapp","no_pull":true}'`. The command print
 `job <id> queued`, then follows the job: its output and its steps (`[lock] started: waiting for
 myapp's lock, held by ...`) as they come, once a second. It ends with `job <id> succeeded` and the
 result (exit 0), or `ERROR: <code>: <message>` (exit 1). A call refused before it is queued (an
-unknown project, parameters that do not match, an upgrade running) prints `ERROR:` and the reason,
+unknown project, parameters that do not match, an upgrade running) prints `ERROR: <code>: <reason>`,
 queues nothing, and exits 1; a usage error exits 2.
+
+In a one-shot `ssh deploy@<host> job run ...` the deploy shell splits the command line a second
+time, which strips the JSON's double quotes; quote the whole command once more
+(`ssh deploy@<host> "job run project.backup '{\"project\":\"myapp\"}'"`), or run it in an
+interactive session. `job run` recognises stripped quotes and says so.
 
 `--detach` queues the job and returns at once. Ctrl-C while following stops following, never the
 job, and prints the command that picks it up again:
@@ -1121,10 +1127,12 @@ boxmunge jobs --running            # every queued and running job
 boxmunge jobs --project myapp
 ```
 
-If a job is still queued after 30 seconds, the follower says once
-`still queued after 30 s: is the job runner active? systemctl status boxmunge-jobs.path`. Check the
-unit (as the supervisor) and `boxmunge health` (`jobs-runner`); once the runner is active, the job
-starts.
+If a job is still queued after 30 seconds, the follower says once why it is likely waiting:
+`waiting for job <id> (<action>) on <project> to finish` when another job of the same project is
+running, `waiting for one of the 4 running jobs to finish` when every runner slot is busy, and,
+with nothing running, `still queued after 30 s: is the job runner active? systemctl status
+boxmunge-jobs.path`. For the last, check the unit (as the supervisor) and `boxmunge health`
+(`jobs-runner`); once the runner is active, the job starts.
 
 ### busy: the project lock stayed held
 

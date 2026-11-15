@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any, NoReturn
 
 from boxmunge.commands.argv import parse_args, usage_error
 from boxmunge.fs_nofollow import running_as_root
-from boxmunge.paths import BoxPaths
+from boxmunge.paths import BoxPaths, InvalidProjectName, validate_project_name
 from boxmunge.state import StateError
 
 if TYPE_CHECKING:
@@ -32,6 +32,9 @@ FOLLOW_POLL_SECONDS = 1
 QUEUED_HINT_SECONDS = 30
 QUEUED_HINT = (f"still queued after {QUEUED_HINT_SECONDS} s: is the job runner active? "
                f"systemctl status boxmunge-jobs.path")
+# The job runner's limits (job_runner.MAX_CONCURRENT_JOBS): at most this many
+# jobs run at once, and a project's jobs run one at a time.
+RUNNER_SLOTS = 4
 EXIT_INTERRUPTED = 130
 UNFINISHED = frozenset({"queued", "running"})
 # Patched by tests, which run the worker inline in place of the runner.
@@ -55,8 +58,12 @@ def cmd_jobs(args: list[str]) -> None:
     from boxmunge.api.actions.jobs import JOBS_LIMIT_DEFAULT
     parsed = parse_args("jobs", args, flags={"--running", "--json"}, options={"--project"})
     running = parsed.has("--running")
-    listing = _store(BoxPaths()).recent(project=parsed.get("--project"),
-                                        limit=None if running else JOBS_LIMIT_DEFAULT)
+    paths = BoxPaths()
+    project = parsed.get("--project")
+    if project is not None:
+        _require_registered(paths, project)
+    listing = _store(paths).recent(project=project,
+                                   limit=None if running else JOBS_LIMIT_DEFAULT)
     jobs = [j for j in listing.jobs if j["state"] in UNFINISHED] if running else listing.jobs
     if parsed.has("--json"):
         print(json.dumps({"jobs": jobs, "unreadable": listing.unreadable}, indent=2))
@@ -94,6 +101,10 @@ def _job_run(args: list[str]) -> None:
         result = invoker.invoke(name, params, principal)
     except ActionError as e:
         _refused(e)
+    except KeyboardInterrupt:
+        print(f"\ninterrupted before {name} was confirmed queued; see whether it was with: "
+              f"boxmunge jobs --running", file=sys.stderr)
+        sys.exit(EXIT_INTERRUPTED)
     if not result.job:
         raise AssertionError(f"{name} ran inline although its action is a job")
     job_id = result.data["id"]
@@ -163,13 +174,28 @@ def _follow(store: JobStore, job_id: str) -> int:
                 return _concluded(record)
             if (record["state"] == "queued" and not hinted
                     and _monotonic() - began >= QUEUED_HINT_SECONDS):
-                print(QUEUED_HINT, file=sys.stderr, flush=True)
+                print(_queued_hint(store, record), file=sys.stderr, flush=True)
                 hinted = True
             _sleep(FOLLOW_POLL_SECONDS)
     except KeyboardInterrupt:
         print(f"\nthe job keeps running; follow it with: boxmunge job show {job_id} --events",
               file=sys.stderr)
         return EXIT_INTERRUPTED
+
+
+def _queued_hint(store: JobStore, record: dict[str, Any]) -> str:
+    """Why the job is likely still queued: a job of its project is running
+    (the runner runs a project's jobs one at a time), every runner slot is
+    busy, or, with nothing running, the runner itself may be down."""
+    running = [j for j in store.recent(limit=None).jobs if j["state"] == "running"]
+    head = f"still queued after {QUEUED_HINT_SECONDS} s: waiting for"
+    for job in running:
+        if record["project"] is not None and job["project"] == record["project"]:
+            return f"{head} job {job['id']} ({job['action']}) on {job['project']} to finish"
+    if len(running) >= RUNNER_SLOTS:
+        return (f"{head} one of the {len(running)} running jobs to finish "
+                f"(boxmunge jobs --running)")
+    return QUEUED_HINT
 
 
 def _concluded(record: dict[str, Any]) -> int:
@@ -200,6 +226,13 @@ def _params(text: str) -> dict[str, Any]:
     try:
         params = json.loads(text)
     except ValueError as e:
+        if "{" in text and '"' not in text:
+            usage_error("job", f"the params {text!r} lost their double quotes: a second shell "
+                               f"took them off, most likely a one-shot ssh call, which runs "
+                               f"the command through the deploy shell's own parsing. Quote "
+                               f"the whole command: ssh deploy@<host> \"job run <action> "
+                               f"'{{\\\"project\\\":\\\"myapp\\\"}}'\", or type it in an "
+                               f"interactive session (ssh deploy@<host>).")
         usage_error("job", f"the params are not JSON ({e}); give one JSON object, "
                            f"e.g. '{{\"project\":\"myapp\"}}'")
     if not isinstance(params, dict):
@@ -216,6 +249,21 @@ def _require_job_action(registry: Registry, name: str) -> None:
         usage_error("job", f"{name} does not run as a job. Job actions: {jobs}")
 
 
+def _require_registered(paths: BoxPaths, project: str) -> None:
+    from boxmunge.project_registry import ProjectRegistryError, is_registered
+    try:
+        validate_project_name(project)
+    except InvalidProjectName as e:
+        usage_error("jobs", str(e))
+    try:
+        registered = is_registered(project, paths)
+    except ProjectRegistryError as e:
+        _fail(str(e))
+    if not registered:
+        _fail(f"no project {project!r} is registered on this server. "
+              f"See the registered projects with: boxmunge project-list")
+
+
 def _store(paths: BoxPaths, registry: Registry | None = None) -> JobStore:
     """The job reader; it checks a job's result against *registry* (the
     full one by default)."""
@@ -227,7 +275,7 @@ def _store(paths: BoxPaths, registry: Registry | None = None) -> JobStore:
 
 
 def _refused(error: ActionError) -> NoReturn:
-    print(f"ERROR: {error.message}", file=sys.stderr)
+    print(f"ERROR: {error.code.value}: {error.message}", file=sys.stderr)
     for violation in (error.details or {}).get("violations", []):
         print(f"  - {violation}", file=sys.stderr)
     sys.exit(1)

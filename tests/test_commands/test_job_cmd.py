@@ -140,7 +140,7 @@ def test_job_run_refusal_prints_the_reason(box, monkeypatch, capsys):
                                                '{"project":"nope"}']))
     captured = capsys.readouterr()
     assert code == 1
-    assert captured.err.startswith("ERROR: ")
+    assert captured.err.startswith("ERROR: not_found: ")
     assert "nope" in captured.err
     assert "queued" not in captured.out
     assert not box.jobs_queue.is_dir() or not list(box.jobs_queue.glob("*.json"))
@@ -153,7 +153,7 @@ def test_job_run_invalid_params_lists_every_violation(box, monkeypatch, capsys):
                                                '{"project":"myapp","x":1}']))
     assert code == 1
     err = capsys.readouterr().err
-    assert "ERROR: Parameters for project.backup do not match its schema." in err
+    assert "ERROR: invalid_params: Parameters for project.backup do not match its schema." in err
     assert "\n  - " in err
 
 
@@ -162,6 +162,8 @@ def test_job_run_invalid_params_lists_every_violation(box, monkeypatch, capsys):
     (["run", "project.backup", "[1]"], "a JSON object"),
     (["run", "nosuch.action"], "unknown action 'nosuch.action'"),
     (["run", "status.get"], "status.get does not run as a job"),
+    (["run", "project.backup", "{project:myapp}"], "a one-shot ssh call"),
+    (["run", "project.backup", "{}", "extra"], "ERROR:"),
     (["show", "not-an-id"], "not a job id"),
     ([], "needs a subcommand"),
     (["frobnicate"], "unknown job subcommand"),
@@ -274,3 +276,114 @@ def test_job_show_unknown_job_exits_1(box, monkeypatch, capsys):
     _use(monkeypatch, _registry())
     assert _exit_code(lambda: job_cmd.cmd_job(["show", "01J" + "E" * 23])) == 1
     assert "boxmunge jobs" in capsys.readouterr().err
+
+
+def test_stripped_quotes_show_the_form_that_works(box, monkeypatch, capsys):
+    _use(monkeypatch, _registry())
+    assert _exit_code(lambda: job_cmd.cmd_job(["run", "project.backup",
+                                               "{project:myapp}"])) == 2
+    err = capsys.readouterr().err
+    assert "lost their double quotes" in err
+    assert """ssh deploy@<host> "job run <action> '{\\"project\\":\\"myapp\\"}'\"""" in err
+
+
+def test_detach_prints_the_follow_command_and_returns(box, monkeypatch, capsys):
+    _use(monkeypatch, _registry())
+    monkeypatch.setattr(job_cmd, "_sleep", lambda _s: pytest.fail("--detach must not follow"))
+    job_cmd.cmd_job(["run", "project.backup", '{"project":"myapp"}', "--detach"])
+    job_id = _queued_id(box)
+    assert capsys.readouterr().out.splitlines() == [
+        f"job {job_id} queued", f"follow it with: boxmunge job show {job_id} --events"]
+    record = json.loads((box.jobs_queue / f"{job_id}.json").read_text())
+    assert (record["state"], record["principal"]) == ("queued", "operator:ssh")
+
+
+def test_ctrl_c_before_the_job_is_queued_points_at_jobs_running(box, monkeypatch, capsys):
+    _use(monkeypatch, _registry())
+    from boxmunge.api import invoke as invoke_mod
+
+    def interrupted(*_a, **_kw):
+        raise KeyboardInterrupt
+    monkeypatch.setattr(invoke_mod.Invoker, "invoke", interrupted)
+    code = _exit_code(lambda: job_cmd.cmd_job(["run", "project.backup",
+                                               '{"project":"myapp"}']))
+    assert code == 130
+    assert "boxmunge jobs --running" in capsys.readouterr().err
+
+
+def test_worker_lost_ends_the_follow_with_exit_1(box, monkeypatch, capsys):
+    _use(monkeypatch, _registry())
+    monkeypatch.setattr(api_jobs, "is_alive", lambda _worker, _proc: False)
+    job_id = "01J" + "F" * 23
+    record = job_writer.new_record(job_id, "project.backup", {"project": "myapp"},
+                                   "operator:ssh", "myapp", NOW)
+    assert job_writer.publish(box, record)
+    assert job_writer.claim(box, job_id, WorkerIdentity("boot-0", 1, 1), NOW) is not None
+    monkeypatch.setattr(job_cmd, "_sleep", lambda _s: pytest.fail("a lost job is terminal"))
+    assert job_cmd._follow(job_cmd._store(box, _registry()), job_id) == 1
+    assert "ERROR: worker_lost: The worker running this job" in capsys.readouterr().err
+
+
+def _running(paths, job_id: str, project: str, minute: int) -> None:
+    record = job_writer.new_record(job_id, "project.restore", {"project": project},
+                                   "operator:ssh", project, NOW.replace(minute=minute))
+    assert job_writer.publish(paths, record)
+    assert job_writer.claim(paths, job_id, WorkerIdentity("boot-1", os.getpid(), 777),
+                            NOW) is not None
+
+
+def _hint_after_queueing(monkeypatch, capsys) -> str:
+    """Queue project.backup on myapp, poll past the hint, stop following."""
+    clock = [0.0]
+
+    def sleep(seconds):
+        clock[0] += seconds
+        if clock[0] > 35:
+            raise KeyboardInterrupt
+    monkeypatch.setattr(job_cmd, "_sleep", sleep)
+    monkeypatch.setattr(job_cmd, "_monotonic", lambda: clock[0])
+    assert _exit_code(lambda: job_cmd.cmd_job(["run", "project.backup",
+                                               '{"project":"myapp"}'])) == 130
+    return capsys.readouterr().err
+
+
+def test_still_queued_behind_a_job_of_the_same_project_names_it(box, monkeypatch, capsys):
+    _use(monkeypatch, _registry())
+    monkeypatch.setattr(api_jobs, "is_alive", lambda _worker, _proc: True)
+    _running(box, "01J" + "G" * 23, "myapp", 1)
+    err = _hint_after_queueing(monkeypatch, capsys)
+    assert ("still queued after 30 s: waiting for job 01J" + "G" * 23 +
+            " (project.restore) on myapp to finish") in err
+    assert "systemctl" not in err
+
+
+def test_still_queued_with_every_runner_slot_busy_says_so(box, monkeypatch, capsys):
+    _use(monkeypatch, _registry())
+    monkeypatch.setattr(api_jobs, "is_alive", lambda _worker, _proc: True)
+    for n, letter in enumerate("HJKM"):
+        box.project_dir(f"other{n}").mkdir(parents=True)
+        _running(box, "01J" + letter * 23, f"other{n}", n)
+    err = _hint_after_queueing(monkeypatch, capsys)
+    assert "still queued after 30 s: waiting for one of the 4 running jobs to finish" in err
+    assert "systemctl" not in err
+
+
+def test_jobs_project_filters(box, monkeypatch, capsys):
+    _use(monkeypatch, _registry())
+    from boxmunge.project_registry import add_project
+    box.project_dir("blog").mkdir(parents=True)
+    add_project("blog", box)
+    for job_id, project in (("01J" + "N" * 23, "myapp"), ("01J" + "P" * 23, "blog")):
+        record = job_writer.new_record(job_id, "project.backup", {"project": project},
+                                       "operator:ssh", project, NOW)
+        assert job_writer.publish(box, record)
+    job_cmd.cmd_jobs(["--project", "blog", "--json"])
+    assert [j["id"] for j in json.loads(capsys.readouterr().out)["jobs"]] == ["01J" + "P" * 23]
+
+
+def test_jobs_project_must_be_a_registered_name(box, monkeypatch, capsys):
+    _use(monkeypatch, _registry())
+    assert _exit_code(lambda: job_cmd.cmd_jobs(["--project", "../etc"])) == 2
+    assert "Invalid project name" in capsys.readouterr().err
+    assert _exit_code(lambda: job_cmd.cmd_jobs(["--project", "ghost"])) == 1
+    assert "boxmunge project-list" in capsys.readouterr().err
