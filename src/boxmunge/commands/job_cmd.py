@@ -32,9 +32,6 @@ FOLLOW_POLL_SECONDS = 1
 QUEUED_HINT_SECONDS = 30
 QUEUED_HINT = (f"still queued after {QUEUED_HINT_SECONDS} s: is the job runner active? "
                f"systemctl status boxmunge-jobs.path")
-# The job runner's limits (job_runner.MAX_CONCURRENT_JOBS): at most this many
-# jobs run at once, and a project's jobs run one at a time.
-RUNNER_SLOTS = 4
 EXIT_INTERRUPTED = 130
 UNFINISHED = frozenset({"queued", "running"})
 # Patched by tests, which run the worker inline in place of the runner.
@@ -187,12 +184,13 @@ def _queued_hint(store: JobStore, record: dict[str, Any]) -> str:
     """Why the job is likely still queued: a job of its project is running
     (the runner runs a project's jobs one at a time), every runner slot is
     busy, or, with nothing running, the runner itself may be down."""
+    from boxmunge.api.job_runner import MAX_CONCURRENT_JOBS
     running = [j for j in store.recent(limit=None).jobs if j["state"] == "running"]
     head = f"still queued after {QUEUED_HINT_SECONDS} s: waiting for"
     for job in running:
         if record["project"] is not None and job["project"] == record["project"]:
             return f"{head} job {job['id']} ({job['action']}) on {job['project']} to finish"
-    if len(running) >= RUNNER_SLOTS:
+    if len(running) >= MAX_CONCURRENT_JOBS:
         return (f"{head} one of the {len(running)} running jobs to finish "
                 f"(boxmunge jobs --running)")
     return QUEUED_HINT
