@@ -270,6 +270,7 @@ API_FRONTENDS = frozenset({
     "health_checks/audit_log.py",  # the audit-log health check reads the seal's state
     "commands/run_job_cmd.py",  # _run-job: the job worker, started by the job runner
     "commands/job_cmd.py",  # job run/show and jobs: the operator's job frontend (Invoker, JobStore)
+    "commands/job_runner_cmd.py",  # _job-runner: the job runner, boxmunge-jobs.service
 })
 
 

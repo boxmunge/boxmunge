@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import pytest
 
-from boxmunge.api.job_recovery import Recovery, classify, lost_message, recovery_advice
+from boxmunge.api.job_recovery import (
+    Recovery, advice_text, classify, lost_message, recovery_advice, retry_command,
+)
 from boxmunge.api.worker_identity import WorkerIdentity
 from boxmunge.release_txn import load_txn, options_text
 from tests.readiness_helpers import add_project, make_box, open_install
@@ -66,3 +68,16 @@ def test_advice_per_action_without_an_install(paths, action, expected):
 
 def test_lost_message_says_it_was_not_rerun():
     assert "was not run again" in lost_message(_rec("running", WORKER))
+
+
+def test_advice_text_takes_the_full_action_name(paths):
+    assert "boxmunge backup myapp" in advice_text(paths, "project.backup", "myapp")
+
+
+def test_advice_text_says_when_no_way_out_is_known(paths):
+    assert "no way out is known" in advice_text(paths, "project.unknown", "myapp")
+
+
+def test_retry_command_quotes_the_params():
+    record = {"action": "project.backup", "params": '{"project":"myapp"}'}
+    assert retry_command(record) == """boxmunge job run project.backup '{"project":"myapp"}'"""

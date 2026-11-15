@@ -49,6 +49,7 @@ from boxmunge.commands.container_update_cmd import cmd_container_update
 from boxmunge.commands.discover_update_cmd import cmd_discover_update
 from boxmunge.commands.audit_cmd import cmd_audit_rotate, cmd_audit_seal
 from boxmunge.commands.readiness_cmd import cmd_upgrade_readiness
+from boxmunge.commands.job_runner_cmd import cmd_job_runner
 from boxmunge.commands.run_job_cmd import cmd_run_job
 from boxmunge.commands.job_cmd import cmd_job, cmd_jobs
 from boxmunge.commands.mcp_serve_cmd import cmd_mcp_serve
@@ -110,6 +111,7 @@ COMMANDS: dict[str, Callable[[list[str]], None]] = {
     "_run-job": cmd_run_job,
     "job": cmd_job,
     "jobs": cmd_jobs,
+    "_job-runner": cmd_job_runner,
     "upgrade-readiness": cmd_upgrade_readiness,
     "mcp-serve": cmd_mcp_serve,
     "project-add": cmd_project_add,

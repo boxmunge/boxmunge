@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 import traceback
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
@@ -36,7 +35,7 @@ from boxmunge.api.job_capture import (
 )
 from boxmunge.api.job_events import EventLog
 from boxmunge.api.job_gate import GateTimeout, job_gate
-from boxmunge.api.job_recovery import recovery_advice
+from boxmunge.api.job_recovery import advice_text, retry_command
 from boxmunge.api.job_writer import claim, finish
 from boxmunge.api.param_tiers import param_tier_refusal
 from boxmunge.api.principal import Principal, Tier, refusal
@@ -352,10 +351,7 @@ class _Worker:
             if outcome.error is not None:
                 outcome.error["message"] += f" It was {note}"
             return outcome, f"Job {self._id} ({self._name}) {outcome.state}, and was {note}"
-        try:
-            advice = recovery_advice(self._paths, self._name.split(".", 1)[-1], self._project)
-        except StateError as e:
-            advice = f"no way out is known for this action ({e}); check what it changed"
+        advice = advice_text(self._paths, self._name, self._project)
         message = (f"stopped by SIGTERM (a service stop or shutdown); it was not run "
                    f"again, and may have done part of its work. To recover: {advice}.")
         return _failed(ErrorCode.FAILED, message), message
@@ -409,7 +405,7 @@ class _Worker:
                       self._paths, project=self._project)
 
     def _retry_command(self) -> str:
-        return f"boxmunge job run {self._name} {shlex.quote(self._record['params'])}"
+        return retry_command(self._record)
 
     def _result_schema_of(self, name: str) -> dict[str, Any] | None:
         try:

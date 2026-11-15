@@ -420,6 +420,13 @@ Usage: boxmunge _run-job <job-id>
 Internal: run one queued action API job (used by the job runner). Exits 0
 once the job has finished, 75 when an upgrade held the jobs gate and the
 job was left queued for the new code, 1 when the job is not queued.""",
+    "_job-runner": """\
+Usage: boxmunge _job-runner
+
+Internal: run every queued action API job, one worker each (used by
+boxmunge-jobs.service). Fails and alerts jobs whose worker was lost or
+crashed before starting, and exits 0 once the queue is empty, or after an
+upgrade so the service restarts on the new code.""",
     "mcp-serve": """\
 Usage: boxmunge mcp-serve
 
