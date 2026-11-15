@@ -311,13 +311,14 @@ def audit_targets(
     paths: BoxPaths, project: str, *, meta: ProjectMeta, profile: ProjectHardening,
     supps: tuple[Suppression, ...], targets: list[ScanTarget],
     unidentified: dict[str, str], kev: KevCatalog, basis: str,
+    scanned: dict[str, ScanResult],
 ) -> ProjectScan:
     """An audit-only scan of exactly ``targets`` under the given policy:
     nothing is written, alerted or enforced. A release not yet deployed is
     judged by its own manifest and compose, with the project's suppressions
-    (quarantine_gate)."""
+    (quarantine_gate). Reuses the results in ``scanned`` and adds new ones."""
     check_declared_runtimes(project, meta.declared_runtimes)
-    results, failed, skipped, warnings = _scan_targets(paths, project, targets)
+    results, failed, skipped, warnings = _scan_targets(paths, project, targets, scanned)
     today = _today()
     decisions = _evaluate(paths, project, meta, profile, supps, results,
                           load_exploited(paths, today, cisa=kev), today, complete=True, alerts=None)

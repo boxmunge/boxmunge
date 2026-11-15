@@ -164,6 +164,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `cve/fix_grace.py` | `load` | `cve/fix_grace/<p>.json`, strict's fix deadlines (`FixGrace.load`) | `state/` |
 | `cve/quarantine.py` | `read_quarantine_state` | `deploy/<p>.quarantined.json` | `state/` |
 | `cve/scan_state.py` | `scan_problem` | `scans/<p>.json` | `state/` |
+| `cve/scan_cache.py` | `get` | `scans/cache/<image ID>.json`, the deploy guard's Trivy results by image | `state/` |
 | `bind_sources.py` | `_load_record` | a project's bind-source record | `state/` |
 | `run_as.py` | `read_users` | a project's users record | `state/` |
 | `user_drift.py` | `held_back` | a project's user-drift record | `state/` |

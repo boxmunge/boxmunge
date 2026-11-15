@@ -392,3 +392,20 @@ def _users_decided_without_images(request, monkeypatch):
     monkeypatch.setattr("boxmunge.commands.deploy_images.prepare_release_users",
                         lambda paths, target, manifest, *, component, pull, rollback=False,
                         refetch=frozenset(): {})
+
+
+@pytest.fixture(autouse=True)
+def _deploy_guard_off(request, monkeypatch):
+    """Every stage, deploy, promote and rollback runs the deploy guard,
+    which scans the release's images with Trivy
+    (commands/security_regression_guard). Outside tests marked
+    `deploy_guard` it passes every release, and Trivy's DB version is a new
+    one on each call, so a quarantine gate's test never reads a cached scan
+    (cve.scan_cache)."""
+    if request.node.get_closest_marker("deploy_guard"):
+        return
+    monkeypatch.setattr("boxmunge.commands.security_regression_guard.guard_release",
+                        lambda paths, target, manifest: None)
+    versions = iter(range(1, 1 << 30))
+    monkeypatch.setattr("boxmunge.commands.quarantine_gate.trivy_db_version",
+                        lambda: f"test-db-{next(versions)}")

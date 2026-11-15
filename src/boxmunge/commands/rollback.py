@@ -433,11 +433,16 @@ def _report_not_started(project_name: str, paths: BoxPaths, target: RollbackTarg
 
 def cmd_rollback(args: list[str]) -> None:
     from boxmunge.commands.argv import parse_args, require_project_name
+    from boxmunge.commands.security_regression_guard import (
+        OVERRIDE_FLAG, REASON_OPTION, override_reason, regression_override,
+    )
     parsed = parse_args(
-        "rollback", args, flags={"--yes"}, min_positional=1, max_positional=1,
+        "rollback", args, flags={"--yes", OVERRIDE_FLAG}, options={REASON_OPTION},
+        min_positional=1, max_positional=1,
     )
     project = require_project_name("rollback", parsed.positional[0])
     yes = parsed.has("--yes")
 
     paths = BoxPaths()
-    sys.exit(run_rollback(project, paths, yes=yes))
+    with regression_override(paths, project, override_reason("rollback", parsed)):
+        sys.exit(run_rollback(project, paths, yes=yes))

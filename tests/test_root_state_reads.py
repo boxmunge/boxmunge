@@ -40,7 +40,7 @@ from boxmunge.commands.security_scan_inputs import project_suppressions_path
 from boxmunge.container_update_targets import read_target_state
 from boxmunge.cve import (
     breaker, exploited, fix_grace, kev, kev_enisa, kev_source_history, kev_watch_state,
-    kev_withdrawals, quarantine, scan_state, suppressions,
+    kev_withdrawals, quarantine, scan_cache, scan_state, suppressions,
 )
 from boxmunge.discovery_freshness import stale_discovery_warning
 from boxmunge.health_checks.backup_freshness import check_backup_freshness
@@ -183,6 +183,11 @@ READERS = [
     Reader("kev_vulncheck", lambda p: p.kev_vulncheck,
            {"fetched_at": ISO, "entries": ["CVE-1"]},
            exploited.read_vulncheck_cache),
+    # The deploy guard's Trivy results: a record it cannot read is a fault, never a miss.
+    Reader("scan_cache", lambda p: p.scan_cache_dir / ("a" * 64 + ".json"),
+           {"digest": "sha256:" + "a" * 64, "trivy_db": "2:db", "scanned_at": ISO,
+            "lang_types": [], "findings": []},
+           lambda p: scan_cache.ScanCache(p).get("sha256:" + "a" * 64, "2:db").scanned_at),
     Reader("kev_watch", lambda p: p.kev_watch,
            {"seen_at": ISO, "cve_ids": ["CVE-1"], "failing": {}}, kev_watch_state.read_watch),
     Reader("blocked_update", lambda p: p.platform_update_state,

@@ -5,8 +5,10 @@ decide_release_users builds the release from a scratch overlay whose built
 images carry a candidate tag, so production's image names and files stay
 as they were until the switch, whatever is refused or fails before it; it
 decides and checks every service's user (deploy_images) and records
-nothing. A CVE-quarantined project's release is scanned there too, before
-the hook (quarantine_gate), so a refusal leaves its install abandonable.
+nothing. Every release's images are scanned there too, before the hook: for
+a known-exploited CVE (security_regression_guard), then, for a
+CVE-quarantined project, by its gate (quarantine_gate); so a refusal leaves
+its install abandonable.
 generate_release_config writes the Caddy site and the overlay with those
 users, then the users record. promote_candidates, at the
 switch, moves the built names onto the candidates the users were decided
@@ -23,9 +25,10 @@ import yaml
 
 from boxmunge import docker_containers, user_drift
 from boxmunge.caddy import prepare_caddy_config
-from boxmunge.commands import deploy_images
+from boxmunge.commands import deploy_images, security_regression_guard
 from boxmunge.commands.deploy_images import CANDIDATE, candidate_name
 from boxmunge.commands.quarantine_gate import Clearance, QuarantineRefused, clear_release
+from boxmunge.commands.security_regression_guard import SecurityRegressionRefused
 from boxmunge.compose import (
     ComposeError, load_user_compose, prepare_compose_override, render_compose_override,
 )
@@ -66,14 +69,16 @@ def decide_release_users(project_name: str, paths: BoxPaths, manifest: dict,
                          pull: bool, carry_record: bool = False) -> ReleaseDecision:
     """Build the release installed in the project dir under candidate tags,
     and decide and check who each service runs as; nothing is recorded.
-    A quarantined project's release is then scanned, and its candidates
-    removed if that refuses it. `previous` is the manifest the install
+    The release's images are then scanned by the deploy guard and, for a
+    quarantined project, its gate; its candidates are removed if either
+    refuses it. `previous` is the manifest the install
     replaced (quarantine_gate.manifest_in_force). `pull`: build with
     --pull (commands/deploy_build). `carry_record`: the
     release may predate its services' declarations (a rollback), so the users
     record stands where it does not say, and a project no deploy has
     decided users for only builds (deploy_images.prepare_release_users).
-    Raises DeployRefused (QuarantineRefused) or DockerError."""
+    Raises DeployRefused (SecurityRegressionRefused, QuarantineRefused) or
+    DockerError."""
     print("  Building images and deciding who each service runs as...")
     remove_candidates(project_name)
     try:
@@ -89,16 +94,17 @@ def decide_release_users(project_name: str, paths: BoxPaths, manifest: dict,
                 paths, target, manifest,
                 component=component, pull=pull, rollback=carry_record,
                 refetch=user_drift.held_back(paths, project_name))
-            if not is_quarantined(project_name, paths):
-                return ReleaseDecision(users)
             try:
+                security_regression_guard.guard_release(paths, target, manifest)
+                if not is_quarantined(project_name, paths):
+                    return ReleaseDecision(users)
                 return ReleaseDecision(users, clear_release(paths, target, manifest, previous))
-            except QuarantineRefused as refused:
+            except (SecurityRegressionRefused, QuarantineRefused) as refused:
                 try:
                     remove_candidates(project_name)
                 except DockerError as e:
-                    raise QuarantineRefused([*refused.problems, f"Removing its candidate "
-                                             f"images failed too: {e}"]) from e
+                    raise type(refused)([*refused.problems, f"Removing its candidate "
+                                         f"images failed too: {e}"]) from e
                 raise
     except (RunAsError, ComposeResolveError, ComposeError) as e:
         raise DeployRefused([str(e)]) from e

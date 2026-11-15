@@ -247,6 +247,33 @@ def refresh_db() -> None:
         )
 
 
+def trivy_db_version() -> str:
+    """The vulnerability DB Trivy scans with now, as "<schema>:<built at>"
+    (`trivy version`): a cached result is valid only for the same one
+    (cve.scan_cache). Raises TrivyNotInstalledError, or ScannerError when
+    Trivy fails or does not name its DB (none downloaded yet)."""
+    cmd = ["trivy", "version", "--format", "json"]
+    try:
+        completed = subprocess.run(cmd, capture_output=True, text=True, check=True,
+                                   timeout=_DB_REFRESH_TIMEOUT)
+    except FileNotFoundError as e:
+        raise TrivyNotInstalledError(_TRIVY_NOT_FOUND_MSG) from e
+    except subprocess.TimeoutExpired as e:
+        raise ScannerError(f"`trivy version` timed out after {_DB_REFRESH_TIMEOUT}s") from e
+    except subprocess.CalledProcessError as e:
+        raise ScannerError(f"`trivy version` failed (exit {e.returncode}): "
+                           f"{(e.stderr or '').strip()}") from e
+    try:
+        db = json.loads(completed.stdout)["VulnerabilityDB"]
+        schema, built = db["Version"], db["UpdatedAt"]
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        raise ScannerError(f"`trivy version` does not name its vulnerability DB ({e!r}); "
+                           f"run `trivy image --download-db-only`") from e
+    if not isinstance(built, str) or not built:
+        raise ScannerError(f"`trivy version` gives the vulnerability DB no build time: {db!r}")
+    return f"{schema}:{built}"
+
+
 def scan_image(image_ref: str, *, timeout: int = _DEFAULT_TIMEOUT) -> ScanResult:
     """Scan a container image with Trivy and return parsed findings.
 
