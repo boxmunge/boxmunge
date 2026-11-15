@@ -1176,6 +1176,12 @@ action must not repeat itself. The alert names the way out for that action, as f
 mid-work; for a deploy that left an install open, the install's options. Check what it changed
 (`boxmunge status myapp`, `boxmunge job show <id> --events`), then follow the alert.
 
+### expired
+
+A job still queued 2 hours after it was created (it waited out a platform rollback, or a job runner
+that was down) is failed with `expired` and never run, with an alert. Its message names when it was
+queued and the `boxmunge job run ...` command that makes the same call again, if it is still wanted.
+
 ### A job's audit lines
 
 A job writes two audit lines with its id: `accepted` when it is queued, and its outcome once it has

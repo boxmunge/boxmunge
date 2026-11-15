@@ -10,13 +10,13 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from boxmunge import fileutil
-from boxmunge.api import job_capture, job_gate, job_worker, job_writer
+from boxmunge.api import job_capture, job_failure, job_gate, job_worker, job_writer
 from boxmunge.api.job_capture import CoreFailed
 from boxmunge.api.job_worker import EX_TEMPFAIL, run_job
 from boxmunge.api.principal import Tier
@@ -79,9 +79,11 @@ def box(paths, tmp_path, monkeypatch):
     monkeypatch.setattr(fileutil, "lock_holder", lambda _p: HOLDER)
     monkeypatch.setattr(fileutil, "LOCK_POLL_SECONDS", 0.05)
     alerts: list[dict] = []
-    monkeypatch.setattr(job_worker, "notify",
-                        lambda _paths, title, body, **kw: alerts.append(
-                            {"title": title, "body": body, **kw}) or True)
+    for module in (job_worker, job_failure):
+        monkeypatch.setattr(module, "notify",
+                            lambda _paths, title, body, **kw: alerts.append(
+                                {"title": title, "body": body, **kw}) or True)
+    monkeypatch.setattr(job_failure, "clock", lambda: NOW)
     paths.proc = proc
     paths.alerts = alerts
     return paths
@@ -149,6 +151,31 @@ def test_runs_a_queued_job_to_succeeded_with_log_events_and_outcome_audit(box):
     assert (outcome["job"], outcome["principal"], outcome["action"]) == (
         JOB_ID, "operator:ssh", "project.backup")
     assert outcome["params"] == {"project": "myapp"}
+
+
+def test_a_worker_started_on_a_job_queued_too_long_fails_it_without_running(box, monkeypatch):
+    _publish(box)
+    monkeypatch.setattr(job_failure, "clock",
+                        lambda: NOW + job_failure.JOB_MAX_QUEUED_AGE + timedelta(minutes=1))
+    handler = Handler()
+    assert _run(box, handler) == 0
+    assert handler.calls == []
+    record = _record(box)
+    assert (record["state"], record["error"]["code"], record["worker"]) == (
+        "failed", "expired", None)
+    assert record["created_at"] in record["error"]["message"]
+    assert not (box.jobs_queue / f"{JOB_ID}.json").exists()
+    [outcome] = _outcomes(box)
+    assert (outcome["outcome"], outcome["code"]) == ("failed", "expired")
+    [alert] = box.alerts
+    assert "expired in the queue" in alert["title"]
+
+
+def test_a_job_just_inside_the_age_bound_runs(box, monkeypatch):
+    _publish(box)
+    monkeypatch.setattr(job_failure, "clock", lambda: NOW + job_failure.JOB_MAX_QUEUED_AGE)
+    assert _run(box, Handler()) == 0
+    assert _record(box)["state"] == "succeeded"
 
 
 def test_claim_is_synced_before_the_handler_runs(box, monkeypatch):
