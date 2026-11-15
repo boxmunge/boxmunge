@@ -234,6 +234,20 @@ def checkout_detached(repo: Path, sha: str) -> None:
             f"run 'git -C {repo} checkout -f --detach {sha}' as the deploy user, then retry")
 
 
+def checkout_release(project_dir: Path, sha: str) -> None:
+    """Check ``sha`` out in production's ``repo/`` (checkout_detached) and
+    install its boxmunge-scripts/ beside it (commit_scripts.install_commit_scripts).
+    Idempotent, so a resume at any phase makes sure the tree is the SHA's."""
+    from boxmunge.data_dirs import ReleaseStateError
+    from boxmunge.commit_scripts import install_commit_scripts
+    checkout_detached(project_dir / "repo", sha)
+    try:
+        install_commit_scripts(project_dir)
+    except (OSError, ReleaseStateError) as e:
+        raise GitRefError(f"{sha} is checked out, but installing its boxmunge-scripts/ "
+                          f"failed: {e}") from e
+
+
 CONTROL_FILES = ("compose.yml", "manifest.yml")
 _REGULAR_MODES = ("100644", "100755")
 
@@ -312,6 +326,7 @@ def materialise(project_dir: Path, sha: str, release: Path, *,
     the staged release: staging runs only from the staged tree. ``made``
     is what the current slot records that staging created (staging_copies).
     """
+    from boxmunge.commit_scripts import install_commit_scripts
     _require_full_sha(sha, "stage")
     _refuse_foreign_copies(project_dir, made)
     source, clone = project_dir / "repo", release / "repo"
@@ -328,6 +343,7 @@ def materialise(project_dir: Path, sha: str, release: Path, *,
     _refuse_filters(clone, sha)
     checkout_detached(clone, sha)
     copy_project_entries(project_dir, release)
+    install_commit_scripts(release)
     _refuse_escaping_links(release)
     chown_tree_deploy(release)  # the slot is deploy's, as the user's own stage makes it
     return [SUBMODULE_WARN] if os.path.lexists(clone / ".gitmodules") else []
@@ -386,7 +402,8 @@ def copy_project_entries(project_dir: Path, release: Path) -> None:
     into repo/ (production's are absolute) is recreated as a relative link
     to the slot's repo/. Box state and staging's ``-staging`` copies stay in
     the project dir (materialise refused any other ``-staging`` entry). The
-    current slot is not read (a re-stage replaces it)."""
+    current slot is not read (a re-stage replaces it). materialise then
+    refreshes boxmunge-scripts/ from the staged commit, when it has one."""
     from boxmunge.bundle import STAGING_SUFFIX
     from boxmunge.release import project_data_dirs
     state = project_data_dirs(project_dir, with_staged=False).box_state()

@@ -31,8 +31,9 @@ from boxmunge.staging_copy_plan import CopyPlan, StagingDataError, copy_sources
 from boxmunge.staging_data import plan_staging_copy
 from boxmunge.user_entries import USER_ENTRIES
 from boxmunge.staging_isolation import (
-    StagingIsolationError, candidate_model, check_isolation, production_model, resolving,
-    separation_problems, staging_copy_tops, staging_model,
+    StagingIsolationError, candidate_model, check_isolation, never_deployed,
+    never_deployed_refusal, production_model, resolving, separation_problems,
+    staging_copy_tops, staging_model,
 )
 
 if TYPE_CHECKING:
@@ -183,6 +184,8 @@ def precheck_candidate(paths: BoxPaths, project: str, manifest: dict[str, Any],
         productions = []
         now = production_model(paths, project)
         if now is not None:
+            if copy_sources(manifest) is not None and never_deployed(paths, project):
+                raise StagingIsolationError(never_deployed_refusal(project))
             productions.append(("production", now))
         productions.append(("production after promoting this release", candidate_model(
             paths, project, tree, manifest, check_dir, user_compose=user_compose)))

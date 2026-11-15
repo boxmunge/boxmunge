@@ -129,7 +129,7 @@ services:
 ```
 
 A declared service is treated like any manifest service: it also receives the
-project's `env_files` and `secrets.env`.
+project's `project.env` and `secrets.env`.
 
 **Opting out.** Apps that legitimately need writable rootfs declare `read_only: false` in `compose.yml` and accept the +1 CVE hardening penalty consciously. Most apps just need `tmpfs:['/tmp']` (the v0.8 default) and possibly extra tmpfs entries for cache/log paths under read-only rootfs.
 

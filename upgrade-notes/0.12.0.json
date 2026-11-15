@@ -169,6 +169,47 @@
    "files": [],
    "superseded_by": null,
    "refs": []
+  },
+  {
+   "id": "0.12.0-git-scripts-from-repository",
+   "scope": "project",
+   "when": "before",
+   "kind": "recommended",
+   "title": "A git project's boxmunge-scripts/ comes from its repository, and a missing script refuses the deploy",
+   "change": "A git project's scripts needed a boxmunge-scripts/ placed by hand, which the deploy shell cannot do; Docker then made it empty, owned by root. From 0.12 every checkout (deploy, promote, rollback, abandon, the staged release) of a commit that has boxmunge-scripts/ refreshes the project directory's copy to the commit's, in place; hand-placed scripts are replaced. A commit without one leaves the existing scripts alone, so a rollback to an older commit still finds them; once a commit has carried boxmunge-scripts/, a rollback to a commit from before keeps those scripts, not the earlier hand-placed ones. A link inside the committed directory is refused.\nA deploy, stage or promote whose manifest names a smoke script, or a relative pre_deploy, that the release lacks is refused before anything starts, naming it.\nBefore upgrading, commit boxmunge-scripts/ (regular files) at the top of each git project's repository, and make sure each bundle ships the scripts its manifest names.",
+   "verify": "'validate <project>' reports no missing smoke or pre_deploy script, and the next 'prod-deploy <project>' runs its smoke check.",
+   "files": [
+    "manifest.yml"
+   ],
+   "superseded_by": null,
+   "refs": []
+  },
+  {
+   "id": "0.12.0-validate-runs-deploy-checks",
+   "scope": "project",
+   "when": "after",
+   "kind": "fact",
+   "title": "validate runs deploy's compose checks; env_files is ignored",
+   "change": "'validate <project>' now runs the compose.yml checks a deploy runs (hardening, isolation, the posture rules such as strict's read_only requirement), the missing-script check, and the identity check. A project validate passes is one prod-deploy does not refuse for its configuration; a compose.yml rejection exits 3, as the deploy's does, and a missing compose.yml is an error rather than a warning.\nThe manifest key env_files never did anything (the overlay always reads the project's project.env). It is gone from the templates, and validate warns about a manifest that still has it; such a manifest keeps validating. Remove the key at your next change to the manifest.",
+   "verify": "'validate <project>' for each project prints VALID, or names what the next deploy would refuse.",
+   "files": [
+    "manifest.yml",
+    "compose.yml"
+   ],
+   "superseded_by": null,
+   "refs": []
+  },
+  {
+   "id": "0.12.0-git-first-release-is-prod-deploy",
+   "scope": "box",
+   "when": "after",
+   "kind": "fact",
+   "title": "A git project's first release is deployed with prod-deploy",
+   "change": "'stage' of a git project that was never deployed is refused, saying to run 'prod-deploy <project>' first: staging is checked against production, and staging.copy_data copies production's data, neither of which exists yet. Stage and promote the releases after it. add-git-project says so, and notes a project.env.example in the repository, which boxmunge does not copy: set the values it lists with 'secrets set <project> KEY=value'.",
+   "verify": "Nothing to check.",
+   "files": [],
+   "superseded_by": null,
+   "refs": []
   }
  ]
 }

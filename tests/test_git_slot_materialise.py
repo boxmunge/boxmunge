@@ -65,9 +65,23 @@ def test_project_entries_copied_and_links_made_relative(project, tmp_path) -> No
     assert os.readlink(release / "manifest.yml") == "repo/manifest.yml"
     assert (release / "compose.yml").read_text() == "services: {}\n"
     assert (release / ".env").read_text() == "X=1\n"
+    # The commit has no scripts: production's stay, as a promote would leave them.
     assert (release / "boxmunge-scripts" / "smoke.sh").read_text() == "true\n"
     for state in ("secrets.env", "data", "data-staging"):                # box state stays
         assert not os.path.lexists(release / state)
+
+
+def test_the_staged_commits_scripts_are_installed_beside_its_clone(project, tmp_path) -> None:
+    """The overlay mounts the release's ./boxmunge-scripts: a git slot's is
+    the staged commit's, never production's."""
+    pdir, work = project
+    sha = _push(pdir, work, {"boxmunge-scripts/smoke.sh": "echo staged\n"})
+    release = _release(tmp_path)
+    materialise(pdir, sha, release)
+    smoke = release / "boxmunge-scripts" / "smoke.sh"
+    assert smoke.read_text() == "echo staged\n"
+    assert not smoke.is_symlink() and os.stat(smoke).st_mode & 0o111
+    assert (pdir / "boxmunge-scripts" / "smoke.sh").read_text() == "true\n"  # production's
 
 
 def test_gitmodules_warns(project, tmp_path) -> None:

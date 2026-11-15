@@ -24,8 +24,6 @@ services:
     smoke: boxmunge-scripts/smoke.sh
 backup:
   type: none
-env_files:
-  - project.env
 """
 
 
@@ -35,6 +33,8 @@ def _setup_project(paths: BoxPaths, name: str, manifest: str) -> None:
     (project_dir / "manifest.yml").write_text(manifest)
     (project_dir / "project.env").write_text("KEY=value\n")
     (project_dir / "compose.yml").write_text("services:\n  frontend:\n    image: nginx\n")
+    (project_dir / "boxmunge-scripts").mkdir()
+    (project_dir / "boxmunge-scripts" / "smoke.sh").write_text("#!/bin/sh\n")
 
 
 class TestValidate:
@@ -62,13 +62,64 @@ class TestValidate:
         exit_code = run_validate("myapp", paths)
         assert exit_code == 1
 
-    def test_missing_env_file_warns(self, paths: BoxPaths, capsys) -> None:
-        _setup_project(paths, "myapp", VALID_MANIFEST)
-        (paths.project_dir("myapp") / "project.env").unlink()
-        exit_code = run_validate("myapp", paths)
+    def test_an_env_files_key_is_warned_as_ignored(self, paths: BoxPaths, capsys) -> None:
+        _setup_project(paths, "myapp", VALID_MANIFEST + "env_files:\n  - other.env\n")
+        assert run_validate("myapp", paths) == 0  # existing manifests keep validating
+        out = capsys.readouterr().out
+        assert "VALID (with warnings)" in out
+        assert "manifest key 'env_files' is ignored" in out
+        assert "remove the key" in out
+
+    def test_a_strict_posture_without_read_only_is_refused_as_deploy_refuses_it(
+            self, paths: BoxPaths, capsys) -> None:
+        """validate runs deploy's compose checks: the same message, exit 3."""
+        _setup_project(paths, "myapp", "schema_version: 3\n" + VALID_MANIFEST
+                       + "security:\n  posture: strict\n")
+        (paths.project_dir("myapp") / "compose.yml").write_text(
+            "services:\n  frontend:\n    image: nginx\n    read_only: false\n")
+        assert run_validate("myapp", paths) == 3
         captured = capsys.readouterr()
-        assert exit_code == 0  # warning, not error
-        assert "project.env" in captured.out.lower()
+        assert "myapp: INVALID" in captured.out
+        assert "posture 'strict' requires read_only: true" in captured.err
+
+    def test_a_missing_smoke_script_is_an_error(self, paths: BoxPaths, capsys) -> None:
+        _setup_project(paths, "myapp", VALID_MANIFEST)
+        (paths.project_dir("myapp") / "boxmunge-scripts" / "smoke.sh").unlink()
+        assert run_validate("myapp", paths) == 1
+        err = capsys.readouterr().err
+        assert "smoke 'boxmunge-scripts/smoke.sh' runs /boxmunge-scripts/smoke.sh" in err
+        assert "upload a new bundle" in err
+
+    def test_a_missing_script_exits_as_deploy_does_before_compose_checks(
+            self, paths: BoxPaths, capsys) -> None:
+        """Deploy refuses the missing script first (exit 1): so does validate."""
+        _setup_project(paths, "myapp", "schema_version: 3\n" + VALID_MANIFEST
+                       + "security:\n  posture: strict\n")
+        (paths.project_dir("myapp") / "boxmunge-scripts" / "smoke.sh").unlink()
+        assert run_validate("myapp", paths) == 1
+        err = capsys.readouterr().err
+        assert "smoke 'boxmunge-scripts/smoke.sh'" in err and "posture" not in err
+
+    def test_a_git_projects_scripts_are_read_from_its_repository(
+            self, paths: BoxPaths, capsys) -> None:
+        """Before its next checkout installs them, the commit's scripts count."""
+        _setup_project(paths, "myapp", VALID_MANIFEST)
+        project_dir = paths.project_dir("myapp")
+        (project_dir / "boxmunge-scripts" / "smoke.sh").unlink()
+        (project_dir / "boxmunge-scripts").rmdir()
+        (project_dir / "repo").mkdir()
+        assert run_validate("myapp", paths) == 1
+        assert ("the commit has no boxmunge-scripts/, and the project directory has no "
+                "boxmunge-scripts/smoke.sh") in capsys.readouterr().err
+        (project_dir / "repo" / "boxmunge-scripts").mkdir()
+        (project_dir / "repo" / "boxmunge-scripts" / "smoke.sh").write_text("#!/bin/sh\n")
+        assert run_validate("myapp", paths) == 0
+
+    def test_a_missing_compose_file_is_an_error(self, paths: BoxPaths, capsys) -> None:
+        _setup_project(paths, "myapp", VALID_MANIFEST)
+        (paths.project_dir("myapp") / "compose.yml").unlink()
+        assert run_validate("myapp", paths) == 1
+        assert "Compose file missing: compose.yml" in capsys.readouterr().err
 
     def test_pre_registered_returns_error(self, paths: BoxPaths, capsys) -> None:
         pdir = paths.project_dir("myapp")
@@ -133,3 +184,42 @@ class TestValidateUnknownArg:
         err = capsys.readouterr().err
         assert "ERROR" in err
         assert "--not-a-flag" in err
+
+
+class TestScriptLinks:
+    """A bundle may ship links that stay inside it (bundle checks); a script
+    reached through one runs where its target is."""
+
+    def _project(self, paths: BoxPaths, extra: str = ""):
+        _setup_project(paths, "myapp", VALID_MANIFEST + extra)
+        return paths.project_dir("myapp")
+
+    def test_a_smoke_link_within_boxmunge_scripts_is_fine(self, paths: BoxPaths) -> None:
+        import os
+        pdir = self._project(paths)
+        scripts = pdir / "boxmunge-scripts"
+        (scripts / "smoke.sh").unlink()
+        (scripts / "healthcheck.sh").write_text("#!/bin/sh\n")
+        os.symlink("healthcheck.sh", scripts / "smoke.sh")
+        assert run_validate("myapp", paths) == 0
+
+    def test_a_pre_deploy_link_within_the_project_is_fine(self, paths: BoxPaths) -> None:
+        import os
+        pdir = self._project(paths, "deploy:\n  pre_deploy: bin/migrate\n")
+        (pdir / "scripts").mkdir()
+        (pdir / "scripts" / "migrate.sh").write_text("#!/bin/sh\n")
+        (pdir / "bin").mkdir()
+        os.symlink("../scripts/migrate.sh", pdir / "bin" / "migrate")
+        assert run_validate("myapp", paths) == 0
+
+    def test_a_smoke_link_out_of_boxmunge_scripts_is_refused(self, paths: BoxPaths,
+                                                              capsys) -> None:
+        import os
+        pdir = self._project(paths)
+        (pdir / "boxmunge-scripts" / "smoke.sh").unlink()
+        (pdir / "check.sh").write_text("#!/bin/sh\n")
+        os.symlink("../check.sh", pdir / "boxmunge-scripts" / "smoke.sh")
+        assert run_validate("myapp", paths) == 1
+        err = capsys.readouterr().err
+        assert "boxmunge-scripts/smoke.sh is a link that does not resolve to a regular " \
+               "file inside boxmunge-scripts/" in err

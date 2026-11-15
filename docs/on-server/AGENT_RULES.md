@@ -72,7 +72,7 @@ These operations are safe to run without human confirmation:
 | Promote staging to production | `promote <project>` |
 | Abandon staging | `unstage <project>` |
 | Deploy directly to production | `prod-deploy <project>` |
-| Deploy the installed release again (no new upload; rebuilds on current base images) | `prod-deploy <project> --redeploy` |
+| Deploy the installed release again (no new upload; rebuilds on current base images) | `prod-deploy <project> --redeploy` (a git project: `prod-deploy <project> --ref <deployed commit SHA>`; `--redeploy` is refused for it and prints that command) |
 | Register a git-based project | `add-git-project <name> <repo-url>` |
 | Preview changes before deploying (against the newest bundle in the inbox) | `diff <project>` |
 | Set a project secret | `secrets set <project> KEY=value` |
@@ -145,7 +145,7 @@ These commands prompt for confirmation before executing. Use `--yes` only when y
 - `project-delete <project>` -- destructively deletes a project (containers, files including local backups, registry entry); off-site backup copies are kept
 - `pause <project>` -- takes the site offline with a maintenance page, after a data snapshot (the deploy that ends the pause rolls back to it); `pause <project> --no-snapshot` for an emergency pause, giving up that data rollback
 - `resume <project>` -- brings it back online; with `--skip-security-checks` (DANGEROUS) it starts potentially vulnerable images without pulling fresh ones
-- `resume <project> --no-start` -- starts nothing: hands the pause to the next `prod-deploy`/`promote` (or `rollback`), which ends it once its containers start. Use it when `resume` refuses and names it (only a deploy can repair what it found)
+- `resume <project> --no-start` -- starts nothing: hands the pause to the next `prod-deploy`/`promote` (or `rollback`), which ends it once its containers start. Use it when `resume` refuses and names it (only a deploy can repair what it found). The deploy after it is `prod-deploy <project> --redeploy` for a bundle project, `prod-deploy <project> --ref <deployed commit SHA>` for a git project
 - `recover <project>` -- restarts a project the health monitor stopped
 - `inbox clean [project]` -- removes every uploaded bundle (of that project)
 
@@ -235,10 +235,13 @@ What each autofix alert means, and the one step for it:
 ### New project from git
 
 1. `add-git-project <name> <repo-url> [--ref REF]` -- register the project
-2. `secrets set <project> KEY=value` -- set required secrets
-3. `stage <project>` -- deploy to staging
-4. Verify the staging site at `https://staging.<host>` (stage prints it)
-5. `promote <project>` -- go live
+2. `secrets set <project> KEY=value` -- set required secrets, and any configuration this box needs
+   (a git project has no bundle to carry `project.env`; see `agent-help conventions`)
+3. `prod-deploy <project>` -- the first release goes straight to production. Staging is checked
+   against production and copies production's data (`staging.copy_data`), so `stage` refuses a
+   git project that was never deployed
+4. `check <project>` -- verify it
+5. Later releases: `stage <project>`, verify the staging site, `promote <project>` (below)
 
 ### Updating an existing project
 

@@ -24,5 +24,3 @@ backup:
 deploy:
   pre_deploy: ''
   snapshot_before_deploy: false
-env_files:
-- project.env

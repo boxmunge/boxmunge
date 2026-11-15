@@ -26,7 +26,7 @@ from boxmunge.commands.deploy_tree import TreeDeploy, report_left_open, switch_a
 from boxmunge.commands.quarantine_gate import manifest_in_force
 from boxmunge.crashpoint import crash_point
 from boxmunge.data_dirs import ReleaseStateError
-from boxmunge.git_slot import GitRefError, checkout_detached, head_sha, materialise
+from boxmunge.git_slot import GitRefError, checkout_release, head_sha, materialise
 from boxmunge.intake import IntakeError, validate_release_tree
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.release_txn import (
@@ -204,7 +204,7 @@ def _checkout_and_switch(project_name: str, paths: BoxPaths, req: GitDeploy,
                                 f"recording its progress failed: {e}")
     crash_point("txn.previous_kept")
     try:  # idempotent, so a resume at any phase makes sure the tree is the SHA
-        checkout_detached(paths.project_dir(project_name) / "repo", req.sha)
+        checkout_release(paths.project_dir(project_name), req.sha)
     except GitRefError as e:
         return report_left_open(project_name, paths, txn, tree_req,
                                 f"checking out {req.sha} failed: {e}")

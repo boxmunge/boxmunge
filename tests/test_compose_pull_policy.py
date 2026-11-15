@@ -54,7 +54,7 @@ def test_validate_reports_it_as_an_error(paths, capsys) -> None:
     _setup_project(paths, "myapp", VALID_MANIFEST)
     (paths.project_dir("myapp") / "compose.yml").write_text(
         "services:\n  frontend:\n    image: nginx\n    pull_policy: always\n")
-    assert run_validate("myapp", paths) == 1
+    assert run_validate("myapp", paths) == 3  # a compose rejection, as deploy's
     assert "pull_policy: always would pull" in capsys.readouterr().err
 
 

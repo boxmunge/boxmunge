@@ -83,6 +83,11 @@ def test_production_model_needs_a_deployed_project(paths) -> None:
     project_dir.mkdir(parents=True)
     assert production_model(paths, "myapp") is None
     (project_dir / "manifest.yml").write_text("project: myapp\n")
+    # A git project add-git-project registered: its manifest, no deploy yet.
+    with pytest.raises(StagingIsolationError, match="never been deployed.*'prod-deploy myapp'"):
+        production_model(paths, "myapp")
+    from boxmunge.state import write_state
+    write_state(paths.project_deploy_state("myapp"), {"current_ref": "a" * 40})
     with pytest.raises(StagingIsolationError, match="Redeploy production first"):
         production_model(paths, "myapp")
 

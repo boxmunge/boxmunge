@@ -13,6 +13,7 @@ import errno
 import fcntl
 import logging
 import os
+import shutil
 import pwd
 import stat
 from collections.abc import Sequence
@@ -425,3 +426,42 @@ def _write_all(fd: int, data: bytes, name: str) -> None:
             raise OSError(errno.EIO, f"copying {name} wrote nothing with {len(left)} "
                           "bytes left; refusing to leave it truncated")
         left = left[written:]
+
+
+def clear_dir_nofollow(fd: int) -> None:
+    """Remove everything in the open directory ``fd``, keeping the directory
+    itself (its inode, so a bind mount of it survives). Entries are reached
+    through ``fd`` and never followed: a link is removed, not its target."""
+    for name in os.listdir(fd):
+        if stat.S_ISDIR(os.stat(name, dir_fd=fd, follow_symlinks=False).st_mode):
+            shutil.rmtree(name, dir_fd=fd)
+        else:
+            os.unlink(name, dir_fd=fd)
+
+
+def open_writable_dir(parent: int, name: str, path: Path, project: str) -> int:
+    """Open the directory ``name`` in ``parent`` (``path``, for messages)
+    without following a link, to be refilled by this process. Not as root,
+    a directory someone else owns cannot be written: one that is empty
+    (Docker's bind-mount create_host_path makes a missing source that way,
+    owned by root) is replaced by one of this user's, since nothing depends
+    on an empty directory's inode; any other is refused, naming the remedy,
+    before anything in it changes. Raises OSError."""
+    fd = os.open(name, _DIR_FLAGS, dir_fd=parent)
+    st = os.fstat(fd)
+    if running_as_root() or st.st_uid == os.geteuid():
+        return fd
+    if os.listdir(fd):
+        os.close(fd)
+        raise OSError(errno.EACCES,
+                      f"{path} is owned by uid {st.st_uid}, not by this user, so it cannot "
+                      f"be refreshed. Rerun the command that failed with sudo in front (sudo "
+                      f"boxmunge prod-deploy {project}, a bundle's after its upload; or the "
+                      f"stage, promote or rollback you ran), or have a supervisor run "
+                      f"chown -R deploy:deploy {path}, then run it again")
+    os.close(fd)
+    os.rmdir(name, dir_fd=parent)
+    os.mkdir(name, 0o755, dir_fd=parent)
+    print(f"  NOTE: replaced the empty {path}, owned by uid {st.st_uid} (Docker creates a "
+          f"missing bind source that way), with one of this user's")
+    return os.open(name, _DIR_FLAGS, dir_fd=parent)
