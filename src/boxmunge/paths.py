@@ -284,6 +284,11 @@ class BoxPaths:
         name = _checked(name)
         return self.autofix_queue_dir / f"{name}.json"
 
+    def project_autofix_journal(self, name: str) -> Path:
+        """What a running autofix must undo if it is killed (cve.autofix_record)."""
+        name = _checked(name)
+        return self.state / "autofix" / f"{name}.journal"
+
     def project_fix_grace(self, name: str) -> Path:
         """Strict's fix deadlines for a project (cve.fix_grace)."""
         name = _checked(name)

@@ -369,3 +369,40 @@ def test_the_two_scan_failures_read_differently(paths, box) -> None:
     box.scan_error = ScannerError("trivy timed out")
     outcome = _run(paths)
     assert outcome.failed_step == "scan" and "the scan of the running images" in outcome.reason
+
+
+# ---------- the journal: a run killed mid-swap ----------
+
+
+def test_the_journal_is_kept_from_the_swap_until_the_run_is_over(paths, box) -> None:
+    from boxmunge.cve.autofix_record import read_journal
+    seen = []
+    box.on_health = lambda: seen.append(read_journal(paths, NAME))
+    assert _run(paths).ok
+    (journal,) = seen
+    assert journal.pins_before == () and [p.service for p in journal.built] == ["web"]
+    assert read_journal(paths, NAME) is None
+
+
+def test_a_rolled_back_run_removes_its_journal(paths, box) -> None:
+    from boxmunge.cve.autofix_record import read_journal
+    seen = []
+    box.on_health = lambda: seen.append(read_journal(paths, NAME))
+    box.unhealthy_on_patched = True
+    assert _run(paths).failed_step == "health"
+    assert len(seen) == 2 and all(j is not None for j in seen)  # the patch's, the rollback's
+    assert read_journal(paths, NAME) is None
+
+
+def test_a_killed_run_is_rolled_back_from_its_journal(paths, box) -> None:
+    from boxmunge.cve.autofix_record import AutofixJournal, read_journal, write_journal
+    patched = "sha256:" + "e" * 64
+    built = ImagePin("web", pin_ref(NAME, "web", patched), patched, "autofix")
+    write_journal(paths, NAME, AutofixJournal(datetime.now(timezone.utc), (), (built,)))
+    box.pins, box.containers["web"] = (built,), ("c-web-9", patched)
+    with project_lock(NAME, paths):
+        assert autofix_run.recover_interrupted(paths, NAME) == ()
+        assert autofix_run.recover_interrupted(paths, NAME) is None   # nothing left to undo
+    assert box.pins == () and box.running()["web"] == WEB
+    assert box.removed == [built.ref] and read_journal(paths, NAME) is None
+    assert any(level == "error" and "interrupted" in msg for level, msg, _ in box.log)

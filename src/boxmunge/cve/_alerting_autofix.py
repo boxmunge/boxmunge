@@ -95,3 +95,23 @@ def format_autofix_failed_alert(
                      "packages and deploy it.",
                      f"Details: boxmunge security {project}",
                  ]), priority=1)
+
+
+def format_autofix_interrupted_alert(project: str, problems: Sequence[str], *,
+                                     site: str) -> Alert:
+    """A run was killed mid-swap (its journal was left) and has now been
+    rolled back from the journal; ``site`` is the fallback applied for what
+    it was patching. Priority 1."""
+    undone = (["", "The rollback did not finish:", *(f"- {p}" for p in problems),
+               f"Check it with `boxmunge status {project}`."] if problems else [])
+    return Alert(kind="autofix_failed",
+                 title=f"[boxmunge:{project}] Autofix run interrupted — rolled back",
+                 body="\n".join([
+                     f"An autofix run for {project} was interrupted and has been rolled back:",
+                     "its previous image pins are restored, its containers recreated and the",
+                     "images it built removed.",
+                     *undone,
+                     "",
+                     site,
+                     f"Details: boxmunge security {project}",
+                 ]), priority=1)

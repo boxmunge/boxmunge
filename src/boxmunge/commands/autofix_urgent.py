@@ -2,11 +2,16 @@
 """The urgent autofix flow's run: patch what the scan queued, then apply the
 outcome (CVE autofix flowcharts, chart 1 and table B).
 
-The scan or KEV watch tick that queued a patch (commands.autofix_urgent_scan)
-runs the queue at its end, under its fleet lock; both are root units, so
-the patch builds run as root. For each queued project, under its project
+A scan or KEV watch tick queues a patch (commands.autofix_urgent_scan);
+the queue runs in its own unit, boxmunge-autofix.service, which a caller
+running as root starts without waiting (commands.autofix_queue_cmd), so a
+long patch never runs inside the watch's or the nightly unit's timeout,
+and never holds the fleet lock. For each queued project, under its project
 lock (held by someone else: left for the next run, logged):
 
+- a journal left by a run that was killed (cve.autofix_run) is undone
+  first, alerted once, and table B applied for what it was patching; then
+  the queued patch carries on as below;
 - the findings are read again from the project's stored scan, by the keys
   the queue holds: a queue entry is never trusted on its own. Gone (a later
   scan no longer finds them, or they stopped being urgent): the entry and
@@ -25,33 +30,41 @@ lift sends no alert of its own. Failure applies table B, which is the
 policy's own disposition of the findings: one the policy takes down is
 quarantined (re-asserted when it is already: the rollback started the
 containers), one it leaves up or at risk stays so; then one urgent alert
-names the step. Upgrade probation does not hold this back; only the
-nightly flow waits for it.
+names the step. The lift or the fallback comes first, then the entry and
+the marker are cleared (both kept when the lift or the fallback failed, so
+the next run retries), then the one alert, which says what of that
+failed. Upgrade probation does not hold this back; only the nightly flow
+waits for it.
 
 A queue entry that cannot be read is logged on every run, alerted at most
 once a day per project, and skipped; the rest of the queue still runs.
 `only` limits a run to some projects: a single-project `security scan`
-runs its own project's entry at once, not at the next KEV watch tick.
+run as deploy runs its own project's entry itself, at once.
 """
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
+from boxmunge.commands.autofix_urgent_scan import with_note
 from boxmunge.commands.quarantine_lift import Restored, restore_from_quarantine
 from boxmunge.commands.security_enforce import quarantine_listing
 from boxmunge.commands.security_scan_inputs import (
     ProjectMeta, ProjectScanError, load_project_meta,
 )
 from boxmunge.cve.alerting import (
-    Alert, format_autofix_failed_alert, format_autofix_patched_alert, send_alerts,
+    Alert, format_autofix_failed_alert, format_autofix_interrupted_alert,
+    format_autofix_patched_alert, send_alerts,
 )
 from boxmunge.cve.autofix_policy import AUTOFIX_URGENT_BUDGET, AutofixUrgency, urgency
 from boxmunge.cve.autofix_record import (
-    QueueEntry, clear_autofixing, queued_projects, read_queue_entry, remove_queue_entry,
+    QueueEntry, clear_autofixing, journaled_projects, queued_projects, read_queue_entry,
+    remove_queue_entry,
 )
-from boxmunge.cve.autofix_run import AutofixOutcome, autofix_project_locked
+from boxmunge.cve.autofix_run import (
+    AutofixOutcome, autofix_project_locked, recover_interrupted,
+)
 from boxmunge.cve.breaker import BreakerError, read_held
 from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
 from boxmunge.cve.quarantine import (
@@ -76,10 +89,11 @@ def _now() -> datetime:
 
 def run_urgent_queue(paths: BoxPaths, now: datetime, *,
                      only: Collection[str] | None = None) -> list[AutofixOutcome]:
-    """Run every queued urgent patch (of ``only``, when given); the outcome
-    of each that ran. ``now``: the earliest the run can start."""
+    """Run every queued urgent patch (of ``only``, when given), and undo any
+    run that was killed (a journal left behind); the outcome of each patch
+    that ran. ``now``: the earliest the run can start."""
     try:
-        projects = queued_projects(paths)
+        projects = sorted(set(queued_projects(paths)) | set(journaled_projects(paths)))
     except StateError as e:
         _problem(paths, None, str(e))
         return []
@@ -89,7 +103,7 @@ def run_urgent_queue(paths: BoxPaths, now: datetime, *,
             continue
         try:
             with project_lock(project, paths):
-                outcome = _run_one(paths, project, max(now, _now()))
+                outcome = _process(paths, project, max(now, _now()))
         except LockError:
             log_operation(_COMPONENT, f"{project}: queued autofix left for the next run: the "
                           f"project is held by another operation", paths, project=project)
@@ -97,9 +111,6 @@ def run_urgent_queue(paths: BoxPaths, now: datetime, *,
         except InvalidProjectName as e:
             _problem(paths, None, f"the autofix queue holds {project!r}, not a project "
                      f"name: {e}")
-            continue
-        except _PROBLEMS as e:
-            _problem(paths, project, f"{type(e).__name__}: {e}")
             continue
         if outcome is not None:
             print(f"{project}: autofix " + ("patched" if outcome.ok else
@@ -133,11 +144,28 @@ def _send(paths: BoxPaths, alert: Alert) -> None:
         log_warning(_COMPONENT, f"autofix alert delivery failed: {e}", paths)
 
 
-def _stored(paths: BoxPaths, project: str) -> tuple[ProjectDecision, ...]:
+@dataclass(frozen=True)
+class _Job:
+    """A queued patch, read again: the entry, and what the stored scan
+    still holds of it."""
+    entry: QueueEntry
+    meta: ProjectMeta
+    decisions: tuple[ProjectDecision, ...]
+    findings: list[FindingDisposition]
+
+
+def _read(paths: BoxPaths, project: str) -> _Job | None:
+    """The project's queued patch, or None. Raises what its reads raise
+    (_PROBLEMS): the entry stays, and nothing was changed."""
+    entry = read_queue_entry(paths, project)
+    if entry is None:
+        return None
+    meta = load_project_meta(paths, project)
     state = read_scan_state(paths.project_scan_state(project))
     if state is None:
         raise StateError(f"{project} has an autofix queued but no stored scan")
-    return decisions_from_scan_state(state, project_name=project)
+    decisions = decisions_from_scan_state(state, project_name=project)
+    return _Job(entry, meta, decisions, _current(decisions, entry, meta))
 
 
 def _current(decisions: Sequence[ProjectDecision], entry: QueueEntry,
@@ -154,44 +182,76 @@ def _done(paths: BoxPaths, project: str) -> None:
     clear_autofixing(paths, project)
 
 
-def _run_one(paths: BoxPaths, project: str, now: datetime) -> AutofixOutcome | None:
-    entry = read_queue_entry(paths, project)
-    if entry is None:
+def _process(paths: BoxPaths, project: str, now: datetime) -> AutofixOutcome | None:
+    """Under the project lock: undo a killed run, read the queued patch
+    (a read that fails is alerted and changes nothing), run it, conclude."""
+    try:
+        interrupted = recover_interrupted(paths, project)
+    except StateError as e:
+        _problem(paths, project, f"its autofix journal cannot be used: {e}")
         return None
-    meta = load_project_meta(paths, project)
-    decisions = _stored(paths, project)
-    findings = _current(decisions, entry, meta)
-    if not findings:
+    try:
+        job = _read(paths, project)
+    except _PROBLEMS as e:
+        _problem(paths, project, f"{type(e).__name__}: {e}")
+        job = None
+    if interrupted is not None:
+        site = ("Nothing it was patching is queued any more." if job is None or not job.findings
+                else _fallback(paths, project, job)[0])
+        _send(paths, format_autofix_interrupted_alert(project, interrupted, site=site))
+    if job is None:
+        return None
+    if not job.findings:
         _done(paths, project)
-        log_operation(_COMPONENT, f"{project}: queued autofix of {', '.join(entry.cves)} "
+        log_operation(_COMPONENT, f"{project}: queued autofix of {', '.join(job.entry.cves)} "
                       f"dropped: the stored scan no longer has them to patch", paths,
                       project=project)
         return None
+    entry = job.entry
     log_operation(_COMPONENT, f"{project}: urgent autofix of {', '.join(entry.cves)} "
                   f"starting, found {entry.detected_at.isoformat()}", paths, project=project,
                   detail={"detected_at": entry.detected_at.isoformat(),
                           "started_at": now.isoformat()})
-    if not meta.autofix:
+    if not job.meta.autofix:
         outcome = AutofixOutcome(False, None, "autofix was turned off for this project "
                                  "before the patch started", ())
     else:
-        outcome = _patch(paths, project, findings, now + AUTOFIX_URGENT_BUDGET)
+        outcome = _patch(paths, project, job.findings, now + AUTOFIX_URGENT_BUDGET)
     outcome = replace(outcome, detected_at=entry.detected_at, started_at=now)
-    _done(paths, project)
-    cves = sorted({fd.finding.cve_id for fd in findings})
-    timing = _timing(entry.detected_at, now, _now(), "patched" if outcome.ok else "failed")
+    _conclude(paths, project, job, outcome)
+    return outcome
+
+
+def _conclude(paths: BoxPaths, project: str, job: _Job, outcome: AutofixOutcome) -> None:
+    """Lift or fall back first, then clear the entry and the marker (kept
+    when the lift or the fallback failed, so the next run retries), then
+    one alert saying all of it."""
+    cves = sorted({fd.finding.cve_id for fd in job.findings})
+    timing = _timing(job.entry.detected_at, outcome.started_at or _now(), _now(),
+                     "patched" if outcome.ok else "failed")
     log_operation(_COMPONENT, f"{project}: urgent autofix of {', '.join(cves)}: {timing}",
                   paths, project=project, detail={
-                      "ok": outcome.ok, "detected_at": entry.detected_at.isoformat(),
-                      "started_at": now.isoformat()})
+                      "ok": outcome.ok, "detected_at": job.entry.detected_at.isoformat(),
+                      "started_at": (outcome.started_at or _now()).isoformat()})
     if outcome.ok:
-        _send(paths, _succeeded(paths, project, meta, entry, cves, outcome, timing))
+        site, settled, urgent = _succeeded(paths, project, job)
+        alert = format_autofix_patched_alert(project, cves, outcome.records, site=site,
+                                             urgent=urgent, timing=timing)
     else:
-        site = _fallback(paths, project, meta, decisions, findings)
-        _send(paths, format_autofix_failed_alert(
+        site, settled = _fallback(paths, project, job)
+        alert = format_autofix_failed_alert(
             project, cves, step=outcome.failed_step, reason=outcome.reason, site=site,
-            rollback_problems=outcome.rollback_problems, timing=timing))
-    return outcome
+            rollback_problems=outcome.rollback_problems, timing=timing)
+    note = None
+    if not settled:
+        note = "The patch stays queued (and marked), so the next autofix run tries again."
+    else:
+        try:
+            _done(paths, project)
+        except StateError as e:
+            log_error(_COMPONENT, f"{project}: {e}", paths, project=project)
+            note = f"Clearing the queue entry or the autofixing marker failed: {e}"
+    _send(paths, with_note(alert, note))
 
 
 def _timing(found: datetime, started: datetime, ended: datetime, verb: str) -> str:
@@ -220,36 +280,35 @@ def _quarantine_kwargs(paths: BoxPaths, project: str, meta: ProjectMeta) -> dict
             "compose_files": meta.compose_files}
 
 
-def _succeeded(paths: BoxPaths, project: str, meta: ProjectMeta, entry: QueueEntry,
-               cves: Sequence[str], outcome: AutofixOutcome, timing: str) -> Alert:
-    """Lift the quarantine taken for the patch; the notice of what runs now."""
-    urgent = False
+def _succeeded(paths: BoxPaths, project: str, job: _Job) -> tuple[str, bool, bool]:
+    """Lift the quarantine taken for the patch. (what the site is now,
+    whether that is settled, whether it needs the operator)."""
     try:
         record = read_quarantine_state(project, paths)
     except QuarantineError as e:
-        return format_autofix_patched_alert(
-            project, cves, outcome.records, urgent=True, timing=timing,
-            site=f"Whether the project is quarantined cannot be read: {e}")
+        return f"Whether the project is quarantined cannot be read: {e}", False, True
     if record is None:
-        site = "The site stayed up while it was patched."
-    elif record.get("cve_id") in entry.cves:
+        return "The site stayed up while it was patched.", True, False
+    if record.get("cve_id") in job.entry.cves:
         try:
             site, urgent = _lifted(restore_from_quarantine(paths, project,
                                                            component=_COMPONENT))
         except QuarantineError as e:
-            site, urgent = (f"The quarantine could not be lifted: {e} Lift it with "
-                            f"`boxmunge security resume {project}`."), True
+            log_error(_COMPONENT, f"{project}: quarantine lift after autofix failed: {e}",
+                      paths, project=project)
+            return (f"The quarantine could not be lifted: {e} Lift it with "
+                    f"`boxmunge security resume {project}`."), False, True
         log_operation(_COMPONENT, f"{project}: quarantine lifted after autofix: {site}",
                       paths, project=project)
-    else:   # taken for something else since: it stands, containers stopped again
-        site = (f"The project stays quarantined for {record.get('cve_id')}, which this "
-                f"patch was not for.")
-        try:
-            reassert_quarantine(project, paths, **_quarantine_kwargs(paths, project, meta))
-        except QuarantineError as e:
-            site, urgent = f"{site} Re-asserting it failed: {e}; the next scan retries.", True
-    return format_autofix_patched_alert(project, cves, outcome.records, site=site,
-                                        urgent=urgent, timing=timing)
+        return site, True, urgent
+    # Taken for something else since: it stands, its containers stopped again.
+    site = (f"The project stays quarantined for {record.get('cve_id')}, which this "
+            f"patch was not for.")
+    try:
+        reassert_quarantine(project, paths, **_quarantine_kwargs(paths, project, job.meta))
+    except QuarantineError as e:
+        return f"{site} Re-asserting it failed: {e}.", False, True
+    return site, True, False
 
 
 def _lifted(restored: Restored) -> tuple[str, bool]:
@@ -261,24 +320,24 @@ def _lifted(restored: Restored) -> tuple[str, bool]:
     return "The quarantine is lifted: the site is back online, smoke test OK.", False
 
 
-def _fallback(paths: BoxPaths, project: str, meta: ProjectMeta,
-              decisions: Sequence[ProjectDecision],
-              findings: Sequence[FindingDisposition]) -> str:
+def _fallback(paths: BoxPaths, project: str, job: _Job) -> tuple[str, bool]:
     """Table B: what the policy decided for the findings, applied now.
-    Returns what that leaves the site as, for the alert."""
+    (what that leaves the site as, whether it was applied)."""
+    findings, meta, decisions = job.findings, job.meta, job.decisions
     dark = [fd for fd in findings if fd.disposition is Disposition.QUARANTINE]
     if not dark:
         if any(fd.disposition is Disposition.STILL_RUNNING_AT_RISK for fd in findings):
             return ("The site keeps running at risk: dangerously_disable_quarantine is "
-                    "set, so it is not quarantined.")
-        return "The site stays up; the scans keep alerting the findings until they are fixed."
+                    "set, so it is not quarantined."), True
+        return ("The site stays up; the scans keep alerting the findings until they are "
+                "fixed."), True
     try:
         if read_quarantine_state(project, paths) is not None:
             reassert_quarantine(project, paths, **_quarantine_kwargs(paths, project, meta))
-            return "The site stays quarantined: maintenance page up, containers stopped."
+            return "The site stays quarantined: maintenance page up, containers stopped.", True
         if project in read_held(paths) and not any(fd.full_kev for fd in dark):
             return ("The circuit breaker holds this project's quarantine, so it keeps "
-                    "running: apply it with `boxmunge security scan --apply-held`.")
+                    "running: apply it with `boxmunge security scan --apply-held`."), True
         head = dark[0]
         image_ref = next(d.image_ref for d in decisions if head in d.findings)
         quarantine_project(project, paths, **_quarantine_kwargs(paths, project, meta),
@@ -287,5 +346,5 @@ def _fallback(paths: BoxPaths, project: str, meta: ProjectMeta,
     except (QuarantineError, BreakerError) as e:
         log_error(_COMPONENT, f"{project}: quarantine after a failed autofix failed: {e}",
                   paths, project=project)
-        return f"The quarantine could not be completed: {e}; the next scan retries it."
-    return "The site is quarantined now: maintenance page up, containers stopped."
+        return f"The quarantine could not be completed: {e}.", False
+    return "The site is quarantined now: maintenance page up, containers stopped.", True

@@ -45,7 +45,7 @@ bootstrap/init-host.sh   one-time host provisioning (users, sshd, UFW, Docker, C
 install.sh               lays down /opt/boxmunge from a release bundle
 scripts/boxmunge-upgrade the root upgrade shim: download, verify signature, swap venvs, probation
 system/                  the boxmunge-system container (age, rclone)
-systemd/                 timers: backup, backup-sync, health, kev-watch (every 30 min), maintenance (scan then container-update), auto-update
+systemd/                 timers: backup, backup-sync, health, kev-watch (every 30 min), maintenance (scan then container-update), auto-update; boxmunge-autofix.service (no timer: the scans start it)
 canary/                  the project self-test deploys to prove the pipeline works
 docs/on-server/          operator and agent docs, shipped to the box and served by agent-help
 services/version-check/  the public update-discovery service (itself deployed as a boxmunge project)
@@ -163,7 +163,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `cve/kev_source_history.py` | `_entries` | `kev/sources.json` | `state/` |
 | `cve/fix_grace.py` | `load` | `cve/fix_grace/<p>.json`, strict's fix deadlines (`FixGrace.load`) | `state/` |
 | `image_pins.py` | `read_pins` | `image_pins/<p>.json`, the images autofix pinned a project's services to | `state/` |
-| `cve/autofix_record.py` | `_read_doc` | `autofix/<p>.json` (the patches autofix applied: `read_records`), `autofix/<p>.active` (the marker of a patch in progress: `read_autofixing`) and `autofix/queue/<p>.json` (an urgent patch waiting for the end of its scan: `read_queue_entry`) | `state/` |
+| `cve/autofix_record.py` | `_read_doc` | `autofix/<p>.json` (the patches autofix applied: `read_records`), `autofix/<p>.active` (the marker of a patch in progress: `read_autofixing`) `autofix/queue/<p>.json` (an urgent patch waiting for the autofix unit: `read_queue_entry`) and `autofix/<p>.journal` (what a killed autofix run must undo: `read_journal`) | `state/` |
 | `cve/quarantine.py` | `read_quarantine_state` | `deploy/<p>.quarantined.json` | `state/` |
 | `cve/scan_state.py` | `scan_problem` | `scans/<p>.json` | `state/` |
 | `cve/scan_cache.py` | `get` | `scans/cache/<image ID>.json`, the deploy guard's Trivy results by image | `state/` |
@@ -253,7 +253,7 @@ added again under the same name reuses them. Create a new lock under `state/` wi
 | `state/secrets-locks/<project>.lock` | `SecretsFile.locked` | writes of the project's secrets file | kept for good, as above |
 | `state/secrets-locks/.host.lock` | `SecretsFile.locked` | writes of the host secrets file | kept for good |
 | `state/.registry.lock` | `fileutil.registry_lock` | read, change and save of `projects.txt` | kept for good |
-| `state/.cve-fleet.lock` | `cve.fleet_lock.fleet_lock`: the KEV watch doesn't wait (skips its tick); the fleet `security scan` blocks until it is free; the watch service's 1h `TimeoutStartSec` bounds that | one fleet-wide CVE run at a time, with the urgent autofix queue it ends with (`commands/autofix_urgent.py`, which takes each project's lock in turn and leaves a busy one for the next run) | kept for good |
+| `state/.cve-fleet.lock` | `cve.fleet_lock.fleet_lock`: the KEV watch doesn't wait (skips its tick); the fleet `security scan` blocks until it is free; the watch service's 1h `TimeoutStartSec` bounds that | one fleet-wide CVE run at a time; the urgent autofix queue runs outside it, in `boxmunge-autofix.service` (`commands/autofix_urgent.py` takes each project's lock in turn and leaves a busy one for the next run) | kept for good |
 | `state/.caddy.lock` | `docker.caddy_config_lock` | writing Caddy site config and reloading | kept for good |
 | `state/.legacy-stages.lock` | nothing since 0.11.7: `legacy-stage` took it, up to 0.11.6 | (the legacy-stage records) | left on a box where an older release made it |
 | `state/container-updates/.lock` | `commands/container_update_cmd.py` (doesn't wait) | one container-update run at a time | kept for good |

@@ -18,6 +18,11 @@ The steps, each a `failed_step` of the outcome when it fails:
 
 The patch records are written only once the services are healthy.
 
+Just before the swap the run writes its journal (cve.autofix_record: the
+pins it found, the images it built), and removes it once the run has
+finished, patched or rolled back. A journal left behind means the run was
+killed mid-swap; recover_interrupted undoes it the way a rollback would.
+
 On any failure the run rolls back, whatever the project's container-update
 `strategy` (a patch that failed is never left running): once the swap has
 begun, the pins the project had are restored exactly (or cleared when it
@@ -54,7 +59,8 @@ from boxmunge.cve.autofix_build import (
 )
 from boxmunge.cve.autofix_plan import PROD, ServicePlan, Step, StepFailed
 from boxmunge.cve.autofix_record import (
-    PackageChange, PatchRecord, Trigger, read_records, write_records,
+    AutofixJournal, PackageChange, PatchRecord, Trigger, read_journal, read_records,
+    remove_journal, write_journal, write_records,
 )
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import LockError, project_lock
@@ -141,18 +147,52 @@ def autofix_project_locked(paths: BoxPaths, project: str,
         records = _steps(paths, run, cves, trigger, deadline)
     except StepFailed as e:
         problems = tuple(_rollback(paths, run))
+        _finish(paths, project)
         reason = "; ".join([str(e), *problems])
         return _outcome(paths, run, cves, AutofixOutcome(False, e.step, reason, (), problems))
     except BaseException as e:
         problems = _rollback(paths, run)
+        _finish(paths, project)
         for problem in problems:
             e.add_note(problem)
         log_error(_COMPONENT, f"Autofix of {project} failed unexpectedly and was rolled back: "
                   f"{type(e).__name__}: {e}", paths, project=project,
                   detail={"cves": list(cves), "services": run.patching, "rollback": problems})
         raise
+    _finish(paths, project)
     return _outcome(paths, run, cves, AutofixOutcome(
         True, None, f"patched {', '.join(run.patching)}", records))
+
+
+def _finish(paths: BoxPaths, project: str) -> None:
+    """The run is over: its journal goes. Logged, not raised: what the run
+    did stands either way (a journal left makes the next run undo it)."""
+    try:
+        remove_journal(paths, project)
+    except StateError as e:
+        log_error(_COMPONENT, f"Autofix of {project}: {e}; the next autofix of it will roll "
+                  f"back to the journal", paths, project=project)
+
+
+def recover_interrupted(paths: BoxPaths, project: str) -> tuple[str, ...] | None:
+    """Undo an autofix run that was killed before it finished, from its
+    journal: restore the pins it found, recreate the containers, remove the
+    images it built. None when there is no journal; else what could not be
+    undone, one line each. The caller holds the project lock. Raises
+    StateError for a journal it cannot read."""
+    _require_lock_held(paths, project)
+    journal = read_journal(paths, project)
+    if journal is None:
+        return None
+    run = _Run(project, journal.pins_before, swapped=True,
+               built=[(p.service, PatchedImage(p.ref, p.image_id, {})) for p in journal.built])
+    problems = tuple(_rollback(paths, run))
+    remove_journal(paths, project)
+    log_error(_COMPONENT, f"Autofix of {project} started {journal.started_at.isoformat()} was "
+              f"interrupted and has been rolled back"
+              + (f"; {'; '.join(problems)}" if problems else ""), paths, project=project,
+              detail={"rollback": list(problems)})
+    return problems
 
 
 def _steps(paths: BoxPaths, run: _Run, cves: tuple[str, ...], trigger: Trigger,
@@ -223,6 +263,11 @@ def _swap(paths: BoxPaths, run: _Run, patched: dict[str, PatchedImage]) -> None:
     kept = [pin for pin in run.pins_before if pin.service not in patched]
     pins = kept + [ImagePin(svc, img.ref, img.image_id, "autofix")
                    for svc, img in patched.items()]
+    try:
+        write_journal(paths, run.project, AutofixJournal(_now(), run.pins_before, tuple(
+            ImagePin(svc, img.ref, img.image_id, "autofix") for svc, img in run.built)))
+    except StateError as e:
+        raise StepFailed("swap", f"the autofix journal could not be written: {e}") from e
     run.swapped = True   # from here the rollback restores the pins and recreates
     try:
         write_pins(paths, run.project, pins)

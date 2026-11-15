@@ -54,6 +54,7 @@ from boxmunge.cve._alerting_fleet import (
 from boxmunge.cve._alerting_autofix import (
     PERSISTENCE_CAVEAT,
     format_autofix_failed_alert,
+    format_autofix_interrupted_alert,
     format_autofix_patched_alert,
     format_autofix_started_alert,
 )
@@ -93,6 +94,7 @@ __all__ = [
     "format_autofix_started_alert",
     "format_autofix_patched_alert",
     "format_autofix_failed_alert",
+    "format_autofix_interrupted_alert",
     "format_quarantine_alert",
     "format_quarantine_lifted_alert",
     "format_kev_withdrawal_hold_alert",

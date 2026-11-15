@@ -320,6 +320,8 @@ Recurring operations run via systemd timers:
 | `boxmunge-kev-watch.timer` | Every 30 minutes (up to 2 min jitter) | `security kev-watch` |
 | `boxmunge-auto-update.timer` | Every 6 hours (up to 30 min jitter) | `auto-update` |
 
+One unit has no timer: `boxmunge-autofix.service` (`security autofix-queue`) patches the urgent known-exploited findings a scan queued. The nightly scan, the KEV watch and a supervisor's single-project scan start it when they queue a patch, without waiting for it. It runs as root with a 6-hour limit, outside the scans' own units, and takes no lock beyond each project's own.
+
 All timers but the KEV watch use `Persistent=true` so a missed run (e.g., server was rebooted) executes on next start rather than being silently skipped. A missed KEV watch tick is not replayed: the next one comes within half an hour.
 
 Host security patching is handled by unattended-upgrades, configured to install security updates automatically and reboot during a configurable maintenance window (default 04:00). Because an enabled service proves nothing about updates arriving, the `auto-updates` health check and every `auto-update` run look for evidence (a recent successful `apt-get update`, a recent successful `unattended-upgrade` run, successful apt-daily runs), and `auto-update` sends a Pushover alert when it is missing.

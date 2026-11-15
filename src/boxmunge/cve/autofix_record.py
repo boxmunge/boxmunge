@@ -19,7 +19,13 @@ A finding the urgent flow patches waits in `state/autofix/queue/<project>.json`,
 {detected_at, findings: [{cve_id, package, image_ref}], downtime}, until the
 end of the scan or KEV watch run that found it (commands.autofix_urgent).
 
-All three are deploy-writable state that root reads: through fs_nofollow,
+From just before an autofix swaps its images in until it has finished
+(patched, or rolled back), `state/autofix/<project>.journal` holds
+{started_at, pins_before, built}: the project's pins exactly as they were,
+and the images the run built, as pins. A journal left behind means the run
+was killed; the next run undoes it first (cve.autofix_run.recover_interrupted).
+
+All four are deploy-writable state that root reads: through fs_nofollow,
 times timezone-aware UTC and not in the future, and anything unusable
 raises StateError naming the file.
 """
@@ -33,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.fs_nofollow import read_text_nofollow_or_none
+from boxmunge.image_pins import ImagePin
 from boxmunge.state import StateError
 
 if TYPE_CHECKING:
@@ -307,11 +314,67 @@ def remove_queue_entry(paths: BoxPaths, project: str) -> None:
 def queued_projects(paths: BoxPaths) -> tuple[str, ...]:
     """The names with a queue entry (`<name>.json`), sorted; the caller
     validates each as a project name. Raises StateError."""
+    return _names(paths.autofix_queue_dir, ".json")
+
+
+def _names(directory: Path, suffix: str) -> tuple[str, ...]:
     try:
-        names = [e.name for e in paths.autofix_queue_dir.iterdir()]
+        names = [e.name for e in directory.iterdir()]
     except FileNotFoundError:
         return ()
     except OSError as e:
-        raise StateError(f"cannot list the autofix queue {paths.autofix_queue_dir}: {e}") from e
-    return tuple(sorted(n[:-len(".json")] for n in names
-                        if n.endswith(".json") and not n.startswith(".")))
+        raise StateError(f"cannot list {directory}: {e}") from e
+    return tuple(sorted(n[:-len(suffix)] for n in names
+                        if n.endswith(suffix) and not n.startswith(".")))
+
+
+@dataclass(frozen=True)
+class AutofixJournal:
+    """What an autofix run that was killed left to undo."""
+    started_at: datetime
+    pins_before: tuple[ImagePin, ...]
+    built: tuple[ImagePin, ...]
+
+
+def _pin_rows(pins: Sequence[ImagePin]) -> list[dict[str, str]]:
+    return [{"service": p.service, "ref": p.ref, "image_id": p.image_id, "reason": p.reason}
+            for p in pins]
+
+
+def _pins(rows: Any, field: str) -> tuple[ImagePin, ...]:
+    if not isinstance(rows, list):
+        raise ValueError(f"{field} is not a list")
+    return tuple(ImagePin(r["service"], r["ref"], r["image_id"], r["reason"]) for r in rows)
+
+
+def write_journal(paths: BoxPaths, project: str, journal: AutofixJournal) -> None:
+    _write_doc(paths.project_autofix_journal(project), {
+        "started_at": journal.started_at.isoformat(),
+        "pins_before": _pin_rows(journal.pins_before), "built": _pin_rows(journal.built),
+    }, "autofix journal")
+
+
+def read_journal(paths: BoxPaths, project: str) -> AutofixJournal | None:
+    """The journal of a run that did not finish, or None. Raises StateError."""
+    path = paths.project_autofix_journal(project)
+    doc = _read_doc(path, "autofix journal")
+    if doc is None:
+        return None
+    try:
+        if not isinstance(doc, dict) or set(doc) != {"started_at", "pins_before", "built"}:
+            raise ValueError("expected {started_at, pins_before, built}")
+        return AutofixJournal(_time(doc["started_at"], "started_at"),
+                              _pins(doc["pins_before"], "pins_before"),
+                              _pins(doc["built"], "built"))
+    except (ValueError, KeyError, TypeError) as e:
+        raise StateError(f"{path} is not an autofix journal: {e!r}") from e
+
+
+def remove_journal(paths: BoxPaths, project: str) -> None:
+    _unlink(paths.project_autofix_journal(project), "autofix journal")
+
+
+def journaled_projects(paths: BoxPaths) -> tuple[str, ...]:
+    """The names with a journal (`<name>.journal`), sorted; the caller
+    validates each as a project name. Raises StateError."""
+    return _names(paths.state / "autofix", ".journal")

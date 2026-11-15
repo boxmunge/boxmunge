@@ -5,31 +5,37 @@ probe, the Docker primitives and the patch runner itself are stubbed."""
 from __future__ import annotations
 
 import json
+import subprocess
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import yaml
 
 from boxmunge.commands.autofix_urgent_scan import PATCHING_NOTE
 from boxmunge.commands import (
-    autofix_urgent, autofix_urgent_scan, kev_watch, quarantine_lift, security_actions,
-    security_scan_core,
+    autofix_queue_cmd, autofix_urgent, autofix_urgent_scan, kev_watch, quarantine_lift,
+    security_actions, security_scan_core,
 )
-from boxmunge.cve import autofix_run
+from boxmunge.cve import autofix_build, autofix_run
 from boxmunge.cve.alerting import PERSISTENCE_CAVEAT
 from boxmunge.cve.autofix_build import NotPatchable, Patchable
 from boxmunge.cve.autofix_policy import AUTOFIX_URGENT_BUDGET
 from boxmunge.cve.autofix_record import (
-    PackageChange, PatchRecord, read_autofixing, read_queue_entry,
+    AutofixJournal, PackageChange, PatchRecord, read_autofixing, read_journal,
+    read_queue_entry, write_journal,
 )
 from boxmunge.cve.autofix_run import AutofixOutcome
 from boxmunge.cve.exploited import ExploitedIndex, ExploitedSource
-from boxmunge.cve.fleet_lock import FleetLockBusy, fleet_lock
 from boxmunge.cve.kev import KevCatalog
-from boxmunge.cve.quarantine import is_quarantined
+from boxmunge.cve.kev_watch_state import WatchState, write_watch
+from boxmunge.cve.quarantine import QuarantineError, is_quarantined
 from boxmunge.fileutil import project_lock
+from boxmunge.image_pins import ImagePin, pin_ref
+from boxmunge.state import StateError
 from tests.test_commands.cve_helpers import (
     Docker, Pushover, finding, make_box, render_site, scan_and_send, scan_result,
+    seed_quarantine,
 )
 
 CVE = "CVE-2026-0001"
@@ -398,42 +404,34 @@ def test_the_fleet_quarantine_alert_carries_why_autofix_cannot_help(tmp_path,
     assert "no shell or package manager in the image" in quarantined[1]
 
 
-def _holds_fleet_lock(paths) -> bool:
-    try:
-        with fleet_lock(paths):
-            return False
-    except FleetLockBusy:
-        return True
-
-
 @pytest.mark.parametrize(("ok", "rc"), [(True, 0), (False, 2)])
-def test_the_fleet_scan_runs_the_queue_under_its_lock(tmp_path, monkeypatch, ok, rc) -> None:
-    """A patch that failed needs attention: the scan exits 2, as for a quarantine."""
+def test_the_fleet_scan_hands_the_queue_on_under_its_lock(tmp_path, monkeypatch, ok,
+                                                          rc) -> None:
+    """A patch run here that failed needs attention: exit 2, as for a quarantine."""
     paths = make_box(tmp_path)
-    seen: list[bool] = []
+    seen: list = []
     outcome = AutofixOutcome(ok, None if ok else "build", "x", ())
     monkeypatch.setattr(security_actions, "_scan_targets_cmd", lambda args, p: 0)
-    monkeypatch.setattr(security_actions, "run_urgent_queue",
-                        lambda p, now, only=None: seen.append(_holds_fleet_lock(p)) or [outcome])
+    monkeypatch.setattr(security_actions, "after_scan",
+                        lambda p, only=None: seen.append(only) or [outcome])
     assert security_actions.cmd_security_scan([], paths) == rc
-    assert seen == [True]
+    assert seen == [None]
 
 
-def test_a_single_project_scan_runs_that_projects_patch_at_once(tmp_path, monkeypatch) -> None:
+def test_a_single_project_scan_hands_on_that_projects_patch(tmp_path, monkeypatch) -> None:
     paths = make_box(tmp_path)
     seen: list = []
     monkeypatch.setattr(security_actions, "_scan_targets_cmd", lambda args, p: 0)
-    monkeypatch.setattr(security_actions, "run_urgent_queue",
-                        lambda p, now, only=None: seen.append(only) or [])
+    monkeypatch.setattr(security_actions, "after_scan",
+                        lambda p, only=None: seen.append(only) or [])
     assert security_actions.cmd_security_scan(["demo"], paths) == 0
     assert seen == [["demo"]]
 
 
 @pytest.mark.parametrize("fails", [False, True])
-def test_every_kev_watch_tick_runs_the_queue_under_its_lock(tmp_path, monkeypatch,
-                                                            fails) -> None:
+def test_every_kev_watch_tick_hands_the_queue_on(tmp_path, monkeypatch, fails) -> None:
     paths = make_box(tmp_path)
-    seen: list[bool] = []
+    seen: list = []
 
     def watch(p, now):
         if fails:
@@ -441,11 +439,263 @@ def test_every_kev_watch_tick_runs_the_queue_under_its_lock(tmp_path, monkeypatc
         return kev_watch.WatchResult()
 
     monkeypatch.setattr(kev_watch, "_watch", watch)
-    monkeypatch.setattr(kev_watch, "run_urgent_queue",
-                        lambda p, now: seen.append(_holds_fleet_lock(p)) or [])
+    monkeypatch.setattr(kev_watch, "after_scan", lambda p, only=None: seen.append(only) or [])
     if fails:
         with pytest.raises(RuntimeError, match="refresh failed"):
             kev_watch.run_kev_watch(paths, _now())
     else:
         kev_watch.run_kev_watch(paths, _now())
-    assert seen == [True]
+    assert seen == [None]
+
+
+class Systemctl:
+    def __init__(self, monkeypatch, returncode: int = 0) -> None:
+        self.calls: list[list[str]] = []
+        self.returncode = returncode
+        monkeypatch.setattr(autofix_queue_cmd.subprocess, "run", self._run)
+
+    def _run(self, argv, **kw):
+        self.calls.append(argv)
+        return subprocess.CompletedProcess(argv, self.returncode, "", "unit not found")
+
+
+@pytest.mark.parametrize("root", [True, False])
+def test_root_starts_the_unit_and_deploy_runs_its_own_patch(tmp_path, monkeypatch,
+                                                            root) -> None:
+    box = _box(tmp_path, monkeypatch, "relaxed", projects=("blog", "shop"))
+    box.scan("blog")
+    box.scan("shop")
+    systemctl = Systemctl(monkeypatch)
+    monkeypatch.setattr(autofix_queue_cmd, "_is_root", lambda: root)
+    outcomes = autofix_queue_cmd.after_scan(box.paths, only=["shop"])
+    if root:
+        assert outcomes == [] and box.runner.calls == []
+        assert systemctl.calls == [["systemctl", "start", "--no-block",
+                                    "boxmunge-autofix.service"]]
+    else:
+        assert [o.ok for o in outcomes] == [True] and systemctl.calls == []
+        assert [c[0] for c in box.runner.calls] == ["shop"]
+        assert read_queue_entry(box.paths, "blog") is not None
+
+
+def test_the_unit_is_not_started_for_an_empty_queue(tmp_path, monkeypatch) -> None:
+    paths = make_box(tmp_path)
+    systemctl = Systemctl(monkeypatch)
+    monkeypatch.setattr(autofix_queue_cmd, "_is_root", lambda: True)
+    autofix_queue_cmd.after_scan(paths)
+    assert systemctl.calls == []
+
+
+def test_a_unit_that_will_not_start_is_logged_loudly(tmp_path, monkeypatch, capsys) -> None:
+    box = _box(tmp_path, monkeypatch, "relaxed")
+    box.scan()
+    Systemctl(monkeypatch, returncode=5)
+    autofix_queue_cmd.start_autofix_unit(box.paths)
+    assert "could not start boxmunge-autofix.service" in capsys.readouterr().err
+    assert read_queue_entry(box.paths, "demo") is not None
+
+
+def test_the_autofix_command_goes_round_until_the_queue_is_empty(tmp_path,
+                                                                 monkeypatch) -> None:
+    """A patch queued while the unit runs is picked up by the same run."""
+    box = _box(tmp_path, monkeypatch, "relaxed", projects=("blog", "shop"))
+    box.scan("blog")
+    monkeypatch.setattr(autofix_queue_cmd, "_is_root", lambda: True)
+    real = box.runner.__call__
+
+    def runner(paths, project, findings, **kw):
+        if project == "blog":
+            box.scan("shop")   # queued meanwhile, by another scan
+        return real(paths, project, findings, **kw)
+
+    monkeypatch.setattr(autofix_urgent, "autofix_project_locked", runner)
+    assert autofix_queue_cmd.cmd_autofix_queue([], box.paths) == 0
+    assert [c[0] for c in box.runner.calls] == ["blog", "shop"]
+
+
+def test_the_autofix_command_is_root_only(tmp_path, monkeypatch, capsys) -> None:
+    monkeypatch.setattr(autofix_queue_cmd, "_is_root", lambda: False)
+    assert autofix_queue_cmd.cmd_autofix_queue([], make_box(tmp_path)) == 1
+    assert "runs as root" in capsys.readouterr().err
+
+
+def test_deploy_shell_refuses_the_autofix_queue(capsys) -> None:
+    from boxmunge.shell import run_command
+    assert run_command("security", ["autofix-queue"]) == 1
+    assert "operator-only" in capsys.readouterr().err
+
+
+def test_a_real_kev_watch_rescan_feeds_the_queue(tmp_path, monkeypatch) -> None:
+    """The watch's own diff and rescan (scan_projects, the real scan) queue the
+    newly listed CVE; only the hand-on to the unit is stubbed."""
+    box = _box(tmp_path, monkeypatch, "balanced", listed=frozenset(), cvss=7.5)
+    box.scan()                                   # stored: the finding, not yet listed
+    assert read_queue_entry(box.paths, "demo") is None
+    write_watch(box.paths, WatchState(_now() - timedelta(minutes=30), frozenset()))
+    box.listed = CISA
+    now = _now()
+    kev = KevCatalog(frozenset({CVE}), now, now, "t")
+    monkeypatch.setattr(kev_watch, "refresh_kev_and_alert", lambda p, n, **kw: kev)
+    monkeypatch.setattr(kev_watch, "load_exploited", lambda p, today, cisa=None:
+                        ExploitedIndex({CVE: CISA}, {}))
+    handed: list = []
+    monkeypatch.setattr(kev_watch, "after_scan", lambda p, only=None: handed.append(only))
+    result = kev_watch.run_kev_watch(box.paths, now)
+    assert result.rescanned == ("demo",) and handed == [None]
+    entry = read_queue_entry(box.paths, "demo")
+    assert entry.cves == (CVE,) and entry.downtime is False
+    assert not is_quarantined("demo", box.paths)
+
+
+# ---------- fix round 1 ----------
+
+
+def test_a_cleanup_failure_after_a_patch_keeps_the_lift_and_the_notice(tmp_path,
+                                                                       monkeypatch) -> None:
+    box = _box(tmp_path, monkeypatch, "balanced", cvss=9.8)
+    box.scan()
+    assert is_quarantined("demo", box.paths)
+
+    def broken(paths, project):
+        raise StateError("cannot remove the autofixing marker: read-only file system")
+
+    monkeypatch.setattr(autofix_urgent, "clear_autofixing", broken)
+    [outcome] = box.run()
+    assert outcome.ok and not is_quarantined("demo", box.paths)
+    [patched] = box.sent("Autofix patched")
+    assert "Nothing was patched" not in patched[1] and "read-only file system" in patched[1]
+    assert box.sent("could not run") == []
+
+
+def test_a_lift_that_fails_keeps_the_patch_queued(tmp_path, monkeypatch) -> None:
+    box = _box(tmp_path, monkeypatch, "balanced", cvss=9.8)
+    box.scan()
+
+    def refused(paths, project, *, component):
+        raise QuarantineError("Caddy reload failed")
+
+    monkeypatch.setattr(autofix_urgent, "restore_from_quarantine", refused)
+    box.run()
+    assert is_quarantined("demo", box.paths)
+    assert read_queue_entry(box.paths, "demo") is not None
+    [patched] = box.sent("Autofix patched")
+    assert patched[2] == 1 and "could not be lifted: Caddy reload failed" in patched[1]
+    assert "stays queued" in patched[1]
+
+
+def test_a_quarantine_for_another_cve_is_reasserted_after_the_patch(tmp_path,
+                                                                    monkeypatch) -> None:
+    box = _box(tmp_path, monkeypatch, "balanced", cvss=9.8)
+    box.scan()
+    record = json.loads(box.paths.project_quarantine_state("demo").read_text())
+    box.paths.project_quarantine_state("demo").write_text(
+        json.dumps({**record, "cve_id": "CVE-2026-0099"}))
+    stops = box.docker.calls.count("compose_stop")
+    [outcome] = box.run()
+    assert outcome.ok and is_quarantined("demo", box.paths)
+    assert box.docker.calls.count("compose_stop") == stops + 1
+    [patched] = box.sent("Autofix patched")
+    assert "stays quarantined for CVE-2026-0099" in patched[1]
+
+
+def test_autofix_turned_off_before_the_run_applies_the_fallback(tmp_path,
+                                                                monkeypatch) -> None:
+    box = _box(tmp_path, monkeypatch, "balanced", cvss=7.5)
+    box.scan()
+    manifest = box.paths.project_manifest("demo")
+    doc = yaml.safe_load(manifest.read_text())
+    doc["security"]["autofix"] = False
+    manifest.write_text(yaml.safe_dump(doc))
+    [outcome] = box.run()
+    assert not outcome.ok and box.runner.calls == []
+    assert is_quarantined("demo", box.paths)
+    [failed] = box.sent("Autofix FAILED")
+    assert "turned off" in failed[1] and "quarantined now" in failed[1]
+
+
+def test_strict_overdue_fix_is_patched_dark_through_the_scan(tmp_path, monkeypatch) -> None:
+    box = _box(tmp_path, monkeypatch, "strict", listed=frozenset())
+    t0 = _now() - timedelta(days=8)
+    monkeypatch.setattr(security_scan_core, "_now", lambda: t0)
+    box.scan()                                    # first seen: the grace starts
+    assert read_queue_entry(box.paths, "demo") is None
+    monkeypatch.setattr(security_scan_core, "_now", lambda: t0 + timedelta(days=7))
+    box.scan()                                    # overdue: quarantined, patched at once
+    assert is_quarantined("demo", box.paths)
+    assert read_queue_entry(box.paths, "demo").downtime is True
+    [quarantined] = box.sent("QUARANTINED")
+    assert quarantined[1].endswith(PATCHING_NOTE)
+    [outcome] = box.run()
+    assert outcome.ok and not is_quarantined("demo", box.paths)
+
+
+def test_a_breaker_held_quarantine_is_patched_up_and_its_fallback_stays_held(
+        tmp_path, monkeypatch) -> None:
+    """Enough paranoid projects hit by one non-KEV CVE trip the breaker: none
+    goes dark, each is patched with the site up and says so; a failed patch
+    leaves the quarantine to the operator."""
+    box = _box(tmp_path, monkeypatch, "paranoid", listed=frozenset(),
+               projects=("blog", "shop", "wiki"))
+    now = _now()
+    run = security_actions.scan_projects(box.paths, ["blog", "shop", "wiki"],
+                                         kev=KevCatalog(frozenset(), now, now, "t"))
+    assert sorted(run.held) == ["blog", "shop", "wiki"]
+    for project in run.held:
+        assert not is_quarantined(project, box.paths)
+        assert read_queue_entry(box.paths, project).downtime is False
+        assert read_autofixing(box.paths, project).downtime is False
+    started = box.sent("patching (site up)")
+    assert len(started) == 3 and box.sent("QUARANTINED") == []
+    box.runner.outcome = AutofixOutcome(False, "build", "mirror down", ())
+    box.run()
+    assert not any(is_quarantined(p, box.paths) for p in run.held)
+    failed = box.sent("Autofix FAILED")
+    assert len(failed) == 3 and all("circuit breaker holds" in f[1] for f in failed)
+
+
+def test_a_reused_entry_follows_the_projects_real_state(tmp_path, monkeypatch) -> None:
+    """Queued up; quarantined since (a failed lift, an operator): the next
+    scan rewrites the entry dark, keeping its detection time."""
+    box = _box(tmp_path, monkeypatch, "balanced", cvss=7.5)
+    box.scan()
+    first = read_queue_entry(box.paths, "demo")
+    seed_quarantine(box.paths, cve_id=CVE)
+    box.scan()
+    entry = read_queue_entry(box.paths, "demo")
+    assert entry.downtime is True and entry.detected_at == first.detected_at
+    assert read_autofixing(box.paths, "demo").downtime is True
+
+
+def test_a_killed_run_is_rolled_back_then_the_patch_carries_on(tmp_path, monkeypatch) -> None:
+    box = _box(tmp_path, monkeypatch, "balanced", cvss=7.5)
+    box.scan()
+    patched = "sha256:" + "e" * 64
+    built = ImagePin("web", pin_ref("demo", "web", patched), patched, "autofix")
+    write_journal(box.paths, "demo", AutofixJournal(_now(), (), (built,)))
+    undone: list = []   # the runner's own Docker seams (tests/cve/test_autofix_run.py)
+    monkeypatch.setattr(autofix_run, "clear_pins", lambda p, project: undone.append("pins"))
+    monkeypatch.setattr(autofix_run, "recreate_project",
+                        lambda p, project, files, component: undone.append("recreate"))
+    monkeypatch.setattr(autofix_run, "wait_healthy", lambda *a, **k: (True, []))
+    monkeypatch.setattr(autofix_run, "remove_patched", lambda pin: undone.append(pin.ref))
+    [outcome] = box.run()
+    assert undone == ["pins", "recreate", built.ref]
+    assert read_journal(box.paths, "demo") is None
+    [interrupted] = box.sent("interrupted")
+    assert interrupted[2] == 1 and "has been rolled back" in interrupted[1]
+    assert "quarantined now" in interrupted[1]        # table B for the queued finding
+    assert outcome.ok and not is_quarantined("demo", box.paths)   # then patched, lifted
+
+
+def test_the_real_probe_decides_queueing(tmp_path, monkeypatch) -> None:
+    """Without the unit-tier probe stub: the probe's own docker calls are
+    faked, and an apt image is queued."""
+    box = _box(tmp_path, monkeypatch, "balanced", cvss=7.5)
+    monkeypatch.setattr(autofix_urgent_scan, "probe", autofix_build.probe)
+    monkeypatch.setattr(autofix_build, "_image_doc", lambda ref: {"Config": {"User": ""}})
+    ran: list = []
+    monkeypatch.setattr(autofix_build, "_run", lambda argv, **kw: ran.append(argv) or
+                        subprocess.CompletedProcess(argv, 0, "apt\n", ""))
+    box.scan()
+    assert read_queue_entry(box.paths, "demo") is not None
+    assert ran and ran[0][:2] == ["docker", "run"]

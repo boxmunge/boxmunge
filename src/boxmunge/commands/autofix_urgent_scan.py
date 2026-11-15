@@ -6,8 +6,9 @@ finding (cve.autofix_policy.urgency) on a project with `security.autofix`
 on queues it here, under the project lock, before enforcement:
 
 - downtime (flowchart table A, or the project is quarantined already):
-  the quarantine is taken the normal way (the circuit breaker still weighs a
-  finding that is not full KEV);
+  the quarantine is taken the normal way. The circuit breaker still weighs
+  a finding that is not full KEV; one it holds is patched with the site up
+  (held_for_patch records that after the fleet run's phase 2);
 - otherwise the site stays up: the quarantine its findings would take is
   held back while it is patched, and the autofixing marker says so.
 
@@ -15,8 +16,8 @@ Either way the marker holds {cves, downtime} and the queue entry holds the
 findings and their detection time. One alert says patching started: the
 QUARANTINED alert itself when the scan quarantines the project for the
 patch, the autofix_started notice otherwise (the site stays up, or it was
-quarantined already). The patch runs at the end of the run
-(commands.autofix_urgent).
+quarantined already). The patch runs once the scan is over
+(commands.autofix_queue_cmd, commands.autofix_urgent).
 
 Nothing is queued when autofix cannot help: it is off, the project is down
 on purpose (paused, stopped by the health monitor), something else keeps it
@@ -26,7 +27,7 @@ the findings (the QUARANTINED alert included), not sent as one more alert.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 
@@ -40,6 +41,7 @@ from boxmunge.cve.autofix_record import (
     QueuedFinding, QueueEntry, clear_autofixing, mark_autofixing, read_queue_entry,
     remove_queue_entry, write_queue_entry,
 )
+from boxmunge.cve.breaker import BreakerError, read_held
 from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
 from boxmunge.cve.quarantine import QuarantineError, is_quarantined, read_quarantine_state
 from boxmunge.docker_run import DockerError
@@ -107,21 +109,26 @@ def prepare_urgent(paths: BoxPaths, project: str, meta: ProjectMeta,
     try:
         blocker = _blocker(paths, project, meta, decisions, urgent, cves)
         existing = None if blocker else read_queue_entry(paths, project)
-    except (StateError, QuarantineError) as e:
+        downtime = None if blocker else _downtime(paths, project, meta, urgent)
+    except (StateError, QuarantineError, BreakerError) as e:
         blocker = f"what it may patch cannot be read ({e})"
-        existing = None
+        existing, downtime = None, None
     if blocker is not None:
         log_warning(_COMPONENT, f"{project}: autofix cannot help with {', '.join(cves)}: "
                     f"{blocker}", paths, project=project, detail={"cves": list(cves)})
         _forget(paths, project)
         return UrgentPlan(cves, note=f"Autofix cannot help: {blocker}.")
+    assert downtime is not None
     keys = {_key(d, fd) for d, fd in urgent}
     if existing is not None and keys <= set(existing.findings):
-        return UrgentPlan(existing.cves, queued=True, downtime=existing.downtime)
+        if existing.downtime is not downtime:
+            try:
+                record_downtime(paths, project, existing, downtime=downtime)
+            except StateError as e:
+                log_warning(_COMPONENT, f"{project}: {e}", paths, project=project)
+                downtime = existing.downtime
+        return UrgentPlan(existing.cves, queued=True, downtime=downtime)
     quarantined = is_quarantined(project, paths)
-    downtime = quarantined or (existing is not None and existing.downtime) \
-        or (not meta.dangerously and any(downtime_while_patching(fd, meta.posture)
-                                         for _, fd in urgent))
     try:
         queue_urgent(paths, project, [fd for _, fd in urgent], downtime=downtime, now=now,
                      keys=sorted(keys, key=lambda k: (k.cve_id, k.package, k.image_ref)))
@@ -132,6 +139,46 @@ def prepare_urgent(paths: BoxPaths, project: str, meta: ProjectMeta,
     if not downtime or quarantined:   # else the QUARANTINED alert says it (quarantine_note)
         alerts.append(format_autofix_started_alert(project, cves, downtime=downtime))
     return UrgentPlan(cves, queued=True, downtime=downtime)
+
+
+def _downtime(paths: BoxPaths, project: str, meta: ProjectMeta,
+              urgent: Sequence[Urgent]) -> bool:
+    """Whether the project is down while it is patched: it is quarantined
+    already, or table A says dark and it can be (not opted out, and not held
+    by the circuit breaker, which never holds a full-KEV one). Raises
+    BreakerError."""
+    if is_quarantined(project, paths):
+        return True
+    if meta.dangerously or not any(downtime_while_patching(fd, meta.posture)
+                                   for _, fd in urgent):
+        return False
+    return not (project in read_held(paths) and not any(fd.full_kev for _, fd in urgent))
+
+
+def record_downtime(paths: BoxPaths, project: str, entry: QueueEntry, *,
+                    downtime: bool) -> None:
+    """Rewrite a queued patch (and its marker) with whether the project is
+    down for it, keeping its detection time. Raises StateError."""
+    mark_autofixing(paths, project, entry.cves, downtime=downtime)
+    write_queue_entry(paths, project, replace(entry, downtime=downtime))
+
+
+def held_for_patch(paths: BoxPaths, held: Collection[str]) -> list[Alert]:
+    """The projects whose quarantine for a patch the circuit breaker held
+    this run stay up while they are patched: record that, and the started
+    notice for each (no QUARANTINED alert said it)."""
+    notices = []
+    for project in sorted(held):
+        try:
+            entry = read_queue_entry(paths, project)
+            if entry is None or not entry.downtime or is_quarantined(project, paths):
+                continue
+            record_downtime(paths, project, entry, downtime=False)
+        except StateError as e:
+            log_warning(_COMPONENT, f"{project}: {e}", paths, project=project)
+            continue
+        notices.append(format_autofix_started_alert(project, entry.cves, downtime=False))
+    return notices
 
 
 def queue_urgent(paths: BoxPaths, project: str, findings: Sequence[FindingDisposition], *,
