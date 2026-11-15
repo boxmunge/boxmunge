@@ -182,11 +182,24 @@ def _done(paths: BoxPaths, project: str) -> None:
     clear_autofixing(paths, project)
 
 
+def _dark(paths: BoxPaths, project: str) -> bool:
+    """Whether the queued patch took the project down (quarantined it), so
+    undoing a killed run may start it behind its maintenance page. An entry
+    that cannot be read says no: the undo then starts nothing, and _read
+    alerts the entry."""
+    try:
+        entry = read_queue_entry(paths, project)
+    except StateError:
+        return False
+    return entry is not None and entry.downtime
+
+
 def _process(paths: BoxPaths, project: str, now: datetime) -> AutofixOutcome | None:
     """Under the project lock: undo a killed run, read the queued patch
     (a read that fails is alerted and changes nothing), run it, conclude."""
     try:
-        interrupted = recover_interrupted(paths, project)
+        interrupted = recover_interrupted(
+            paths, project, quarantined_for_patch=_dark(paths, project))
     except StateError as e:
         _problem(paths, project, f"its autofix journal cannot be used: {e}")
         return None
@@ -228,7 +241,8 @@ def _process(paths: BoxPaths, project: str, now: datetime) -> AutofixOutcome | N
         outcome = AutofixOutcome(False, None, "autofix was turned off for this project "
                                  "before the patch started", ())
     else:
-        outcome = _patch(paths, project, job.findings, now + AUTOFIX_URGENT_BUDGET)
+        outcome = _patch(paths, project, job.findings, now + AUTOFIX_URGENT_BUDGET,
+                         downtime=entry.downtime)
     outcome = replace(outcome, detected_at=entry.detected_at, started_at=now)
     _conclude(paths, project, job, outcome)
     return outcome
@@ -276,12 +290,12 @@ def _timing(found: datetime, started: datetime, ended: datetime, verb: str) -> s
 
 
 def _patch(paths: BoxPaths, project: str, findings: Sequence[FindingDisposition],
-           deadline: datetime) -> AutofixOutcome:
+           deadline: datetime, *, downtime: bool) -> AutofixOutcome:
     """The runner's outcome; an exception no step expects (rolled back, and
     logged by the runner) is a failure too, so the fallback still applies."""
     try:
         return autofix_project_locked(paths, project, findings, trigger="urgent",
-                                      deadline=deadline)
+                                      deadline=deadline, quarantined_for_patch=downtime)
     except Exception as e:  # noqa: BLE001 — the fallback must apply whatever failed
         notes = tuple(getattr(e, "__notes__", ()))
         return AutofixOutcome(False, None, f"{type(e).__name__}: {e}", (), notes)

@@ -52,7 +52,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from boxmunge.compose_guard import ComposeRefused
-from boxmunge.container_recreate import recreate_project, wait_healthy
+from boxmunge.container_recreate import recreate_project, start_refusal, wait_healthy
 from boxmunge.container_update import one_shot_services
 from boxmunge.commands.security_scan_inputs import load_project_meta
 from boxmunge.cve import autofix_plan
@@ -106,6 +106,8 @@ class _Run:
     deployed: dict[str, DeployedService] = field(default_factory=dict)
     built: list[tuple[str, PatchedImage]] = field(default_factory=list)
     swapped: bool = False
+    # The caller quarantined the project for this patch (container_recreate).
+    quarantined_for_patch: bool = False
     records_before: tuple[PatchRecord, ...] = ()
 
 
@@ -131,19 +133,22 @@ def _check_deadline(deadline: datetime) -> None:
 
 def autofix_project_locked(paths: BoxPaths, project: str,
                            findings: Sequence[FindingDisposition], *, trigger: Trigger,
-                           deadline: datetime) -> AutofixOutcome:
+                           deadline: datetime, quarantined_for_patch: bool) -> AutofixOutcome:
     """Patch the CVEs of `findings` in every image of `project` that carries
     them, swap the patched images in and wait for the project to be
     healthy, by `deadline` (timezone-aware). The caller holds the project
-    lock for the whole run (RuntimeError otherwise). Returns the outcome;
-    a failed one has been rolled back."""
+    lock for the whole run (RuntimeError otherwise). A project the platform
+    keeps down is refused at the swap, nothing started, unless
+    `quarantined_for_patch` (the caller quarantined it for this patch: the
+    dark patch) and the quarantine is all that keeps it down. Returns the
+    outcome; a failed one has been rolled back."""
     if deadline.tzinfo is None:
         raise ValueError(f"deadline {deadline.isoformat()} has no timezone")
     cves = tuple(sorted({fd.finding.cve_id for fd in findings}))
     if not cves:
         raise ValueError("autofix needs at least one finding to fix")
     _require_lock_held(paths, project)
-    run = _Run(project, read_pins(paths, project))
+    run = _Run(project, read_pins(paths, project), quarantined_for_patch=quarantined_for_patch)
     log_operation(_COMPONENT, f"Autofix of {project} started for {', '.join(cves)}", paths,
                   project=project, detail={"cves": list(cves), "trigger": trigger,
                                            "deadline": deadline.isoformat()})
@@ -180,17 +185,20 @@ def _finish(paths: BoxPaths, project: str) -> bool:
     return True
 
 
-def recover_interrupted(paths: BoxPaths, project: str) -> tuple[str, ...] | None:
+def recover_interrupted(paths: BoxPaths, project: str, *,
+                        quarantined_for_patch: bool) -> tuple[str, ...] | None:
     """Undo an autofix run that was killed before it finished, from its
     journal: restore the pins it found, recreate the containers, remove the
-    images it built. None when there is no journal; else what could not be
-    undone, one line each. The caller holds the project lock. Raises
+    images it built (`quarantined_for_patch` as for autofix_project_locked).
+    None when there is no journal; else what could not be undone, one line
+    each. The caller holds the project lock. Raises
     StateError for a journal it cannot read."""
     _require_lock_held(paths, project)
     journal = read_journal(paths, project)
     if journal is None:
         return None
     run = _Run(project, journal.pins_before, swapped=True,
+               quarantined_for_patch=quarantined_for_patch,
                built=[(p.service, PatchedImage(p.ref, p.image_id, {})) for p in journal.built])
     problems = _rollback(paths, run)
     try:
@@ -281,6 +289,11 @@ def _swap(paths: BoxPaths, run: _Run, patched: dict[str, PatchedImage]) -> None:
     kept = [pin for pin in run.pins_before if pin.service not in patched]
     pins = kept + [ImagePin(svc, img.ref, img.image_id, "autofix")
                    for svc, img in patched.items()]
+    # Asked before anything changes, so a refusal starts and swaps nothing;
+    # recreate_project asks again (the state may change under a bug).
+    refusal = start_refusal(paths, run.project, quarantined_for_patch=run.quarantined_for_patch)
+    if refusal is not None:
+        raise StepFailed("swap", f"the patched images were not swapped in: {refusal}")
     try:
         write_journal(paths, run.project, AutofixJournal(
             _now(), run.pins_before, run.records_before,
@@ -290,7 +303,8 @@ def _swap(paths: BoxPaths, run: _Run, patched: dict[str, PatchedImage]) -> None:
     run.swapped = True   # from here the rollback restores the pins and recreates
     try:
         write_pins(paths, run.project, pins)
-        recreate_project(paths, run.project, PROD, component=_COMPONENT)
+        recreate_project(paths, run.project, PROD, component=_COMPONENT,
+                         quarantined_for_patch=run.quarantined_for_patch)
     except (ValueError, StateError, OSError, ComposeRefused, DockerError) as e:
         raise StepFailed("swap", f"swapping the patched images in failed: {e}") from e
 
@@ -340,7 +354,8 @@ def _rollback(paths: BoxPaths, run: _Run) -> list[str]:
                    else (lambda: clear_pins(paths, project)))
         if attempt("restore the previous image pins", restore) and attempt(
                 "recreate the previous containers",
-                lambda: recreate_project(paths, project, PROD, component=_COMPONENT)):
+                lambda: recreate_project(paths, project, PROD, component=_COMPONENT,
+                                         quarantined_for_patch=run.quarantined_for_patch)):
             attempt("see the previous containers healthy",
                     lambda: _health(project, run.deployed, "the previous images"))
     keep = {pin.ref for pin in run.pins_before}

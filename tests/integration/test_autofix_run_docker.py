@@ -119,7 +119,8 @@ def _fd() -> FindingDisposition:
 def _autofix(paths, p):
     with project_lock(p, paths):
         return autofix_project_locked(paths, p, [_fd()], trigger="urgent",
-                                      deadline=datetime.now(timezone.utc) + timedelta(minutes=30))
+                                      deadline=datetime.now(timezone.utc) + timedelta(minutes=30),
+                                      quarantined_for_patch=False)
 
 
 def test_patch_runs_pinned_and_is_recorded(deployed) -> None:

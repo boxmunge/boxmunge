@@ -132,7 +132,7 @@ class Box:
     def _clear_pins(self, paths, project):
         self.pins = ()
 
-    def _recreate(self, paths, project, files, *, component):
+    def _recreate(self, paths, project, files, *, component, quarantined_for_patch=False):
         self.recreates += 1
         pinned = {p.service: p.image_id for p in self.pins}
         for svc, (cid, img) in list(self.containers.items()):
@@ -156,11 +156,12 @@ def box(monkeypatch) -> Box:
     return Box(monkeypatch)
 
 
-def _run(paths, findings=None, *, deadline=None, trigger="urgent"):
+def _run(paths, findings=None, *, deadline=None, trigger="urgent", dark=False):
     with project_lock(NAME, paths):
         return autofix_project_locked(
             paths, NAME, findings if findings is not None else [_fd()], trigger=trigger,
-            deadline=deadline or datetime.now(timezone.utc) + timedelta(minutes=30))
+            deadline=deadline or datetime.now(timezone.utc) + timedelta(minutes=30),
+            quarantined_for_patch=dark)
 
 
 def test_success_writes_pins_and_records(paths, box) -> None:
@@ -315,7 +316,8 @@ def test_rollback_failure_is_added_to_the_reason(paths, box, monkeypatch) -> Non
 def test_refuses_without_the_project_lock(paths, box) -> None:
     with pytest.raises(RuntimeError, match="project lock"):
         autofix_project_locked(paths, NAME, [_fd()], trigger="nightly",
-                               deadline=datetime.now(timezone.utc) + timedelta(minutes=5))
+                               deadline=datetime.now(timezone.utc) + timedelta(minutes=5),
+                               quarantined_for_patch=False)
     assert box.built == [] and box.log == []
 
 
@@ -401,8 +403,8 @@ def test_a_killed_run_is_rolled_back_from_its_journal(paths, box) -> None:
     write_journal(paths, NAME, AutofixJournal(datetime.now(timezone.utc), (), (), (built,)))
     box.pins, box.containers["web"] = (built,), ("c-web-9", patched)
     with project_lock(NAME, paths):
-        assert autofix_run.recover_interrupted(paths, NAME) == ()
-        assert autofix_run.recover_interrupted(paths, NAME) is None   # nothing left to undo
+        assert autofix_run.recover_interrupted(paths, NAME, quarantined_for_patch=False) == ()
+        assert autofix_run.recover_interrupted(paths, NAME, quarantined_for_patch=False) is None   # nothing left to undo
     assert box.pins == () and box.running()["web"] == WEB
     assert box.removed == [built.ref] and read_journal(paths, NAME) is None
     assert any(level == "error" and "interrupted" in msg for level, msg, _ in box.log)
@@ -467,7 +469,28 @@ def test_a_journal_left_after_a_patch_keeps_what_recovery_restores(paths, box,
     assert read_records(paths, NAME) == outcome.records
     monkeypatch.setattr(autofix_run, "remove_journal", real_remove)
     with project_lock(NAME, paths):
-        assert autofix_run.recover_interrupted(paths, NAME) == ()
+        assert autofix_run.recover_interrupted(paths, NAME, quarantined_for_patch=False) == ()
     assert box.pins == (pin,) and box.running()["web"] == pin.image_id
     assert read_records(paths, NAME) == (record,)     # no record claims the undone patch
     assert pin.ref not in box.removed and read_journal(paths, NAME) is None
+
+
+def test_paused_project_is_refused_at_swap_nothing_started(paths, box) -> None:
+    from boxmunge.pause import write_paused_state
+    write_paused_state(NAME, paths)
+    before = dict(box.containers)
+    outcome = _run(paths)
+    assert (outcome.ok, outcome.failed_step) == (False, "swap")
+    assert "paused" in outcome.reason and outcome.rollback_problems == ()
+    assert box.containers == before and box.recreates == 0 and box.pins == ()
+    assert len(box.removed) == 1
+
+
+def test_quarantined_project_is_refused_unless_quarantined_for_the_patch(paths, box) -> None:
+    from tests.test_commands.cve_helpers import seed_quarantine
+    seed_quarantine(paths, NAME)
+    refused = _run(paths)
+    assert refused.failed_step == "swap" and "CVE-quarantined" in refused.reason
+    assert box.recreates == 0
+    dark = _run(paths, dark=True)
+    assert dark.ok, dark.reason

@@ -53,9 +53,11 @@ class Runner:
     def __init__(self) -> None:
         self.calls: list[tuple[str, tuple[str, ...], str, datetime]] = []
         self.outcome: AutofixOutcome | None = None
+        self.dark: list[bool] = []
 
-    def __call__(self, paths, project, findings, *, trigger, deadline):
+    def __call__(self, paths, project, findings, *, trigger, deadline, quarantined_for_patch):
         autofix_run._require_lock_held(paths, project)
+        self.dark.append(quarantined_for_patch)
         self.calls.append((project, tuple(fd.finding.cve_id for fd in findings), trigger,
                            deadline))
         if self.outcome is not None:
@@ -152,6 +154,7 @@ def test_urgent_flow_matches_posture_charts(tmp_path, monkeypatch, posture, list
     [(project, cves, trigger, deadline)] = box.runner.calls
     assert (project, cves, trigger) == ("demo", (CVE,), "urgent")
     assert deadline == outcome.started_at + AUTOFIX_URGENT_BUDGET
+    assert box.runner.dark == [dark]   # only a dark patch may start it quarantined
     assert not is_quarantined("demo", paths)
     assert read_queue_entry(paths, "demo") is None and read_autofixing(paths, "demo") is None
     [patched] = box.sent("Autofix patched")
@@ -675,7 +678,8 @@ def test_a_killed_run_is_rolled_back_then_the_patch_carries_on(tmp_path, monkeyp
     undone: list = []   # the runner's own Docker seams (tests/cve/test_autofix_run.py)
     monkeypatch.setattr(autofix_run, "clear_pins", lambda p, project: undone.append("pins"))
     monkeypatch.setattr(autofix_run, "recreate_project",
-                        lambda p, project, files, component: undone.append("recreate"))
+                        lambda p, project, files, component, quarantined_for_patch:
+                        undone.append("recreate"))
     monkeypatch.setattr(autofix_run, "wait_healthy", lambda *a, **k: (True, []))
     monkeypatch.setattr(autofix_run, "remove_patched", lambda pin: undone.append(pin.ref))
     [outcome] = box.run()

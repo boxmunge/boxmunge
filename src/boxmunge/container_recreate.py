@@ -5,6 +5,14 @@ Container update (container_update) and autofix (cve.autofix_run) both
 swap the images a project runs: they recreate its containers from the
 local images through the start checks, then poll until every service is
 healthy, a service fails, or the timeout passes.
+
+A recreate starts the project, so it refuses one the platform keeps down:
+paused, quarantined, stopped by the health monitor, or held by the userns
+migration (lifecycle.is_blocked); an open install is refused by the start
+checks. The one exception is autofix's dark patch: a project quarantined
+for the very patch being swapped in is started behind its maintenance
+page for its health check (`quarantined_for_patch`), unless it is paused
+too.
 """
 from __future__ import annotations
 
@@ -14,7 +22,10 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from boxmunge import docker_containers
-from boxmunge.compose_guard import compose_up_checked
+from boxmunge.commands.health_state import is_monitor_stopped
+from boxmunge.compose_guard import ComposeRefused, compose_up_checked
+from boxmunge.lifecycle import BlockReason, is_blocked
+from boxmunge.pause import is_paused
 from boxmunge.docker_containers import ProjectContainer
 
 if TYPE_CHECKING:
@@ -30,10 +41,32 @@ def managed(containers: Iterable[ProjectContainer]) -> list[ProjectContainer]:
     return [c for c in containers if not c.oneoff]
 
 
+def start_refusal(paths: BoxPaths, project: str, *,
+                  quarantined_for_patch: bool = False) -> str | None:
+    """Why the project may not be started now, or None."""
+    block = is_blocked(project, paths)
+    if block is not None:
+        if not (quarantined_for_patch and block.reason is BlockReason.QUARANTINED):
+            return block.refuse_message
+        if is_paused(project, paths):   # is_blocked names the quarantine first
+            return (f"Project '{project}' is paused as well as quarantined for the patch; "
+                    f"`boxmunge resume {project}` brings it back.")
+    if is_monitor_stopped(project, paths):
+        return (f"Project '{project}' was stopped by the health monitor; "
+                f"`boxmunge recover {project}` brings it back.")
+    return None
+
+
 def recreate_project(paths: BoxPaths, project: str, compose_files: list[str], *,
-                     component: str) -> None:
+                     component: str, quarantined_for_patch: bool = False) -> None:
     """Recreate the user project's containers from its local images, through
-    the start checks. Raises ComposeRefused or DockerError."""
+    the start checks. `quarantined_for_patch`: the caller quarantined the
+    project for the patch it swaps in (autofix's dark patch), the one
+    blocked start allowed. Raises ComposeRefused (nothing started) or
+    DockerError."""
+    refusal = start_refusal(paths, project, quarantined_for_patch=quarantined_for_patch)
+    if refusal is not None:
+        raise ComposeRefused(f"Refused to recreate {project}: {refusal} Nothing was started.")
     compose_up_checked(paths, project, component=component, compose_files=compose_files)
 
 
