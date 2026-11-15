@@ -5,8 +5,9 @@
 # the shim that releases ship.
 #
 # Releases add and retire units: 0.12 replaced the scan and container-update
-# timers with boxmunge-maintenance.timer and added boxmunge-kev-watch.timer and
-# boxmunge-autofix.service. The new release's install.sh installs its units
+# timers with boxmunge-maintenance.timer and added boxmunge-kev-watch.timer,
+# boxmunge-autofix.service and the job runner's boxmunge-jobs.path and
+# boxmunge-jobs.service. The new release's install.sh installs its units
 # before the swap, and the older release a rollback returns to knows nothing of
 # them: left as they are, its timers would run commands that release lacks.
 # So each slot keeps its release's units in env-<slot>/boxmunge-systemd: the
@@ -14,34 +15,52 @@
 # bootstrap/systemd-units.sh records the units the live slot ran before it
 # replaces them; a slot with no copy yet records the live units as its own
 # (seed_slot_units). A rollback installs the slot's units, disables and removes
-# every boxmunge unit the slot does not ship, and enables its timers
-# (restore_slot_units). A shim from before 0.11.11 does not, so 0.12 installs
-# only over 0.11.11 or later (src/boxmunge/upgrade_floor.py): the upgrade that
+# every boxmunge unit the slot does not ship, and enables its timers and path
+# units (restore_slot_units). A shim from before 0.11.11 does not, so 0.12
+# installs only over 0.11.11 or later (src/boxmunge/upgrade_floor.py): the upgrade that
 # adds 0.12's units is run by a shim that can take them away again. Every
 # check-probation and upgrade, holding the upgrade lock with nothing in
 # flight, also puts the live slot's units back where they differ
-# (heal_slot_units), which reverts hand edits to the unit files too.
+# (heal_slot_units), which reverts hand edits to the unit files too. A
+# rollback to 0.11.11 is run by its own shim, whose restore knows only
+# .service and .timer units and so leaves boxmunge-jobs.path behind; the heal
+# of the next check-probation removes it.
 
 SYSTEMD_UNIT_DIR="${BOXMUNGE_SYSTEMD_DIR:-/etc/systemd/system}"
 
 slot_units() { echo "$BOXMUNGE_ROOT/env-$1/boxmunge-systemd"; }
 
-# copy_units <from_dir> <record>: <record> anew, with the boxmunge-*.service
-# and boxmunge-*.timer files of <from_dir>. The record is a link to a
-# versioned directory beside it, written in full first and swapped in by
-# rename, so a copy cut short leaves the previous record whole (the same
+# The unit kinds a release ships: services, the timers that start most of
+# them, and the path unit that starts the job runner.
+UNIT_GLOBS=('boxmunge-*.service' 'boxmunge-*.timer' 'boxmunge-*.path')
+
+# units_in <dir>: the boxmunge unit files in <dir>, one per line.
+units_in() {
+    local glob unit
+    for glob in "${UNIT_GLOBS[@]}"; do
+        for unit in "$1"/$glob; do
+            [[ -e "$unit" || -L "$unit" ]] && echo "$unit"
+        done
+    done
+    return 0
+}
+
+# copy_units <from_dir> <record>: <record> anew, with the boxmunge-*.service,
+# boxmunge-*.timer and boxmunge-*.path files of <from_dir>. The record is a
+# link to a versioned directory beside it, written in full first and swapped
+# in by rename, so a copy cut short leaves the previous record whole (the same
 # scheme as bootstrap/systemd-units.sh's record_units).
 copy_units() {
     local from="$1" to="$2" unit stage previous
     mkdir -p "$(dirname "$to")"
     stage="$(mktemp -d "$(dirname "$to")/.boxmunge-systemd.XXXXXX")"
-    for unit in "$from"/boxmunge-*.service "$from"/boxmunge-*.timer; do
+    while IFS= read -r unit; do
         if [[ -f "$unit" ]] && ! cp "$unit" "$stage/"; then
             rm -rf "$stage"
             log "ERROR: could not copy $unit into a units record; $to is left as it was"
             return 1
         fi
-    done
+    done < <(units_in "$from")
     previous="$(readlink "$to" 2>/dev/null || true)"
     ln -s "$(basename "$stage")" "$stage.link"
     python3 -I -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$stage.link" "$to"
@@ -81,15 +100,14 @@ seed_slot_units() {
 # and content.
 units_match() {
     local unit name
-    for unit in "$1"/boxmunge-*.service "$1"/boxmunge-*.timer; do
+    while IFS= read -r unit; do
         [[ -f "$unit" ]] || continue
         cmp -s "$unit" "$SYSTEMD_UNIT_DIR/${unit##*/}" || return 1
-    done
-    for unit in "$SYSTEMD_UNIT_DIR"/boxmunge-*.service "$SYSTEMD_UNIT_DIR"/boxmunge-*.timer; do
-        [[ -e "$unit" || -L "$unit" ]] || continue
+    done < <(units_in "$1")
+    while IFS= read -r unit; do
         name="${unit##*/}"
         [[ -e "$1/$name" ]] || return 1
-    done
+    done < <(units_in "$SYSTEMD_UNIT_DIR")
     return 0
 }
 
@@ -111,7 +129,7 @@ heal_slot_units() {
 # named the newer release's units, so it is dropped: the next upgrade runs
 # its install.sh again.
 restore_slot_units() {
-    local src unit name ok=1 timers=() changed=()
+    local src unit name ok=1 enabled=() changed=()
     src="$(slot_units "$1")"
     if ! compgen -G "$src/boxmunge-*.timer" >/dev/null; then
         log "ERROR: slot $1 has no record of its systemd units ($src), so the units of the release rolled back from stay installed; put the running release's own back by reinstalling it (sudo bash boxmunge-install.sh)"
@@ -125,32 +143,34 @@ restore_slot_units() {
         bm_log error upgrade "systemd units record refused" "{\"slot\": \"$1\"}"
         return 1
     fi
-    for unit in "$SYSTEMD_UNIT_DIR"/boxmunge-*.service "$SYSTEMD_UNIT_DIR"/boxmunge-*.timer; do
-        [[ -e "$unit" || -L "$unit" ]] || continue
+    while IFS= read -r unit; do
         name="${unit##*/}"
         [[ ! -e "$src/$name" ]] || continue
-        if [[ "$name" == *.timer ]]; then
+        if [[ "$name" != *.service ]]; then
             systemctl disable --now "$name" || { ok=0; log "ERROR: could not disable $name"; }
         fi
         rm -f "$unit"
         log "Removed $name: the release on slot $1 does not ship it"
-    done
-    for unit in "$src"/boxmunge-*.timer; do
+    done < <(units_in "$SYSTEMD_UNIT_DIR")
+    # Timers and path units are enabled; a running one keeps the schedule or
+    # watch it loaded, so each whose file changes is restarted.
+    while IFS= read -r unit; do
         name="${unit##*/}"
-        timers+=("$name")
+        [[ "$name" != *.service ]] || continue
+        enabled+=("$name")
         cmp -s "$unit" "$SYSTEMD_UNIT_DIR/$name" || changed+=("$name")
-    done
-    for unit in "$src"/boxmunge-*.service "$src"/boxmunge-*.timer; do
+    done < <(units_in "$src")
+    while IFS= read -r unit; do
         if [[ -f "$unit" ]]; then cp "$unit" "$SYSTEMD_UNIT_DIR/" || ok=0; fi
-    done
+    done < <(units_in "$src")
     systemctl daemon-reload || ok=0
-    systemctl enable --now "${timers[@]}" || ok=0
+    systemctl enable --now "${enabled[@]}" || ok=0
     if [[ "${#changed[@]}" -gt 0 ]]; then systemctl restart "${changed[@]}" || ok=0; fi
     rm -f "$INSTALLER_HASH_FILE"
     if [[ "$ok" -eq 1 ]]; then
         log "Restored the systemd units of the release on slot $1"
     else
-        log "ERROR: restoring the systemd units of slot $1 did not finish (see above); as supervisor, check: systemctl list-timers 'boxmunge-*'"
+        log "ERROR: restoring the systemd units of slot $1 did not finish (see above); as supervisor, check: systemctl list-timers 'boxmunge-*' and systemctl list-units 'boxmunge-*.path'"
         bm_log error upgrade "systemd units restore incomplete" "{\"slot\": \"$1\"}"
     fi
 }

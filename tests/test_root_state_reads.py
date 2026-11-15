@@ -50,6 +50,7 @@ from boxmunge.cve import (
 from boxmunge.discovery_freshness import stale_discovery_warning
 from boxmunge.health_checks.backup_freshness import check_backup_freshness
 from boxmunge.health_checks.container_updates import check_container_updates
+from boxmunge.health_checks.jobs_runner import check_jobs_runner
 from boxmunge.notify import _unconfigured_logged_recently
 from boxmunge.os_update_alert import read_os_update_state
 from boxmunge.paths import BoxPaths
@@ -140,6 +141,12 @@ def _prune_oldest(paths: BoxPaths) -> list[str]:
     if kept is not None and not name.exists():
         name.write_text(kept)
     return deleted
+
+
+def _jobs_runner(paths: BoxPaths) -> str:
+    """The check's detail, with the path unit active (systemctl is faked)."""
+    active = {"boxmunge-jobs.path": {"ActiveState": "active", "Result": "success"}}
+    return check_jobs_runner(paths, show=lambda: active, now=NOW).detail
 
 
 def _event_log_resumed(paths: BoxPaths) -> int:
@@ -324,6 +331,11 @@ READERS = [
            _event_log_resumed),
     Reader("queued job record (claim)", lambda p: p.jobs_queue / f"{JOB_ID}.json", QUEUED_JOB,
            _claim),
+    # A queued job that waits too long warns naming it; one it cannot read
+    # warns that it cannot be read.
+    Reader("health jobs_runner", lambda p: p.jobs_queue / f"{JOB_ID}.json", QUEUED_JOB,
+           _jobs_runner,
+           dangling=lambda o, _p: o[0] == "value" and "cannot be read" in o[1]),
     Reader("backup sync evidence", lambda p: p.backup_sync_state, {"synced_at": ISO},
            sync_evidence),
     Reader("health backup_freshness", lambda p: p.project_backup_state(P),

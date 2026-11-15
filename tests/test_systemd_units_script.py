@@ -13,6 +13,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "bootstrap" / "systemd-units.sh"
 TIMERS = sorted(p.name for p in (REPO / "systemd").glob("*.timer"))
+PATHS = sorted(p.name for p in (REPO / "systemd").glob("*.path"))
+ENABLED = sorted(TIMERS + PATHS)
 
 
 def _run(tmp_path: Path, bundle: Path, **env: str) -> list[str]:
@@ -43,7 +45,44 @@ def test_installs_every_unit_and_enables_every_timer(tmp_path) -> None:
     calls = _run(tmp_path, _bundle(tmp_path))
     installed = sorted(p.name for p in (tmp_path / "etc-systemd").iterdir())
     assert installed == sorted(p.name for p in (REPO / "systemd").iterdir())
-    assert calls[:2] == ["daemon-reload", "enable --now " + " ".join(TIMERS)]
+    assert calls[:2] == ["daemon-reload", "enable --now " + " ".join(ENABLED)]
+
+
+def test_installs_the_path_unit_and_enables_it(tmp_path) -> None:
+    """The path unit is the job runner's start, at boot and on every queued
+    job; its service has no [Install] and is never enabled itself."""
+    calls = _run(tmp_path, _bundle(tmp_path))
+    dest = tmp_path / "etc-systemd"
+    assert PATHS == ["boxmunge-jobs.path"]
+    assert (dest / "boxmunge-jobs.path").is_file() and (dest / "boxmunge-jobs.service").is_file()
+    enabled = calls[1].split()
+    assert "boxmunge-jobs.path" in enabled and "boxmunge-jobs.service" not in enabled
+
+
+def test_a_changed_path_unit_is_restarted_so_its_watch_applies(tmp_path) -> None:
+    bundle = _bundle(tmp_path)
+    _run(tmp_path, bundle)
+    changed = bundle / "systemd" / "boxmunge-jobs.path"
+    changed.write_text(changed.read_text() + "# changed\n")
+    assert _run(tmp_path, bundle)[-1] == "restart boxmunge-jobs.path"
+
+
+def test_units_record_includes_path_units(tmp_path) -> None:
+    """A rollback to the slot installs its path units again, and removes any
+    its record lacks, so the record holds them, as the live set and as the
+    bundle's."""
+    dest = tmp_path / "etc-systemd"
+    dest.mkdir()
+    for name in ("boxmunge-health.timer", "boxmunge-jobs.path", "boxmunge-jobs.service"):
+        (dest / name).write_text(f"old {name}\n")
+    record = tmp_path / "env-a" / "boxmunge-systemd"
+    bundle = _bundle(tmp_path)
+    _run(tmp_path, bundle, BOXMUNGE_SLOT_UNITS=str(record), FROM_UPGRADE_SHIM="1")
+    assert sorted(p.name for p in record.iterdir()) == [
+        "boxmunge-health.timer", "boxmunge-jobs.path", "boxmunge-jobs.service"]
+    _run(tmp_path, bundle, BOXMUNGE_SLOT_UNITS=str(record), FROM_UPGRADE_SHIM="0")
+    assert (record / "boxmunge-jobs.path").read_text() == (
+        REPO / "systemd" / "boxmunge-jobs.path").read_text()
 
 
 def test_an_unchanged_timer_is_not_restarted(tmp_path) -> None:

@@ -93,3 +93,35 @@ def test_rotate_timer_is_monthly_and_root() -> None:
     service = _unit("boxmunge-audit-rotate.service")["Service"]
     assert (service["Type"], service["User"]) == ("oneshot", "root")
     assert service["ExecStart"] == "/opt/boxmunge/bin/boxmunge-server _audit-rotate"
+
+
+def test_path_unit_watches_the_queue() -> None:
+    """Any record in queue/ starts the runner; it is the runner's boot start too."""
+    unit = _unit("boxmunge-jobs.path")
+    assert dict(unit["Path"]) == {"DirectoryNotEmpty": "/opt/boxmunge/state/jobs/queue",
+                                  "Unit": "boxmunge-jobs.service"}
+    assert unit["Install"]["WantedBy"] == "paths.target"
+
+
+def test_jobs_service_sets_explicit_start_limits_and_runs_as_deploy() -> None:
+    """A runner that cannot start is rate-limited at a known rate, which the
+    jobs-runner health check reports; it has no [Install] of its own."""
+    unit = _unit("boxmunge-jobs.service")
+    assert (unit["Unit"]["After"], unit["Unit"]["StartLimitIntervalSec"],
+            unit["Unit"]["StartLimitBurst"]) == ("docker.service", "600", "20")
+    service = unit["Service"]
+    assert (service["Type"], service["User"], service["Group"]) == ("exec", "deploy", "deploy")
+    assert service["ExecStart"] == "/opt/boxmunge/bin/boxmunge-server _job-runner"
+    assert service["TimeoutStopSec"] == "300"
+    assert (service["StandardOutput"], service["StandardError"]) == ("journal", "journal")
+    assert not unit.has_section("Install")
+
+
+def test_jobs_service_stops_every_worker_and_is_one_unit() -> None:
+    """A stop's SIGTERM reaches each worker, not only the runner (the default
+    control-group kill mode), and one non-templated unit is what keeps two
+    runners from running at once."""
+    service = _unit("boxmunge-jobs.service")["Service"]
+    assert service.get("KillMode", "control-group") == "control-group"
+    assert sorted(p.name for p in UNITS.glob("boxmunge-jobs*")) == [
+        "boxmunge-jobs.path", "boxmunge-jobs.service"]

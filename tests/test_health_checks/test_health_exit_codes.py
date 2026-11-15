@@ -17,7 +17,7 @@ import yaml
 from boxmunge import compose_inventory
 from boxmunge.commands import health_cmd
 from boxmunge.commands.health_cmd import HealthCheck, run_guarded, run_health
-from boxmunge.health_checks import audit_log, hardening, sshd, userns
+from boxmunge.health_checks import audit_log, hardening, jobs_runner, sshd, userns
 from boxmunge.health_checks.projects import check_project_containers
 from boxmunge.paths import BoxPaths
 
@@ -43,6 +43,7 @@ def platform_ok(monkeypatch):
         (userns, "check_docker_userns", "docker-userns"),
         (hardening, "check_ufw", "ufw"),
         (audit_log, "check_audit_log", "audit-log"),   # install seals it
+        (jobs_runner, "check_jobs_runner", "jobs-runner"),   # install enables its path unit
     ):
         monkeypatch.setattr(module, attr, _ok(name))
 

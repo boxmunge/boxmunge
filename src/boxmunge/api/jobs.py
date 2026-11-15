@@ -72,8 +72,9 @@ EVENT_SCHEMA = obj({
 
 @dataclass(frozen=True)
 class JobListing:
-    """Jobs newest first, and the records that could not be read: each
-    {"id", "problem"}, the problem naming the file."""
+    """Jobs (newest first from recent(), oldest first from unfinished()),
+    and the records that could not be read: each {"id", "problem"}, the
+    problem naming the file."""
 
     jobs: list[dict[str, Any]]
     unreadable: list[dict[str, str]]
@@ -117,9 +118,30 @@ class JobStore:
         record that cannot be read is listed as unreadable (its project is
         unknowable, so whatever the filter) and never hides the others.
         """
+        records, unreadable = self._scan((self._queue, self._done))
+        jobs = [self._presented(r) for r in records.values()
+                if project is None or r["project"] == project]
+        jobs.sort(key=lambda r: (r["created_at"], r["id"]), reverse=True)
+        return JobListing(jobs=jobs[:limit], unreadable=unreadable)
+
+    def unfinished(self) -> JobListing:
+        """The queued and running jobs in queue/, oldest first, and the
+        records there that cannot be read. A finished record still in queue/
+        (its finish was cut short, and the runner completes the move) is not
+        unfinished."""
+        records, unreadable = self._scan((self._queue,))
+        jobs = [self._presented(r) for r in records.values()
+                if r["state"] not in TERMINAL_STATES]
+        jobs.sort(key=lambda r: (r["created_at"], r["id"]))
+        return JobListing(jobs=jobs, unreadable=unreadable)
+
+    def _scan(self, directories: tuple[Path, ...]) -> tuple[dict[str, dict[str, Any]],
+                                                            list[dict[str, str]]]:
+        """The records in *directories*, by id, and those that could not be
+        read (see recent())."""
         records: dict[str, dict[str, Any]] = {}
         problems: dict[str, str] = {}
-        for directory in (self._queue, self._done):
+        for directory in directories:
             if not directory.is_dir():
                 continue
             for path in directory.glob("*.json"):
@@ -132,12 +154,9 @@ class JobStore:
                     continue
                 if record is not None:
                     records[path.stem] = _prefer(records.get(path.stem), record)
-        jobs = [self._presented(r) for r in records.values()
-                if project is None or r["project"] == project]
-        jobs.sort(key=lambda r: (r["created_at"], r["id"]), reverse=True)
         unreadable = [{"id": job_id, "problem": problem}
                       for job_id, problem in sorted(problems.items()) if job_id not in records]
-        return JobListing(jobs=jobs[:limit], unreadable=unreadable)
+        return records, unreadable
 
     def events(self, job_id: str, *, after: int = 0) -> list[dict[str, Any]]:
         """The job's events with seq greater than *after*, in order."""

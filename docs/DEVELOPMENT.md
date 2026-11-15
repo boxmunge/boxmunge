@@ -189,7 +189,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `tui/project_detail.py` | `_caddy_text` | `<p>.conf`, shown (the site cap) | `caddy/sites/` |
 | `compose_up_steps.py` | `sweep_live_scripts` | the generated compose overlay, searched for one string (1 MiB) | `projects/<p>/` |
 | `secrets.py` | `_parse` | a project's `secrets.env`. Cap: 1 MiB | `projects/<p>/` |
-| `api/jobs.py` | `_read` | a job's record and events; the record under the job's lock, for `JobStore` and for `api/job_writer.py` before a claim, finish or recovery (a record mid-move, one file under both names, is read with its two links) | `state/jobs/`, `state/jobs/queue/` |
+| `api/jobs.py` | `_read` | a job's record and events; the record under the job's lock, for `JobStore` (the `jobs.*` actions, and root's `jobs-runner` health check, which reads every record in `queue/`) and for `api/job_writer.py` before a claim, finish or recovery (a record mid-move, one file under both names, is read with its two links) | `state/jobs/`, `state/jobs/queue/` |
 | `api/job_retention.py` | `_finished_at` | a finished job's record: its id and `finished_at` | `state/jobs/` |
 | `api/job_events.py` | `_last_seq` | a job's events, so a reopened log numbers on from its last line | `state/jobs/` |
 | `commands/logs.py` | `_show_boxmunge_logs` | `boxmunge.log` and its archives | `logs/` |

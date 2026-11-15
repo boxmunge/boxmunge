@@ -4,6 +4,8 @@
 # its own (timers it retired included) installed and enabled, and the
 # installer fingerprint dropped so the next upgrade runs install.sh again.
 # pass() always returns 0, so "cond && pass || fail" is a safe if/else here.
+# Path units (boxmunge-jobs.path) are units like the timers: recorded,
+# disabled and removed when the slot lacks them, enabled when it has them.
 # shellcheck disable=SC2015
 set -euo pipefail
 # shellcheck source=tests/shim/lib.sh
@@ -17,7 +19,8 @@ new_root a
 live="$BOXMUNGE_SYSTEMD_DIR"
 for u in boxmunge-maintenance.timer boxmunge-maintenance.service boxmunge-kev-watch.timer \
          boxmunge-kev-watch.service boxmunge-autofix.service boxmunge-health.timer \
-         boxmunge-health.service boxmunge-cve-scan.service; do unit "$live/$u" "new $u"; done
+         boxmunge-health.service boxmunge-cve-scan.service boxmunge-jobs.path \
+         boxmunge-jobs.service; do unit "$live/$u" "new $u"; done
 old="$BOXMUNGE_ROOT/env-b/boxmunge-systemd"
 mkdir -p "$old"
 for u in boxmunge-cve-scan.timer boxmunge-cve-scan.service boxmunge-container-update.timer \
@@ -40,7 +43,7 @@ want="boxmunge-container-update.service boxmunge-container-update.timer boxmunge
 [[ "$(cat "$live/boxmunge-health.timer")" == *"old boxmunge-health.timer"* ]] \
     && pass "a unit both ship is the previous release's" || fail "health.timer not restored"
 calls="$(cat "$BOXMUNGE_ROOT/calls")"
-for t in boxmunge-maintenance.timer boxmunge-kev-watch.timer; do
+for t in boxmunge-maintenance.timer boxmunge-kev-watch.timer boxmunge-jobs.path; do
     [[ "$calls" == *"systemctl disable --now $t"* ]] && pass "$t disabled" || fail "$t not disabled: $calls"
 done
 [[ "$calls" == *"systemctl enable --now boxmunge-container-update.timer boxmunge-cve-scan.timer boxmunge-health.timer"* ]] \
@@ -104,6 +107,43 @@ run_shim check-probation
 expect 0 "" "a second check-probation runs"
 [[ "$OUT" != *"restoring them"* && "$(cat "$BOXMUNGE_ROOT/calls")" != *"enable"* ]] \
     && pass "units that match are left alone" || fail "healed again: $OUT"
+drop_root
+
+# A rollback run by an older shim, whose restore knows only timers and
+# services, removes boxmunge-jobs.service but leaves boxmunge-jobs.path
+# behind; this shim's heal sees the stray path unit and removes it.
+new_root a
+mkdir -p "$BOXMUNGE_ROOT/env-a/boxmunge-systemd"
+for u in boxmunge-health.timer boxmunge-health.service; do
+    unit "$BOXMUNGE_ROOT/env-a/boxmunge-systemd/$u" "old $u"
+    unit "$BOXMUNGE_SYSTEMD_DIR/$u" "old $u"
+done
+unit "$BOXMUNGE_SYSTEMD_DIR/boxmunge-jobs.path" "new boxmunge-jobs.path"
+run_shim check-probation
+expect 0 "restoring them" "check-probation heals a stray path unit"
+installed="$(cd "$BOXMUNGE_SYSTEMD_DIR" && ls | sort | tr '\n' ' ')"
+[[ "$installed" == "boxmunge-health.service boxmunge-health.timer " ]] \
+    && pass "the stray path unit is removed" || fail "installed after heal: $installed"
+[[ "$(cat "$BOXMUNGE_ROOT/calls")" == *"systemctl disable --now boxmunge-jobs.path"* ]] \
+    && pass "the stray path unit is disabled" || fail "not disabled: $(cat "$BOXMUNGE_ROOT/calls")"
+drop_root
+
+# A slot whose release ships a path unit: it is recorded, and a restore
+# installs and enables it with the timers.
+new_root a
+for u in boxmunge-health.timer boxmunge-jobs.path boxmunge-jobs.service; do
+    unit "$BOXMUNGE_SYSTEMD_DIR/$u" "live $u"
+done
+with_shim_functions seed_slot_units a
+[[ "$(cd "$BOXMUNGE_ROOT/env-a/boxmunge-systemd" && ls | tr '\n' ' ')" == "boxmunge-health.timer boxmunge-jobs.path boxmunge-jobs.service " ]] \
+    && pass "a slot's record holds its path units" || fail "path unit not recorded"
+rm "$BOXMUNGE_SYSTEMD_DIR/boxmunge-jobs.path"
+run_shim check-probation
+expect 0 "restoring them" "check-probation heals a missing path unit"
+[[ "$(cat "$BOXMUNGE_SYSTEMD_DIR/boxmunge-jobs.path" 2>/dev/null)" == *"live boxmunge-jobs.path"* ]] \
+    && pass "the path unit is put back" || fail "path unit not restored"
+[[ "$(cat "$BOXMUNGE_ROOT/calls")" == *"systemctl enable --now boxmunge-health.timer boxmunge-jobs.path"* ]] \
+    && pass "the path unit is enabled with the timers" || fail "not enabled: $(cat "$BOXMUNGE_ROOT/calls")"
 drop_root
 
 # A live slot with no record (installed from a bundle without units) is left

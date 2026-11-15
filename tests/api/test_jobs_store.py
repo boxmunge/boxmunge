@@ -303,3 +303,21 @@ def test_a_non_null_result_is_checked_against_its_action(paths) -> None:
     _write(paths.jobs_dir, _record(1, action="project.retired", result={"count": "3"}))
     with pytest.raises(StateError, match=r"\$.result.count: expected integer"):
         JobStore(paths, result_schemas=schemas).get(_id(1))
+
+
+def test_unfinished_lists_the_queue_oldest_first_without_finished_jobs(paths) -> None:
+    """What the jobs-runner health check reads: queue/ only. A terminal record
+    still in queue/ (a finish cut short) is not unfinished."""
+    _write(paths.jobs_dir, _record(1))
+    _write(paths.jobs_queue, _record(4, state="queued", started_at=None, finished_at=None))
+    _write(paths.jobs_queue, _record(2, state="queued", started_at=None, finished_at=None))
+    _write(paths.jobs_queue, _record(3))
+    (paths.jobs_queue / f"{_id(5)}.json").write_text("{")
+    listing = JobStore(paths, result_schemas=registry_results).unfinished()
+    assert [j["id"] for j in listing.jobs] == [_id(2), _id(4)]
+    assert [u["id"] for u in listing.unreadable] == [_id(5)]
+
+
+def test_unfinished_without_a_queue_is_empty(paths) -> None:
+    listing = JobStore(paths, result_schemas=registry_results).unfinished()
+    assert (listing.jobs, listing.unreadable) == ([], [])
