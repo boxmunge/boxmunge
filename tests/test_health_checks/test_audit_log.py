@@ -48,7 +48,7 @@ def test_health_warns_not_errors_on_a_recorded_unsupported_host(paths, attr) -> 
     seal(paths)
     check = check_audit_log(paths)
     assert check.status == "warn"
-    assert f"EOPNOTSUPP {paths.logs}" in check.detail
+    assert f"{errno.errorcode[errno.EOPNOTSUPP]} {paths.logs}" in check.detail
     assert "deploy can rewrite the audit log on this host" in check.detail
 
 
