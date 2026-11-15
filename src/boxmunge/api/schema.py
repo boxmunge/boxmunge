@@ -5,8 +5,8 @@ Keywords: type, properties, required, additionalProperties (false only),
 enum, pattern, minimum, maximum, minLength, maxLength, items, const.
 Annotations that never affect validation: description, secret, and
 x-tier, which names the tier a parameter raises its call to (see
-api/param_tiers.py). x-tier is allowed only on an optional boolean or
-string property; the registry checks the rest.
+api/param_tiers.py). x-tier is "govern" and allowed only on an optional
+boolean or string property; the registry checks the rest.
 
 One keyword of our own, x-result-of-action, exists for job records: on a
 `result` property beside an `action` property it means "null, or the
@@ -44,7 +44,9 @@ _KEYWORDS = frozenset({
     "const", "description", "secret", "x-result-of-action", "x-tier",
 })
 X_TIER = "x-tier"
-_TIER_NAMES = tuple(tier.value for tier in Tier)
+# Only govern for now: a platform parameter would need the upgrade shim's
+# route, which a parameter refusal cannot name.
+_X_TIER_VALUES = (Tier.GOVERN.value,)
 _X_TIER_TYPES = ("boolean", "string")
 _RESULT_OF_ACTION = "x-result-of-action"
 _RESULT_OF_ACTION_TYPES = ["object", "null"]
@@ -179,9 +181,9 @@ def _check_scalar_keywords(schema: dict[str, Any], path: str) -> None:
 
 
 def _check_x_tier(schema: dict[str, Any], path: str) -> None:
-    if schema[X_TIER] not in _TIER_NAMES:
+    if schema[X_TIER] not in _X_TIER_VALUES:
         raise SchemaDefinitionError(
-            f"{path}: {X_TIER} must be one of {', '.join(_TIER_NAMES)}")
+            f"{path}: {X_TIER} must be {', '.join(map(repr, _X_TIER_VALUES))}")
     if schema.get("type") not in _X_TIER_TYPES:
         raise SchemaDefinitionError(
             f"{path}: {X_TIER} is allowed only on a boolean or string property")

@@ -130,8 +130,8 @@ Parameter and result schemas use a small JSON Schema subset: `type`, `properties
   `["object", "null"]`. A client that does not understand the keyword can
   treat `result` as any JSON value or null.
 - `x-tier: "govern"` marks a parameter that weakens a control, such as resuming a project
-  without its security checks. It never affects validation. It sits only on an optional boolean
-  parameter, which counts when it is `true`, or an optional string parameter, which counts when
+  without its security checks. It never affects validation. It is the only value, and it sits only on
+  an operate action's optional boolean parameter, which counts when it is `true`, or an optional string parameter, which counts when
   it is present. A call that uses such a parameter needs that tier rather than the action's own.
   Plugins never hold `govern`, so a plugin can call the action but not with that parameter: the
   call is refused with `forbidden`, naming the parameter and the SSH command the operator runs

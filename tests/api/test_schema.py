@@ -188,8 +188,9 @@ def test_a_result_cannot_pass_unchecked_without_the_registry() -> None:
 
 
 @pytest.mark.parametrize("schema,message", [
-    ({"type": "boolean", "x-tier": "root"}, "x-tier must be one of"),
-    ({"type": "boolean", "x-tier": True}, "x-tier must be one of"),
+    ({"type": "boolean", "x-tier": "root"}, "x-tier must be 'govern'"),
+    ({"type": "boolean", "x-tier": "platform"}, "x-tier must be 'govern'"),
+    ({"type": "boolean", "x-tier": True}, "x-tier must be 'govern'"),
     ({"type": "integer", "x-tier": "govern"},
      "x-tier is allowed only on a boolean or string property"),
     (obj({"force": {"type": "boolean", "x-tier": "govern"}}),

@@ -10,8 +10,8 @@ call's effective tier, so an agent can resume a project but cannot skip
 its checks.
 
 The registry calls tier_rule_problem() so that a definition breaking these
-rules never loads: the annotation sits only on a top-level parameter,
-names a tier above the action's own, and the action names the CLI command
+rules never loads: the annotation sits only on a top-level parameter of
+an operate or higher action, names a tier above the action's own, and the action names the CLI command
 the operator runs instead.
 """
 from __future__ import annotations
@@ -38,6 +38,9 @@ def tier_rule_problem(action: Action) -> str | None:
     if nested or keyword_values(action.result, X_TIER):
         return f"{X_TIER} is allowed only on a top-level parameter"
     for name, tier in tiers.items():
+        if action.tier is Tier.OBSERVE:
+            return (f"{X_TIER} on {name} is not allowed on an observe action, which has "
+                    f"no control to weaken")
         if tier.rank <= action.tier.rank:
             return (f"{X_TIER} {tier.value} on {name} is not above the action's tier "
                     f"({action.tier.value})")
