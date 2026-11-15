@@ -170,11 +170,11 @@ READERS = [
     # the reader cannot use is a fault, so a dangling link is refused.
     Reader("kev_enisa", lambda p: p.kev_enisa,
            {"fetched_at": ISO, "etag": None, "last_modified": None,
-            "entries": {"CVE-1": ["eu_kev"]}},
+            "entries": {"CVE-1": ["eukev_kev"]}},
            exploited.read_enisa_cache),
     Reader("kev_enisa_refresh", lambda p: p.kev_enisa,
            {"fetched_at": ISO, "etag": None, "last_modified": None,
-            "entries": {"CVE-1": ["eu_kev"]}},
+            "entries": {"CVE-1": ["eukev_kev"]}},
            lambda p: kev_enisa._cached(p)["entries"]),
     Reader("kev_vulncheck", lambda p: p.kev_vulncheck,
            {"fetched_at": ISO, "entries": ["CVE-1"]},

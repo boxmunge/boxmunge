@@ -3,7 +3,7 @@
 
 ENISA's EU Vulnerability Database publishes its known-exploited list as one
 JSON dump: a list of objects with ``cveId``, ``sources`` (the catalogs that
-list the CVE, e.g. ``cisa_kev``, ``eu_kev``) and ``dateAdded``. The cache
+list the CVE, ``cisa_kev`` and ``eukev_kev``) and ``dateAdded``. The cache
 format is read by cve.exploited. The dump is asked for with the validators
 the last one came with, so an unchanged list is a 304 that only renews the
 cache's ``fetched_at``.
@@ -20,6 +20,7 @@ import logging
 from datetime import datetime
 from typing import Any
 
+from boxmunge.cve.exploited import ENISA_TAGS
 from boxmunge.cve.kev_config import KevConfig
 from boxmunge.cve.kev_http import (
     NotModified, ResponseTooLarge, SourceResult, describe, download,
@@ -61,6 +62,11 @@ def _entries(body: bytes) -> dict[str, list[str]]:
             raise _Rejected(f"entry {i} ({cve}) has no 'sources' list of strings")
         if not isinstance(added, str):
             raise _Rejected(f"entry {i} ({cve}) has no 'dateAdded'")
+        unknown = sorted(set(sources) - ENISA_TAGS.keys())
+        if unknown:
+            raise _Rejected(f"entry {i} ({cve}) has an unknown source tag "
+                            f"{', '.join(map(repr, unknown))}: ENISA's list changed, so "
+                            f"it was not cached")
         merged = entries.setdefault(cve, [])
         merged.extend(s for s in sources if s not in merged)
     if len(entries) < ENISA_MIN_ENTRIES:

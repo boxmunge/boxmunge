@@ -39,10 +39,17 @@ class _Resp:
 
 
 def _dump(n: int = ENISA_MIN_ENTRIES + 50) -> bytes:
-    items = [{"cveId": f"CVE-2021-{i:05d}", "sources": ["cisa_kev"], "dateAdded": "2026-01-01"}
-             for i in range(n)]
-    items[0]["sources"] = ["cisa_kev", "eu_kev"]
-    items[1]["sources"] = ["eu_kev"]
+    """The shape ENISA served in November 2026: a trimmed sample of the real
+    tag combinations, padded with CISA-only entries."""
+    real = [
+        ("CVE-2021-44228", "EUVD-2021-0001", ["cisa_kev"]),
+        ("CVE-2023-20198", "EUVD-2023-0002", ["cisa_kev", "eukev_kev"]),
+        ("CVE-2024-0012", "EUVD-2024-0003", ["eukev_kev"]),
+    ]
+    items = [{"cveId": c, "euvdId": e, "dateAdded": "2026-01-01", "sources": s}
+             for c, e, s in real]
+    items += [{"cveId": f"CVE-2021-{i:05d}", "euvdId": f"EUVD-2021-{i:05d}",
+               "dateAdded": "2026-01-01", "sources": ["cisa_kev"]} for i in range(n - 3)]
     return json.dumps(items).encode()
 
 
@@ -78,13 +85,14 @@ def test_enisa_dump_parsed_and_cached(tmp_path, monkeypatch):
     doc = _cache(paths)
     assert doc["fetched_at"] == NOW.isoformat()
     assert doc["etag"] == '"v1"' and doc["last_modified"] == "Sat, 14 Nov 2026 01:00:00 GMT"
-    assert doc["entries"]["CVE-2021-00000"] == ["cisa_kev", "eu_kev"]
-    assert doc["entries"]["CVE-2021-00001"] == ["eu_kev"]
+    assert doc["entries"]["CVE-2021-44228"] == ["cisa_kev"]
+    assert doc["entries"]["CVE-2023-20198"] == ["cisa_kev", "eukev_kev"]
+    assert doc["entries"]["CVE-2024-0012"] == ["eukev_kev"]
     assert len(doc["entries"]) == ENISA_MIN_ENTRIES + 50
     assert seen[0].full_url == ENISA_URL and not seen[0].has_header("If-none-match")
     # What exploited.py reads back from it.
     index = load_exploited(paths, NOW.date())
-    assert index.lookup("CVE-2021-00001") == {ExploitedSource.EU}
+    assert index.lookup("CVE-2024-0012") == {ExploitedSource.EU}
     assert ExploitedSource.EU not in index.stale
 
 
@@ -92,11 +100,13 @@ def test_enisa_dump_parsed_and_cached(tmp_path, monkeypatch):
     (_dump(ENISA_MIN_ENTRIES - 1), "below the floor"),
     (b"<html>oops</html>", "not JSON"),
     (b'{"cveId": "CVE-1"}', "not a JSON list"),
-    (json.dumps([{"cveId": "CVE-1", "sources": ["eu_kev"]}]).encode(), "no 'dateAdded'"),
-    (json.dumps([{"cveId": "CVE-1", "sources": "eu_kev", "dateAdded": "x"}]).encode(),
+    (json.dumps([{"cveId": "CVE-1", "sources": ["eukev_kev"]}]).encode(), "no 'dateAdded'"),
+    (json.dumps([{"cveId": "CVE-1", "sources": "eukev_kev", "dateAdded": "x"}]).encode(),
      "no 'sources' list"),
     (json.dumps([{"sources": [], "dateAdded": "x"}]).encode(), "no 'cveId'"),
     (json.dumps(["CVE-1"]).encode(), "not an object"),
+    (json.dumps([{"cveId": "CVE-1", "sources": ["cisa_kev", "newcat_kev"],
+                  "dateAdded": "x"}]).encode(), "unknown source tag 'newcat_kev'"),
 ])
 def test_enisa_rejects_short_or_malformed_dump(tmp_path, monkeypatch, body, match):
     paths = BoxPaths(root=tmp_path)
@@ -125,6 +135,22 @@ def test_not_modified_keeps_cache_and_bumps_fetched_at(tmp_path, monkeypatch):
     assert seen[1].get_header("If-none-match") == '"v1"'
     assert seen[1].get_header("If-modified-since") == "Sat, 14 Nov 2026 01:00:00 GMT"
     assert _cache(paths) == {**first, "fetched_at": later.isoformat()}
+
+
+def test_a_server_that_sends_no_validators_gets_plain_requests(tmp_path, monkeypatch):
+    paths = BoxPaths(root=tmp_path)
+    seen = []
+
+    def open_(req):
+        seen.append(req)
+        return _Resp(_dump())  # no ETag, no Last-Modified, as ENISA answers
+
+    monkeypatch.setattr(kev_http, "_open", open_)
+    assert refresh_enisa(paths, KevConfig(), NOW).status == "updated"
+    assert _cache(paths)["etag"] is None and _cache(paths)["last_modified"] is None
+    assert refresh_enisa(paths, KevConfig(), NOW).status == "updated"
+    assert not any(r.has_header("If-none-match") or r.has_header("If-modified-since")
+                   for r in seen)
 
 
 def test_enisa_disabled_in_config_is_not_fetched(tmp_path, monkeypatch):
