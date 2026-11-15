@@ -115,9 +115,56 @@ expect 0 "" "check-probation without a units record"
     && pass "no record: no heal" || fail "healed without a record: $OUT"
 drop_root
 
+# A damaged record (no health timer) is refused: the live units stay as they
+# are, the rollback still completes.
+new_root a
+for u in boxmunge-kev-watch.timer boxmunge-health.timer; do unit "$BOXMUNGE_SYSTEMD_DIR/$u" "new $u"; done
+mkdir -p "$BOXMUNGE_ROOT/env-b/boxmunge-systemd"
+unit "$BOXMUNGE_ROOT/env-b/boxmunge-systemd/boxmunge-cve-scan.timer" "old"
+mock_server a 'if [[ "$1" == "health" ]]; then exec health-report 2; fi; exit 0'
+rm "$BOXMUNGE_ROOT/env-b/bin/python"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$BOXMUNGE_ROOT/env-b/bin/python"
+chmod +x "$BOXMUNGE_ROOT/env-b/bin/python"
+write_probation "1.2.3" "b" "$SOON"
+run_shim check-probation
+expect 1 "Rollback complete" "the rollback completes past a damaged record"
+[[ "$OUT" == *"refusing slot b's record of its systemd units"*"no boxmunge-health.timer"* ]] \
+    && pass "the damaged record is refused, loudly" || fail "not refused: $OUT"
+installed="$(cd "$BOXMUNGE_SYSTEMD_DIR" && ls | sort | tr '\n' ' ')"
+[[ "$installed" == "boxmunge-health.timer boxmunge-kev-watch.timer " \
+   && "$(cat "$BOXMUNGE_SYSTEMD_DIR/boxmunge-health.timer")" == *"new boxmunge-health.timer"* ]] \
+    && pass "the live units are untouched" || fail "live units changed: $installed"
+[[ "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" != *"systemctl disable"* ]] \
+    && pass "nothing disabled" || fail "a unit was disabled"
+drop_root
+
+# copy_units cut short (cp fails part-way): the previous record stays whole.
+new_root a
+unit "$BOXMUNGE_SYSTEMD_DIR/boxmunge-health.timer" "first"
+with_shim_functions copy_units "$BOXMUNGE_SYSTEMD_DIR" "$BOXMUNGE_ROOT/env-a/boxmunge-systemd"
+unit "$BOXMUNGE_SYSTEMD_DIR/boxmunge-health.timer" "second"
+unit "$BOXMUNGE_SYSTEMD_DIR/boxmunge-health.service" "second"
+broken="$(mktemp -d)"
+printf '#!/usr/bin/env bash\nexit 1\n' > "$broken/cp"
+chmod +x "$broken/cp"
+rc=0
+( PATH="$broken:$PATH"; set -e; with_shim_functions copy_units "$BOXMUNGE_SYSTEMD_DIR" \
+    "$BOXMUNGE_ROOT/env-a/boxmunge-systemd" ) >/dev/null 2>&1 || rc=$?
+record="$BOXMUNGE_ROOT/env-a/boxmunge-systemd"
+[[ "$rc" -ne 0 && "$(ls "$record" | tr '\n' ' ')" == "boxmunge-health.timer " \
+   && "$(cat "$record/boxmunge-health.timer")" == *first* ]] \
+    && pass "an interrupted record write leaves the old record" || fail "record changed (rc=$rc): $(ls "$record")"
+with_shim_functions copy_units "$BOXMUNGE_SYSTEMD_DIR" "$record"
+[[ -L "$record" && "$(cat "$record/boxmunge-health.timer")" == *second* ]] \
+    && pass "a whole write swaps the record in" || fail "record not replaced"
+[[ "$(compgen -G "$BOXMUNGE_ROOT/env-a/.boxmunge-systemd.*" | grep -cv '\.link$')" -le 2 ]] \
+    && pass "the replaced record is removed" || fail "records pile up"
+rm -rf "$broken"
+drop_root
+
 grep -q 'restore_slot_units "$prev_slot"' "$REPO_DIR/scripts/boxmunge-upgrade.d/slots.sh" \
     && pass "complete_rollback restores the units" || fail "complete_rollback does not restore units"
-grep -q 'copy_units "$bundle/systemd" "$(slot_units "$standby")"' "$REPO_DIR/scripts/boxmunge-upgrade" \
+grep -q 'copy_units "$bundle/systemd" "$(slot_units "$standby")" \\' "$REPO_DIR/scripts/boxmunge-upgrade" \
     && pass "an upgrade records the bundle's units for the standby" || fail "standby units not recorded"
 
 finish
