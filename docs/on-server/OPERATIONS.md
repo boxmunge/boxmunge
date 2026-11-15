@@ -2487,8 +2487,9 @@ out with `security.autofix: false`. It runs in two places:
 While a patch runs, `state/autofix/<project>.active` marks it (`status` shows `autofixing`).
 Just before it swaps images in, it writes `state/autofix/<project>.journal`, and removes it once
 the patched images are healthy and recorded, or rolled back. A journal left behind means the run
-was killed: the next autofix run undoes it exactly (pins, patch records and built images) and
-alerts `Autofix run interrupted — rolled back`; the KEV watch starts that run within half an
+was killed: the next autofix run undoes it exactly (pins, patch records and built images; only
+the built images when the project was deployed since) and alerts `Autofix run interrupted —
+rolled back`; the KEV watch starts that run within half an
 hour. The patches themselves are recorded in `state/autofix/<project>.json` and the image pins in
 `state/image_pins/<project>.json`; a deploy, promote or rollback drops both. `log --component
 autofix` has every run, its outcome and the step that failed.

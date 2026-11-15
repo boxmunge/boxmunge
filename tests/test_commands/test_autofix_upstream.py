@@ -22,6 +22,7 @@ from boxmunge.deployed_inventory import DeployedInventory, DeployedService
 from boxmunge.docker_containers import LocalImage, ProjectContainer
 from boxmunge.fileutil import project_lock
 from boxmunge.image_pins import ImagePin, pin_ref
+from boxmunge.state import write_state
 from tests.test_commands.cve_helpers import finding, make_box
 
 P = "shop"
@@ -41,6 +42,7 @@ def _fd(cve: str = CVE, disposition: Disposition = Disposition.QUARANTINE,
 class Box:
     def __init__(self, tmp_path, monkeypatch) -> None:
         self.paths = make_box(tmp_path, projects=(P,))
+        write_state(self.paths.project_deploy_state(P), {"current_ref": "v1"})
         self.pin = ImagePin("web", pin_ref(P, "web", PATCHED), PATCHED, "autofix")
         self.pins: tuple[ImagePin, ...] = (self.pin,)
         self.record = PatchRecord(P, "web", "example/web@sha256:" + "a" * 64, BASE,
@@ -478,7 +480,7 @@ def test_a_switch_killed_midway_is_undone_from_its_journal(box, monkeypatch) -> 
                        ("remove_patched", lambda pin: box.removed.append(pin.ref))]:
         monkeypatch.setattr(autofix_run, name, fake)
     with project_lock(P, box.paths):
-        assert autofix_run.recover_interrupted(box.paths, P, patch_cves=()) == ()
+        assert autofix_run.recover_interrupted(box.paths, P, patch_cves=()).problems == ()
     assert box.pins == (box.pin,) and box.running == PATCHED
     assert read_records(box.paths, P) == (box.record,)
     assert box.removed == [] and read_journal(box.paths, P) is None

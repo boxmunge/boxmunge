@@ -226,7 +226,7 @@ def test_queued_urgent_patch_skips_nightly(tmp_path, monkeypatch) -> None:
 def test_leftover_journal_skips_nightly(tmp_path, monkeypatch) -> None:
     box = Box(tmp_path, monkeypatch)
     box.scan()
-    write_journal(box.paths, "demo", AutofixJournal(_now(), (), (), ()))
+    write_journal(box.paths, "demo", AutofixJournal(_now(), "v1", (), (), (), ("web",), ()))
     box.update()
     assert box.runner.calls == []
 

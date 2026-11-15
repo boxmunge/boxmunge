@@ -569,6 +569,9 @@ Each attempt has 30 minutes from its own start, not from the detection: a
 project waiting its turn behind others (many projects on one base image)
 stays as the scan left it and does not lose its patch to the wait. A step
 still running when the time is up finishes, then the patch is rolled back.
+Once the patched images are swapped in, the time limit no longer applies:
+the health check and the patch record always finish, so a patch that works
+is not undone for running late.
 
 Any failure rolls back, whatever the project's container-update `strategy`:
 the pins the project had are restored exactly, its containers recreated
@@ -577,12 +580,16 @@ failed is never left running. The patch is recorded only once its services
 are healthy.
 
 **An interrupted run.** Just before the swap, the run writes a journal,
-`state/autofix/<project>.journal`: the pins and patch records the project
-had, and the images the run built. A run that finishes removes it. One
-left behind means the run was killed (a reboot, the service's time limit);
-the autofix unit undoes it on its next run exactly as a rollback would,
-patch records included, alerts once (`Autofix run interrupted — rolled
-back`), then applies the fallback (table B) for what it was patching. The
+`state/autofix/<project>.journal`: the release it patched, the pins and
+patch records the project had, the images the run built and the services
+production ran. A run that finishes removes it. One left behind means the
+run was killed (a reboot, the service's time limit); the autofix unit undoes
+it on its next run exactly as a rollback would, patch records included, and
+waits for those services to be healthy. When the project has been deployed
+since, the new release's pins, records and containers are left alone and
+only the images the run built are removed. Either way it alerts once
+(`Autofix run interrupted — rolled back`, saying which), then applies the
+fallback (table B) for what it was patching. The
 KEV watch starts the unit on its next tick when a journal is left, so the
 undo comes within half an hour.
 

@@ -29,9 +29,11 @@ from boxmunge.docker_containers import ProjectContainer
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import project_lock
 from boxmunge.image_pins import ImagePin, pin_ref
+from boxmunge.state import StateError, write_state
 from tests.test_commands.cve_helpers import finding
 
 NAME = "shop"
+RELEASE = "v1"
 CVE = "CVE-2026-1111"
 WEB, DB = "sha256:" + "a" * 64, "sha256:" + "d" * 64
 
@@ -66,6 +68,7 @@ class Box:
         self.check_error: Exception | None = None
         self.scan_error: Exception | None = None
         self.log: list[tuple[str, str, dict]] = []
+        self.waited: list[tuple[list[str], list[str]]] = []
         self._ids = itertools.count(1)
         for name, fake in [("load_deployed_inventory", self._inventory),
                            ("scan_release_images", self._scan),
@@ -144,6 +147,7 @@ class Box:
                 self.containers[svc] = (f"c-{svc}-{next(self._ids)}", want)
 
     def _wait_healthy(self, project, services, one_shots=frozenset(), timeout_sec=0):
+        self.waited.append((sorted(services), sorted(one_shots)))
         if self.on_health is not None:
             self.on_health()
         bad = [svc for svc, (_c, img) in self.containers.items()
@@ -155,7 +159,8 @@ class Box:
 
 
 @pytest.fixture
-def box(monkeypatch) -> Box:
+def box(paths, monkeypatch) -> Box:
+    write_state(paths.project_deploy_state(NAME), {"current_ref": RELEASE})
     return Box(monkeypatch)
 
 
@@ -233,20 +238,40 @@ def test_health_failure_rolls_back_even_with_leave_broken(paths, box) -> None:
     assert [r.service for r in read_records(paths, NAME)] == ["db"]
 
 
-def test_budget_exceeded_rolls_back_with_step_budget(paths, box, monkeypatch) -> None:
-    """The deadline passes while the health wait runs: the wait finishes,
-    then the run rolls back."""
+def test_budget_exceeded_before_the_swap_rolls_back_with_step_budget(paths, box,
+                                                                    monkeypatch) -> None:
+    """The deadline passes while the build runs: the build finishes, then
+    the run rolls back, nothing swapped."""
     clock = [datetime.now(timezone.utc)]
     monkeypatch.setattr(autofix_run, "_now", lambda: clock[0])
     deadline = clock[0] + timedelta(minutes=30)
+    real_build = box._build
+
+    def late(*args):
+        clock[0] = deadline + timedelta(seconds=1)
+        return real_build(*args)
+    monkeypatch.setattr(autofix_run, "build_patched", late)
+    outcome = _run(paths, deadline=deadline)
+    assert (outcome.ok, outcome.failed_step) == (False, "budget")
+    assert box.pins == () and box.running() == {"web": WEB, "db": DB}
+    assert len(box.removed) == 1 and read_records(paths, NAME) == ()
+    assert box.recreates == 0
+
+
+def test_a_swapped_patch_finishes_whatever_the_time(paths, box, monkeypatch) -> None:
+    """The deadline passes while the health wait runs: once swapped, the
+    health check and the records finish and the patch stands."""
+    clock = [datetime.now(timezone.utc)]
+    monkeypatch.setattr(autofix_run, "_now", lambda: clock[0])
+    deadline = clock[0] + timedelta(seconds=1)   # records must not be in the future
 
     def late() -> None:
         clock[0] = deadline + timedelta(seconds=1)
     box.on_health = late
     outcome = _run(paths, deadline=deadline)
-    assert (outcome.ok, outcome.failed_step) == (False, "budget")
-    assert box.pins == () and box.running() == {"web": WEB, "db": DB}
-    assert len(box.removed) == 1 and read_records(paths, NAME) == ()
+    assert outcome.ok
+    assert [p.service for p in box.pins] == ["web"] and read_records(paths, NAME) == \
+        outcome.records
 
 
 def test_scan_still_finding_cve_fails_at_scan(paths, box) -> None:
@@ -402,18 +427,67 @@ def test_a_rolled_back_run_removes_its_journal(paths, box) -> None:
     assert read_journal(paths, NAME) is None
 
 
-def test_a_killed_run_is_rolled_back_from_its_journal(paths, box) -> None:
-    from boxmunge.cve.autofix_record import AutofixJournal, read_journal, write_journal
+def _killed(paths, box, *, release: str = RELEASE, records=()) -> ImagePin:
+    """A run killed mid-swap: its journal, web on the image it built."""
+    from boxmunge.cve.autofix_record import AutofixJournal, write_journal
     patched = "sha256:" + "e" * 64
     built = ImagePin("web", pin_ref(NAME, "web", patched), patched, "autofix")
-    write_journal(paths, NAME, AutofixJournal(datetime.now(timezone.utc), (), (), (built,)))
+    write_journal(paths, NAME, AutofixJournal(datetime.now(timezone.utc), release, (),
+                                              tuple(records), (built,), ("db", "web"), ()))
     box.pins, box.containers["web"] = (built,), ("c-web-9", patched)
+    return built
+
+
+def test_a_killed_run_is_rolled_back_from_its_journal(paths, box) -> None:
+    from boxmunge.cve.autofix_record import read_journal
+    built = _killed(paths, box)
     with project_lock(NAME, paths):
-        assert autofix_run.recover_interrupted(paths, NAME, patch_cves=()) == ()
+        recovered = autofix_run.recover_interrupted(paths, NAME, patch_cves=())
+        assert recovered == autofix_run.Recovered(())
         assert autofix_run.recover_interrupted(paths, NAME, patch_cves=()) is None   # nothing left to undo
     assert box.pins == () and box.running()["web"] == WEB
     assert box.removed == [built.ref] and read_journal(paths, NAME) is None
+    assert box.waited == [(["db", "web"], [])]   # the journal's services, waited for
     assert any(level == "error" and "interrupted" in msg for level, msg, _ in box.log)
+
+
+def test_a_killed_run_after_a_deploy_only_removes_what_it_built(paths, box) -> None:
+    """A deploy replaced the release the run patched before the recovery:
+    the new release's pins, records and containers stand."""
+    from boxmunge.cve.autofix_record import read_journal
+    built = _killed(paths, box, release="v0", records=[_old_record()])
+    box.pins, box.containers["web"] = (), ("c-web-5", WEB)   # the deploy's own images
+    new = _old_record(service="db")
+    write_records(paths, NAME, [new])
+    with project_lock(NAME, paths):
+        recovered = autofix_run.recover_interrupted(paths, NAME, patch_cves=())
+    assert recovered == autofix_run.Recovered((), superseded="v0")
+    assert box.recreates == 0 and box.waited == [] and box.running()["web"] == WEB
+    assert read_records(paths, NAME) == (new,)
+    assert box.removed == [built.ref] and read_journal(paths, NAME) is None
+    assert any("deployed since" in msg for level, msg, _ in box.log if level == "error")
+
+
+def test_a_journal_that_cannot_be_removed_says_the_rollback_finished(paths, box,
+                                                                     monkeypatch) -> None:
+    _killed(paths, box)
+
+    def stuck(p, project):
+        raise StateError("cannot remove the autofix journal: read-only file system")
+    monkeypatch.setattr(autofix_run, "remove_journal", stuck)
+    with project_lock(NAME, paths):
+        recovered = autofix_run.recover_interrupted(paths, NAME, patch_cves=())
+    [problem] = recovered.problems
+    assert problem.startswith("the rollback finished, but its journal could not be removed")
+    assert box.pins == () and box.running()["web"] == WEB
+
+
+def _old_record(service: str = "web") -> PatchRecord:
+    image = "sha256:" + "b" * 64
+    return PatchRecord(NAME, service, f"example/{service}:1", WEB,
+                       pin_ref(NAME, service, image), image,
+                       (PackageChange("zlib", "1.2", "1.3"),), ("CVE-2026-0002",),
+                       datetime.now(timezone.utc), "nightly")
 
 
 def _repatch_setup(paths, box) -> tuple[ImagePin, PatchRecord]:
@@ -475,7 +549,7 @@ def test_a_journal_left_after_a_patch_keeps_what_recovery_restores(paths, box,
     assert read_records(paths, NAME) == outcome.records
     monkeypatch.setattr(autofix_run, "remove_journal", real_remove)
     with project_lock(NAME, paths):
-        assert autofix_run.recover_interrupted(paths, NAME, patch_cves=()) == ()
+        assert autofix_run.recover_interrupted(paths, NAME, patch_cves=()).problems == ()
     assert box.pins == (pin,) and box.running()["web"] == pin.image_id
     assert read_records(paths, NAME) == (record,)     # no record claims the undone patch
     assert pin.ref not in box.removed and read_journal(paths, NAME) is None

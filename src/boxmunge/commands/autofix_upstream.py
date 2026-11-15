@@ -59,7 +59,9 @@ from boxmunge.cve.autofix_policy import AUTOFIX_NIGHTLY_BUDGET
 from boxmunge.cve.autofix_record import (
     AutofixJournal, read_records, remove_journal, write_journal, write_records,
 )
-from boxmunge.cve.autofix_run import repatch_on_upstream_locked, require_lock_held
+from boxmunge.cve.autofix_run import (
+    current_release, repatch_on_upstream_locked, require_lock_held,
+)
 from boxmunge.cve.policy_types import Disposition
 from boxmunge.deployed_inventory import load_deployed_inventory
 from boxmunge.docker import compose_pull
@@ -327,7 +329,9 @@ def _switch(paths: BoxPaths, project: str, pin: ImagePin, pins: Sequence[ImagePi
     except Exception as e:  # noqa: BLE001 — nothing changed yet
         raise UpstreamFailed(f"cannot tell what production runs: {e}") from e
     try:
-        write_journal(paths, project, AutofixJournal(_now(), tuple(pins), tuple(records), ()))
+        write_journal(paths, project, AutofixJournal(
+            _now(), current_release(paths, project), tuple(pins), tuple(records), (),
+            tuple(services), tuple(sorted(one_shot_services(services)))))
     except StateError as e:
         raise UpstreamFailed(f"not switched to upstream: the autofix journal could not be "
                              f"written: {e}") from e

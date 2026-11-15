@@ -21,8 +21,10 @@ end of the scan or KEV watch run that found it (commands.autofix_urgent).
 
 From just before an autofix swaps its images in until it has finished
 (its patched images healthy and recorded, or rolled back), `state/autofix/<project>.journal`
-holds {started_at, pins_before, records_before, built}: the project's pins and
-patch records exactly as they were, and the images the run built, as pins.
+holds {started_at, release_ref, pins_before, records_before, built, services,
+one_shots}: the release it patched, the project's pins and patch records
+exactly as they were, the images the run built, as pins, and the services
+production ran.
 A journal left behind means the run was killed; the next run undoes it
 first (cve.autofix_run.recover_interrupted).
 
@@ -334,11 +336,17 @@ def _names(directory: Path, suffix: str) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class AutofixJournal:
-    """What an autofix run that was killed left to undo."""
+    """What an autofix run that was killed left to undo: the release it
+    patched (the deploy state's current_ref), the pins and records as they
+    were, the images it built, and the services production ran (with the
+    one-shot ones among them), whose health the undo waits for."""
     started_at: datetime
+    release_ref: str
     pins_before: tuple[ImagePin, ...]
     records_before: tuple[PatchRecord, ...]
     built: tuple[ImagePin, ...]
+    services: tuple[str, ...]
+    one_shots: tuple[str, ...]
 
 
 def _pin_rows(pins: Sequence[ImagePin]) -> list[dict[str, str]]:
@@ -352,12 +360,19 @@ def _pins(rows: Any, field: str) -> tuple[ImagePin, ...]:
     return tuple(ImagePin(r["service"], r["ref"], r["image_id"], r["reason"]) for r in rows)
 
 
+_JOURNAL_KEYS = frozenset({"started_at", "release_ref", "pins_before", "records_before",
+                           "built", "services", "one_shots"})
+
+
 def write_journal(paths: BoxPaths, project: str, journal: AutofixJournal) -> None:
     _write_doc(paths.project_autofix_journal(project), {
         "started_at": journal.started_at.isoformat(),
+        "release_ref": journal.release_ref,
         "pins_before": _pin_rows(journal.pins_before),
         "records_before": _record_rows(journal.records_before),
         "built": _pin_rows(journal.built),
+        "services": list(journal.services),
+        "one_shots": list(journal.one_shots),
     }, "autofix journal")
 
 
@@ -368,17 +383,19 @@ def read_journal(paths: BoxPaths, project: str) -> AutofixJournal | None:
     if doc is None:
         return None
     try:
-        keys = {"started_at", "pins_before", "records_before", "built"}
-        if not isinstance(doc, dict) or set(doc) != keys:
-            raise ValueError("expected {started_at, pins_before, records_before, built}")
+        if not isinstance(doc, dict) or set(doc) != _JOURNAL_KEYS:
+            raise ValueError(f"expected {{{', '.join(sorted(_JOURNAL_KEYS))}}}")
         rows = doc["records_before"]
         if not isinstance(rows, list):
             raise ValueError("records_before is not a list")
         records = tuple(_record(item, project) for item in rows)
         _unique_services(records)
         return AutofixJournal(_time(doc["started_at"], "started_at"),
+                              _text(doc["release_ref"], "release_ref"),
                               _pins(doc["pins_before"], "pins_before"), records,
-                              _pins(doc["built"], "built"))
+                              _pins(doc["built"], "built"),
+                              _strings(doc["services"], "services"),
+                              _strings(doc["one_shots"], "one_shots"))
     except (ValueError, KeyError, TypeError) as e:
         raise StateError(f"{path} is not an autofix journal: {e!r}") from e
 

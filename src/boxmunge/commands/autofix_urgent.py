@@ -10,8 +10,9 @@ and never holds the fleet lock. For each queued project, under its project
 lock (held by someone else: left for the next run, logged):
 
 - a journal left by a run that was killed (cve.autofix_run) is undone
-  first, alerted once, and table B applied for what it was patching; then
-  the queued patch carries on as below;
+  first (only its built images removed when a deploy has replaced the
+  release it patched), alerted once, and table B applied for what it was
+  patching; then the queued patch carries on as below;
 - the findings are read again from the project's stored scan, by the keys
   the queue holds: a queue entry is never trusted on its own. Gone (a later
   scan no longer finds them, or they stopped being urgent): the entry and
@@ -201,7 +202,8 @@ def _process(paths: BoxPaths, project: str, now: datetime) -> AutofixOutcome | N
         interrupted = recover_interrupted(
             paths, project, patch_cves=_dark(paths, project))
     except StateError as e:
-        _problem(paths, project, f"its autofix journal cannot be used: {e}")
+        _problem(paths, project, f"its autofix journal (or the release it names) cannot be "
+                 f"read, so the interrupted run was not undone: {e}")
         return None
     unreadable = None
     try:
@@ -218,7 +220,8 @@ def _process(paths: BoxPaths, project: str, now: datetime) -> AutofixOutcome | N
             site = "Nothing it was patching is queued any more."
         else:
             site = _fallback(paths, project, job)[0]
-        _send(paths, format_autofix_interrupted_alert(project, interrupted, site=site))
+        _send(paths, format_autofix_interrupted_alert(
+            project, interrupted.problems, site=site, superseded=interrupted.superseded))
     if job is None:
         return None
     if not job.findings:
