@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import warnings
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable
@@ -42,7 +43,13 @@ def crash_at(point: str, fn: Callable[[], object]) -> int:
     """Run fn in a forked child that dies at `point`; return its exit code
     (137 when the point was reached, 0 when fn returned without reaching it)."""
     from boxmunge.crashpoint import CRASH_ENV
-    pid = os.fork()
+    # The test process carries native threads (no Python ones), so Python
+    # warns on every fork. The child only runs fn and leaves by os._exit, as
+    # a crash test intends; the warning would only clutter the output.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", r"This process \(pid=\d+\) is multi-threaded",
+                                DeprecationWarning)
+        pid = os.fork()
     if pid == 0:
         os.environ[CRASH_ENV] = point
         try:

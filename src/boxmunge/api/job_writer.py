@@ -45,6 +45,7 @@ from boxmunge.api.jobs import (
 from boxmunge.api.schema import ResultSchemas, validate
 from boxmunge.api.timefmt import format_utc
 from boxmunge.api.worker_identity import WorkerIdentity
+from boxmunge.crashpoint import crash_point
 from boxmunge.fileutil import durable_link, durable_unlink, exclusive_lock, fsync_dir
 from boxmunge.fs_nofollow import fchown_deploy, mkdir_p_deploy
 from boxmunge.log import log_error
@@ -95,6 +96,7 @@ def publish(paths: BoxPaths, record: dict[str, Any]) -> bool:
             raise
         try:
             fsync_dir(paths.jobs_queue)
+            crash_point("job.published")
             durable_unlink(tmp)
         except BaseException:
             _withdraw(paths, queued, tmp)
@@ -136,6 +138,7 @@ def claim(paths: BoxPaths, job_id: str, identity: WorkerIdentity,
         record = {**record, "state": "running", "worker": identity.as_record(),
                   "started_at": format_utc(now)}
         _replace(paths, queued, record)
+        crash_point("job.claimed")
     return record
 
 
@@ -244,6 +247,7 @@ def _move_to_done(paths: BoxPaths, job_id: str) -> None:
         raise StateError(f"Job {job_id} in {queued} is still {record['state']}; only a "
                          f"finished job moves out of the queue.")
     durable_link(queued, done)
+    crash_point("job.moving")
     durable_unlink(queued)
 
 

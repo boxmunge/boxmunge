@@ -433,6 +433,14 @@ See `agent-help cve` (CVE_POLICY.md) for posture tiers, hardening penalty, suppr
 
 ---
 
+## Jobs and the audit log
+
+An operate action through the action API (`project.deploy`, `project.backup`, `project.stage` and the rest) is a job: `invoke` checks the call, writes the `accepted` audit record with the job's id, and publishes the job durably into `state/jobs/queue/`, then returns at once (202 over HTTP). `boxmunge job run`, `job show` and `jobs` are the operator's front end to the same path. `boxmunge-jobs.path` starts the runner (`boxmunge-jobs.service`) whenever the queue holds a record; it starts one `_run-job` worker per job, at most 4 at once and one per project. The worker holds the jobs gate shared, claims the job, waits up to 2 minutes for the project lock, runs the action with its output captured as the job's events (`state/jobs/<id>.events.jsonl`), then finishes the record into `state/jobs/<id>.json` and writes the outcome audit record. Publish, claim and finish each sync before returning, so a crash leaves one of three states, each with one recovery: a queued job runs once; a claimed job whose worker is gone fails `worker_lost` and is never re-run (its alert names the way out); a finish cut off mid-move is completed. An upgrade takes the gate exclusively, so it waits for running jobs and new jobs are refused while it runs. See OPERATIONS.md, [Jobs](OPERATIONS.md#jobs) and [Upgrades and jobs](OPERATIONS.md#upgrades-and-jobs).
+
+Every call through the action API that changes something, job or not, is recorded in `logs/audit.jsonl`. Install seals the log append-only (`chattr +a`), root rotates it monthly (`boxmunge-audit-rotate.timer`, 12 archives kept), and the `audit-log` health check reports an unsealed log as an error, or a warning on a host recorded as unable to set the attribute. See OPERATIONS.md, [The action audit log](OPERATIONS.md#the-action-audit-log).
+
+---
+
 ## MCP Server
 
 boxmunge exposes a subset of its command set via the Model Context Protocol (MCP) over SSH stdio transport. AI agents connect by running `mcp-serve` via SSH and speak the MCP protocol over stdin/stdout.

@@ -38,6 +38,7 @@ record_bm_log() {
 
 # test_upgrade_waits_for_a_shared_holder_then_proceeds
 new_root a
+record_bm_log
 hold_shared
 PATH="$FAILVISUDO:$PATH" bash "$SHIM" target 1.2.3 > "$BOXMUNGE_ROOT/run.out" 2>&1 7<&- &
 waiter=$!
@@ -57,6 +58,8 @@ OUT="$(cat "$BOXMUNGE_ROOT/run.out")"
 expect 1 "Waiting up to 60 minutes for running jobs to finish (see: boxmunge jobs --running)" \
     "the wait says what it waits for and where to see it"
 expect 1 "failed visudo" "the upgrade goes ahead once the job finishes"
+grep -q "^bm_log info Waiting up to 60 minutes for running jobs to finish" "$BOXMUNGE_ROOT/calls" \
+    && pass "the wait is in the operational log" || fail "wait not logged: $(cat "$BOXMUNGE_ROOT/calls" 2>&1)"
 drop_root
 
 # test_upgrade_dies_logged_after_the_wait

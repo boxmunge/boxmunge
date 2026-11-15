@@ -38,6 +38,7 @@ take_jobs_gate() {
         exit 0
     fi
     log "Waiting up to 60 minutes for running jobs to finish (see: boxmunge jobs --running)"
+    bm_log info upgrade "Waiting up to 60 minutes for running jobs to finish (see: boxmunge jobs --running)"
     write_root_file "$JOBS_WAIT_FILE" "$(date +%s)"
     local rc=0
     flock -w "$JOBS_GATE_WAIT_SECS" 8 || rc=$?

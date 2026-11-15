@@ -1176,6 +1176,16 @@ action must not repeat itself. The alert names the way out for that action, as f
 mid-work; for a deploy that left an install open, the install's options. Check what it changed
 (`boxmunge status myapp`, `boxmunge job show <id> --events`), then follow the alert.
 
+### A job's audit lines
+
+A job writes two audit lines with its id: `accepted` when it is queued, and its outcome once it has
+finished. If the worker dies while moving the finished record out of the queue, the runner completes
+the move and writes the outcome line from the record (without the parameters, which the
+`accepted` line carries), and logs that it recovered it. One narrow window remains: a worker that
+dies after the move but before it appends the outcome line leaves a finished job whose record holds
+the outcome while the audit log shows only `accepted`. `boxmunge job show <id>` is then the record
+of what happened.
+
 ### Upgrades and jobs
 
 A platform upgrade and jobs never overlap:

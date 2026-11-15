@@ -14,6 +14,12 @@
 6. Check the result, finish the record, write the terminal state event and
    the outcome audit record.
 
+The outcome audit record is written strictly after finish has moved the
+record out of the queue. A worker that dies mid-move has its outcome line
+written by the runner, which completes the move. One that dies after the
+move but before its append leaves the outcome in the job record only: a
+known, narrow window in which the audit log shows just the accepted line.
+
 A SIGTERM (Terminated) fails the job, alerts its way out, and is raised
 again so the process ends as stopped. Exits 0 once the job is terminal.
 """

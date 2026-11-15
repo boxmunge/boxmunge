@@ -133,6 +133,42 @@
    "files": [],
    "superseded_by": null,
    "refs": []
+  },
+  {
+   "id": "0.12.0-operate-jobs",
+   "scope": "box",
+   "when": "after",
+   "kind": "fact",
+   "title": "Operate actions run as audited jobs: job run, job show and jobs",
+   "change": "'boxmunge job run', 'job show' and 'jobs' start and follow operate actions as jobs run by 'boxmunge-jobs.service'; every job is audited. A job (project.deploy, project.backup, project.stage and the other operate actions) runs in the background as deploy, outside your SSH session: at most 4 at once, one at a time per project. It waits up to 2 minutes for its project's lock, then fails busy, naming the holder and the command that retries it. A job cut off by a restart fails worker_lost and is never re-run; the alert names its way out. The direct commands (backup, stage, prod-deploy and the rest) are unchanged.\nboxmunge-jobs.path starts the runner whenever a job is queued. The new jobs-runner health check reports an error when that path unit is not active; it names the fix: as the supervisor, sudo systemctl reset-failed boxmunge-jobs.path boxmunge-jobs.service && sudo systemctl start boxmunge-jobs.path.",
+   "verify": "As the supervisor, 'systemctl status boxmunge-jobs.path' shows the unit active (waiting), and 'boxmunge health' passes the jobs-runner check.",
+   "files": [],
+   "superseded_by": null,
+   "refs": []
+  },
+  {
+   "id": "0.12.0-upgrade-waits-for-jobs",
+   "scope": "box",
+   "when": "after",
+   "kind": "fact",
+   "title": "An upgrade waits for running jobs and refuses new ones",
+   "change": "An upgrade waits up to 60 minutes for running jobs; new jobs are refused while it runs. While it waits it logs 'Waiting up to 60 minutes for running jobs to finish'; if jobs still run after that, it installs nothing and stops, and can be run again once they finish. A job refused during an upgrade is refused with unavailable and queues nothing: run the same 'job run' again once the upgrade has finished. A job queued just as an upgrade started stays queued and runs once afterwards, on the new code.",
+   "verify": "'boxmunge jobs --running' lists the jobs an upgrade would wait for; 'boxmunge log --component upgrade' shows any wait.",
+   "files": [],
+   "superseded_by": null,
+   "refs": []
+  },
+  {
+   "id": "0.12.0-audit-append-only",
+   "scope": "box",
+   "when": "after",
+   "kind": "fact",
+   "title": "The action audit log is append-only and rotated monthly",
+   "change": "'logs/audit.jsonl' is append-only ('chattr +a'); 'boxmunge-audit-rotate.timer' rotates it monthly and keeps 12 months; 'health' reports an error if the attribute is missing, or a warning on a host that cannot set it (some container-based VPS plans). The installer seals the log: deploy cannot truncate, rewrite or delete it; only root can, by lifting the attribute. The fix for the audit-log error is sudo boxmunge-server _audit-seal. On a host that cannot set the attribute, install still completes, records why in upgrade-root/audit-append-unsupported, and deploy can still rewrite the log there.",
+   "verify": "As root, 'lsattr /opt/boxmunge/logs/audit.jsonl' shows the a attribute, and 'boxmunge health' passes the audit-log check (or warns that this host cannot set it).",
+   "files": [],
+   "superseded_by": null,
+   "refs": []
   }
  ]
 }
