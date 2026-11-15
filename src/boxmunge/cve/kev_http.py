@@ -73,16 +73,22 @@ def _open(req: urllib.request.Request) -> Any:
     return _OPENER.open(req, timeout=FETCH_TIMEOUT)
 
 
-def download(url: str, *, etag: str | None = None,
-             last_modified: str | None = None) -> Downloaded | NotModified:
-    """GET ``url``; NotModified if it answers 304 to the validators given."""
+def download(url: str, *, etag: str | None = None, last_modified: str | None = None,
+             bearer: str | None = None) -> Downloaded | NotModified:
+    """GET ``url``; NotModified if it answers 304 to the validators given.
+
+    ``bearer`` is sent as an Authorization header that is not carried across
+    a redirect, so a credential only ever reaches the host it was meant for."""
     headers = {"User-Agent": "boxmunge"}
     if etag:
         headers["If-None-Match"] = etag
     if last_modified:
         headers["If-Modified-Since"] = last_modified
+    req = urllib.request.Request(url, headers=headers)
+    if bearer:
+        req.add_unredirected_header("Authorization", f"Bearer {bearer}")
     try:
-        with _open(urllib.request.Request(url, headers=headers)) as resp:
+        with _open(req) as resp:
             body = read_within(resp, KEV_MAX_BYTES + 1, KEV_FETCH_DEADLINE)
             got = resp.headers
     except urllib.error.HTTPError as e:

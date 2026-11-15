@@ -273,6 +273,9 @@ def _no_kev_network(monkeypatch):
         lambda paths, config, now: SourceResult("enisa", "disabled"),
     )
     monkeypatch.setattr(
+        "boxmunge.cve.kev_refresh.refresh_vulncheck", lambda paths, config, now: None,
+    )
+    monkeypatch.setattr(
         "boxmunge.commands.security_kev.load_kev", lambda paths: _fresh_empty,
     )
     monkeypatch.setattr(

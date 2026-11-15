@@ -62,6 +62,7 @@ from boxmunge.cve.kev_enisa import refresh_enisa
 from boxmunge.cve.kev_http import (
     NotModified, ResponseTooLarge, SourceResult, describe, download,
 )
+from boxmunge.cve.kev_vulncheck import refresh_vulncheck
 from boxmunge.cve.kev_source_history import KevHistoryError, load_history, note_served
 from boxmunge.cve.kev_withdrawals import KevWithdrawalsError, record_withdrawals
 from boxmunge.fileutil import atomic_write_text
@@ -129,6 +130,7 @@ class KevRefresh:
     failures: tuple[SourceFailure, ...] = ()
     withdrawn: tuple[str, ...] = ()
     enisa: SourceResult | None = None  # ENISA's list, refreshed beside CISA's
+    vulncheck: SourceResult | None = None  # VulnCheck's, None unless the operator opted in
 
     @property
     def updated(self) -> bool:
@@ -446,7 +448,7 @@ def refresh_from(paths: BoxPaths, sources: tuple[str, ...]) -> KevRefresh:
 
 def refresh_kev(paths: BoxPaths) -> KevRefresh:
     """Refresh the caches from the sources configured in boxmunge.yml: the
-    CISA catalog first, then ENISA's list, whose failure cannot hold it up."""
+    CISA catalog first, then ENISA's list and VulnCheck's (if opted in), whose failure cannot hold it up."""
     try:
         config = kev_config(paths)
     except ConfigError as e:
@@ -457,4 +459,6 @@ def refresh_kev(paths: BoxPaths) -> KevRefresh:
             SourceFailure("boxmunge.yml", CONFIG, f"cannot read the KEV sources: {e}"),
         ))
     result = refresh_from(paths, config.sources)
-    return replace(result, enisa=refresh_enisa(paths, config, datetime.now(timezone.utc)))
+    now = datetime.now(timezone.utc)
+    return replace(result, enisa=refresh_enisa(paths, config, now),
+                   vulncheck=refresh_vulncheck(paths, config, now))
