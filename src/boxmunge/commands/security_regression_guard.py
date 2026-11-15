@@ -64,8 +64,6 @@ from boxmunge.state import StateError
 OVERRIDE_FLAG = "--allow-security-regression"
 REASON_OPTION = "--reason"
 DEPLOY_ANYWAY = f'To deploy anyway: {OVERRIDE_FLAG} {REASON_OPTION} "<why>"'
-# How a CVE refused only for autofix having patched it is said.
-_BROUGHT_BACK = "autofix patched"
 FIX_IN_REPO = ("Fix it in the repo: bump the base image, or upgrade the package in the "
                "Dockerfile, then deploy again. " + DEPLOY_ANYWAY)
 
@@ -146,19 +144,21 @@ def _line(f: FindingDisposition, image_ref: str, service: str, listed: str) -> s
 
 
 def _listed(f: FindingDisposition, *, paranoid: bool, patched: frozenset[str],
-            stale_listed: frozenset[str], stale: str | None) -> str | None:
-    """Why the guard refuses this finding, or None."""
+            stale_listed: frozenset[str], stale: str | None) -> tuple[str, bool] | None:
+    """(why the guard refuses this finding, whether it is for its being
+    exploited rather than only for autofix having patched it), or None."""
     sources = f.exploited_by
     if is_full_kev(sources):
-        return f"listed as actively exploited by {listing_label(sources)}"
+        return f"listed as actively exploited by {listing_label(sources)}", True
     if f.finding.cve_id in stale_listed:
         return (f"listed as actively exploited by the cached CISA KEV catalog, which is "
-                f"stale ({stale}); a stale catalog cannot show that has changed")
+                f"stale ({stale}); a stale catalog cannot show that has changed"), True
     if paranoid and ExploitedSource.VULNCHECK in sources:  # no suppression applies there
-        return f"listed as actively exploited by {listing_label(sources)} (paranoid refuses it)"
+        return (f"listed as actively exploited by {listing_label(sources)} (paranoid "
+                f"refuses it)"), True
     if f.finding.cve_id in patched:
-        return (f"{_BROUGHT_BACK} {f.finding.cve_id} in the running release; this release "
-                f"brings it back")
+        return (f"autofix patched {f.finding.cve_id} in the running release; this release "
+                f"brings it back"), False
     return None
 
 
@@ -179,10 +179,11 @@ def _cve_lines(meta: ProjectMeta, scan: ProjectScan, targets: list[ScanTarget],
             listed = _listed(f, paranoid=meta.posture is Posture.PARANOID, patched=patched,
                              stale_listed=stale_listed, stale=stale)
             if listed is not None:
-                exploited |= not listed.startswith(_BROUGHT_BACK)
+                why, for_exploited = listed
+                exploited |= for_exploited
                 lines.setdefault((f.finding.cve_id, f.finding.package, decision.image_ref),
                                  _line(f, decision.image_ref,
-                                       ", ".join(services[decision.image_ref]), listed))
+                                       ", ".join(services[decision.image_ref]), why))
     return list(lines.values()), exploited
 
 

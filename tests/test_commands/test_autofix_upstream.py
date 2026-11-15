@@ -66,8 +66,13 @@ class Box:
                            ("remove_patched", lambda pin: self.removed.append(pin.ref)),
                            ("local_image", lambda ref: LocalImage(NEW, (NEW_REF,))
                             if ref == NEW else None),
-                           ("repatch_on_upstream_locked", self._repatch)]:
+                           ("repatch_on_upstream_locked", self._repatch),
+                           ("load_manifest", lambda path: self.manifest),
+                           ("backup_locked", self._backup)]:
             monkeypatch.setattr(up, name, fake)
+        self.manifest: dict = {"project": P}
+        self.backups: list = []
+        self.backup_rc = 0
         monkeypatch.setattr(autofix_plan, "scan_images", self._scan)
 
     def _write_pins(self, paths, project, pins) -> None:
@@ -89,9 +94,14 @@ class Box:
         self.running = pinned.get("web", NEW)
         self.recreates.append(self.running)
 
-    def _wait_healthy(self, project, services, one_shots=frozenset()):
+    def _wait_healthy(self, project, services, one_shots=frozenset(), timeout_sec=0):
         bad = ["web"] if self.running in self.unhealthy_on else []
         return (not bad, bad)
+
+    def _backup(self, project_name, paths, kind=None, manifest=None, compose_file=None,
+                offline=False):
+        self.backups.append(kind)
+        return self.backup_rc
 
     def _repatch(self, paths, project, findings, *, upstream, deadline):
         self.repatched.append((tuple(sorted(fd.finding.cve_id for fd in findings)),
@@ -289,8 +299,8 @@ def test_pull_upstream_returns_the_new_image(box, monkeypatch) -> None:
     images = {"example/web:1": LocalImage(BASE, ())}
     pulled = []
 
-    def pull(cwd, files, *, project_name, services):
-        pulled.append((project_name, services))
+    def pull(cwd, files, *, project_name, services, project_directory, env_file):
+        pulled.append((project_name, services, project_directory, env_file))
         images["example/web:1"] = LocalImage(NEW, ())
 
     monkeypatch.setattr(up, "compose_pull", pull)
@@ -298,10 +308,11 @@ def test_pull_upstream_returns_the_new_image(box, monkeypatch) -> None:
     seen = {}
     monkeypatch.setattr(up, "guard_pull", lambda paths, project, refs, before, component:
                         seen.update(refs=refs, before=before) or {})
-    target = SimpleNamespace(compose=SimpleNamespace(cwd=box.paths.project_dir(P),
-                                                     files=["compose.yml", "/x.yml"]))
+    target = SimpleNamespace(compose=SimpleNamespace(
+        cwd=box.paths.project_dir(P), files=["compose.yml", "/x.yml"],
+        project_directory=None, env_file="/env/shop.env"))
     assert up._pull_upstream(box.paths, P, target, "web", "example/web:1") == NEW
-    assert pulled == [(P, ["web"])]
+    assert pulled == [(P, ["web"], None, "/env/shop.env")]
     assert seen == {"refs": {"web": "example/web:1"}, "before": {"web": BASE}}
     monkeypatch.setattr(up, "guard_pull", lambda *a, **k: {"web": "image user app -> root"})
     with pytest.raises(up.UpstreamFailed, match="held back: image user app -> root"):
@@ -332,16 +343,18 @@ def nightly(tmp_path, monkeypatch):
     return nb
 
 
-def test_nightly_catches_up_before_patching_and_digests_it(nightly) -> None:
-    from boxmunge.cve.autofix_policy import AUTOFIX_NIGHTLY_BUDGET
+def test_nightly_catches_up_before_patching_and_digests_it(nightly, monkeypatch) -> None:
+    from boxmunge.commands import autofix_nightly
+    from boxmunge.cve.autofix_policy import AUTOFIX_NIGHTLY_BUDGET, NIGHTLY_AUTOFIX_WINDOW
     nightly.scan()
     nightly.results = (up.UpstreamResult("demo", "web", "switched", (CVE,)),)
-    before = datetime.now(timezone.utc)
+    frozen = datetime.now(timezone.utc)
+    monkeypatch.setattr(autofix_nightly, "_now", lambda: frozen)
     nightly.update()
     [(what, project, start_by), patch] = nightly.calls
     assert (what, project, patch) == ("upstream", "demo", ("patch", "demo"))
-    from boxmunge.cve.autofix_policy import NIGHTLY_AUTOFIX_WINDOW
-    assert start_by <= before + NIGHTLY_AUTOFIX_WINDOW - AUTOFIX_NIGHTLY_BUDGET
+    until = frozen + NIGHTLY_AUTOFIX_WINDOW        # window_end() at container-update's start
+    assert start_by == until - AUTOFIX_NIGHTLY_BUDGET - autofix_nightly._START_MARGIN
     [(title, body, priority)] = nightly.pushover.sent
     assert priority == -1
     assert "switched to upstream: demo/web" in body
@@ -408,3 +421,88 @@ def test_a_project_a_catch_up_left_mixed_is_not_patched_tonight(nightly) -> None
     urgent, digest = nightly.pushover.sent
     assert urgent[2] == 1
     assert "skipped: demo: catching it up with upstream did not roll back cleanly" in digest[1]
+
+
+# The switch is journalled, and the pre-update backup comes first.
+
+def test_a_switch_leaves_no_journal(box) -> None:
+    from boxmunge.cve.autofix_record import read_journal
+    assert box.reconcile() == "switched"
+    assert read_journal(box.paths, P) is None
+
+
+def test_a_failed_switch_leaves_no_journal(box) -> None:
+    from boxmunge.cve.autofix_record import read_journal
+    box.unhealthy_on = {NEW}
+    with pytest.raises(up.UpstreamFailed):
+        box.reconcile()
+    assert read_journal(box.paths, P) is None
+
+
+def test_a_journal_that_cannot_be_written_changes_nothing(box, monkeypatch) -> None:
+    from boxmunge.state import StateError
+
+    def refuse(paths, project, journal):
+        raise StateError("read-only file system")
+
+    monkeypatch.setattr(up, "write_journal", refuse)
+    with pytest.raises(up.UpstreamFailed, match="journal could not be written"):
+        box.reconcile()
+    assert box.pins == (box.pin,) and box.recreates == [] and box.removed == []
+
+
+def test_a_switch_killed_midway_is_undone_from_its_journal(box, monkeypatch) -> None:
+    """Killed after the pin went, before the record did: the autofix unit's
+    recovery puts the pin and the records back; nothing was built, so
+    nothing is removed."""
+    from boxmunge.cve import autofix_run
+    from boxmunge.cve.autofix_record import read_journal
+
+    class Killed(BaseException):
+        pass
+
+    def killed(paths, project, records):
+        raise Killed()
+
+    monkeypatch.setattr(up, "write_records", killed)
+    monkeypatch.setattr(up, "_restore", lambda *a: [])     # a kill runs no rollback
+    monkeypatch.setattr(up, "_finish", lambda *a: True)    # nor removes the journal
+    with pytest.raises(Killed):
+        box.reconcile()
+    assert box.pins == () and read_journal(box.paths, P) is not None
+    for name, fake in [("write_pins", box._write_pins),
+                       ("clear_pins", lambda paths, project: box._write_pins(paths, project,
+                                                                             ())),
+                       ("recreate_project", box._recreate),
+                       ("wait_healthy", box._wait_healthy),
+                       ("remove_patched", lambda pin: box.removed.append(pin.ref))]:
+        monkeypatch.setattr(autofix_run, name, fake)
+    with project_lock(P, box.paths):
+        assert autofix_run.recover_interrupted(box.paths, P, patch_cves=()) == ()
+    assert box.pins == (box.pin,) and box.running == PATCHED
+    assert read_records(box.paths, P) == (box.record,)
+    assert box.removed == [] and read_journal(box.paths, P) is None
+
+
+@pytest.mark.parametrize("findings", ["clean", "vulnerable"])
+def test_the_pre_update_backup_comes_first(box, findings) -> None:
+    from boxmunge.backup import BackupKind
+    box.manifest = {"project": P, "backup": {"dump_command": "pg_dump"}}
+    if findings == "vulnerable":
+        box.findings[NEW] = [_fd()]
+    assert box.reconcile() in ("switched", "repatched")
+    assert box.backups == [BackupKind.PREUPDATE]
+
+
+def test_no_backup_declared_none_taken(box) -> None:
+    assert box.reconcile() == "switched"
+    assert box.backups == []
+
+
+def test_a_failed_backup_changes_nothing(box) -> None:
+    box.manifest = {"project": P, "backup": {"dump_command": "pg_dump"}}
+    box.backup_rc = 1
+    box.findings[NEW] = [_fd()]
+    with pytest.raises(up.UpstreamFailed, match="backup failed"):
+        box.reconcile()
+    assert box.pins == (box.pin,) and box.recreates == [] and box.repatched == []

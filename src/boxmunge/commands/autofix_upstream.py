@@ -17,11 +17,14 @@ start in the maintenance window (reconcile_upstream):
   and nothing is said;
 - a new image is scanned the way the deploy guard scans a release (the
   project's posture, the fresh known-exploited lists, the scan cache by
-  image ID). Clean of every CVE of the service's patch record, and with no
-  quarantine-level finding the patched image does not have: the pin and
-  the record go, production is recreated on the upstream image and must
-  come back healthy. When it does not, the pin and the record are put back
-  and production recreated on the patch (rolled back);
+  image ID), and the pre-update backup container update would take is
+  taken (a failed one changes nothing). Clean of every CVE of the service's
+  patch record, and with no quarantine-level finding the patched image
+  does not have: the pin and the record go, production is recreated on the
+  upstream image and must come back healthy. When it does not, the pin and
+  the record are put back and production recreated on the patch (rolled
+  back). The autofix journal covers the switch, so one that is killed is
+  undone by the autofix unit like a killed patch;
 - a new image that still needs any of that patched: the patch is built
   again FROM the new image (cve.autofix_run.repatch_on_upstream_locked),
   never from the old patched image, and replaces the old one; a failed
@@ -42,6 +45,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from boxmunge.backup import BackupKind
+from boxmunge.commands.backup_cmd import backup_locked
 from boxmunge.commands.security_scan_inputs import load_project_meta
 from boxmunge.compose import load_user_compose, render_compose_override
 from boxmunge.compose_images import is_platform_image
@@ -51,7 +56,9 @@ from boxmunge.cve import autofix_plan
 from boxmunge.cve.autofix_build import PatchBuildError, remove_patched
 from boxmunge.cve.autofix_plan import PROD, StepFailed
 from boxmunge.cve.autofix_policy import AUTOFIX_NIGHTLY_BUDGET
-from boxmunge.cve.autofix_record import read_records, write_records
+from boxmunge.cve.autofix_record import (
+    AutofixJournal, read_records, remove_journal, write_journal, write_records,
+)
 from boxmunge.cve.autofix_run import repatch_on_upstream_locked, require_lock_held
 from boxmunge.cve.policy_types import Disposition
 from boxmunge.deployed_inventory import load_deployed_inventory
@@ -63,6 +70,7 @@ from boxmunge.lifecycle import is_blocked
 from boxmunge.log import log_error, log_operation
 from boxmunge.manifest import load_manifest
 from boxmunge.release_target import production_target, resolved_services
+from boxmunge.state import StateError
 from boxmunge.user_drift import guard_pull
 
 if TYPE_CHECKING:
@@ -140,7 +148,8 @@ def _pull_upstream(paths: BoxPaths, project: str, target: ReleaseTarget, service
     service's user (held back: its tag points back), DockerError."""
     before = local_image(ref)
     c = target.compose
-    compose_pull(c.cwd, list(c.files), project_name=project, services=[service])
+    compose_pull(c.cwd, list(c.files), project_name=project, services=[service],
+                 project_directory=c.project_directory, env_file=c.env_file)
     pulled = local_image(ref)
     if pulled is None:
         raise UpstreamFailed(f"{ref} is not in the local image store after the pull")
@@ -240,6 +249,7 @@ def reconcile_pinned_service(paths: BoxPaths, project: str, service: str,
     except StepFailed as e:
         raise UpstreamFailed(str(e)) from e
     still = _still_to_patch(upstream, patched, record.cves)
+    _backup(paths, project)
     if not still:
         _switch(paths, project, pin, pins, records)
         return "switched"
@@ -253,6 +263,17 @@ def reconcile_pinned_service(paths: BoxPaths, project: str, service: str,
                              f"{outcome.failed_step or 'an unexpected error'}: "
                              f"{outcome.reason}", outcome.rollback_problems)
     return "repatched"
+
+
+def _backup(paths: BoxPaths, project: str) -> None:
+    """The pre-update backup container update takes before it runs new
+    images, for a project whose manifest declares one. Raises
+    UpstreamFailed, nothing changed, when it fails."""
+    if not load_manifest(paths.project_manifest(project)).get("backup", {}).get(
+            "dump_command"):
+        return
+    if backup_locked(project, paths, kind=BackupKind.PREUPDATE) != 0:
+        raise UpstreamFailed("the pre-update backup failed, so nothing was changed")
 
 
 def _still_to_patch(upstream: ProjectDecision, patched: ProjectDecision,
@@ -292,7 +313,12 @@ def _set_pins(paths: BoxPaths, project: str, pins: Sequence[ImagePin]) -> None:
 def _switch(paths: BoxPaths, project: str, pin: ImagePin, pins: Sequence[ImagePin],
             records: Sequence[PatchRecord]) -> None:
     """Unpin `pin`'s service, drop its record, recreate production on
-    upstream and see it healthy; on failure put both back and recreate."""
+    upstream and see it healthy; on failure put both back and recreate.
+    The autofix journal holds the pins and records from before the switch
+    until it is over (healthy, or rolled back), so a switch that is killed
+    is undone like a killed patch (cve.autofix_run.recover_interrupted); it
+    built nothing. The replaced patched image goes only after the journal,
+    whose pins name it."""
     refusal = start_refusal(paths, project)
     if refusal is not None:
         raise UpstreamFailed(f"not switched to upstream: {refusal}")
@@ -301,25 +327,49 @@ def _switch(paths: BoxPaths, project: str, pin: ImagePin, pins: Sequence[ImagePi
     except Exception as e:  # noqa: BLE001 — nothing changed yet
         raise UpstreamFailed(f"cannot tell what production runs: {e}") from e
     try:
+        write_journal(paths, project, AutofixJournal(_now(), tuple(pins), tuple(records), ()))
+    except StateError as e:
+        raise UpstreamFailed(f"not switched to upstream: the autofix journal could not be "
+                             f"written: {e}") from e
+    try:
         _set_pins(paths, project, [p for p in pins if p.service != pin.service])
         write_records(paths, project, [r for r in records if r.service != pin.service])
         recreate_project(paths, project, PROD, component=_COMPONENT)
         _healthy(project, services, "the new upstream image")
     except Exception as e:  # noqa: BLE001 — every failure rolls back
         problems = _restore(paths, project, pins, records, services)
+        _finish(paths, project)
         raise UpstreamFailed(f"switching {pin.service} to upstream failed: "
                              f"{type(e).__name__}: {e}", problems) from e
     except BaseException as e:
         for problem in _restore(paths, project, pins, records, services):
             e.add_note(problem)
+        _finish(paths, project)
         raise
     log_operation(_COMPONENT, f"{project}/{pin.service} switched to upstream; its patch "
                   f"record is cleared", paths, project=project)
+    if not _finish(paths, project):   # the journal's pins still name the patched image
+        log_error(_COMPONENT, f"{project}: the replaced patched image {pin.ref} is kept, "
+                  f"since the autofix journal is still there", paths, project=project)
+        return
     try:
         remove_patched(pin)
     except (PatchBuildError, DockerError) as e:
         log_error(_COMPONENT, f"{project}: could not remove the replaced patched image "
                   f"{pin.ref}: {e}", paths, project=project)
+
+
+def _finish(paths: BoxPaths, project: str) -> bool:
+    """The journal goes: the switch is healthy, or rolled back. Logged, not
+    raised (a journal left makes the autofix unit undo the switch again,
+    which restores what is there now); returns whether it went."""
+    try:
+        remove_journal(paths, project)
+    except StateError as e:
+        log_error(_COMPONENT, f"{project}: upstream catch-up: {e}; the autofix unit will "
+                  f"roll back to the journal", paths, project=project)
+        return False
+    return True
 
 
 def _restore(paths: BoxPaths, project: str, pins: Sequence[ImagePin],

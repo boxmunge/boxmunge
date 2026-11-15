@@ -691,7 +691,7 @@ def test_a_killed_run_is_rolled_back_then_the_patch_carries_on(tmp_path, monkeyp
     undone: list = []   # the runner's own Docker seams (tests/cve/test_autofix_run.py)
     monkeypatch.setattr(autofix_run, "clear_pins", lambda p, project: undone.append("pins"))
     monkeypatch.setattr(autofix_run, "recreate_project",
-                        lambda p, project, files, component, patch_cves:
+                        lambda p, project, files, *, component, patch_cves=():
                         undone.append("recreate"))
     monkeypatch.setattr(autofix_run, "wait_healthy", lambda *a, **k: (True, []))
     monkeypatch.setattr(autofix_run, "remove_patched", lambda pin: undone.append(pin.ref))
@@ -749,7 +749,8 @@ def test_an_interrupted_run_with_an_unreadable_entry_says_so(tmp_path, monkeypat
     built = ImagePin("web", pin_ref("demo", "web", patched), patched, "autofix")
     write_journal(box.paths, "demo", AutofixJournal(_now(), (), (), (built,)))
     for name, fake in [("clear_pins", lambda p, project: None),
-                       ("recreate_project", lambda p, project, files, component: None),
+                       ("recreate_project",
+                        lambda p, project, files, *, component, patch_cves=(): None),
                        ("wait_healthy", lambda *a, **k: (True, [])),
                        ("remove_patched", lambda pin: None)]:
         monkeypatch.setattr(autofix_run, name, fake)

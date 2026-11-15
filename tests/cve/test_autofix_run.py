@@ -72,7 +72,7 @@ class Box:
                            ("load_kev", lambda paths: None)]:
             monkeypatch.setattr(autofix_plan, name, fake)
         for name, fake in [("load_project_meta", lambda paths, project: object()),
-                           ("probe", lambda ref: self.probe_result),
+                           ("probe", self._probe),
                            ("build_patched", self._build),
                            ("check_versions", self._check_versions),
                            ("remove_patched", lambda pin: self.removed.append(pin.ref)),
@@ -95,6 +95,9 @@ class Box:
             svc, f"example/{svc}:1", False, True, (ProjectContainer(
                 f"{project}-{svc}-1", svc, img, (), True, "healthy", False, None, "always"),))
             for svc, (_cid, img) in self.containers.items()})
+
+    def _probe(self, image_ref):
+        return self.probe_result
 
     def _check_versions(self, image, patchability, packages):
         self.checked.append(dict(packages))
@@ -140,7 +143,7 @@ class Box:
             if want != img:
                 self.containers[svc] = (f"c-{svc}-{next(self._ids)}", want)
 
-    def _wait_healthy(self, project, services, one_shots=frozenset()):
+    def _wait_healthy(self, project, services, one_shots=frozenset(), timeout_sec=0):
         if self.on_health is not None:
             self.on_health()
         bad = [svc for svc, (_c, img) in self.containers.items()
@@ -302,7 +305,8 @@ def test_unexpected_error_rolls_back_and_raises(paths, box, monkeypatch) -> None
     assert len(box.removed) == 1
 
 
-def test_rollback_failure_is_added_to_the_reason(paths, box, monkeypatch) -> None:
+def test_rollback_failure_is_reported_apart_from_the_reason(paths, box,
+                                                            monkeypatch) -> None:
     box.unhealthy_on_patched = True
 
     def refuses(pin):
@@ -310,7 +314,9 @@ def test_rollback_failure_is_added_to_the_reason(paths, box, monkeypatch) -> Non
     monkeypatch.setattr(autofix_run, "remove_patched", refuses)
     outcome = _run(paths)
     assert outcome.failed_step == "health"
-    assert "rollback could not remove the patched image" in outcome.reason
+    assert outcome.reason == "not healthy on the patched images: web"   # not folded in
+    [problem] = outcome.rollback_problems
+    assert "rollback could not remove the patched image" in problem
 
 
 def test_refuses_without_the_project_lock(paths, box) -> None:

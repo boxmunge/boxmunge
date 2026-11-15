@@ -404,3 +404,20 @@ def test_unreadable_patch_records_refuse_the_release(box) -> None:
     text = str(e.value)
     assert "could not clear this release" in text and "patch records" in text
     assert e.value.problems[-1] == 'To deploy anyway: --allow-security-regression --reason "<why>"'
+
+
+@pytest.mark.parametrize("route", [
+    pytest.param(lambda b: _decide_staging(b), id="stage"),
+    pytest.param(lambda b: _decide_production(b, "deploy"), id="prod-deploy"),
+    pytest.param(lambda b: _decide_production(b, "promote"), id="promote"),
+    pytest.param(lambda b: _decide_production(b, "rollback", True), id="rollback"),
+])
+def test_bringing_back_a_patched_cve_refused_on_every_route(box, route) -> None:
+    """Every route decides its release (and so reads the patch records)
+    before the switch would forget them."""
+    _patched(box, ("cache", (PATCHED_CVE,)))
+    box.findings[CACHE_IMAGE] = (finding(PATCHED_CVE, fix="2", pkg="zlib"),)
+    with pytest.raises(guard.SecurityRegressionRefused) as e:
+        route(box)
+    assert "this release brings it back" in str(e.value)
+    assert guard.patched_cves(box.paths, "demo") == {PATCHED_CVE}

@@ -31,7 +31,7 @@ On any failure the run rolls back, whatever the project's container-update
 begun, the pins the project had are restored exactly (or cleared when it
 had none) and its containers recreated and waited for; then every image
 this run built is removed, by the name it was given. A rollback failure
-is added to the outcome's reason and logged; it never replaces the step
+is the outcome's `rollback_problems` and logged; it never replaces the step
 that failed. An exception no step expects rolls back the same way and is
 raised, with the rollback's failures as notes on it.
 
@@ -83,7 +83,7 @@ _COMPONENT = "autofix"
 @dataclass(frozen=True)
 class AutofixOutcome:
     """`rollback_problems`: what a failed run's rollback could not undo, one
-    line each (also in `reason`); empty when it was undone cleanly. When it
+    line each (not repeated in `reason`); empty when it was undone cleanly. When it
     is not empty the project may be left mixed (pins restored, containers
     still on a patched image): the flows alert it. `detected_at` and
     `started_at`: when the findings were found and the attempt began, set
@@ -192,9 +192,9 @@ def _autofix(paths: BoxPaths, project: str, findings: Sequence[FindingDispositio
     except StepFailed as e:
         problems = tuple(_rollback(paths, run))
         _finish(paths, project)
-        reason = "; ".join([str(e), *problems])
+        # The rollback's problems have their own field (and the oplog's detail).
         return _outcome(paths, run, cves, AutofixOutcome(
-            False, e.step, reason, (), problems,
+            False, e.step, str(e), (), problems,
             nothing_to_patch=isinstance(e, autofix_plan.NothingToPatch)))
     except BaseException as e:
         problems = _rollback(paths, run)
