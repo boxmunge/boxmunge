@@ -103,8 +103,8 @@ def decide_release_users(project_name: str, paths: BoxPaths, manifest: dict,
                 try:
                     remove_candidates(project_name)
                 except DockerError as e:
-                    raise type(refused)([*refused.problems, f"Removing its candidate "
-                                         f"images failed too: {e}"]) from e
+                    raise refused.with_extra(f"Removing its candidate images failed "
+                                             f"too: {e}") from e
                 raise
     except (RunAsError, ComposeResolveError, ComposeError) as e:
         raise DeployRefused([str(e)]) from e

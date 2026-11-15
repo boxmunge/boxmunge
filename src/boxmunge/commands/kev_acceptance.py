@@ -83,9 +83,9 @@ def accept_at_guard(project: str, check: KevLiftCheck, paths: BoxPaths) -> str |
     quarantined has no lift to alert the acceptance: it is alerted here."""
     refusal, first = _accept(project, check, paths)
     if refusal is not None and first and not is_quarantined(project, paths):
-        notify(paths, f"{project}: deployed without a usable KEV catalog",
-               f"{project}: prod-deploy {ACCEPT_FLAG} let a release through although "
-               f"{refusal}. A CVE that is actively exploited may be live.",
+        notify(paths, f"{project}: deploying without a usable KEV catalog",
+               f"{project}: prod-deploy {ACCEPT_FLAG} accepted, deploying although "
+               f"{refusal}. A CVE that is actively exploited may go live.",
                component="deploy", project=project, priority=0)
     return refusal
 

@@ -74,7 +74,11 @@ class SecurityRegressionRefused(DeployRefused):
 
     def __init__(self, reasons: list[str], closing: str) -> None:
         self.reasons = reasons
+        self.closing = closing
         super().__init__([*reasons, closing])
+
+    def with_extra(self, line: str) -> SecurityRegressionRefused:
+        return SecurityRegressionRefused([*self.reasons, line], self.closing)
 
 
 @dataclass
@@ -232,11 +236,11 @@ def _let_through(paths: BoxPaths, override: _Override, project: str, where: str,
     if key in override.recorded:
         return
     override.recorded.add(key)
-    log_warning(component, f"{OVERRIDE_FLAG}: deployed to {where} past the deploy guard",
+    log_warning(component, f"{OVERRIDE_FLAG}: deploying to {where} past the deploy guard",
                 paths, project=project,
                 detail={"reason": override.reason, "where": where, "problems": problems})
-    notify(paths, f"{project}: deployed past the deploy guard",
-           f"{project}: {OVERRIDE_FLAG} let a release through to {where} that the deploy "
+    notify(paths, f"{project}: deploying past the deploy guard",
+           f"{project}: {OVERRIDE_FLAG} accepted for a release to {where} that the deploy "
            f"guard refused. Reason given: {override.reason}\n" + "\n".join(problems),
            component=component, project=project, priority=0)
 

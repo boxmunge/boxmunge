@@ -22,6 +22,10 @@ class DeployRefused(Exception):
         self.problems = problems
         super().__init__("\n".join(f"- {p}" for p in problems))
 
+    def with_extra(self, line: str) -> DeployRefused:
+        """The same refusal with one more problem (a subclass keeps its exits)."""
+        return type(self)([*self.problems, line])
+
 
 @dataclass(frozen=True)
 class ReleaseTarget:

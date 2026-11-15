@@ -120,7 +120,7 @@ def test_prod_deploys_accept_stale_kev_accepts_no_usable_catalog(box, monkeypatc
         _guard(box)  # a rollback decides its release twice
     assert capsys.readouterr().out.count("--accept-stale-kev: deploying although") == 1
     (title, body, priority), = pushover.sent
-    assert "demo: deployed without a usable KEV catalog" in title and priority == 0
+    assert "demo: deploying without a usable KEV catalog" in title and priority == 0
     assert "--accept-stale-kev" in body and "no usable CISA KEV catalog" in body
 
 
@@ -280,7 +280,7 @@ def test_override_with_reason_proceeds_and_is_audited(box, monkeypatch, capsys) 
     assert logged[0]["detail"]["reason"] == "not reachable: libc unused"
     assert any(KEV_CVE in p for p in logged[0]["detail"]["problems"])
     (title, body, priority), = pushover.sent
-    assert "deployed past the deploy guard" in title and priority == 0
+    assert "deploying past the deploy guard" in title and priority == 0
     assert "not reachable: libc unused" in body and KEV_CVE in body
 
 
@@ -302,3 +302,39 @@ def test_a_scan_that_cannot_be_kept_still_stands(box, monkeypatch, capsys) -> No
     monkeypatch.setattr(ScanCache, "put", full)
     _guard(box)
     assert "WARNING: keeping the scan of" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("refusal", ["guard", "quarantine"])
+def test_a_refusal_whose_candidates_cannot_be_removed_keeps_its_text(
+        box, monkeypatch, refusal) -> None:
+    """A refused release's candidate images are removed; when that fails too,
+    the refusal gains a line and keeps its exits (no traceback)."""
+    from boxmunge.commands import release_config
+    from boxmunge.docker_run import DockerError
+    from tests.test_commands.cve_helpers import seed_quarantine
+    calls = []
+
+    def remove(project):
+        calls.append(project)
+        if len(calls) > 1:  # the first removal precedes the build
+            raise DockerError("docker image rm timed out")
+    monkeypatch.setattr(release_config, "remove_candidates", remove)
+    if refusal == "guard":
+        _carry_kev(box)
+        expected = guard.SecurityRegressionRefused
+    else:
+        seed_quarantine(box.paths)
+        monkeypatch.setattr(guard, "guard_release", lambda *a: None)
+        box.findings[CACHE_IMAGE] = (finding("CVE-2026-1234"),)
+        monkeypatch.setitem(MANIFEST, "security", {"posture": "paranoid"})
+        expected = gate.QuarantineRefused
+    with pytest.raises(expected) as e:
+        _decide_production(box, "deploy")
+    assert calls == ["demo", "demo"]
+    text = str(e.value)
+    assert "Removing its candidate images failed too: docker image rm timed out" in text
+    if refusal == "guard":
+        assert KEV_CVE in text and text.endswith(CLOSING)
+        assert e.value.reasons[-1].startswith("Removing its candidate images failed too")
+    else:
+        assert "CVE-2026-1234" in text
