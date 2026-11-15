@@ -47,6 +47,7 @@ NOT_DOCKER = {
     ("commands/upgrade_howto_cmd.py", "_fetch_notes", "?"): "sudo to the upgrade shim's guide verb",
     ("cve/scanner.py", "refresh_db", "trivy"): "trivy DB download; never reads project compose files, needs HOME for its cache",
     ("cve/scanner.py", "scan_image", "trivy"): "trivy scans an image from the daemon; never reads project compose files",
+    ("cve/scanner.py", "trivy_version_key", "trivy"): "`trivy version` names Trivy and its DB; it does not talk to Docker or read compose files",
     ("health_checks/hardening.py", "_run", "?"): "host hardening probes (ufw, systemctl, sshd) with an sbin PATH",
     ("mcp_tools.py", "run_subprocess_tool", "?"): "runs the upgrade shim argv",
     ("os_updates.py", "_systemctl", "systemctl"): "reads apt timer and unit state",

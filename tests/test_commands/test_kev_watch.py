@@ -3,7 +3,6 @@
 findings contain it, and only those."""
 from __future__ import annotations
 
-import json
 import os
 import threading
 from datetime import datetime, timedelta, timezone
@@ -16,7 +15,7 @@ from boxmunge.cve.breaker import BreakerError
 from boxmunge.cve.exploited import ExploitedIndex, ExploitedSource
 from boxmunge.cve.fleet_lock import FleetLockBusy, fleet_lock
 from boxmunge.cve.kev import KevCatalog
-from boxmunge.cve.kev_watch_state import Failing, WatchState, read_watch, write_watch
+from boxmunge.cve.kev_watch_state import WatchState, read_watch, write_watch
 from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
 from boxmunge.cve.scan_state import write_scan_state
 from boxmunge.cve.scanner import Severity
