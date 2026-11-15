@@ -38,6 +38,8 @@ _SPAWN_MODULES = set(_SPAWNERS) | {"asyncio.subprocess"}
 # A new spawn site fails test_every_spawn_is_classified until it is one or
 # the other. "?" is a program the scan cannot read from the source.
 NOT_DOCKER = {
+    ("health_checks/jobs_runner.py", "unit_states", "?"): "systemctl show of the jobs units; never talks to Docker",
+    ("api/job_runner.py", "_spawn_worker", "?"): "boxmunge-server _run-job <id>: the job worker, which builds its own docker_env() for any compose call",
     ("as_deploy.py", "run_as_deploy", "?"): "the manifest's pre_deploy hook, and git in the project's repo or the slot's clone",
     ("bounded_run.py", "run_bounded", "?"): "the caller's argv and env; service_exec passes docker_env()",
     ("commands/autofix_queue_cmd.py", "start_autofix_unit", "systemctl"): "starts the autofix unit without waiting",
