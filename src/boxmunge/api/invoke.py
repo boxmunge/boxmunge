@@ -64,7 +64,7 @@ class Invoker:
         safe_params = redact(action.params, params)
         if audited:
             try:
-                self._audit.append(audit_record(principal, name, "accepted", params=safe_params))
+                self._audit.append(audit_record(principal.id, name, "accepted", params=safe_params))
             except AuditError as e:
                 log_error("audit", f"refused {name} for {principal.id}: {e}", self._paths)
                 raise ActionError(
@@ -149,7 +149,7 @@ class Invoker:
             return None
 
     def _refusal(self, principal: Principal, name: str, error: ActionError) -> None:
-        record = audit_record(principal, _audited_name(name), "refused",
+        record = audit_record(principal.id, _audited_name(name), "refused",
                               code=error.code.value, message=error.message)
         try:
             self._audit.append(record)
@@ -159,7 +159,7 @@ class Invoker:
 
     def _outcome(self, principal: Principal, name: str, params: dict[str, Any],
                  outcome: str, code: str | None = None, message: str | None = None) -> None:
-        record = audit_record(principal, name, outcome, params=params,
+        record = audit_record(principal.id, name, outcome, params=params,
                               code=code, message=message)
         try:
             self._audit.append(record)
