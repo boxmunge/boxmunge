@@ -122,13 +122,20 @@ POST /v1/actions/project.get
 
 Parameter and result schemas use a small JSON Schema subset: `type`, `properties`, `required`,
 `additionalProperties`, `enum`, `pattern`, `minimum`, `maximum`, `minLength`, `maxLength`, `items`,
-`const`, plus the annotations `description` and `secret`, and one keyword of boxmunge's own:
+`const`, plus the annotations `description` and `secret`, and two keywords of boxmunge's own:
 
 - `x-result-of-action: true` appears only on a job record's `result` property, beside its `action`
   property. It means the value is null or the result of the action that `action` names, matching
   that action's catalog `result` schema (an unknown action is invalid). Its `type` is
   `["object", "null"]`. A client that does not understand the keyword can
   treat `result` as any JSON value or null.
+- `x-tier: "govern"` marks a parameter that weakens a control, such as resuming a project
+  without its security checks. It never affects validation. It sits only on an optional boolean
+  parameter, which counts when it is `true`, or an optional string parameter, which counts when
+  it is present. A call that uses such a parameter needs that tier rather than the action's own.
+  Plugins never hold `govern`, so a plugin can call the action but not with that parameter: the
+  call is refused with `forbidden`, naming the parameter and the SSH command the operator runs
+  instead. Leave the parameter out, or send `false`.
 
 - Every object schema sets `additionalProperties: false`. Unknown parameters are refused. The
   server checks every result it sends against the schema it publishes, but within `1.x` a

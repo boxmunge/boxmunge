@@ -185,3 +185,24 @@ def test_a_result_cannot_pass_unchecked_without_the_registry() -> None:
     assert validate(JOB_LIKE, {"action": "thing.get", "result": None}) == []
     assert validate(JOB_LIKE, {"action": "thing.get", "result": {"count": 3}}) == [
         "$.result: no action registry to check it against"]
+
+
+@pytest.mark.parametrize("schema,message", [
+    ({"type": "boolean", "x-tier": "root"}, "x-tier must be one of"),
+    ({"type": "boolean", "x-tier": True}, "x-tier must be one of"),
+    ({"type": "integer", "x-tier": "govern"},
+     "x-tier is allowed only on a boolean or string property"),
+    (obj({"force": {"type": "boolean", "x-tier": "govern"}}),
+     "$.force: x-tier is allowed only on an optional property"),
+])
+def test_x_tier_outside_its_rules_is_rejected(schema, message) -> None:
+    with pytest.raises(SchemaDefinitionError) as excinfo:
+        check_schema(schema)
+    assert message in str(excinfo.value)
+
+
+def test_x_tier_never_affects_validation() -> None:
+    schema = obj({"force": {"type": "boolean", "x-tier": "govern"}}, optional=("force",))
+    check_schema(schema)
+    assert validate(schema, {"force": True}) == []
+    assert validate(schema, {"force": "yes"}) == ["$.force: expected boolean, got string"]

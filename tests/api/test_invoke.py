@@ -67,6 +67,7 @@ def test_observe_call_returns_data_and_is_not_audited(paths) -> None:
     params, ctx = calls.seen[0]
     assert params == {"project": "shop"}
     assert ctx.principal == WEBUI and ctx.paths is paths and ctx.emit is None
+    assert ctx.after_release is None
     assert read_audit(paths) == []
 
 
@@ -177,7 +178,7 @@ def test_unwritable_audit_log_refuses_and_runs_nothing(paths) -> None:
 
 def test_job_actions_need_a_job_runner(paths) -> None:
     invoker = make_invoker(paths, registry=_registry(_action("project.stage", Tier.OPERATE,
-                                                             job=True)))
+                                                             job=True, params=obj({}))))
     with pytest.raises(ActionError) as excinfo:
         invoker.invoke("project.stage", {}, OPERATOR)
     assert excinfo.value.code is ErrorCode.UNAVAILABLE
@@ -294,3 +295,36 @@ def test_a_job_result_is_checked_against_the_named_actions_schema(paths, result,
     assert excinfo.value.code is ErrorCode.FAILED
     assert excinfo.value.details["violations"] == [
         "$.result.ok: expected boolean, got string"]
+
+
+def _staging_check(params):
+    if params.get("tag") and params.get("latest"):
+        return "Give tag or latest, not both."
+    return None
+
+
+def test_param_check_message_is_invalid_params(paths) -> None:
+    calls = Calls()
+    action = _action("project.stage", Tier.OPERATE, handler=calls.handler(),
+                     params=obj({"tag": STRING, "latest": BOOLEAN}, optional=("tag", "latest")),
+                     param_check=_staging_check)
+    invoker = make_invoker(paths, registry=_registry(action))
+    with pytest.raises(ActionError) as excinfo:
+        invoker.invoke("project.stage", {"tag": "v2", "latest": True}, OPERATOR)
+    assert excinfo.value.code is ErrorCode.INVALID_PARAMS
+    assert excinfo.value.message == "Give tag or latest, not both."
+    assert calls.seen == []
+    _refused(paths, ErrorCode.INVALID_PARAMS)
+    invoker.invoke("project.stage", {"tag": "v2"}, OPERATOR)
+    assert calls.seen[0][0] == {"tag": "v2"}
+
+
+def test_param_check_runs_only_on_schema_valid_params(paths) -> None:
+    seen = []
+    action = _action("project.stage", Tier.OPERATE, params=obj({"tag": STRING}),
+                     param_check=lambda params: seen.append(params))
+    invoker = make_invoker(paths, registry=_registry(action))
+    with pytest.raises(ActionError) as excinfo:
+        invoker.invoke("project.stage", {"tag": 3}, OPERATOR)
+    assert excinfo.value.code is ErrorCode.INVALID_PARAMS
+    assert seen == []

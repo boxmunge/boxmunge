@@ -108,3 +108,53 @@ def test_result_of_action_is_refused_in_params() -> None:
                     result=obj({}), handler=lambda params, ctx: {})
     with pytest.raises(RegistryError, match="params schema may not use x-result-of-action"):
         registry.register(action)
+
+
+GOVERN_FLAG = {**BOOLEAN, "x-tier": "govern"}
+
+
+@pytest.mark.parametrize("tier,params,cli,message", [
+    (Tier.OPERATE, obj({"project": STRING, "force": GOVERN_FLAG}),
+     "resume", "x-tier is allowed only on an optional property"),
+    (Tier.OPERATE, obj({"limit": {"type": "integer", "x-tier": "govern"}}, optional=("limit",)),
+     "resume", "x-tier is allowed only on a boolean or string property"),
+    (Tier.OPERATE, obj({"note": {"type": ["string", "null"], "x-tier": "govern"}},
+                       optional=("note",)),
+     "resume", "x-tier is allowed only on a boolean or string property"),
+    (Tier.GOVERN, obj({"force": GOVERN_FLAG}, optional=("force",)),
+     "resume", "x-tier govern on force is not above the action's tier (govern)"),
+    (Tier.OPERATE, obj({"force": {**BOOLEAN, "x-tier": "observe"}}, optional=("force",)),
+     "resume", "x-tier observe on force is not above the action's tier (operate)"),
+    (Tier.OPERATE, obj({"force": {**BOOLEAN, "x-tier": "root"}}, optional=("force",)),
+     "resume", "x-tier must be one of"),
+    (Tier.OPERATE, obj({"opts": obj({"force": GOVERN_FLAG}, optional=("force",))},
+                       optional=("opts",)),
+     "resume", "x-tier is allowed only on a top-level parameter"),
+    (Tier.OPERATE, obj({"force": GOVERN_FLAG}, optional=("force",)),
+     None, "an x-tier parameter needs the action's cli command"),
+])
+def test_registry_rejects_x_tier_on_required_or_non_boolean_string_or_not_above(
+        tier, params, cli, message) -> None:
+    with pytest.raises(RegistryError) as excinfo:
+        Registry().register(_action("project.resume", tier, params=params, cli=cli))
+    assert message in str(excinfo.value)
+
+
+def test_registry_rejects_x_tier_in_a_result() -> None:
+    result = obj({"ok": BOOLEAN, "forced": GOVERN_FLAG}, optional=("forced",))
+    with pytest.raises(RegistryError, match="x-tier is allowed only on a top-level parameter"):
+        Registry().register(_action("project.resume", Tier.OPERATE, result=result,
+                                    cli="resume"))
+
+
+def test_registry_accepts_a_govern_flag_on_an_operate_action() -> None:
+    params = obj({"force": GOVERN_FLAG, "reason": {**STRING, "x-tier": "govern"}},
+                 optional=("force", "reason"))
+    Registry().register(_action("project.resume", Tier.OPERATE, params=params, cli="resume"))
+
+
+def test_registry_rejects_secret_params_on_job_actions() -> None:
+    params = obj({"token": {**STRING, "secret": True}}, optional=("token",))
+    with pytest.raises(RegistryError, match="a job action may not have a secret parameter"):
+        Registry().register(_action("project.stage", Tier.OPERATE, params=params, job=True))
+    Registry().register(_action("project.stage", Tier.OPERATE, params=params))

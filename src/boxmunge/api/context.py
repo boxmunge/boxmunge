@@ -4,7 +4,9 @@
 Handlers read state files through ctx.paths. Facts that need Docker or the
 host (health probes, smoke checks, container logs) come through ctx.host, a
 HostProbe: LiveHost on a real box, FixtureHost in dev mode. ctx.emit is set
-only for actions that run as jobs.
+only for actions that run as jobs. ctx.after_release is set only by the job
+worker: a handler passes it a callable to run once the job's locks are
+released.
 """
 from __future__ import annotations
 
@@ -28,6 +30,7 @@ class HostProbe(Protocol):
 
 
 Emit = Callable[[dict[str, Any]], None]
+AfterRelease = Callable[[Callable[[], None]], None]
 
 
 @dataclass(frozen=True)
@@ -39,3 +42,4 @@ class ActionContext:
     # checking the results stored in job records.
     result_schemas: ResultSchemas
     emit: Emit | None = None
+    after_release: AfterRelease | None = None

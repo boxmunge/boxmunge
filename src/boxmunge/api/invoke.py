@@ -5,6 +5,10 @@
 2. Check the principal's grant, then the tiers this server serves
    (forbidden).
 3. Validate the parameters (invalid_params, listing every violation).
+   A parameter marked x-tier raises the call's tier: check the grant and
+   the served tiers again for that tier (forbidden, naming the parameter
+   and the SSH command). Then run the action's param_check, if any
+   (invalid_params with its message).
 4. A plugin's operate call needs a verified approval (approval_required,
    approval_invalid). This build has no verifier, so none can pass.
 5. For any tier but observe, write the "accepted" audit record; if it
@@ -24,6 +28,7 @@ from typing import Any
 
 from boxmunge.api.audit import AuditError, AuditLog, audit_record, redact
 from boxmunge.api.context import ActionContext, HostProbe
+from boxmunge.api.param_tiers import param_tier_refusal
 from boxmunge.api.principal import Principal, PrincipalKind, Tier, refusal
 from boxmunge.api.registry import Action, Registry
 from boxmunge.api.result import ActionError, ActionResult, ErrorCode
@@ -104,6 +109,12 @@ class Invoker:
                 raise ActionError(ErrorCode.INVALID_PARAMS,
                                   f"Parameters for {name} do not match its schema.",
                                   {"violations": violations})
+            why = param_tier_refusal(action, params, principal, self._served)
+            if why is not None:
+                raise ActionError(ErrorCode.FORBIDDEN, why)
+            problem = action.param_check(params) if action.param_check else None
+            if problem is not None:
+                raise ActionError(ErrorCode.INVALID_PARAMS, problem)
             _check_approval(action, principal, approval)
             if action.job:
                 raise ActionError(ErrorCode.UNAVAILABLE,
