@@ -14,8 +14,9 @@
 # upgrade copies the bundle's there for the standby; the release's own
 # bootstrap/systemd-units.sh records the units the live slot ran before it
 # replaces them; a slot with no copy yet records the live units as its own
-# (seed_slot_units). A rollback installs the slot's units, disables and removes
-# every boxmunge unit the slot does not ship, and enables its timers and path
+# (seed_slot_units). A rollback installs the slot's units, disables (timers,
+# path units) or stops (services) and removes every boxmunge unit the slot
+# does not ship, and enables its timers and path
 # units (restore_slot_units). A shim from before 0.11.11 does not, so 0.12
 # installs only over 0.11.11 or later (src/boxmunge/upgrade_floor.py): the upgrade that
 # adds 0.12's units is run by a shim that can take them away again. Every
@@ -146,15 +147,28 @@ restore_slot_units() {
         bm_log error upgrade "systemd units record refused" "{\"slot\": \"$1\"}"
         return 1
     fi
+    # The units the slot does not ship: timers and path units are disabled
+    # first, so none starts a service again, then the services are stopped
+    # (one still running, the job runner say, would go on running the code
+    # of the release rolled back from), then all are removed.
+    local removed=()
     while IFS= read -r unit; do
-        name="${unit##*/}"
-        [[ ! -e "$src/$name" ]] || continue
-        if [[ "$name" != *.service ]]; then
-            systemctl disable --now "$name" || { ok=0; log "ERROR: could not disable $name"; }
-        fi
-        rm -f "$unit"
-        log "Removed $name: the release on slot $1 does not ship it"
+        [[ -e "$src/${unit##*/}" ]] || removed+=("$unit")
     done < <(units_in "$SYSTEMD_UNIT_DIR")
+    for unit in "${removed[@]+"${removed[@]}"}"; do
+        name="${unit##*/}"
+        [[ "$name" != *.service ]] || continue
+        systemctl disable --now "$name" || { ok=0; log "ERROR: could not disable $name"; }
+    done
+    for unit in "${removed[@]+"${removed[@]}"}"; do
+        name="${unit##*/}"
+        [[ "$name" == *.service ]] || continue
+        systemctl stop "$name" || { ok=0; log "ERROR: could not stop $name"; }
+    done
+    for unit in "${removed[@]+"${removed[@]}"}"; do
+        rm -f "$unit"
+        log "Removed ${unit##*/}: the release on slot $1 does not ship it"
+    done
     # Timers and path units are enabled; a running one keeps the schedule or
     # watch it loaded, so each whose file changes is restarted.
     while IFS= read -r unit; do

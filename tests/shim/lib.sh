@@ -238,7 +238,7 @@ state="${state%.service}"
 case "$1" in
     show) if [[ -f "$state" ]]; then printf 'LoadState=loaded\nResult=%s\n' "$(cat "$state")"; else printf 'LoadState=not-found\nResult=success\n'; fi ;;
     reset-failed) [[ -f "$state" ]] || { echo "Unit ${*: -1} not loaded." >&2; exit 1; }; rm -f "$state" ;;
-    daemon-reload|enable|disable|restart) ;;   # the units a rollback restores (units.sh)
+    daemon-reload|enable|disable|restart|stop) ;;   # the units a rollback restores or removes (units.sh)
     *) echo "systemctl stand-in: unexpected $*" >&2; exit 64 ;;
 esac
 EOF

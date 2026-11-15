@@ -46,6 +46,15 @@ calls="$(cat "$BOXMUNGE_ROOT/calls")"
 for t in boxmunge-maintenance.timer boxmunge-kev-watch.timer boxmunge-jobs.path; do
     [[ "$calls" == *"systemctl disable --now $t"* ]] && pass "$t disabled" || fail "$t not disabled: $calls"
 done
+# A removed service still running (the job runner on the deleted slot's
+# code) is stopped, after its trigger is disabled; a kept one is not.
+for s in boxmunge-maintenance.service boxmunge-kev-watch.service boxmunge-autofix.service boxmunge-jobs.service; do
+    [[ "$calls" == *"systemctl stop $s"* ]] && pass "$s stopped" || fail "$s not stopped: $calls"
+done
+[[ "$calls" == *"systemctl disable --now boxmunge-jobs.path"*"systemctl stop boxmunge-jobs.service"* ]] \
+    && pass "the job runner's trigger is disabled before the runner is stopped" || fail "order: $calls"
+[[ "$calls" != *"systemctl stop boxmunge-health.service"* && "$calls" != *"systemctl stop boxmunge-cve-scan.service"* ]] \
+    && pass "a service the previous release ships is not stopped" || fail "stopped a kept service: $calls"
 [[ "$calls" == *"systemctl enable --now boxmunge-container-update.timer boxmunge-cve-scan.timer boxmunge-health.timer"* ]] \
     && pass "the previous release's timers are enabled" || fail "timers not enabled: $calls"
 [[ "$calls" == *"systemctl restart"*"boxmunge-health.timer"* ]] \
