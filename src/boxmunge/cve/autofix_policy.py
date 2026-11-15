@@ -23,6 +23,9 @@ AUTOFIX_URGENT_BUDGET = timedelta(minutes=30)
 # A nightly patch attempt (commands.autofix_nightly) has as long, from its
 # own start: projects are patched one after another in the window.
 AUTOFIX_NIGHTLY_BUDGET = timedelta(minutes=30)
+# No nightly patch starts later in container-update's run than this, less
+# its budget and a margin: the maintenance unit's limit covers the scan too.
+NIGHTLY_AUTOFIX_WINDOW = timedelta(hours=3)
 
 # A finding the policy takes down (or, opted out, runs at risk) for: a
 # not-listed one with these and its patch gate is strict's overdue fix

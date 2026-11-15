@@ -471,3 +471,15 @@ def test_a_journal_left_after_a_patch_keeps_what_recovery_restores(paths, box,
     assert box.pins == (pin,) and box.running()["web"] == pin.image_id
     assert read_records(paths, NAME) == (record,)     # no record claims the undone patch
     assert pin.ref not in box.removed and read_journal(paths, NAME) is None
+
+
+def test_cve_gone_from_the_running_images_is_nothing_to_patch(paths, box) -> None:
+    box.findings[WEB] = []   # e.g. a container update moved it onto a fixed upstream
+    outcome = _run(paths)
+    assert (outcome.ok, outcome.failed_step, outcome.nothing_to_patch) == (False, "scan", True)
+    assert box.built == [] and box.recreates == 0
+
+
+def test_other_scan_failures_are_not_nothing_to_patch(paths, box) -> None:
+    box.patched_findings["web"] = [_fd(disposition=Disposition.IGNORED_FIXED)]
+    assert _run(paths).nothing_to_patch is False

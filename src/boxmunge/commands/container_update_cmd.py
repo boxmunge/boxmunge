@@ -4,9 +4,12 @@
 import fcntl
 import os
 import sys
+from datetime import datetime
 from typing import Any
 
-from boxmunge.commands.autofix_nightly import after_update, send_nightly_results
+from boxmunge.commands.autofix_nightly import (
+    after_update, autofix_the_rest, send_nightly_results, window_end,
+)
 from boxmunge.config import ConfigError
 from boxmunge.host_config_alert import load_for_job
 from boxmunge.commands.health_state import is_monitor_stopped
@@ -142,17 +145,19 @@ def _update_one(paths: BoxPaths, target: UpdateTarget, dry_run: bool) -> dict[st
         return {"name": target.name, "status": "failed", "reason": f"exception: {e}"}
 
 
-def update_project(paths: BoxPaths, target: UpdateTarget, dry_run: bool) -> dict[str, Any]:
+def update_project(paths: BoxPaths, target: UpdateTarget, dry_run: bool,
+                   nightly_until: datetime | None = None) -> dict[str, Any]:
     """One user project, entirely under its project lock: its lifecycle state
     is read while the lock is held, so a pause or quarantine that lands while
     the run works on other targets is honoured. The nightly autofix runs
-    after the update, under the same lock (its attempt, if any, is the
-    result's "autofix")."""
+    after the update, under the same lock, when a window end is given (its
+    attempt, if any, is the result's "autofix")."""
     try:
         with project_lock(target.name, paths):
             result = _update_project_locked(paths, target, dry_run)
-            if not dry_run:
-                result["autofix"] = after_update(paths, target.name, result)
+            if nightly_until is not None:
+                result["autofix"] = after_update(paths, target.name, result,
+                                                 until=nightly_until)
             return result
     except LockError:
         return lock_skipped(paths, target)
@@ -239,14 +244,14 @@ def _prefetch_paused(paths: BoxPaths, target: UpdateTarget) -> dict[str, Any]:
 
 def _retry_locked(
     paths: BoxPaths, targets: list[UpdateTarget], results: list[dict[str, Any]],
-    dry_run: bool,
+    dry_run: bool, nightly_until: datetime | None,
 ) -> list[dict[str, Any]]:
     """Retry each lock-skipped project once; report any still busy."""
     by_name = {t.name: t for t in targets}
     retried: list[dict[str, Any]] = []
     for result in results:
         if result["status"] == SKIPPED_LOCKED:
-            result = update_project(paths, by_name[result["name"]], dry_run)
+            result = update_project(paths, by_name[result["name"]], dry_run, nightly_until)
             if result["status"] == SKIPPED_LOCKED:
                 print(
                     f"Skipped {result['name']}: another operation holds its "
@@ -266,6 +271,10 @@ def run_container_update(
     containers. Reports which targets WOULD change. The pulled images'
     layers remain in local Docker storage, ready for the next real run; the
     image tags are pointed back at the images the containers run.
+
+    A real run also runs the nightly autofix (commands.autofix_nightly) of
+    every deployed project, container updates on or off, and sends its
+    digest.
     """
     # Caddy too: no target may be recreated while the daemon is migrating.
     from boxmunge.lifecycle import migration_refusal
@@ -274,6 +283,7 @@ def run_container_update(
         print(f"ERROR: {refusal}", file=sys.stderr)
         log_warning("container-update", refusal, paths)
         return 1
+    nightly_until = None if dry_run else window_end()
     # Step 0: Lock
     paths.container_update_state.mkdir(parents=True, exist_ok=True)
     # state/ is deploy-writable: open("w") would follow a planted symlink and
@@ -306,6 +316,9 @@ def run_container_update(
         if not cu.get("enabled", True):
             log_operation("container-update", "Skipped: container updates disabled", paths)
             print("Container updates disabled in config, skipping.")
+            if nightly_until is not None:
+                send_nightly_results(paths, autofix_the_rest(paths, (), only=only,
+                                                             until=nightly_until))
             return 0
 
         # Step 3: Build target list
@@ -333,11 +346,11 @@ def run_container_update(
         # Step 5: Update user projects independently
         for target in targets:
             if not target.is_caddy:
-                results.append(update_project(paths, target, dry_run))
+                results.append(update_project(paths, target, dry_run, nightly_until))
 
         # Step 5b: a project whose lock was held (a deploy, scan, or health
         # tick in progress) gets one more try now the others are done.
-        results = _retry_locked(paths, targets, results, dry_run)
+        results = _retry_locked(paths, targets, results, dry_run, nightly_until)
 
         # Step 6: Summary
         succeeded = [r["name"] for r in results if r["status"] == "succeeded"]
@@ -351,7 +364,10 @@ def run_container_update(
         )
         if failed:
             _send_summary_alert(paths, results)
-        send_nightly_results(paths, [r["autofix"] for r in results if r.get("autofix")])
+        if nightly_until is not None:
+            send_nightly_results(paths, [r["autofix"] for r in results if r.get("autofix")]
+                                 + autofix_the_rest(paths, {t.name for t in targets},
+                                                    only=only, until=nightly_until))
         print(
             f"\nSummary: {len(succeeded)} succeeded, {len(failed)} failed, "
             f"{len(no_change)} no-change, {len(skipped)} skipped (busy)"

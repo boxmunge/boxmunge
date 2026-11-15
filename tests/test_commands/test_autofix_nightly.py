@@ -14,7 +14,7 @@ import yaml
 
 from boxmunge.commands import autofix_nightly, container_update_cmd, security_scan_core
 from boxmunge.cve import autofix_run
-from boxmunge.cve.autofix_policy import AUTOFIX_NIGHTLY_BUDGET
+from boxmunge.cve.autofix_policy import AUTOFIX_NIGHTLY_BUDGET, NIGHTLY_AUTOFIX_WINDOW
 from boxmunge.cve.autofix_record import (
     AutofixJournal, PackageChange, PatchRecord, QueuedFinding, QueueEntry, write_journal,
     write_queue_entry,
@@ -77,12 +77,17 @@ class Box:
         self.runner = Runner()
         monkeypatch.setattr(autofix_nightly, "autofix_project_locked", self.runner)
         self.update_status = "no_change"
+        self.update_result: dict = {"reason": "pull_failed: x"}
+        self.updated: list[str] = []
         monkeypatch.setattr(container_update_cmd, "update_target_locked", self._update)
 
     def _update(self, paths, target):
+        self.updated.append(target.name)
         if target.is_caddy:
             return {"name": target.name, "status": "no_change"}
-        return {"name": target.name, "status": self.update_status, "reason": "pull_failed: x"}
+        return {"name": target.name, "status": self.update_status, "tags_not_restored": [],
+                "rollback_attempted": False, "rollback_succeeded": None,
+                **self.update_result}
 
     def scan(self, project: str = "demo") -> None:
         now = _now()
@@ -130,7 +135,8 @@ def test_quarantined_project_skipped(tmp_path, monkeypatch) -> None:
     assert [c[0] for c in box.runner.calls] == ["shop"]
     # The flow's own gate holds too, whoever calls it.
     with project_lock("demo", box.paths):
-        assert autofix_nightly.run_nightly_autofix(box.paths, "demo") is None
+        assert autofix_nightly.run_nightly_autofix(
+            box.paths, "demo", until=autofix_nightly.window_end()) is None
     assert [c[0] for c in box.runner.calls] == ["shop"]
 
 
@@ -235,16 +241,157 @@ def test_autofix_off_skips_nightly(tmp_path, monkeypatch) -> None:
     assert box.runner.calls == []
 
 
-def test_failed_container_update_skips_nightly(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("result", [
+    pytest.param({"reason": "pull_failed: registry down"}, id="pull-failed"),
+    pytest.param({"reason": "backup_failed"}, id="backup-failed"),
+    pytest.param({"reason": "unhealthy: web", "rollback_attempted": True,
+                  "rollback_succeeded": True}, id="rolled-back-healthy"),
+])
+def test_failed_update_on_previous_images_still_patches(tmp_path, monkeypatch,
+                                                        result) -> None:
     box = Box(tmp_path, monkeypatch)
     box.scan()
-    box.update_status = "failed"
+    box.update_status, box.update_result = "failed", result
+    box.update()
+    assert [c[0] for c in box.runner.calls] == ["demo"]
+
+
+@pytest.mark.parametrize(("result", "why"), [
+    pytest.param({"reason": "unhealthy: web"}, "unhealthy: web", id="left-broken"),
+    pytest.param({"reason": "recreate_failed: x", "rollback_attempted": True,
+                  "rollback_succeeded": False}, "recreate_failed: x", id="rollback-failed"),
+    pytest.param({"reason": "pull_failed: x; tag_restore_failed: web:1",
+                  "tags_not_restored": ["web:1"]}, "pull_failed: x; tag_restore_failed: web:1",
+                 id="tags-not-restored"),
+    pytest.param({"reason": "exception: boom"}, "exception: boom", id="unknown-state"),
+])
+def test_failed_update_that_left_the_project_changed_skips(tmp_path, monkeypatch, result,
+                                                           why) -> None:
+    box = Box(tmp_path, monkeypatch)
+    box.scan()
+    box.update_status, box.update_result = "failed", result
     box.paths.log_file.parent.mkdir(parents=True, exist_ok=True)
     box.update()
     assert box.runner.calls == []
+    [(title, body, priority)] = box.digests()
+    assert priority == -1 and title.endswith("Nightly autofix: 1 project skipped")
+    assert f"skipped: demo: container update failed: {why}" in body
+    assert "demo: nightly autofix skipped: container update failed" in \
+        box.paths.log_file.read_text()
+
+
+def test_failed_update_with_nothing_to_patch_sends_nothing(tmp_path, monkeypatch) -> None:
+    box = Box(tmp_path, monkeypatch, sev=Severity.LOW)
+    box.scan()
+    box.update_status, box.update_result = "failed", {"reason": "unhealthy: web"}
+    box.update()
     assert box.digests() == []
-    assert ("demo: nightly autofix skipped: tonight's container update failed "
-            "(pull_failed: x)") in box.paths.log_file.read_text()
+
+
+def test_project_with_container_updates_off_still_patched(tmp_path, monkeypatch) -> None:
+    box = Box(tmp_path, monkeypatch, projects=("blog", "shop"))
+    manifest = box.paths.project_manifest("blog")
+    doc = yaml.safe_load(manifest.read_text())
+    doc["container_updates"] = {"enabled": False}
+    manifest.write_text(yaml.safe_dump(doc))
+    box.scan("blog")
+    box.scan("shop")
+    box.update()
+    assert "blog" not in box.updated
+    assert sorted(c[0] for c in box.runner.calls) == ["blog", "shop"]
+    [(title, _body, _p)] = box.digests()
+    assert title.endswith("Nightly autofix: 2 projects patched")
+
+
+def test_box_with_container_updates_off_still_patched(tmp_path, monkeypatch) -> None:
+    box = Box(tmp_path, monkeypatch)
+    config = yaml.safe_load(box.paths.config_file.read_text())
+    config["container_updates"] = {"enabled": False}
+    box.paths.config_file.write_text(yaml.safe_dump(config))
+    box.scan()
+    assert box.update() == 0
+    assert box.updated == []
+    assert [c[0] for c in box.runner.calls] == ["demo"]
+    assert len(box.digests()) == 1
+
+
+def test_not_updated_project_keeps_its_gates(tmp_path, monkeypatch) -> None:
+    box = Box(tmp_path, monkeypatch)
+    manifest = box.paths.project_manifest("demo")
+    doc = yaml.safe_load(manifest.read_text())
+    doc["container_updates"] = {"enabled": False}
+    manifest.write_text(yaml.safe_dump(doc))
+    box.scan()
+    seed_quarantine(box.paths, "demo")
+    box.update()
+    assert box.runner.calls == []
+
+
+def test_not_updated_project_busy_is_listed(tmp_path, monkeypatch) -> None:
+    box = Box(tmp_path, monkeypatch)
+    config = yaml.safe_load(box.paths.config_file.read_text())
+    config["container_updates"] = {"enabled": False}
+    box.paths.config_file.write_text(yaml.safe_dump(config))
+    box.scan()
+    with project_lock("demo", box.paths):
+        box.update()
+    assert box.runner.calls == []
+    [(_t, body, _p)] = box.digests()
+    assert "skipped: demo: another operation holds the project" in body
+
+
+@pytest.mark.parametrize(("status", "line"), [
+    pytest.param("succeeded", f"fixed by tonight's update: demo: {CVE}", id="updated"),
+    pytest.param("no_change", f"no longer in the running images: demo: {CVE}", id="unchanged"),
+])
+def test_cve_gone_from_the_running_images_is_not_a_failure(tmp_path, monkeypatch, status,
+                                                           line) -> None:
+    box = Box(tmp_path, monkeypatch)
+    box.scan()
+    box.update_status = status
+    box.runner.outcome = AutofixOutcome(False, "scan", "no image production runs carries it",
+                                        (), nothing_to_patch=True)
+    box.update()
+    [(title, body, priority)] = box.digests()
+    assert priority == -1 and line in body and "could not patch" not in body
+    assert "could not" not in title
+
+
+def test_patches_stop_starting_near_the_window_end(tmp_path, monkeypatch) -> None:
+    box = Box(tmp_path, monkeypatch, projects=("blog", "shop"))
+    box.scan("blog")
+    box.scan("shop")
+    clock = [_now()]
+    monkeypatch.setattr(autofix_nightly, "_now", lambda: clock[0])
+    real = box.runner.__call__
+
+    def slow(paths, project, findings, *, trigger, deadline):
+        clock[0] += timedelta(hours=2, minutes=21)   # 39 minutes left: under 30 + 10
+        return real(paths, project, findings, trigger=trigger, deadline=deadline)
+
+    monkeypatch.setattr(autofix_nightly, "autofix_project_locked", slow)
+    box.update()
+    assert [c[0] for c in box.runner.calls] == ["blog"]
+    [(title, body, priority)] = box.digests()
+    assert title.endswith("Nightly autofix: 1 project patched, 1 deferred")
+    assert "deferred to the next maintenance window: shop" in body
+
+
+def test_window_leaves_room_for_a_whole_patch(tmp_path, monkeypatch) -> None:
+    box = Box(tmp_path, monkeypatch, projects=("blog", "shop"))
+    box.scan("blog")
+    box.scan("shop")
+    clock = [_now()]
+    monkeypatch.setattr(autofix_nightly, "_now", lambda: clock[0])
+    real = box.runner.__call__
+
+    def slow(paths, project, findings, *, trigger, deadline):
+        clock[0] += timedelta(hours=2, minutes=20)   # exactly 40 minutes left
+        return real(paths, project, findings, trigger=trigger, deadline=deadline)
+
+    monkeypatch.setattr(autofix_nightly, "autofix_project_locked", slow)
+    box.update()
+    assert [c[0] for c in box.runner.calls] == ["blog", "shop"]
 
 
 def test_monitor_stopped_project_skipped(tmp_path, monkeypatch) -> None:
@@ -252,7 +399,8 @@ def test_monitor_stopped_project_skipped(tmp_path, monkeypatch) -> None:
     box.scan()
     monkeypatch.setattr(autofix_nightly, "is_monitor_stopped", lambda project, paths: True)
     with project_lock("demo", box.paths):
-        assert autofix_nightly.run_nightly_autofix(box.paths, "demo") is None
+        assert autofix_nightly.run_nightly_autofix(
+            box.paths, "demo", until=autofix_nightly.window_end()) is None
     assert box.runner.calls == []
 
 
@@ -312,5 +460,18 @@ def test_unreadable_scan_state_goes_to_digest(tmp_path, monkeypatch) -> None:
     assert "cannot be read" in body
 
 
-def test_budget_is_thirty_minutes() -> None:
+def test_budget_and_window() -> None:
     assert AUTOFIX_NIGHTLY_BUDGET == timedelta(minutes=30)
+    assert NIGHTLY_AUTOFIX_WINDOW == timedelta(hours=3)
+
+
+def test_not_updated_project_busy_with_nothing_to_patch_is_not_listed(tmp_path,
+                                                                     monkeypatch) -> None:
+    box = Box(tmp_path, monkeypatch, sev=Severity.LOW)
+    config = yaml.safe_load(box.paths.config_file.read_text())
+    config["container_updates"] = {"enabled": False}
+    box.paths.config_file.write_text(yaml.safe_dump(config))
+    box.scan()
+    with project_lock("demo", box.paths):
+        box.update()
+    assert box.digests() == []

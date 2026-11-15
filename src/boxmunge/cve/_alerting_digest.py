@@ -20,7 +20,8 @@ LOW_URGENCY_KINDS: frozenset[AlertKind] = frozenset(
 # The nightly autofix's outcomes (commands.autofix_nightly): container-update
 # sends them as one digest. Not LOW_URGENCY_KINDS: the urgent flow sends the
 # same kinds at once, and the scan's digest counts findings, not patches.
-NIGHTLY_AUTOFIX_KINDS: frozenset[AlertKind] = frozenset({"autofix_patched", "autofix_failed"})
+NIGHTLY_AUTOFIX_KINDS: frozenset[AlertKind] = frozenset(
+    {"autofix_patched", "autofix_gone", "autofix_failed", "autofix_skipped", "autofix_deferred"})
 
 # Pushover priority -1: delivered without sound or vibration.
 DIGEST_PRIORITY = -1
@@ -59,24 +60,36 @@ def format_scan_digest(alerts: Sequence[Alert]) -> Alert:
 
 
 def format_autofix_digest(alerts: Sequence[Alert]) -> Alert:
-    """One line per project the nightly autofix tried, patched ones first:
-    each alert's title is its line (format_nightly_patched_line,
-    format_nightly_failed_line). ``alerts``: at least one, all quiet."""
+    """One line per project the nightly autofix visited with something to
+    patch: patched, already fixed (nothing left to patch), could not patch,
+    skipped, deferred; by project within each. Each alert's title is
+    its line (_alerting_autofix.format_nightly_*). ``alerts``: at least one,
+    all quiet."""
     if not alerts or not all(a.kind in NIGHTLY_AUTOFIX_KINDS
                              and a.priority == DIGEST_PRIORITY for a in alerts):
         raise ValueError("an autofix digest summarises quiet nightly autofix outcomes only")
-    patched = sorted((a for a in alerts if a.kind == "autofix_patched"), key=lambda a: a.project)
-    failed = sorted((a for a in alerts if a.kind == "autofix_failed"), key=lambda a: a.project)
-    counts = [f"{len(group)} {verb}" for group, verb in
-              ((patched, "patched"), (failed, "could not be patched")) if group]
+    groups = [sorted((a for a in alerts if a.kind == kind), key=lambda a: a.project)
+              for kind, _ in _AUTOFIX_GROUPS]
+    counts = [f"{len(group)} {verb}" for group, (_, verb) in zip(groups, _AUTOFIX_GROUPS)
+              if group]
     # "2 projects patched, 1 could not be patched": the noun once, first.
-    first = len(patched or failed)
+    first = len(next(group for group in groups if group))
     counts[0] = counts[0].replace(" ", f" project{'s' if first != 1 else ''} ", 1)
     body = "\n".join([
-        *(a.title for a in (*patched, *failed)), "",
+        *(a.title for group in groups for a in group), "",
         "Every site stayed up; a patch that failed was rolled back. The scans keep",
         "alerting a finding until it is fixed.",
         "Details: boxmunge security <project>",
     ])
     return Alert(kind="autofix_digest", title="Nightly autofix: " + ", ".join(counts),
                  body=body, priority=DIGEST_PRIORITY)
+
+
+# (kind, how its count reads), in digest order.
+_AUTOFIX_GROUPS: tuple[tuple[AlertKind, str], ...] = (
+    ("autofix_patched", "patched"),
+    ("autofix_gone", "already fixed"),
+    ("autofix_failed", "could not be patched"),
+    ("autofix_skipped", "skipped"),
+    ("autofix_deferred", "deferred"),
+)

@@ -128,6 +128,31 @@ def format_nightly_patched_line(project: str, cves: Sequence[str],
                  project=project)
 
 
+def format_nightly_gone_line(project: str, cves: Sequence[str], *, updated: bool) -> Alert:
+    """The CVEs are no longer in the images the project runs (``updated``:
+    tonight's container update replaced them): nothing to patch, not a
+    failure. One digest line, its title."""
+    where = "fixed by tonight's update" if updated else "no longer in the running images"
+    line = f"{where}: {project}: {_cves(cves)}"
+    return Alert(kind="autofix_gone", title=line, body=line, priority=DIGEST_PRIORITY,
+                 project=project)
+
+
+def format_nightly_skipped_line(project: str, why: str) -> Alert:
+    """A nightly patch that did not start, and why. One digest line, its title."""
+    line = f"skipped: {project}: {why}"
+    return Alert(kind="autofix_skipped", title=line, body=line, priority=DIGEST_PRIORITY,
+                 project=project)
+
+
+def format_nightly_deferred_line(project: str) -> Alert:
+    """A nightly patch not started: too little of the window was left. One
+    digest line, its title."""
+    line = f"deferred to the next maintenance window: {project}"
+    return Alert(kind="autofix_deferred", title=line, body=line, priority=DIGEST_PRIORITY,
+                 project=project)
+
+
 def format_nightly_failed_line(project: str, *, step: str | None, reason: str) -> Alert:
     """A nightly patch that failed and was rolled back cleanly: one digest
     line, its title."""

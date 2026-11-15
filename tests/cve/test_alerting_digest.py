@@ -128,3 +128,28 @@ def test_autofix_digest_refuses_urgent_and_scan_alerts() -> None:
     with pytest.raises(ValueError):
         format_autofix_digest([])
     assert not is_low_urgency(_patched("demo"))   # never in the scan's own digest
+
+
+def test_autofix_digest_orders_every_group() -> None:
+    from boxmunge.cve.alerting import (
+        format_autofix_digest, format_nightly_deferred_line, format_nightly_failed_line,
+        format_nightly_gone_line, format_nightly_skipped_line,
+    )
+    digest = format_autofix_digest([
+        format_nightly_deferred_line("zed"),
+        format_nightly_skipped_line("web", "container update failed: unhealthy: app"),
+        format_nightly_failed_line("blog", step="build", reason="x"),
+        format_nightly_gone_line("docs", ("CVE-2026-0002",), updated=True),
+        format_nightly_gone_line("api", ("CVE-2026-0003",), updated=False),
+        _patched("shop"),
+    ])
+    assert digest.title == ("Nightly autofix: 1 project patched, 2 already fixed, "
+                            "1 could not be patched, 1 skipped, 1 deferred")
+    assert digest.body.splitlines()[:6] == [
+        "patched: shop: CVE-2026-0001 (1 package)",
+        "no longer in the running images: api: CVE-2026-0003",
+        "fixed by tonight's update: docs: CVE-2026-0002",
+        "could not patch: blog: build: x",
+        "skipped: web: container update failed: unhealthy: app",
+        "deferred to the next maintenance window: zed",
+    ]

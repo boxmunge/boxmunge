@@ -86,7 +86,9 @@ class AutofixOutcome:
     is not empty the project may be left mixed (pins restored, containers
     still on a patched image): the flows alert it. `detected_at` and
     `started_at`: when the findings were found and the attempt began, set
-    by the flow that queued them (None from the runner itself)."""
+    by the flow that queued them (None from the runner itself).
+    `nothing_to_patch`: the run failed because no running image carries the
+    CVEs any more (autofix_plan.NothingToPatch)."""
     ok: bool
     failed_step: Step | None
     reason: str
@@ -94,6 +96,7 @@ class AutofixOutcome:
     rollback_problems: tuple[str, ...] = ()
     detected_at: datetime | None = None
     started_at: datetime | None = None
+    nothing_to_patch: bool = False
 
 
 @dataclass
@@ -153,7 +156,9 @@ def autofix_project_locked(paths: BoxPaths, project: str,
         problems = tuple(_rollback(paths, run))
         _finish(paths, project)
         reason = "; ".join([str(e), *problems])
-        return _outcome(paths, run, cves, AutofixOutcome(False, e.step, reason, (), problems))
+        return _outcome(paths, run, cves, AutofixOutcome(
+            False, e.step, reason, (), problems,
+            nothing_to_patch=isinstance(e, autofix_plan.NothingToPatch)))
     except BaseException as e:
         problems = _rollback(paths, run)
         _finish(paths, project)

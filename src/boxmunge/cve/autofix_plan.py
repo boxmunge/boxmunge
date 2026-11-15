@@ -58,6 +58,15 @@ class StepFailed(Exception):
         self.step: Step = step
 
 
+class NothingToPatch(StepFailed):
+    """No image production runs carries the CVEs any more (a container
+    update or a deploy since the scan replaced it): a failure of the run,
+    but not of the patch."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("scan", reason)
+
+
 @dataclass(frozen=True)
 class ServicePlan:
     """One service's patch: built FROM `base` (an image ID or exact digest;
@@ -154,8 +163,8 @@ def _fixes(decision: ProjectDecision, cves: Collection[str],
 def plan(now: Running, cves: Collection[str], pins: Collection[ImagePin],
          records: Collection[PatchRecord]) -> tuple[ServicePlan, ...]:
     """The services to patch, by name. Raises StepFailed: "scan" when no
-    running image carries any of `cves`, "probe" for one that cannot be
-    patched or a pinned service with no patch record."""
+    running image carries any of `cves` (NothingToPatch), "probe" for one
+    that cannot be patched or a pinned service with no patch record."""
     pinned = {p.service for p in pins}
     recorded = {r.service: r for r in records}
     plans = []
@@ -179,8 +188,8 @@ def plan(now: Running, cves: Collection[str], pins: Collection[ImagePin],
                                  {n: tuple(sorted(v)) for n, v in packages.items()}, before,
                                  tuple(sorted(found))))
     if not plans:
-        raise StepFailed("scan", f"no image production runs carries {', '.join(sorted(cves))} "
-                         f"any more, so there is nothing to patch")
+        raise NothingToPatch(f"no image production runs carries {', '.join(sorted(cves))} "
+                             f"any more, so there is nothing to patch")
     return tuple(plans)
 
 
