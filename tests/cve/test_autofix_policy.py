@@ -238,3 +238,17 @@ def test_the_patch_gate_survives_the_scan_state(tmp_path) -> None:
         [back] = decisions_from_scan_state(read_scan_state(path), project_name="shop")
         assert back.findings[0].fix_meets_patch_gate is fd.fix_meets_patch_gate
         assert nightly_eligible(back.findings[0], R) is nightly_eligible(fd, R)
+
+
+@pytest.mark.parametrize("ddq", [False, True], ids=["quarantined", "opted-out"])
+def test_strict_overdue_fix_is_patched_at_once_and_dark(ddq) -> None:
+    """Strict's fix deadline (cve.fix_grace) turns a fixable finding at its
+    gate QUARANTINE (at risk when opted out) and keeps its patch gate: it is
+    patched now, not at the window, with the site dark while it is."""
+    fd = _judge(_f(), S, ddq=ddq)
+    overdue = replace(fd, fix_would_quarantine=False, disposition=(
+        Disposition.STILL_RUNNING_AT_RISK if ddq else Disposition.QUARANTINE))
+    assert overdue.fix_meets_patch_gate
+    assert urgency(overdue, S) is AutofixUrgency.URGENT
+    assert not nightly_eligible(overdue, S)
+    assert downtime_while_patching(overdue, S)
