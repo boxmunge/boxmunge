@@ -39,8 +39,8 @@ from boxmunge.blocked_update import read_blocked_state
 from boxmunge.commands.security_scan_inputs import project_suppressions_path
 from boxmunge.container_update_targets import read_target_state
 from boxmunge.cve import (
-    breaker, exploited, kev, kev_enisa, kev_source_history, kev_withdrawals, quarantine, scan_state,
-    suppressions,
+    breaker, exploited, fix_grace, kev, kev_enisa, kev_source_history, kev_withdrawals, quarantine,
+    scan_state, suppressions,
 )
 from boxmunge.discovery_freshness import stale_discovery_warning
 from boxmunge.health_checks.backup_freshness import check_backup_freshness
@@ -162,6 +162,10 @@ READERS = [
     Reader("kev_withdrawals", lambda p: p.kev_withdrawn,
            {"withdrawn": {"CVE-1": {"source": "cisa", "at": ISO}}},
            kev_withdrawals.load_withdrawals),
+    Reader("fix_grace", lambda p: p.project_fix_grace(P),
+           {"entries": [{"cve_id": "CVE-1", "package": "openssl", "first_seen": ISO,
+                         "warned_at": None}]},
+           lambda p: fix_grace.FixGrace.load(p, P).first_seen(("CVE-1", "openssl"))),
     Reader("kev_source_history", lambda p: p.kev_sources,
            {"sources": {"https://cisa.example/kev.json":
                         {"released_at": ISO, "disagreed_runs": 0}}},

@@ -3,17 +3,35 @@
 
 The runtime relevance gate can only de-escalate. These helpers find the
 cases where its inference may be exempting a project's OWN runtime, and log
-them once per project scan. Split from security_scan_core.py.
+them once per project scan. Split from security_scan_core.py, with the
+validation of a declared security.runtimes.
 """
 from __future__ import annotations
 
 from datetime import date
+from typing import Any
 
 from boxmunge.cve.policy import Disposition, Posture, ProjectDecision, evaluate_finding
-from boxmunge.cve.relevance import ecosystem_for_package
+from boxmunge.cve.relevance import ecosystem_for_package, effective_runtimes
 from boxmunge.cve.scanner import PkgClass
 from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
+
+
+def check_declared_runtimes(project: str, declared: Any) -> None:
+    """`declared` (the manifest's security.runtimes) is loop-invariant (one
+    manifest, many images), so it is validated once before any Trivy scan
+    runs: a malformed security.runtimes then fails in milliseconds, and no
+    early return can skip validation (load_manifest does not validate the
+    security: block)."""
+    if declared is None:
+        return
+    try:
+        effective_runtimes((), declared=declared)
+    except (ValueError, TypeError) as e:
+        raise RuntimeError(
+            f"project {project!r}: invalid security.runtimes in manifest: {e}"
+        ) from e
 
 
 def gate_exempted_packages(

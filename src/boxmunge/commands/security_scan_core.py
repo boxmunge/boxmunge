@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
 from boxmunge.commands.security_scan_relevance import (
+    check_declared_runtimes,
     gate_exempted_packages,
     log_relevance_gaps,
 )
@@ -40,6 +41,7 @@ from boxmunge.commands.security_enforce import (
 from boxmunge.compose_images import image_phrase
 from boxmunge.cve.alerting import Alert, emit_scan_alerts
 from boxmunge.cve.exploited import ExploitedIndex, ExploitedSource, load_exploited
+from boxmunge.cve.fix_grace import graced_decisions
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
     FindingDisposition,
@@ -149,6 +151,10 @@ def _today() -> date:
     return datetime.now(timezone.utc).date()
 
 
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def scan_one_project(
     paths: BoxPaths, project: str, *,
     audit_only: bool = False,
@@ -255,28 +261,13 @@ def _scan_targets(
     return results, failed, skipped, warnings
 
 
-def _check_declared_runtimes(project: str, meta: ProjectMeta) -> None:
-    """`declared` is loop-invariant (one manifest, many images), so it is
-    validated once before any Trivy scan runs: a malformed
-    security.runtimes then fails in milliseconds, and no early return can
-    skip validation (load_manifest does not validate the security: block)."""
-    if meta.declared_runtimes is None:
-        return
-    try:
-        effective_runtimes((), declared=meta.declared_runtimes)
-    except (ValueError, TypeError) as e:
-        raise RuntimeError(
-            f"project {project!r}: invalid security.runtimes in manifest: {e}"
-        ) from e
-
-
 def _evaluate(
     paths: BoxPaths, project: str, meta: ProjectMeta, profile: ProjectHardening,
     supps: tuple[Suppression, ...], results: list[ScanResult],
-    exploited: ExploitedIndex, today: date,
+    exploited: ExploitedIndex, today: date, *, complete: bool, alerts: list[Alert] | None,
 ) -> list[ProjectDecision]:
-    """One decision per scanned image, under the project's policy.
-    ``exploited`` lists only the fresh sources (cve.exploited)."""
+    """One decision per scanned image, under the project's policy and strict's fix
+    deadlines (cve.fix_grace). ``exploited``: the fresh sources (cve.exploited)."""
     posture, dangerously, declared = meta.posture, meta.dangerously, meta.declared_runtimes
     decisions: list[ProjectDecision] = []
 
@@ -311,7 +302,8 @@ def _evaluate(
             )
 
     log_relevance_gaps(paths, project, dropped_lang_types, empty_runtime_exempted)
-    return decisions
+    return graced_decisions(paths, project, decisions, posture=posture, dangerously=dangerously,
+                            now=_now(), complete=complete, alerts=alerts)
 
 
 def audit_targets(
@@ -323,11 +315,11 @@ def audit_targets(
     nothing is written, alerted or enforced. A release not yet deployed is
     judged by its own manifest and compose, with the project's suppressions
     (quarantine_gate)."""
-    _check_declared_runtimes(project, meta)
+    check_declared_runtimes(project, meta.declared_runtimes)
     results, failed, skipped, warnings = _scan_targets(paths, project, targets)
     today = _today()
     decisions = _evaluate(paths, project, meta, profile, supps, results,
-                          load_exploited(paths, today, cisa=kev), today)
+                          load_exploited(paths, today, cisa=kev), today, complete=True, alerts=None)
     return ProjectScan(
         project=project, posture=meta.posture.value, dangerously=meta.dangerously,
         decisions=tuple(decisions),
@@ -351,7 +343,7 @@ def scan_one_project_locked(
         raise ValueError("scan_one_project needs an `alerts` list unless audit_only")
     meta = load_project_meta(paths, project)
     dangerously = meta.dangerously
-    _check_declared_runtimes(project, meta)
+    check_declared_runtimes(project, meta.declared_runtimes)
     profile = hardening_profile(meta, load_user_model(paths, project))
     # Host-scoped suppressions are for reviewed, accepted-risk findings; the
     # relevance gate handles "base-image package the project never invokes".
@@ -392,7 +384,9 @@ def scan_one_project_locked(
     warnings.extend(scan_warnings)
     today = _today()
     exploited = load_exploited(paths, today, cisa=kev)
-    decisions = _evaluate(paths, project, meta, profile, supps, results, exploited, today)
+    complete = not (failed or skipped or unidentified)
+    decisions = _evaluate(paths, project, meta, profile, supps, results, exploited, today,
+                          complete=complete, alerts=None if audit_only else alerts)
 
     headline = headline_of(decisions)
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow
@@ -402,7 +396,7 @@ def scan_one_project_locked(
     outcome = Enforcement()
     if not audit_only:
         cleared = clears_quarantine(
-            meta.posture, decisions, complete=not (failed or skipped or unidentified),
+            meta.posture, decisions, complete=complete,
             kev_fresh=ExploitedSource.CISA not in exploited.stale)
         outcome = _enforce(
             paths, project, meta, headline, quarantine_listing(decisions),

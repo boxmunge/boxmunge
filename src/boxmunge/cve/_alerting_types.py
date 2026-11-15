@@ -31,6 +31,7 @@ AlertKind = Literal[
     "exploited_listed",
     "hardening_upcoming",
     "awaiting_fix",
+    "fix_deadline",
     "quarantine_lifted",
     "scan_digest",
 ]

@@ -160,6 +160,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `cve/kev_enisa.py` | `_cached` | `kev/enisa.json`, for its validators and entries before they are renewed | `state/` |
 | `cve/kev_withdrawals.py` | `_entries` | `kev/withdrawn.json` | `state/` |
 | `cve/kev_source_history.py` | `_entries` | `kev/sources.json` | `state/` |
+| `cve/fix_grace.py` | `load` | `cve/fix_grace/<p>.json`, strict's fix deadlines (`FixGrace.load`) | `state/` |
 | `cve/quarantine.py` | `read_quarantine_state` | `deploy/<p>.quarantined.json` | `state/` |
 | `cve/scan_state.py` | `scan_problem` | `scans/<p>.json` | `state/` |
 | `bind_sources.py` | `_load_record` | a project's bind-source record | `state/` |

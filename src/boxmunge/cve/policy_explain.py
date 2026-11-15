@@ -7,6 +7,8 @@ label strings (not the Posture enum) so it imports nothing from policy.py.
 """
 from __future__ import annotations
 
+from datetime import date
+
 from boxmunge.cve.scanner import AttackVector, Severity, VulnStatus
 
 
@@ -147,6 +149,24 @@ def explain_fix_quarantine(fixed_version: str | None, *, dangerously_disabled: b
     return (
         f"Fix available upstream ({fixed_version}) but not running in this "
         f"image. It meets the paranoid quarantine gate, so {held}. "
+        f"{_REBUILD_ADVICE}"
+    )
+
+
+def explain_fix_overdue(
+    fixed_version: str | None, since: date, grace_days: int, *, dangerously_disabled: bool,
+) -> str:
+    """Explanation for a fixable finding at strict's gate whose fix was not
+    deployed within the grace (cve.fix_grace)."""
+    if dangerously_disabled:
+        held = ("it would be quarantined, but dangerously_disable_quarantine: true, "
+                "so it keeps running")
+    else:
+        held = "it is quarantined until the fixed image runs"
+    return (
+        f"Fix available since {since.isoformat()} but not deployed (fixed in "
+        f"{fixed_version}). "
+        f"Strict gives an available fix {grace_days} days to be deployed, so {held}. "
         f"{_REBUILD_ADVICE}"
     )
 

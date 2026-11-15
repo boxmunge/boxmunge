@@ -14,6 +14,7 @@ live in ``_alerting_fleet``; consumers import from ``boxmunge.cve.alerting``.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import date
 
 from boxmunge.compose_images import describe_image
 from boxmunge.cve._alerting_types import Alert, Hit
@@ -73,8 +74,12 @@ def format_quarantine_alert(project: str, hits: Sequence[Hit]) -> Alert:
     hits = _ordered(hits)
     head = hits[0].disposition
     cve = head.finding.cve_id
-    why = (f"actively exploited — {head.exploited_label}" if head.kev_override
-           else head.effective_severity.value)
+    if head.kev_override:
+        why = f"actively exploited — {head.exploited_label}"
+    elif head.finding.fix_available and not head.exploited_by:
+        why = f"{head.effective_severity.value}, fix not deployed"
+    else:
+        why = head.effective_severity.value
     title = (f"[boxmunge:{project}] QUARANTINED — {cve} ({why})"
              f"{_more(_cve_count(hits) - 1)}")
     body = "\n".join([
@@ -206,6 +211,40 @@ def format_fixable_alert(project: str, hits: Sequence[Hit]) -> Alert:
     ])
     return Alert(kind="fix_available", title=title, body=body, priority=0,
                  project=project, hits=tuple(hits))
+
+
+def format_fix_deadline_alert(
+    project: str, deadlines: Sequence[tuple[Hit, date]], grace_days: int,
+) -> Alert:
+    """Strict's warning, sent once per finding, that a fix still not deployed
+    quarantines the site on its deadline (cve.fix_grace). Priority 0, sent
+    on its own (never the digest): there is still time to act."""
+    ordered = sorted(deadlines, key=lambda hd: (hd[1], hd[0].disposition.finding.cve_id,
+                                                hd[0].disposition.finding.package))
+    first_hit, first_day = ordered[0]
+    head = first_hit.disposition.finding
+    title = (f"[boxmunge:{project}] Fix deadline {first_day.isoformat()} — {head.cve_id} "
+             f"in {head.package or '?'}: deploy the fix or the site is quarantined"
+             f"{_more(len(ordered) - 1)}")
+    lines = [f"Project: {project} — still running."]
+    for hit, day in ordered[:_MAX_LISTED]:
+        lines += _lines(hit)
+        lines.append(f"  fixed in {hit.disposition.finding.fixed_version}; "
+                     f"deadline {day.isoformat()}")
+    if len(ordered) > _MAX_LISTED:
+        lines.append(f"... and {len(ordered) - _MAX_LISTED} more")
+    lines += [
+        "",
+        f"Deploy the fix (rebuild/bump the image) before {first_day.isoformat()} or the",
+        f"site is quarantined. Strict gives an available fix {grace_days} days to be deployed.",
+        "A `build:` service is rebuilt on its base image's current digest by its",
+        f"next stage and promote, or `prod-deploy {project} --redeploy`. Otherwise",
+        "bump the image tag or digest, then redeploy. A reviewed CVE can be",
+        "suppressed instead:",
+        f"  boxmunge security suppress {head.cve_id} --project {project} \\",
+        "      --until <date> --reason <text>",
+    ]
+    return Alert(kind="fix_deadline", title=title, body="\n".join(lines), priority=0)
 
 
 def format_awaiting_fix_alert(project: str, hits: Sequence[Hit]) -> Alert:

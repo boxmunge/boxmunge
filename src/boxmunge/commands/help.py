@@ -168,7 +168,8 @@ Operating safely:
     exploited, the site stays up.
   - security.posture is what a project accepts CVE downtime for: balanced
     (default) and strict only an actively exploited (CISA KEV) CVE, strict
-    alerting from Medium; paranoid also unexploited risk. -> agent-help cve
+    alerting from Medium and giving an available fix 7 days before
+    quarantine; paranoid also unexploited risk. -> agent-help cve
 
 Deploying a bundle-based project (the recommended path):
   1. Build locally:  boxmunge bundle ./myproject

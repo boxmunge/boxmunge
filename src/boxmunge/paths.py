@@ -253,6 +253,11 @@ class BoxPaths:
         name = _checked(name)
         return self.state / "scans" / f"{name}.json"
 
+    def project_fix_grace(self, name: str) -> Path:
+        """Strict's fix deadlines for a project (cve.fix_grace)."""
+        name = _checked(name)
+        return self.state / "cve" / "fix_grace" / f"{name}.json"
+
     def project_backup_state(self, name: str) -> Path:
         """A project's newest good snapshot and off-site copy (backup_evidence)."""
         name = _checked(name)
