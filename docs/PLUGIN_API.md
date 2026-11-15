@@ -227,8 +227,8 @@ its CLI command does, without a dry run. The release actions are defined:
 | `project.deploy` | `project`, `ref`?, `no_snapshot`?, `no_pull`?, `redeploy`?, `accept_stale_kev`?, `allow_security_regression`? | nothing | `prod-deploy` |
 | `project.rollback` | `project`, `allow_security_regression`? | nothing | `rollback` |
 
-`allow_security_regression` (the reason, logged and alerted) and `accept_stale_kev` weaken a
-control, so they carry `x-tier: "govern"`: a caller without govern gets `forbidden`, naming the
+`allow_security_regression` (the reason, logged and alerted), `accept_stale_kev` and
+`no_snapshot` (a later rollback would have no data to restore) weaken a control, so they carry `x-tier: "govern"`: a caller without govern gets `forbidden`, naming the
 command the operator runs over SSH instead.
 
 Each call will need the operator's fresh approval:

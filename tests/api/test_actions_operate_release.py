@@ -166,12 +166,14 @@ def test_a_blank_regression_reason_is_refused_before_anything_runs(paths) -> Non
 
 @pytest.mark.parametrize("name, param, value, flag, cli", [
     ("project.deploy", "accept_stale_kev", True, "--accept-stale-kev", "prod-deploy"),
+    ("project.deploy", "no_snapshot", True, "--no-snapshot", "prod-deploy"),
     *[(name, "allow_security_regression", "why", "--allow-security-regression",
        REGISTRY.get(name).cli) for name in GUARDED],
 ])
 def test_accept_stale_kev_is_govern(paths, name, param, value, flag, cli) -> None:
     """Decision 2: a flag that weakens a control needs govern, so an agent
-    can deploy but not past the KEV or regression check."""
+    can deploy but not past the KEV or regression check, nor without the
+    snapshot a rollback restores."""
     with pytest.raises(ActionError) as excinfo:
         make_invoker(paths).invoke(name, {"project": NAME, param: value},
                                    Principal.agent("claude-code"))
@@ -186,7 +188,7 @@ def test_everyday_flags_stay_operate(paths) -> None:
     with pytest.raises(ActionError) as excinfo:
         make_invoker(paths).invoke(
             "project.deploy", {"project": NAME, "no_pull": True, "redeploy": True,
-                               "no_snapshot": True, "accept_stale_kev": False},
+                               "no_snapshot": False, "accept_stale_kev": False},
             Principal.agent("claude-code"))
     assert excinfo.value.code is ErrorCode.UNAVAILABLE
     assert "runs as a job" in excinfo.value.message

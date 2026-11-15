@@ -72,10 +72,9 @@ def regression_allowed(paths: BoxPaths, params: dict[str, Any]) -> Iterator[None
 
 def operate_job(name: str, summary: str, *, params: dict[str, dict[str, Any]],
                 result: dict[str, Any], handler: Handler, cli: str,
-                required: tuple[str, ...] = (),
                 param_check: ParamCheck | None = None) -> Action:
     """An operate action run as a job under the project lock. *params* are
-    the properties besides project, optional unless *required* names them. An
+    the properties besides project, all optional. An
     allow_security_regression among them must not be blank; *param_check*
     is any further check, run after that one."""
     if "project" in params:
@@ -85,7 +84,7 @@ def operate_job(name: str, summary: str, *, params: dict[str, dict[str, Any]],
         else None, param_check) if check is not None]
     return Action(
         name=name, tier=Tier.OPERATE, summary=summary,
-        params=obj({"project": PROJECT, **params}, optional=tuple(p for p in params if p not in required)),
+        params=obj({"project": PROJECT, **params}, optional=tuple(params)),
         result=result, handler=handler, locks=("project",), job=True, cli=cli,
         param_check=_first_problem(checks) if checks else None,
     )

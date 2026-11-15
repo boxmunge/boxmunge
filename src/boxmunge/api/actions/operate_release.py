@@ -25,6 +25,12 @@ from boxmunge.staged_release import load_slot
 
 NO_RESULT = obj({})
 RELEASE_REF = {**REF, "description": "The bundle timestamp or git ref to release (--ref)."}
+# Without the pre-deploy snapshot a later rollback has no data to restore.
+NO_SNAPSHOT = {
+    **BOOLEAN, "x-tier": "govern",
+    "description": "Skip the pre-deploy snapshot, so a rollback cannot restore the data "
+                   "(--no-snapshot).",
+}
 ACCEPT_STALE_KEV = {
     **BOOLEAN, "x-tier": "govern",
     "description": "Deploy although there is no usable CISA KEV catalog; logged and "
@@ -94,8 +100,7 @@ ACTIONS = (
         "project.deploy", "Deploy a release to production (prod-deploy).",
         params={
             "ref": RELEASE_REF,
-            "no_snapshot": {**BOOLEAN, "description": "Skip the pre-deploy snapshot "
-                                                       "(--no-snapshot)."},
+            "no_snapshot": NO_SNAPSHOT,
             "no_pull": NO_PULL,
             "redeploy": {**BOOLEAN, "description": "Deploy the installed release again "
                                                     "(--redeploy)."},
