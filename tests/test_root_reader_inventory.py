@@ -125,6 +125,7 @@ def _goes_around_the_helpers(call: ast.Call) -> bool:
 # match when convenient.
 RAW_READS: dict[str, int] = {
     "api/dev/fixture_host.py": 3, "backup.py": 1,
+    "api/worker_identity.py": 2,  # /proc is kernel-owned: deploy cannot write it
     "commands/auto_update_cmd.py": 1, "commands/bundle_cmd.py": 1,
     "commands/doctor.py": 1, "commands/health_cmd.py": 1, "commands/help.py": 1,
     "config.py": 1, "cve/kev_http.py": 1,
