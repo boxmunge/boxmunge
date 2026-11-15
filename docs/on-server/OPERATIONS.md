@@ -534,6 +534,12 @@ Get the same dashboard as machine-parseable JSON:
 status --json
 ```
 
+Below the table, `status` lists the projects autofix touched: `autofixing: patching <CVEs>`
+while a patch runs, and `patched: running image differs from the release (N packages upgraded
+for <CVEs>, since <date>)` once one runs, with the next step (bring the fix into the repo, then
+deploy). `--json` has `patched` and `autofixing` on every row, null when they do not apply. See
+"CVE Policy" below.
+
 Health checks also run automatically every 5 minutes via a systemd timer. Failures trigger Pushover alerts after the configured threshold.
 
 A project whose manifest or state files cannot be read does not stop the others being checked.
@@ -2455,9 +2461,37 @@ Inspect state:
 
 ```
 boxmunge security                    # fleet summary (incl. KEV catalog source and freshness)
-boxmunge security myapp              # per-project view
+boxmunge security myapp              # per-project view, with every autofix patch in full
 boxmunge security --json             # machine-readable
 ```
+
+Autofix (`agent-help cve`, "Autofix") patches fixable OS-package CVEs on the box; opt a project
+out with `security.autofix: false`. It runs in two places:
+
+- **Urgent patches** (known-exploited findings, `paranoid`'s gate, `strict`'s passed fix
+  deadline) run in `boxmunge-autofix.service`,
+  which has no timer. The nightly scan, a KEV watch tick and a root `security scan <project>`
+  queue the patch (`state/autofix/queue/<project>.json`) and start the unit without waiting. It
+  runs `security autofix-queue` as root with a 6-hour limit, takes each project's own lock and
+  never the CVE fleet lock, and leaves a project another operation holds for its next start. A
+  deploy-shell `security scan <project>` runs its own project's patch itself. To run the queue
+  by hand, the supervisor user runs `systemctl start boxmunge-autofix.service`; `journalctl -u
+  boxmunge-autofix` shows the runs.
+- **Nightly patches** run inside the maintenance unit's `container-update`, after each
+  project's own update, within 3 hours of its start. Container updates being off for a project
+  does not stop them. One quiet digest per night (`Nightly autofix: ...`) has one line per
+  project: `patched`, `fixed by tonight's update`, `could not patch: <step>: <reason>`,
+  `skipped: <why>`, `deferred to the next maintenance window`, `switched to upstream`,
+  `re-patched on new upstream`, `could not catch up with upstream`.
+
+While a patch runs, `state/autofix/<project>.active` marks it (`status` shows `autofixing`).
+Just before it swaps images in, it writes `state/autofix/<project>.journal`, and removes it once
+the patched images are healthy and recorded, or rolled back. A journal left behind means the run
+was killed: the next autofix run undoes it exactly (pins, patch records and built images) and
+alerts `Autofix run interrupted — rolled back`; the KEV watch starts that run within half an
+hour. The patches themselves are recorded in `state/autofix/<project>.json` and the image pins in
+`state/image_pins/<project>.json`; a deploy, promote or rollback drops both. `log --component
+autofix` has every run, its outcome and the step that failed.
 
 Suppress a CVE that has been reviewed:
 

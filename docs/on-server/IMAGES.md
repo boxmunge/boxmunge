@@ -35,8 +35,7 @@ they are heuristics. The reliable fix is not shipping the package.
 | Java / JVM | a JRE image, not a JDK | Build with the JDK in a builder stage. |
 | Static site | a small web-server image | Or serve it from a project that already runs one. |
 
-Check the publisher's current tags when you write the Dockerfile; do not copy tags from old
-examples.
+Check the publisher's current tags when you write the Dockerfile; never copy old examples' tags.
 
 ## Debian-based or Alpine?
 
@@ -96,5 +95,7 @@ cache".
 - The root filesystem is read-only. Declare writable paths in the manifest (`agent-help
   writable`); do not write into the image at runtime.
 - Run as a non-root user.
+- Autofix may run a patched image (`boxmunge.invalid/<project>/<service>:autofix-<id>`) until
+  upstream or a deploy has the fix. `status` shows `patched`: fix the repo's image.
 - If your smoke script needs a tool (`curl`, `wget`), it must exist in the runtime image, or use
   the language runtime instead (`agent-help conventions`).
