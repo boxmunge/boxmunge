@@ -13,6 +13,8 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from boxmunge.commands.autofix_queue_cmd import after_scan
+from boxmunge.commands.autofix_urgent_scan import held_for_patch
 from boxmunge.commands.security_fleet_enforce import apply_held, apply_new_quarantines
 from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project
 from boxmunge.cve.breaker import BreakerError
@@ -307,6 +309,9 @@ def _enforce_fleet(paths: BoxPaths, run: FleetRun) -> None:
     for name in sorted(run.held):
         print(f"{name}: HELD by the circuit breaker "
               f"({', '.join(sorted(run.held[name]))}) — still running")
+    notices = held_for_patch(paths, run.held)   # held: patched with the site up
+    if notices:
+        _deliver(paths, run, notices, batch=False)
 
 
 def scan_projects(paths: BoxPaths, targets: list[str], *, kev: KevCatalog,
@@ -417,15 +422,23 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
         return 1
     if args == ["--apply-held"]:
         return _cmd_apply_held(paths)
-    if args:  # one project: its own lock is the whole guard
-        return _scan_targets_cmd(args, paths)
+    if args:  # one project: its own lock is the whole guard, for its patch too
+        return _with_urgent(paths, _scan_targets_cmd(args, paths), only=args[:1])
 
     def waiting() -> None:
         print("waiting for the KEV watch to finish")
         log_warning("cve-scan", "fleet scan: waiting for the KEV watch to finish", paths)
 
     with fleet_lock(paths, wait=True, on_wait=waiting):
-        return _scan_targets_cmd(args, paths)
+        return _with_urgent(paths, _scan_targets_cmd(args, paths))
+
+
+def _with_urgent(paths: BoxPaths, rc: int, *, only: list[str] | None = None) -> int:
+    """Hand the run's urgent patches on (autofix_queue_cmd.after_scan: the
+    autofix unit as root, else run here); one run here that failed has
+    applied its fallback and needs attention (exit 2)."""
+    outcomes = after_scan(paths, only=only)
+    return 2 if rc == 0 and any(not o.ok for o in outcomes) else rc
 
 
 def _scan_targets_cmd(args: list[str], paths: BoxPaths) -> int:

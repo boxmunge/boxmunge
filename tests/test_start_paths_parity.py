@@ -47,7 +47,7 @@ CALLERS = {
     ("commands/upgrade_steps.py", "_restart_locked"): RENDERS,
     ("userns/bringup.py", "_project"): RENDERS,
     ("cve/quarantine.py", "lift_quarantine"): LIFTS,
-    ("container_update.py", "_recreate"): GUARDED,
+    ("container_recreate.py", "recreate_project"): GUARDED,
     ("commands/restore.py", "_up"): GUARDED,
     ("production_stopped.py", "start_stopped"): GUARDED,
     ("commands/data_cmd.py", "_start_again"): GUARDED,

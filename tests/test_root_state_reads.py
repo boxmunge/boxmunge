@@ -194,6 +194,15 @@ READERS = [
     Reader("autofix_marker", lambda p: p.project_autofix_marker(P),
            {"started_at": ISO, "cves": ["CVE-1"], "downtime": False},
            lambda p: autofix_record.read_autofixing(p, P)),
+    Reader("autofix_queue", lambda p: p.project_autofix_queue(P),
+           {"detected_at": ISO, "downtime": False,
+            "findings": [{"cve_id": "CVE-1", "package": "openssl", "image_ref": "web:1"}]},
+           lambda p: autofix_record.read_queue_entry(p, P)),
+    Reader("autofix_journal", lambda p: p.project_autofix_journal(P),
+           {"started_at": ISO, "pins_before": [], "records_before": [], "built": [
+               {"service": "web", "ref": _PIN_REF, "image_id": "sha256:" + "a" * 64,
+                "reason": "autofix"}]},
+           lambda p: autofix_record.read_journal(p, P)),
     Reader("image_pins", lambda p: p.project_image_pins(P), _PINS,
            lambda p: image_pins.read_pins(p, P)),
     # The overlay a pinned start runs; one it cannot read is the refusal.

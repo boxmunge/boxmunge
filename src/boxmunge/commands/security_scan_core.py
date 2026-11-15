@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
+from boxmunge.commands.autofix_urgent_scan import NOTHING_URGENT, prepare_urgent
 from boxmunge.commands.security_scan_relevance import (
     check_declared_runtimes,
     gate_exempted_packages,
@@ -64,18 +65,12 @@ from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
 
 
-# Per-project aggregate scan budget.
-#
-# Trivy's per-image timeout (cve.scanner._DEFAULT_TIMEOUT = 300s) bounds a
-# single scan; this budget bounds the *sum* across all images of one project.
-# Without it, a project with N images each timing out would consume
-# N * 300s of the systemd unit's TimeoutStartSec — starving every project
-# that hasn't been scanned yet. With it, a single hung image consumes at
-# most 600s of wall time and the next project gets its fair share.
-#
-# Companion to the unit timeouts (boxmunge-cve-scan.service 60m for manual
-# runs, boxmunge-maintenance.service 4h for scan plus update): the
-# per-project budget is the inner cap, the unit timeout is the outer.
+# Per-project aggregate scan budget: Trivy's per-image timeout
+# (cve.scanner._DEFAULT_TIMEOUT, 300s) bounds one scan, this bounds the sum
+# over one project's images, so N hung images cannot starve every project
+# after it of the unit's TimeoutStartSec. The unit timeouts
+# (boxmunge-cve-scan.service 60m, boxmunge-maintenance.service 4h for scan
+# plus update) are the outer cap.
 _PROJECT_BUDGET_SECONDS = 600
 
 
@@ -114,6 +109,9 @@ class ProjectScan:
     # cleared was kept (security_enforce).
     lifted: str | None = None
     kept: str | None = None
+    # What the QUARANTINED alert the fleet run sends adds about autofix
+    # (autofix_urgent_scan.UrgentPlan.quarantine_note).
+    autofix_note: str | None = None
 
     @property
     def unidentified_services(self) -> tuple[str, ...]:
@@ -385,11 +383,14 @@ def scan_one_project_locked(
     decisions = _evaluate(paths, project, meta, profile, supps, results, exploited, today,
                           complete=complete, alerts=None if audit_only else alerts)
 
-    headline = headline_of(decisions)
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow
     # itself and never act. Everyone else enforces: an existing quarantine
     # is re-asserted on every scan (B-03) unless this scan cleared it, and a
-    # new one fires here unless the fleet run decides it (defer_new).
+    # new one fires here unless the fleet run decides it (defer_new), or
+    # the site stays up while autofix patches it (autofix_urgent_scan).
+    urgent = NOTHING_URGENT if audit_only else prepare_urgent(
+        paths, project, meta, decisions, now=_now(), alerts=alerts)
+    headline = urgent.headline(headline_of(decisions))
     outcome = Enforcement()
     if not audit_only:
         cleared = clears_quarantine(
@@ -421,10 +422,11 @@ def scan_one_project_locked(
     host_expired: tuple[Suppression, ...] = ()
     if not audit_only:
         if outcome.landed:
-            announce_quarantine(paths, project, decisions)
+            announce_quarantine(paths, project, decisions, note=urgent.quarantine_note)
         host_expired = _collect_transition_alerts(
             paths, project, meta.posture, decisions, prior_decisions, supps, alerts,
         )
+        urgent.annotate(alerts)
     raise_enforcement_error(outcome.error, record_error)
 
     return ProjectScan(
@@ -442,6 +444,7 @@ def scan_one_project_locked(
         host_expired=host_expired,
         lifted=outcome.lifted,
         kept=outcome.kept,
+        autofix_note=urgent.quarantine_note,
     )
 
 

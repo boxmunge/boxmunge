@@ -43,8 +43,8 @@ ALLOWED_COMMANDS: set[str] = {
     # Container security & CVE policy.
     # - `security` (no args / <project>): introspection
     # - `security scan|suppress|unsuppress|resume`: mutating
-    # Operator-only forms (host-scope suppressions, scan --apply-held, kev-watch) are
-    # refused by operator_only_reason below.
+    # Operator-only forms (host-scope suppressions, scan --apply-held, kev-watch,
+    # autofix-queue) are refused by operator_only_reason below.
     "security",
     # Project operations.
     # `check` is read-only. `check-all` is the timer-driven mutator: it
@@ -94,6 +94,14 @@ def operator_only_reason(command: str, args: list[str]) -> str | None:
         return (
             "the KEV watch is run by its systemd timer as root and is "
             "operator-only"
+        )
+    if command == "security" and args[:1] == ["autofix-queue"]:
+        # Deliberately refused: it patches and restarts any project as root.
+        # The scans start its unit; a deploy-shell `security scan <project>`
+        # runs that project's own patch itself.
+        return (
+            "the urgent autofix queue is run by boxmunge-autofix.service as root "
+            "and is operator-only"
         )
     return None
 

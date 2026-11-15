@@ -11,10 +11,20 @@ project's ``security.autofix``) is the caller's to check, as is
 """
 from __future__ import annotations
 
+from datetime import timedelta
 from enum import Enum
 
-from boxmunge.cve.policy_types import FindingDisposition, Posture
+from boxmunge.cve.policy_types import Disposition, FindingDisposition, Posture
 from boxmunge.cve.scanner import PkgClass
+
+# An urgent patch attempt has this long from its own start (not from the
+# detection: a project waiting its turn in the queue keeps its current state).
+AUTOFIX_URGENT_BUDGET = timedelta(minutes=30)
+
+# A finding the policy takes down (or, opted out, runs at risk) for: a
+# not-listed one with these and its patch gate is strict's overdue fix
+# (cve.fix_grace), or paranoid's gate.
+_DARK = frozenset({Disposition.QUARANTINE, Disposition.STILL_RUNNING_AT_RISK})
 
 # A full-KEV finding at or above this CVSS score (or with none) is patched
 # dark under balanced. The score is the highest any source gives.
@@ -38,14 +48,16 @@ def nightly_eligible(fd: FindingDisposition, posture: Posture) -> bool:
     records that as ``fix_meets_patch_gate``. Paranoid never waits for the window: a
     fixable finding at its gate is patched at once (``urgency``)."""
     return (posture is not Posture.PARANOID and on_patch_path(fd)
-            and not fd.exploited_by and fd.fix_meets_patch_gate)
+            and not fd.exploited_by and fd.fix_meets_patch_gate
+            and fd.disposition is Disposition.IGNORED_FIXED)
 
 
 def urgency(fd: FindingDisposition, posture: Posture) -> AutofixUrgency:
     """URGENT for a full-KEV finding on the patch path (no suppression applies
     to one), any listed one under paranoid, a VulnCheck-only one the policy
-    does not suppress, and a paranoid finding at its gate; NIGHTLY when
-    ``nightly_eligible``; else NONE."""
+    does not suppress, a paranoid finding at its gate, and one strict's fix
+    deadline took down (cve.fix_grace: it keeps its patch gate); NIGHTLY
+    when ``nightly_eligible``; else NONE."""
     if not on_patch_path(fd):
         return AutofixUrgency.NONE
     # Paranoid takes every listing through the KEV override, where no
@@ -54,7 +66,7 @@ def urgency(fd: FindingDisposition, posture: Posture) -> AutofixUrgency:
         return AutofixUrgency.URGENT
     if fd.exploited_by:  # VulnCheck only: the policy records the suppression
         return AutofixUrgency.URGENT if fd.fix_meets_patch_gate else AutofixUrgency.NONE
-    if posture is Posture.PARANOID and fd.fix_meets_patch_gate:
+    if fd.fix_meets_patch_gate and (posture is Posture.PARANOID or fd.disposition in _DARK):
         return AutofixUrgency.URGENT
     if nightly_eligible(fd, posture):
         return AutofixUrgency.NIGHTLY
@@ -65,8 +77,9 @@ def downtime_while_patching(fd: FindingDisposition, posture: Posture) -> bool:
     """Whether the site is dark while this finding is patched (table A).
 
     Full KEV: relaxed never; balanced at CVSS 9 or above, or unrated; strict
-    and paranoid always. VulnCheck only: paranoid only. Not listed: only a
-    paranoid finding at its gate; every other one is patched with the site up.
+    and paranoid always. VulnCheck only: paranoid only. Not listed: a
+    paranoid finding at its gate, and one strict's fix deadline took down;
+    every other one is patched with the site up.
     Raises ValueError for a finding off the patch path: nothing is patched."""
     if not on_patch_path(fd):
         raise ValueError(
@@ -82,4 +95,4 @@ def downtime_while_patching(fd: FindingDisposition, posture: Posture) -> bool:
         return True
     if fd.exploited_by:
         return posture is Posture.PARANOID
-    return posture is Posture.PARANOID and fd.fix_meets_patch_gate
+    return fd.fix_meets_patch_gate and (posture is Posture.PARANOID or fd.disposition in _DARK)

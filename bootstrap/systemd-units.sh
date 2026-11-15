@@ -27,6 +27,8 @@ changed=()
 for timer in "${SRC}/"*.timer; do
     cmp -s "${timer}" "${DEST}/${timer##*/}" || changed+=("${timer##*/}")
 done
+# Every service is copied, boxmunge-autofix.service included: it has no
+# timer and is not enabled; the scans start it when they queue a patch.
 cp "${SRC}/"*.service "${SRC}/"*.timer "${DEST}/"
 systemctl daemon-reload
 systemctl enable --now \

@@ -15,15 +15,14 @@ accept; registry digests are kept for display only.
 """
 from __future__ import annotations
 
-import time
-from collections import defaultdict
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from boxmunge import docker_containers
 from boxmunge.container_update_tags import restore_after_interrupt, restore_and_report
 from boxmunge.container_update_targets import UpdateTarget, persist_result
-from boxmunge.compose_guard import ComposeRefused, compose_up_checked, compose_up_platform
+from boxmunge.compose_guard import ComposeRefused, compose_up_platform
+from boxmunge.container_recreate import managed, recreate_project, wait_healthy
 from boxmunge.deployed_inventory import (
     DeployedService, InventoryError, load_deployed_inventory, pulled_services,
 )
@@ -50,11 +49,6 @@ SKIPPED_LOCKED = "skipped_locked"
 # Result status for a user project the health monitor stopped.
 SKIPPED_MONITOR_STOPPED = "monitor_stopped"
 
-_HEALTHCHECK_TIMEOUT_SEC = 90
-_HEALTHCHECK_POLL_INTERVAL_SEC = 3
-_NO_HEALTHCHECK_GRACE_SEC = 30
-
-
 class UpdateError(Exception):
     """A service the update covers has no identifiable image."""
 
@@ -69,11 +63,6 @@ def image_services(target: UpdateTarget) -> dict[str, DeployedService]:
         load_deployed_inventory(target.project_dir, target.compose_files, target.name))
 
 
-def _managed(containers: tuple[ProjectContainer, ...] | list[ProjectContainer]) -> list[ProjectContainer]:
-    """Containers `up` manages; `compose run` one-offs are not recreated."""
-    return [c for c in containers if not c.oneoff]
-
-
 def running_images(services: dict[str, DeployedService]) -> dict[str, ProjectContainer]:
     """For each service, a container standing for the image all its replicas run.
 
@@ -83,19 +72,19 @@ def running_images(services: dict[str, DeployedService]) -> dict[str, ProjectCon
     """
     running: dict[str, ProjectContainer] = {}
     for name, svc in services.items():
-        managed = _managed(svc.containers)
-        if not managed:
+        kept = managed(svc.containers)
+        if not kept:
             raise UpdateError(
                 f"service {name!r} has no container, so the image it runs is "
                 f"unknown. Deploy or resume the project, then update again."
             )
-        ids = sorted({c.image_id for c in managed})
+        ids = sorted({c.image_id for c in kept})
         if len(ids) > 1:
             raise UpdateError(
                 f"the containers of service {name!r} run different images "
                 f"({', '.join(ids)}). Redeploy the project so they agree."
             )
-        running[name] = managed[0]
+        running[name] = kept[0]
     return running
 
 
@@ -137,62 +126,9 @@ def one_shot_services(services: dict[str, DeployedService]) -> frozenset[str]:
     """
     return frozenset(
         name for name, svc in services.items()
-        if (managed := _managed(svc.containers))
-        and all(c.finished_cleanly for c in managed)
+        if (kept := managed(svc.containers))
+        and all(c.finished_cleanly for c in kept)
     )
-
-
-def _health_round(
-    target: UpdateTarget, services: list[str], one_shots: frozenset[str],
-    *, in_grace: bool,
-) -> tuple[list[str], list[str]]:
-    """One look at the services' containers: (still settling, unhealthy).
-
-    A service without a container, or with one that is not running or
-    reports unhealthy, is unhealthy, except a container of a one-shot
-    service that ran to completion again. One without a healthcheck
-    settles once the no-healthcheck grace period is over.
-    """
-    by_service: dict[str, list[ProjectContainer]] = defaultdict(list)
-    for container in _managed(docker_containers.project_containers(target.name)):
-        by_service[container.service].append(container)
-    settling: list[str] = []
-    unhealthy: list[str] = []
-    for name in services:
-        containers = [c for c in by_service.get(name, [])
-                      if not (name in one_shots and c.finished_cleanly)]
-        if not by_service.get(name):
-            unhealthy.append(name)
-        elif any(not c.running or c.health == "unhealthy" for c in containers):
-            unhealthy.append(name)
-        elif any(c.health == "starting" or (c.health is None and in_grace)
-                 for c in containers):
-            settling.append(name)
-    return settling, unhealthy
-
-
-def _wait_healthy(
-    target: UpdateTarget, services: list[str], one_shots: frozenset[str] = frozenset(),
-    timeout_sec: int = _HEALTHCHECK_TIMEOUT_SEC,
-) -> tuple[bool, list[str]]:
-    """Poll until every service's containers are healthy, or timeout.
-
-    Returns (all_healthy, list_of_unhealthy_service_names). An unhealthy
-    verdict is final; services still settling at the deadline count as
-    unhealthy.
-    """
-    start = time.monotonic()
-    deadline = start + timeout_sec
-    settling = list(services)
-    while time.monotonic() < deadline:
-        in_grace = time.monotonic() - start < _NO_HEALTHCHECK_GRACE_SEC
-        settling, unhealthy = _health_round(target, services, one_shots, in_grace=in_grace)
-        if unhealthy:
-            return False, unhealthy
-        if not settling:
-            return True, []
-        time.sleep(_HEALTHCHECK_POLL_INTERVAL_SEC)
-    return False, settling
 
 
 def _now() -> str:
@@ -205,8 +141,7 @@ def _recreate(paths: "BoxPaths", target: UpdateTarget) -> None:
     if target.is_caddy:
         compose_up_platform(target.project_dir, target.compose_files, target.name, build=False)
     else:
-        compose_up_checked(paths, target.name, component="container-update",
-                           compose_files=target.compose_files)
+        recreate_project(paths, target.name, target.compose_files, component="container-update")
 
 
 def _maybe_rollback(
@@ -235,7 +170,7 @@ def _maybe_rollback(
     # Recreate from the now-retagged local images
     try:
         _recreate(paths, target)
-        healthy, _ = _wait_healthy(target, list(services), one_shot_services(services))
+        healthy, _ = wait_healthy(target.name, list(services), one_shot_services(services))
     except DockerError as e:
         log_error("container-update", f"Rollback recreate failed: {e}", paths, project=target.name)
         result["rollback_succeeded"] = False
@@ -387,7 +322,7 @@ def _update_locked(
 
     # Step 6: Healthcheck wait, then record what the containers now run.
     try:
-        healthy, unhealthy = _wait_healthy(target, list(services), one_shot_services(services))
+        healthy, unhealthy = wait_healthy(target.name, list(services), one_shot_services(services))
         new_digests = _current_images(target, services)
     except DockerError as e:
         healthy, unhealthy, new_digests = False, [f"(docker: {e})"], {}
@@ -478,7 +413,7 @@ def _current_images(
 ) -> dict[str, str]:
     """{service: readable image reference} the services' containers run now."""
     current: dict[str, str] = {}
-    for container in _managed(docker_containers.project_containers(target.name)):
+    for container in managed(docker_containers.project_containers(target.name)):
         if container.service in services:
             current.setdefault(container.service, container.image_ref)
     return current

@@ -51,6 +51,13 @@ from boxmunge.cve._alerting_fleet import (
     format_scan_failure_alert,
     format_scan_unrecorded_alert,
 )
+from boxmunge.cve._alerting_autofix import (
+    PERSISTENCE_CAVEAT,
+    format_autofix_failed_alert,
+    format_autofix_interrupted_alert,
+    format_autofix_patched_alert,
+    format_autofix_started_alert,
+)
 from boxmunge.cve._alerting_formatters import (
     format_awaiting_fix_alert,
     format_fixable_alert,
@@ -83,6 +90,11 @@ __all__ = [
     "AlertKind",
     "Hit",
     "Transitions",
+    "PERSISTENCE_CAVEAT",
+    "format_autofix_started_alert",
+    "format_autofix_patched_alert",
+    "format_autofix_failed_alert",
+    "format_autofix_interrupted_alert",
     "format_quarantine_alert",
     "format_quarantine_lifted_alert",
     "format_kev_withdrawal_hold_alert",

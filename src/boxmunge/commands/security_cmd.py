@@ -17,6 +17,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from boxmunge.commands.autofix_queue_cmd import cmd_autofix_queue
 from boxmunge.commands.kev_watch import cmd_kev_watch
 from boxmunge.commands.security_actions import cmd_security_scan
 from boxmunge.commands.security_resume import cmd_security_resume
@@ -59,6 +60,8 @@ Usage:
   boxmunge security scan --apply-held                  Apply breaker-held quarantines (operator)
   boxmunge security kev-watch                          Rescan projects hit by a newly listed
                                                        exploited CVE (operator; the 30-minute timer)
+  boxmunge security autofix-queue                      Run the queued urgent patches (root; the
+                                                       boxmunge-autofix unit the scans start)
   boxmunge security suppress <CVE>|--current (--project <name>|--host)
                              --until <YYYY-MM-DD> --reason <text>
   boxmunge security unsuppress <CVE> (--project <name>|--host)
@@ -66,11 +69,11 @@ Usage:
   boxmunge security resume <project> --accept-stale-kev
                              Lift with no usable KEV catalog (audited)
 
---host suppressions, scan --apply-held and kev-watch are operator-only (refused by the
-deploy shell). --until is at most 90 days ahead.
+--host suppressions, scan --apply-held, kev-watch and autofix-queue are operator-only
+(refused by the deploy shell). --until is at most 90 days ahead.
 """
 
-_SUBCOMMANDS = {"scan", "suppress", "unsuppress", "resume", "kev-watch"}
+_SUBCOMMANDS = {"scan", "suppress", "unsuppress", "resume", "kev-watch", "autofix-queue"}
 
 
 def _paths() -> BoxPaths:
@@ -324,6 +327,8 @@ def cmd_security(args: list[str]) -> None:
             sys.exit(cmd_security_scan(rest, paths))
         if sub == "kev-watch":
             sys.exit(cmd_kev_watch(rest, paths))
+        if sub == "autofix-queue":
+            sys.exit(cmd_autofix_queue(rest, paths))
         if sub == "suppress":
             sys.exit(cmd_security_suppress(rest, paths))
         if sub == "unsuppress":

@@ -48,7 +48,7 @@ STARTS = {
     ("commands/restore.py", "_replace_data"): RUNS_OVERLAY,
     ("commands/restore.py", "_up"): RUNS_OVERLAY,
     ("commands/upgrade_steps.py", "_restart_locked"): RUNS_OVERLAY,
-    ("container_update.py", "_recreate"): RUNS_OVERLAY,
+    ("container_recreate.py", "recreate_project"): RUNS_OVERLAY,
     ("cve/quarantine.py", "lift_quarantine"): RUNS_OVERLAY,
     ("production_stopped.py", "start_stopped"): RUNS_OVERLAY,
     ("staging_bringup.py", "_prepare_storage"): STAGING,

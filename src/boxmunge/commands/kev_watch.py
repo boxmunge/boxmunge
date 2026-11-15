@@ -17,6 +17,11 @@ its failure is alerted once a day. A project whose result could not be
 recorded (``run.unrecorded``) counts as processed: it was judged and
 enforced, only the record failed, and that has its own alert.
 
+Every tick then hands the urgent autofix queue to its own unit
+(commands.autofix_queue_cmd), whatever the diff found: a patch queued by
+this tick's rescans, or one left by an earlier run. The unit runs outside
+the watch's 1h timeout and without the fleet lock.
+
 The tick holds the fleet lock (cve.fleet_lock) for its whole run and skips
 itself when the nightly scan has it. The watch's refresh neither sends the
 degraded-catalog alert nor counts passed-over runs (security_kev): both stay
@@ -30,6 +35,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
+from boxmunge.commands.autofix_queue_cmd import after_scan
 from boxmunge.commands.security_actions import BREAKER_PROBLEM, scan_projects
 from boxmunge.commands.security_kev import refresh_kev_and_alert
 from boxmunge.cve.exploited import load_exploited
@@ -100,6 +106,18 @@ def run_kev_watch(paths: BoxPaths, now: datetime) -> WatchResult:
 
 
 def _tick(paths: BoxPaths, now: datetime) -> WatchResult:
+    """The tick, then the urgent patches any scan queued are handed to the
+    autofix unit (autofix_queue_cmd.after_scan), whatever the tick did."""
+    try:
+        result = _watch(paths, now)
+    except Exception:
+        after_scan(paths)
+        raise
+    after_scan(paths)
+    return result
+
+
+def _watch(paths: BoxPaths, now: datetime) -> WatchResult:
     started = time.monotonic()
     kev = refresh_kev_and_alert(paths, now, nightly=False)
     listed = frozenset(load_exploited(paths, now.date(), cisa=kev).by_cve)

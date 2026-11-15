@@ -159,6 +159,8 @@ class BoxPaths:
         # Every CVE any source listed as of the KEV watch's last tick, and
         # when that tick ran (commands.kev_watch).
         self.kev_watch = self.state / "kev" / "watch.json"
+        # The urgent autofix queue, one entry per project (cve.autofix_queue).
+        self.autofix_queue_dir = self.state / "autofix" / "queue"
         # Last auto-update discovery that installed nothing: any security or
         # break-fix release it could not install, and the alert sent for it.
         self.platform_update_state = self.state / "platform-updates.json"
@@ -276,6 +278,16 @@ class BoxPaths:
         """Present while autofix is patching a project (cve.autofix_record)."""
         name = _checked(name)
         return self.state / "autofix" / f"{name}.active"
+
+    def project_autofix_queue(self, name: str) -> Path:
+        """A project's urgent autofix queue entry (cve.autofix_queue)."""
+        name = _checked(name)
+        return self.autofix_queue_dir / f"{name}.json"
+
+    def project_autofix_journal(self, name: str) -> Path:
+        """What a running autofix must undo if it is killed (cve.autofix_record)."""
+        name = _checked(name)
+        return self.state / "autofix" / f"{name}.journal"
 
     def project_fix_grace(self, name: str) -> Path:
         """Strict's fix deadlines for a project (cve.fix_grace)."""

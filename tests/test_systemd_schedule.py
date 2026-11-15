@@ -63,3 +63,12 @@ def test_the_kev_watch_tick_is_bounded_so_the_nightly_scan_cannot_wait_long() ->
     assert service["TimeoutStartSec"] == "1h"
     timer = _unit("boxmunge-kev-watch.timer")["Timer"]
     assert (timer["OnCalendar"], timer["RandomizedDelaySec"]) == ("*:00/30", "120")
+
+
+def test_the_autofix_unit_runs_the_queue_as_root_outside_the_scan_units() -> None:
+    """Started by the scans (no timer), bounded well past one patch attempt."""
+    service = _unit("boxmunge-autofix.service")["Service"]
+    assert (service["Type"], service["User"], service["TimeoutStartSec"]) == (
+        "oneshot", "root", "6h")
+    assert service["ExecStart"] == "/opt/boxmunge/bin/boxmunge security autofix-queue"
+    assert not (UNITS / "boxmunge-autofix.timer").exists()
