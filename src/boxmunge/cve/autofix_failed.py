@@ -40,8 +40,10 @@ if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
 
 _COMPONENT = "autofix"
-# A transient failure is tried again this long after its last try.
-RETRY_TRANSIENT = timedelta(hours=24)
+# A transient failure is tried again this long after its last try. Under a
+# day: the try is stamped after its scan and build, so the next nightly
+# scan comes a little under 24h later and must still retry it.
+RETRY_TRANSIENT = timedelta(hours=20)
 
 Pairs = Iterable[tuple["ProjectDecision", "FindingDisposition"]]
 

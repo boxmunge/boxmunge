@@ -238,10 +238,10 @@ def test_a_transient_failure_is_retried_after_a_day_without_a_repeat_alert(
     box.run()
     first = remembered(box.paths, "demo", "urgent")
     assert first.kind == "transient"
-    _tried(box, 23)
+    _tried(box, 19)
     box.scan()
-    assert read_queue_entry(box.paths, "demo") is None      # held within the day
-    _tried(box, 25)
+    assert read_queue_entry(box.paths, "demo") is None      # held for 20h
+    _tried(box, 23.5)   # the next night's scan, a little under a day later
     box.scan()
     assert read_queue_entry(box.paths, "demo") is not None  # due again
     box.run()

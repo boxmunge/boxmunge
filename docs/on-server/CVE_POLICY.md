@@ -639,7 +639,7 @@ them and their fixed versions, the step and whether the failure would happen
 again the same way. A failure that would (the image cannot be patched, the
 patch does not fix it, the patched images are not healthy) holds the patch
 until one of those changes. Any other (the time limit, a mirror or Docker
-error, a scan or swap failure) holds it for 24 hours after its last try,
+error, a scan or swap failure) holds it for 20 hours after its last try,
 then the patch is tried again. While it is held, the scans do not queue that
 urgent patch and the nightly run does not try that nightly patch: the
 posture's own rule stands and the nightly digest lists it as `still
