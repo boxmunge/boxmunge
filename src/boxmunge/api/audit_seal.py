@@ -236,29 +236,39 @@ def rotation_in_progress(paths: BoxPaths) -> bool:
             and time.time() - st.st_mtime < ROTATION_MARKER_FRESH_SECONDS)
 
 
-def _seal_archives(paths: BoxPaths) -> None:
+def _seal_archives(paths: BoxPaths) -> list[str]:
     """Set the attribute again on every archive: a rotation that failed
-    between moving the log and sealing the archive leaves one without it."""
+    between moving the log and sealing the archive leaves one without it.
+    A name of an archive's form that is not a plain regular file (a link, a
+    FIFO, a second hard link: something deploy put in logs/) is no archive
+    rotation made. It is skipped, not followed, and named in the list this
+    returns, so it never fails install (and with it every release, security
+    ones included)."""
+    skipped = []
     for name in archives(paths.logs, paths.audit_log.name):
         where = paths.logs / name
         try:
             fd = open_log(where, create=False)
-        except (SealError, FileNotFoundError) as e:
-            raise SealError(f"cannot seal the archive {where}: {e}",
-                            fix=f"remove {where} if it is not an archive "
-                                f"(sudo rm {where}), then run: {SEAL_FIX}") from e
+        except FileNotFoundError:
+            continue  # removed since the listing
+        except SealError as e:
+            skipped.append(f"{e} Remove it if it is not an archive: sudo rm {where}")
+            continue
         try:
             set_append_only(fd, True, where=where)
         finally:
             os.close(fd)
+    return skipped
 
 
-def seal(paths: BoxPaths) -> None:
+def seal(paths: BoxPaths) -> list[str]:
     """As root: open or create logs/audit.jsonl, make it deploy's and 0640,
     and set the append-only attribute, on it and on every archive. On a host
     that cannot set it, record why (upgrade-root/audit-append-unsupported)
-    and return; a later seal that sets it removes the record. Raises
-    SealError for anything else."""
+    and return; a later seal that sets it removes the record. Returns what
+    was wrong with each archive name it skipped (see _seal_archives). Raises
+    SealError for anything else, the active log not being a plain regular
+    file included."""
     where = paths.audit_log
     fd = open_log(where, create=True)
     try:
@@ -268,8 +278,9 @@ def seal(paths: BoxPaths) -> None:
             own_and_seal(fd, where, attribute=False)
             _write_root_record(paths, paths.audit_append_unsupported,
                                f"{e.errno_name} {e.filesystem}\n")
-            return
+            return []
     finally:
         os.close(fd)
-    _seal_archives(paths)
+    skipped = _seal_archives(paths)
     _remove(paths.audit_append_unsupported)
+    return skipped

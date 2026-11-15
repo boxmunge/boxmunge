@@ -146,13 +146,50 @@ def test_seal_sets_the_attribute_again_on_archives(paths, attr) -> None:
     assert attr.append_only(archive) and attr.append_only(paths.audit_log)
 
 
-def test_seal_refuses_a_linked_archive_naming_its_removal(paths, attr, tmp_path) -> None:
+@pytest.mark.parametrize("plant", ["symlink", "fifo", "hardlink"])
+def test_seal_skips_a_planted_archive_name_naming_its_removal(paths, attr, tmp_path,
+                                                              plant) -> None:
+    """deploy writes logs/: a name of an archive's form that is not a plain
+    file is no archive. It is skipped, not followed, and the seal goes on
+    (failing install would block every release, security ones included)."""
     (tmp_path / "real").write_text("")
-    (paths.logs / "audit.jsonl.2026-11-01").symlink_to(tmp_path / "real")
-    with pytest.raises(SealError) as excinfo:
-        seal(paths)
-    assert f"sudo rm {paths.logs / 'audit.jsonl.2026-11-01'}" in excinfo.value.fix
+    planted = paths.logs / "audit.jsonl.2026-11-01"
+    if plant == "symlink":
+        planted.symlink_to(tmp_path / "real")
+    elif plant == "fifo":
+        os.mkfifo(planted)
+    else:
+        os.link(tmp_path / "real", planted)
+    genuine = paths.logs / "audit.jsonl.2026-10-01"
+    genuine.write_text("old\n")
+    [skipped] = seal(paths)
+    assert str(planted) in skipped and f"sudo rm {planted}" in skipped
     assert not attr.flags.get(os.lstat(tmp_path / "real").st_ino)
+    assert attr.append_only(paths.audit_log) and attr.append_only(genuine)
+
+
+def test_seal_warns_and_alerts_once_for_skipped_archives(paths, attr, tmp_path, monkeypatch,
+                                                         capsys) -> None:
+    from boxmunge.commands import audit_cmd
+    from boxmunge.paths import BoxPaths
+    monkeypatch.setattr(BoxPaths.__init__, "__defaults__", (paths.root,))
+    monkeypatch.setattr(audit_cmd, "running_as_root", lambda: True)
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(audit_cmd, "notify", lambda _p, title, body, **kw: sent.append(
+        (title, body)) or True)
+    for day in ("2026-10-01", "2026-11-01"):
+        (paths.logs / f"audit.jsonl.{day}").symlink_to(tmp_path / "real")
+    audit_cmd.cmd_audit_seal([])
+    [(title, body)] = sent
+    assert title == "boxmunge: unexpected audit archive"
+    assert "2 name(s)" in body and "audit.jsonl.2026-10-01" in body
+    assert "Audit log sealed" in capsys.readouterr().out
+
+
+def test_seal_still_refuses_an_active_log_that_is_not_a_plain_file(paths, attr) -> None:
+    os.mkfifo(paths.audit_log)
+    with pytest.raises(SealError, match="not a plain regular file"):
+        seal(paths)
 
 
 def test_unwritable_audit_log_refuses_the_call_and_runs_nothing(paths, attr) -> None:

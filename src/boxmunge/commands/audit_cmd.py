@@ -30,12 +30,14 @@ def cmd_audit_seal(args: list[str]) -> None:
     _require_root("_audit-seal")
     paths = BoxPaths()
     try:
-        seal(paths)
+        skipped = seal(paths)
         reason = read_unsupported(paths)
     except SealError as e:
         log_error(COMPONENT, f"audit log not sealed: {e}. Fix: {e.fix}", paths)
         print(f"ERROR: the audit log was not sealed: {e}. Fix: {e.fix}", file=sys.stderr)
         sys.exit(1)
+    if skipped:
+        _warn_skipped(paths, skipped)
     if reason is None:
         log_operation(COMPONENT, f"sealed {paths.audit_log} append-only", paths)
         print(f"Audit log sealed: {paths.audit_log} (deploy's, 0640, append-only)")
@@ -44,6 +46,18 @@ def cmd_audit_seal(args: list[str]) -> None:
                f"({reason}), so deploy can rewrite the audit log on this host. Recorded in "
                f"{paths.audit_append_unsupported}; `health` warns (audit-log)")
     log_warning(COMPONENT, message, paths)
+    print(f"WARNING: {message}", file=sys.stderr)
+
+
+def _warn_skipped(paths: BoxPaths, skipped: list[str]) -> None:
+    """Names of an audit archive's form that are not archives: logged and
+    alerted, in one alert, and left alone."""
+    message = (f"{len(skipped)} name(s) in {paths.logs} look like audit log archives but are "
+               f"not plain files, so they were not sealed and were left alone: "
+               + "; ".join(skipped))
+    log_warning(COMPONENT, message, paths)
+    notify(paths, "boxmunge: unexpected audit archive", message, component=COMPONENT,
+           priority=1)
     print(f"WARNING: {message}", file=sys.stderr)
 
 
