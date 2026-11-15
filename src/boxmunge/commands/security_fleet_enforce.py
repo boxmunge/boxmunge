@@ -53,8 +53,10 @@ def _candidate(decisions: tuple[ProjectDecision, ...]) -> Candidate:
     )
 
 
-def _apply(paths: BoxPaths, project: str, decisions: tuple[ProjectDecision, ...]) -> str | None:
-    """Quarantine ``project`` under its lock. Returns an error or None."""
+def _apply(paths: BoxPaths, project: str, decisions: tuple[ProjectDecision, ...],
+           note: str | None = None) -> str | None:
+    """Quarantine ``project`` under its lock. Returns an error or None.
+    ``note``: why autofix cannot help, for the QUARANTINED alert."""
     headline = headline_of(decisions)
     if headline is None:
         return None
@@ -75,7 +77,7 @@ def _apply(paths: BoxPaths, project: str, decisions: tuple[ProjectDecision, ...]
     except (RuntimeError, ManifestError, OSError, QuarantineError) as e:
         return str(e)
     if outcome.landed:
-        announce_quarantine(paths, project, decisions)
+        announce_quarantine(paths, project, decisions, note=note)
     return outcome.error
 
 
@@ -103,7 +105,7 @@ def apply_new_quarantines(
         candidates[name] = _candidate(scan.decisions)
     verdict = decide(candidates, projects_scanned=len(scans), already_held=already)
     for name in sorted(verdict.apply):
-        error = _apply(paths, name, scans[name].decisions)
+        error = _apply(paths, name, scans[name].decisions, scans[name].autofix_note)
         if error:
             result.errors[name] = error
         else:

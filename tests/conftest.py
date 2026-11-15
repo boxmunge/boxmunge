@@ -73,6 +73,18 @@ def _no_writable_diagnostic_sleep(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _autofix_probe_without_docker(request, monkeypatch):
+    """Outside the integration tier the scan's urgent-autofix probe (a
+    `docker run` in the image) finds the image not patchable, so a scan
+    keeps today's disposition; the autofix tests stub a patchable one."""
+    if request.node.get_closest_marker("integration"):
+        return
+    from boxmunge.cve.autofix_build import NotPatchable
+    monkeypatch.setattr("boxmunge.commands.autofix_urgent_scan.probe",
+                        lambda ref: NotPatchable("unit tier: the image probe is stubbed"))
+
+
+@pytest.fixture(autouse=True)
 def _no_writable_diagnostic_logs(request, monkeypatch):
     """Outside the integration tier the writable diagnostics' default log
     fetch (after a deploy, on a smoke failure) finds no logs, as on a box

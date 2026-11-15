@@ -34,6 +34,9 @@ AlertKind = Literal[
     "fix_deadline",
     "quarantine_lifted",
     "scan_digest",
+    "autofix_started",
+    "autofix_patched",
+    "autofix_failed",
 ]
 
 

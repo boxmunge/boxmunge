@@ -15,7 +15,11 @@ release switch forgets them with the image pins
 While a patch is being built and started, `state/autofix/<project>.active`
 holds {started_at, cves, downtime} (downtime: the project is down for it).
 
-Both files are deploy-writable state that root reads: through fs_nofollow,
+A finding the urgent flow patches waits in `state/autofix/queue/<project>.json`,
+{detected_at, findings: [{cve_id, package, image_ref}], downtime}, until the
+end of the scan or KEV watch run that found it (commands.autofix_urgent).
+
+All three are deploy-writable state that root reads: through fs_nofollow,
 times timezone-aware UTC and not in the future, and anything unusable
 raises StateError naming the file.
 """
@@ -244,3 +248,70 @@ def read_autofixing(paths: BoxPaths, project: str) -> AutofixingMarker | None:
                                 _strings(doc["cves"], "cves"), doc["downtime"])
     except (ValueError, KeyError, TypeError) as e:
         raise StateError(f"{path} is not an autofixing marker: {e!r}") from e
+
+
+@dataclass(frozen=True)
+class QueuedFinding:
+    cve_id: str
+    package: str
+    image_ref: str
+
+
+@dataclass(frozen=True)
+class QueueEntry:
+    """A project's urgent patch, waiting to run: what was found, when, and
+    whether the project was taken down for it."""
+    detected_at: datetime
+    findings: tuple[QueuedFinding, ...]
+    downtime: bool
+
+    @property
+    def cves(self) -> tuple[str, ...]:
+        return tuple(sorted({f.cve_id for f in self.findings}))
+
+
+def write_queue_entry(paths: BoxPaths, project: str, entry: QueueEntry) -> None:
+    if not entry.findings:
+        raise StateError(f"refusing to queue an autofix of {project} with no findings")
+    _write_doc(paths.project_autofix_queue(project), {
+        "detected_at": entry.detected_at.isoformat(), "downtime": entry.downtime,
+        "findings": [{"cve_id": f.cve_id, "package": f.package, "image_ref": f.image_ref}
+                     for f in entry.findings]}, "autofix queue entry")
+
+
+def read_queue_entry(paths: BoxPaths, project: str) -> QueueEntry | None:
+    """The project's queued urgent patch, or None. Raises StateError."""
+    path = paths.project_autofix_queue(project)
+    doc = _read_doc(path, "autofix queue entry")
+    if doc is None:
+        return None
+    try:
+        if not isinstance(doc, dict) or set(doc) != {"detected_at", "findings", "downtime"}:
+            raise ValueError("expected {detected_at, findings, downtime}")
+        if not isinstance(doc["downtime"], bool):
+            raise ValueError(f"downtime is {doc['downtime']!r}, not a boolean")
+        rows = doc["findings"]
+        if not isinstance(rows, list) or not rows:
+            raise ValueError("findings must be a non-empty list")
+        findings = tuple(QueuedFinding(_text(r["cve_id"], "cve_id"), _text(r["package"], "package"),
+                                       _text(r["image_ref"], "image_ref")) for r in rows)
+        return QueueEntry(_time(doc["detected_at"], "detected_at"), findings, doc["downtime"])
+    except (ValueError, KeyError, TypeError) as e:
+        raise StateError(f"{path} is not an autofix queue entry: {e!r}") from e
+
+
+def remove_queue_entry(paths: BoxPaths, project: str) -> None:
+    _unlink(paths.project_autofix_queue(project), "autofix queue entry")
+
+
+def queued_projects(paths: BoxPaths) -> tuple[str, ...]:
+    """The names with a queue entry (`<name>.json`), sorted; the caller
+    validates each as a project name. Raises StateError."""
+    try:
+        names = [e.name for e in paths.autofix_queue_dir.iterdir()]
+    except FileNotFoundError:
+        return ()
+    except OSError as e:
+        raise StateError(f"cannot list the autofix queue {paths.autofix_queue_dir}: {e}") from e
+    return tuple(sorted(n[:-len(".json")] for n in names
+                        if n.endswith(".json") and not n.startswith(".")))

@@ -11,10 +11,14 @@ project's ``security.autofix``) is the caller's to check, as is
 """
 from __future__ import annotations
 
+from datetime import timedelta
 from enum import Enum
 
 from boxmunge.cve.policy_types import Disposition, FindingDisposition, Posture
 from boxmunge.cve.scanner import PkgClass
+
+# An urgent finding is patched within this long of the scan that found it.
+AUTOFIX_URGENT_BUDGET = timedelta(minutes=30)
 
 # A finding the policy takes down (or, opted out, runs at risk) for: a
 # not-listed one with these and its patch gate is strict's overdue fix

@@ -27,6 +27,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from boxmunge.commands.autofix_urgent_scan import with_note
 from boxmunge.commands.kev_withdrawal import withdrawal_hold
 from boxmunge.commands.quarantine_lift import restore_from_quarantine
 from boxmunge.cve.alerting import (
@@ -205,8 +206,10 @@ def _recorded_cve(project: str, paths: BoxPaths) -> str:
 
 def announce_quarantine(
     paths: BoxPaths, project: str, decisions: Sequence[ProjectDecision],
+    *, note: str | None = None,
 ) -> None:
-    """Send the QUARANTINED alert listing every quarantine-level finding.
+    """Send the QUARANTINED alert listing every quarantine-level finding,
+    ending with ``note`` (why autofix cannot help) when given.
 
     Best-effort: a delivery failure is logged, never raised.
     """
@@ -217,7 +220,7 @@ def announce_quarantine(
     if not hits:
         return
     try:
-        send_alerts((format_quarantine_alert(project, hits),), paths)
+        send_alerts((with_note(format_quarantine_alert(project, hits), note),), paths)
     except Exception as e:  # noqa: BLE001 — alerting must never block scan
         log_warning(
             "cve-scan", f"quarantine alert emission failed for {project}: {e}",

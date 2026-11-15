@@ -1,0 +1,174 @@
+# SPDX-License-Identifier: Apache-2.0
+"""The scan's half of the urgent autofix flow: decide, mark and queue.
+
+A scan (the nightly one, or the KEV watch's rescan) that finds an URGENT
+finding (cve.autofix_policy.urgency) on a project with `security.autofix`
+on queues it here, under the project lock, before enforcement:
+
+- downtime (flowchart table A, or the project is quarantined already):
+  the quarantine is taken the normal way (the circuit breaker still weighs a
+  finding that is not full KEV);
+- otherwise the site stays up: the quarantine its findings would take is
+  held back while it is patched, and the autofixing marker says so.
+
+Either way the marker holds {cves, downtime}, the queue entry holds the
+findings and their detection time, and one notice says patching started.
+The patch itself runs at the end of the run (commands.autofix_urgent).
+
+Nothing is queued when autofix cannot help: it is off, the project is down
+on purpose (paused, stopped by the health monitor), something else keeps it
+down, or the image cannot be patched (cve.autofix_build.probe). Today's
+disposition then stands, and the reason is added to the alerts that name
+the findings (the QUARANTINED alert included), not sent as one more alert.
+"""
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from datetime import datetime
+
+from boxmunge.commands.quarantine_lift import start_hold
+from boxmunge.commands.security_scan_inputs import ProjectMeta
+from boxmunge.compose_images import image_phrase
+from boxmunge.cve.alerting import Alert, format_autofix_started_alert
+from boxmunge.cve.autofix_build import NotPatchable, probe
+from boxmunge.cve.autofix_policy import AutofixUrgency, downtime_while_patching, urgency
+from boxmunge.cve.autofix_record import (
+    QueuedFinding, QueueEntry, clear_autofixing, mark_autofixing, read_queue_entry,
+    remove_queue_entry, write_queue_entry,
+)
+from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
+from boxmunge.cve.quarantine import QuarantineError, is_quarantined, read_quarantine_state
+from boxmunge.docker_run import DockerError
+from boxmunge.log import log_operation, log_warning
+from boxmunge.paths import BoxPaths
+from boxmunge.state import StateError
+
+_COMPONENT = "autofix"
+
+Urgent = tuple[ProjectDecision, FindingDisposition]
+
+
+@dataclass(frozen=True)
+class UrgentPlan:
+    """What the scan does about its urgent findings (``cves``). ``queued``:
+    they are patched at the end of the run, with the project down for it
+    when ``downtime``. ``note``: why autofix cannot help, for the alerts."""
+    cves: tuple[str, ...] = ()
+    queued: bool = False
+    downtime: bool = False
+    note: str | None = None
+
+    def headline(self, headline: Urgent | None) -> Urgent | None:
+        """The quarantine headline enforcement gets: none while the site stays
+        up for its patch (nothing else quarantines it: see ``_blocker``)."""
+        return None if self.queued and not self.downtime else headline
+
+    def annotate(self, alerts: list[Alert], start: int = 0) -> None:
+        """Add the note to each alert from ``start`` on that names a CVE."""
+        if self.note is None:
+            return
+        for i in range(start, len(alerts)):
+            if any(cve in alerts[i].body for cve in self.cves):
+                alerts[i] = with_note(alerts[i], self.note)
+
+
+NOTHING_URGENT = UrgentPlan()
+
+
+def with_note(alert: Alert, note: str | None) -> Alert:
+    return alert if note is None else replace(alert, body=f"{alert.body}\n\n{note}")
+
+
+def prepare_urgent(paths: BoxPaths, project: str, meta: ProjectMeta,
+                   decisions: Sequence[ProjectDecision], *, now: datetime,
+                   alerts: list[Alert]) -> UrgentPlan:
+    """Queue the project's urgent findings, or say why autofix cannot help.
+    The caller holds the project lock. Appends the started notice to
+    ``alerts`` when it queues something new."""
+    urgent = [(d, fd) for d in decisions for fd in d.findings
+              if urgency(fd, meta.posture) is AutofixUrgency.URGENT]
+    if not urgent:
+        return NOTHING_URGENT
+    cves = tuple(sorted({fd.finding.cve_id for _, fd in urgent}))
+    try:
+        blocker = _blocker(paths, project, meta, decisions, urgent, cves)
+        existing = None if blocker else read_queue_entry(paths, project)
+    except (StateError, QuarantineError) as e:
+        blocker = f"what it may patch cannot be read ({e})"
+        existing = None
+    if blocker is not None:
+        log_warning(_COMPONENT, f"{project}: autofix cannot help with {', '.join(cves)}: "
+                    f"{blocker}", paths, project=project, detail={"cves": list(cves)})
+        _forget(paths, project)
+        return UrgentPlan(cves, note=f"Autofix cannot help: {blocker}.")
+    keys = {_key(d, fd) for d, fd in urgent}
+    if existing is not None and keys <= set(existing.findings):
+        return UrgentPlan(existing.cves, queued=True, downtime=existing.downtime)
+    downtime = is_quarantined(project, paths) or (existing is not None and existing.downtime) \
+        or (not meta.dangerously and any(downtime_while_patching(fd, meta.posture)
+                                         for _, fd in urgent))
+    try:
+        queue_urgent(paths, project, [fd for _, fd in urgent], downtime=downtime, now=now,
+                     keys=sorted(keys, key=lambda k: (k.cve_id, k.package, k.image_ref)))
+    except StateError as e:
+        log_warning(_COMPONENT, f"{project}: autofix of {', '.join(cves)} not queued: {e}",
+                    paths, project=project)
+        return UrgentPlan(cves, note=f"Autofix cannot help: it could not be queued ({e}).")
+    alerts.append(format_autofix_started_alert(project, cves, downtime=downtime))
+    return UrgentPlan(cves, queued=True, downtime=downtime)
+
+
+def queue_urgent(paths: BoxPaths, project: str, findings: Sequence[FindingDisposition], *,
+                 downtime: bool, now: datetime, keys: Sequence[QueuedFinding]) -> None:
+    """Mark the project autofixing and queue ``keys`` (the findings, by image),
+    detected ``now``. Raises StateError."""
+    cves = sorted({fd.finding.cve_id for fd in findings})
+    mark_autofixing(paths, project, cves, downtime=downtime)
+    write_queue_entry(paths, project, QueueEntry(now, tuple(keys), downtime))
+    log_operation(_COMPONENT, f"{project}: {', '.join(cves)} queued for urgent autofix, "
+                  f"{'site down' if downtime else 'site up'} while patching", paths,
+                  project=project, detail={"cves": cves, "downtime": downtime})
+
+
+def _key(decision: ProjectDecision, fd: FindingDisposition) -> QueuedFinding:
+    return QueuedFinding(fd.finding.cve_id, fd.finding.package, decision.image_ref)
+
+
+def _forget(paths: BoxPaths, project: str) -> None:
+    """Drop a queued patch autofix can no longer run. Logged, never raised:
+    the runner re-checks what it finds anyway."""
+    try:
+        remove_queue_entry(paths, project)
+        clear_autofixing(paths, project)
+    except StateError as e:
+        log_warning(_COMPONENT, f"{project}: {e}", paths, project=project)
+
+
+def _blocker(paths: BoxPaths, project: str, meta: ProjectMeta,
+             decisions: Sequence[ProjectDecision], urgent: Sequence[Urgent],
+             cves: tuple[str, ...]) -> str | None:
+    """Why autofix cannot patch the urgent findings now, or None."""
+    if not meta.autofix:
+        return "autofix is off for this project (security.autofix: false)"
+    held = start_hold(paths, project)
+    if held is not None:
+        return f"autofix does not start a project that is down on purpose: {held}"
+    for d in decisions:
+        for fd in d.findings:
+            if fd.disposition is Disposition.QUARANTINE and urgency(
+                    fd, meta.posture) is not AutofixUrgency.URGENT:
+                return (f"{fd.finding.cve_id} in {fd.finding.package} also takes the site "
+                        f"down, and autofix cannot patch it")
+    record = read_quarantine_state(project, paths)
+    if record is not None and record.get("cve_id") not in cves:
+        return (f"the project is quarantined for {record.get('cve_id')}, which autofix "
+                f"does not patch")
+    for ref in sorted({d.image_ref for d, _ in urgent}):
+        try:
+            found = probe(ref)
+        except DockerError as e:
+            return f"probing {image_phrase(ref)} failed: {e}"
+        if isinstance(found, NotPatchable):
+            return f"{image_phrase(ref)} cannot be patched: {found.reason}"
+    return None

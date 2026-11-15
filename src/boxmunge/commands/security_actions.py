@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from boxmunge.commands.autofix_urgent import run_urgent_queue
 from boxmunge.commands.security_fleet_enforce import apply_held, apply_new_quarantines
 from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project
 from boxmunge.cve.breaker import BreakerError
@@ -425,7 +426,11 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
         log_warning("cve-scan", "fleet scan: waiting for the KEV watch to finish", paths)
 
     with fleet_lock(paths, wait=True, on_wait=waiting):
-        return _scan_targets_cmd(args, paths)
+        rc = _scan_targets_cmd(args, paths)
+        # The run's urgent patches, still under the fleet lock (autofix_urgent);
+        # one that failed has applied its fallback and needs attention.
+        failed = [o for o in run_urgent_queue(paths, datetime.now(timezone.utc)) if not o.ok]
+        return 2 if failed and rc == 0 else rc
 
 
 def _scan_targets_cmd(args: list[str], paths: BoxPaths) -> int:
