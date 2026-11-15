@@ -14,7 +14,7 @@ listing.
 
 The guard refuses:
 - a finding listed by CISA's KEV or the EU's (full KEV), under any posture;
-- under paranoid, a VulnCheck-only listing too (unless it is suppressed);
+- under paranoid, a VulnCheck-only listing too;
 - a CVE autofix patched in the running release (patched_cves);
 - a scan that failed or did not cover every image: nothing shows the
   release is free of them;
@@ -50,7 +50,7 @@ from boxmunge.compose_resolve import ComposeResolveError
 from boxmunge.cve.exploited import ExploitedSource, is_full_kev
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.lift_rule import KevLiftCheck, fresh_data_advice
-from boxmunge.cve.policy import Disposition, FindingDisposition
+from boxmunge.cve.policy import FindingDisposition
 from boxmunge.cve.policy_types import Posture, listing_label
 from boxmunge.cve.scanner import ScannerError
 from boxmunge.docker_run import DockerError
@@ -150,8 +150,7 @@ def _listed(f: FindingDisposition, *, paranoid: bool, patched: frozenset[str],
     if f.finding.cve_id in stale_listed:
         return (f"listed as actively exploited by the cached CISA KEV catalog, which is "
                 f"stale ({stale}); a stale catalog cannot show that has changed")
-    if (paranoid and ExploitedSource.VULNCHECK in sources
-            and f.disposition is not Disposition.SUPPRESSED):
+    if paranoid and ExploitedSource.VULNCHECK in sources:  # no suppression applies there
         return f"listed as actively exploited by {listing_label(sources)} (paranoid refuses it)"
     if f.finding.cve_id in patched:
         return "autofix patched it in the running release; this release brings it back"

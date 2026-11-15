@@ -314,7 +314,7 @@ def cmd_security_suppress(args: list[str], paths: BoxPaths) -> int:
         cve_ids = [cve_id_positional]
 
     cve_ids = drop_kev_listed(paths, cve_ids, positional=not use_current,
-                               log_project=log_project)
+                              log_project=log_project, project=None if use_host else project)
     if not cve_ids:
         return 1
 

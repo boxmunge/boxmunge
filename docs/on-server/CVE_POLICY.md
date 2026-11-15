@@ -1141,14 +1141,15 @@ Rules:
   This is deliberate — silent overwrites would erase audit-trail entries.
 - A suppression is active while `today < until`. So `until: 2026-08-01`
   applies through 2026-07-31 and expires on 2026-08-01.
-- A suppression never applies to a CVE on the CISA KEV catalog. `suppress`
-  refuses a KEV-listed CVE, and `suppress --current` skips KEV-listed CVEs
-  with a `NOTE:`. Both judge against the cached catalog's CVEs even when it
-  is stale (the message says so): staleness only stops new KEV quarantines,
-  and once the catalog is fresh again such a suppression would not apply.
-  `suppress` checks only CISA's catalog: it accepts a CVE only the EU lists
-  (or, under `paranoid`, only VulnCheck), but that suppression does not
-  apply either.
+- A suppression never applies to a full-KEV CVE (CISA or the EU lists it),
+  nor, on a `paranoid` project, to one VulnCheck lists. `suppress` refuses
+  such a CVE, naming the list, and `suppress --current` skips it with a
+  `NOTE:`. Both judge against each list's cached CVEs even when it is stale
+  (the message says so for CISA's): staleness only stops new quarantines,
+  and once the list is fresh again such a suppression would not apply. A
+  host-scope suppression of a CVE only VulnCheck lists is written, with a
+  `NOTE:` that it does not apply to `paranoid` projects; so is one for a
+  project awaiting its first deploy, whose posture is not known yet.
   An existing suppression whose CVE is later added to KEV stops applying on
   the next scan (see the decision order above).
 
