@@ -2,7 +2,7 @@
 """OS update failures: alert the operator, remember what was said.
 
 ``health`` runs only when someone runs it, so a box whose apt sources broke
-could go months without anyone looking. The auto-update timer (every six
+could go months without anyone looking. The auto-update timer (every four
 hours, as root) therefore inspects OS updates (boxmunge.os_updates) on every
 run and calls ``record_os_updates``:
 

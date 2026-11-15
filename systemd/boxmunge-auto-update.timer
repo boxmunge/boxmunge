@@ -1,8 +1,9 @@
 [Unit]
-Description=boxmunge security auto-update (every 6 hours)
+Description=boxmunge security auto-update (every 4 hours)
 
 [Timer]
-OnCalendar=*-*-* 0/6:00:00
+OnCalendar=*-*-* 0/4:00:00
+# Spread the fleet over 30 minutes so update checks do not arrive at once.
 RandomizedDelaySec=1800
 Persistent=true
 

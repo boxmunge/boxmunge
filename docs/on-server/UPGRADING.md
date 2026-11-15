@@ -25,7 +25,7 @@ deploy> version
 boxmunge 0.10.1
 ```
 
-See what auto-update has been saying (it runs every 6 hours, if you enabled it):
+See what auto-update has been saying (it runs every 4 hours, if you enabled it):
 
 ```
 sudo journalctl -u boxmunge-auto-update --since -7d --no-pager | tail
