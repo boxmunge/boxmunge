@@ -109,8 +109,8 @@ class ProjectScan:
     # cleared was kept (security_enforce).
     lifted: str | None = None
     kept: str | None = None
-    # Why autofix cannot patch an urgent finding (autofix_urgent_scan), for
-    # the QUARANTINED alert the fleet run sends.
+    # What the QUARANTINED alert the fleet run sends adds about autofix
+    # (autofix_urgent_scan.UrgentPlan.quarantine_note).
     autofix_note: str | None = None
 
     @property
@@ -422,7 +422,7 @@ def scan_one_project_locked(
     host_expired: tuple[Suppression, ...] = ()
     if not audit_only:
         if outcome.landed:
-            announce_quarantine(paths, project, decisions, note=urgent.note)
+            announce_quarantine(paths, project, decisions, note=urgent.quarantine_note)
         host_expired = _collect_transition_alerts(
             paths, project, meta.posture, decisions, prior_decisions, supps, alerts,
         )
@@ -444,7 +444,7 @@ def scan_one_project_locked(
         host_expired=host_expired,
         lifted=outcome.lifted,
         kept=outcome.kept,
-        autofix_note=urgent.note,
+        autofix_note=urgent.quarantine_note,
     )
 
 

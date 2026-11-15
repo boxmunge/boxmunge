@@ -2,8 +2,9 @@
 """Autofix alerts: a patch started, a patch running, a patch that failed.
 
 Pure functions, like the other formatters. The urgent flow
-(commands.autofix_urgent) sends one notice when it starts patching, then
-one with the outcome; the nightly flow reuses the outcome formatters for
+(commands.autofix_urgent) sends one notice when it starts patching with the
+site up (a quarantine for the patch says so in its own alert), then one
+with the outcome; the nightly flow reuses the outcome formatters for
 its digest.
 """
 from __future__ import annotations
@@ -45,17 +46,19 @@ def _changes(records: Sequence[PatchRecord]) -> list[str]:
 
 def format_autofix_patched_alert(
     project: str, cves: Sequence[str], records: Sequence[PatchRecord], *,
-    site: str, urgent: bool = False,
+    site: str, timing: str, urgent: bool = False,
 ) -> Alert:
     """The patched images run. ``site`` says what that means for the site
-    (back up, quarantine lifted, or why it stays down); ``urgent`` when it
-    needs the operator (a lift that failed, a smoke test that failed)."""
+    (back up, quarantine lifted, or why it stays down); ``timing`` when it
+    was found, started and patched; ``urgent`` when it needs the operator
+    (a lift that failed, a smoke test that failed)."""
     return Alert(kind="autofix_patched",
                  title=f"[boxmunge:{project}] Autofix patched {_cves(cves)}",
                  body="\n".join([
                      f"Project: {project}",
                      "Patched and running:",
                      *_changes(records),
+                     timing,
                      "",
                      site,
                      f"Details: boxmunge security {project}",
@@ -66,7 +69,7 @@ def format_autofix_patched_alert(
 
 def format_autofix_failed_alert(
     project: str, cves: Sequence[str], *, step: str | None, reason: str, site: str,
-    rollback_problems: Sequence[str] = (),
+    timing: str, rollback_problems: Sequence[str] = (),
 ) -> Alert:
     """The patch failed and was rolled back; ``site`` is the fallback that
     applies now (flowchart table B). Priority 1."""
@@ -83,6 +86,7 @@ def format_autofix_failed_alert(
                  body="\n".join([
                      f"Project: {project}",
                      f"Autofix of {_cves(cves)} failed {where}: {reason}",
+                     timing,
                      *mixed,
                      "",
                      site,

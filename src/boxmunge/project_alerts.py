@@ -20,7 +20,8 @@ from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.fs_nofollow import read_text_nofollow_or_none
 
-ALERT_KINDS = ("manifest-schema", "git-layout", "staged-slot", "production-down")
+ALERT_KINDS = ("manifest-schema", "git-layout", "staged-slot", "production-down",
+               "autofix-queue")
 
 
 def alert_state(paths: BoxPaths, project: str, kind: str) -> Path:

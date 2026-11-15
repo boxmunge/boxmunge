@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from boxmunge.commands.autofix_urgent_scan import PATCHING_NOTE
 from boxmunge.commands import (
     autofix_urgent, autofix_urgent_scan, kev_watch, quarantine_lift, security_actions,
     security_scan_core,
@@ -126,22 +127,31 @@ def test_urgent_flow_matches_posture_charts(tmp_path, monkeypatch, posture, list
     entry = read_queue_entry(paths, "demo")
     assert entry.cves == (CVE,) and entry.downtime is dark
     assert before <= entry.detected_at <= _now()
-    [started] = box.sent("patching")
-    site = "site down while patching" if dark else "site up"
-    assert started[0].endswith(f"[boxmunge:demo] {CVE} found on demo, patching ({site})")
-    assert started[2] == 0
-    assert box.sent("QUARANTINED") == ([box.sent("QUARANTINED")[0]] if dark else [])
+    # One alert at detection: the QUARANTINED alert itself when the project is
+    # taken down for the patch, the started notice when it stays up.
+    if dark:
+        assert box.sent("patching") == []
+        [quarantined] = box.sent("QUARANTINED")
+        assert quarantined[1].endswith(PATCHING_NOTE)
+    else:
+        [started] = box.sent("patching")
+        assert started[0].endswith(f"[boxmunge:demo] {CVE} found on demo, patching (site up)")
+        assert started[2] == 0
+        assert box.sent("QUARANTINED") == []
 
+    start = _now()
     [outcome] = box.run()
     assert outcome.ok
+    assert outcome.detected_at == entry.detected_at and start <= outcome.started_at <= _now()
     [(project, cves, trigger, deadline)] = box.runner.calls
     assert (project, cves, trigger) == ("demo", (CVE,), "urgent")
-    assert deadline == entry.detected_at + AUTOFIX_URGENT_BUDGET
+    assert deadline == outcome.started_at + AUTOFIX_URGENT_BUDGET
     assert not is_quarantined("demo", paths)
     assert read_queue_entry(paths, "demo") is None and read_autofixing(paths, "demo") is None
     [patched] = box.sent("Autofix patched")
     assert patched[2] == 0
     assert ("quarantine is lifted" in patched[1]) is dark
+    assert "Found " in patched[1] and ", patched " in patched[1]
     assert box.sent("Quarantine lifted") == []   # the patched notice says it, once
     assert box.docker.calls.count("compose_up") == (1 if dark else 0)
 
@@ -158,6 +168,7 @@ def test_failure_applies_table_b_and_alerts_step(tmp_path, monkeypatch) -> None:
     title, body, priority = failed
     assert priority == 1 and "at the build step" in title and CVE in title
     assert "the mirror is unreachable" in body and "quarantined now" in body
+    assert "Found " in body and ", failed " in body
     assert "mixed" not in body
     assert read_queue_entry(box.paths, "demo") is None
     assert read_autofixing(box.paths, "demo") is None
@@ -278,14 +289,22 @@ def test_patched_alert_carries_the_persistence_caveat(tmp_path, monkeypatch) -> 
 # ---------- the queue ----------
 
 
-def test_a_passed_deadline_starts_nothing_and_falls_back(tmp_path, monkeypatch) -> None:
+def test_a_project_waiting_its_turn_still_gets_its_whole_budget(tmp_path,
+                                                               monkeypatch) -> None:
+    """The budget runs from the attempt's own start: a long wait in the queue
+    (many projects on one base image) does not turn a patch into downtime."""
     box = _box(tmp_path, monkeypatch, "balanced", cvss=7.5)
     box.scan()
-    box.run(_now() + AUTOFIX_URGENT_BUDGET + timedelta(seconds=1))
-    assert box.runner.calls == []
-    assert is_quarantined("demo", box.paths)
-    [failed] = box.sent("Autofix FAILED")
-    assert "at the budget step" in failed[0] and "had not started" in failed[1]
+    detected = read_queue_entry(box.paths, "demo").detected_at
+    later = _now() + AUTOFIX_URGENT_BUDGET + timedelta(minutes=5)
+    assert not is_quarantined("demo", box.paths)   # waiting: up and marked
+    [outcome] = box.run(later)
+    [(_, _, _, deadline)] = box.runner.calls
+    assert outcome.ok and outcome.started_at >= later
+    assert deadline == outcome.started_at + AUTOFIX_URGENT_BUDGET
+    assert not is_quarantined("demo", box.paths)
+    [patched] = box.sent("Autofix patched")
+    assert "Found " in patched[1] and f"{detected:%H:%M} UTC, patch started" in patched[1]
 
 
 def test_a_busy_project_is_left_for_the_next_run(tmp_path, monkeypatch) -> None:
@@ -313,14 +332,26 @@ def test_a_queued_finding_the_stored_scan_no_longer_has_is_dropped(tmp_path,
 
 def test_a_malformed_entry_is_alerted_and_the_rest_still_run(tmp_path, monkeypatch) -> None:
     box = _box(tmp_path, monkeypatch, "relaxed", projects=("blog", "shop"))
+    box.paths.log_file.parent.mkdir(parents=True, exist_ok=True)
     box.scan("blog")
     box.scan("shop")
     bad = box.paths.project_autofix_queue("blog")
     bad.write_text("{not json")
     [outcome] = box.run()
     assert outcome.ok and [c[0] for c in box.runner.calls] == ["shop"]
+    box.run()   # logged again, alerted once a day
     [problem] = box.sent("could not run")
     assert problem[2] == 1 and str(bad) in problem[1]
+    assert box.paths.log_file.read_text().count("urgent autofix of blog could not run") == 2
+
+
+def test_a_run_for_some_projects_leaves_the_others_queued(tmp_path, monkeypatch) -> None:
+    box = _box(tmp_path, monkeypatch, "relaxed", projects=("blog", "shop"))
+    box.scan("blog")
+    box.scan("shop")
+    [outcome] = autofix_urgent.run_urgent_queue(box.paths, _now(), only=["shop"])
+    assert outcome.ok and [c[0] for c in box.runner.calls] == ["shop"]
+    assert read_queue_entry(box.paths, "blog") is not None
 
 
 def test_a_rescan_keeps_the_queued_detection_time(tmp_path, monkeypatch) -> None:
@@ -351,6 +382,13 @@ def test_the_fleet_run_holds_back_only_the_up_while_patching_quarantine(
     assert not run.held
 
 
+def test_the_fleet_quarantine_alert_says_it_is_for_the_patch(tmp_path, monkeypatch) -> None:
+    box = _box(tmp_path, monkeypatch, "balanced", cvss=9.8)
+    _fleet(box)
+    [quarantined] = box.sent("QUARANTINED")
+    assert quarantined[1].endswith(PATCHING_NOTE) and box.sent("patching") == []
+
+
 def test_the_fleet_quarantine_alert_carries_why_autofix_cannot_help(tmp_path,
                                                                     monkeypatch) -> None:
     box = _box(tmp_path, monkeypatch, "balanced")
@@ -376,9 +414,19 @@ def test_the_fleet_scan_runs_the_queue_under_its_lock(tmp_path, monkeypatch, ok,
     outcome = AutofixOutcome(ok, None if ok else "build", "x", ())
     monkeypatch.setattr(security_actions, "_scan_targets_cmd", lambda args, p: 0)
     monkeypatch.setattr(security_actions, "run_urgent_queue",
-                        lambda p, now: seen.append(_holds_fleet_lock(p)) or [outcome])
+                        lambda p, now, only=None: seen.append(_holds_fleet_lock(p)) or [outcome])
     assert security_actions.cmd_security_scan([], paths) == rc
     assert seen == [True]
+
+
+def test_a_single_project_scan_runs_that_projects_patch_at_once(tmp_path, monkeypatch) -> None:
+    paths = make_box(tmp_path)
+    seen: list = []
+    monkeypatch.setattr(security_actions, "_scan_targets_cmd", lambda args, p: 0)
+    monkeypatch.setattr(security_actions, "run_urgent_queue",
+                        lambda p, now, only=None: seen.append(only) or [])
+    assert security_actions.cmd_security_scan(["demo"], paths) == 0
+    assert seen == [["demo"]]
 
 
 @pytest.mark.parametrize("fails", [False, True])

@@ -17,7 +17,8 @@ from enum import Enum
 from boxmunge.cve.policy_types import Disposition, FindingDisposition, Posture
 from boxmunge.cve.scanner import PkgClass
 
-# An urgent finding is patched within this long of the scan that found it.
+# An urgent patch attempt has this long from its own start (not from the
+# detection: a project waiting its turn in the queue keeps its current state).
 AUTOFIX_URGENT_BUDGET = timedelta(minutes=30)
 
 # A finding the policy takes down (or, opted out, runs at risk) for: a

@@ -75,12 +75,16 @@ class AutofixOutcome:
     """`rollback_problems`: what a failed run's rollback could not undo, one
     line each (also in `reason`); empty when it was undone cleanly. When it
     is not empty the project may be left mixed (pins restored, containers
-    still on a patched image): the flows alert it."""
+    still on a patched image): the flows alert it. `detected_at` and
+    `started_at`: when the findings were found and the attempt began, set
+    by the flow that queued them (None from the runner itself)."""
     ok: bool
     failed_step: Step | None
     reason: str
     records: tuple[PatchRecord, ...]
     rollback_problems: tuple[str, ...] = ()
+    detected_at: datetime | None = None
+    started_at: datetime | None = None
 
 
 @dataclass

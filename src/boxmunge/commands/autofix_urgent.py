@@ -12,10 +12,12 @@ lock (held by someone else: left for the next run, logged):
   scan no longer finds them, or they stopped being urgent): the entry and
   the marker are dropped and nothing runs; a quarantine taken for them
   follows the scan's own lift rules;
-- the deadline is the detection time plus AUTOFIX_URGENT_BUDGET. Passed
-  already: nothing starts, and the fallback applies (failed step "budget");
-- otherwise cve.autofix_run patches, swaps and health checks, by the
-  deadline, and rolls back on any failure.
+- cve.autofix_run patches, swaps and health checks, and rolls back on any
+  failure, by a deadline AUTOFIX_URGENT_BUDGET after this attempt's own
+  start: with many projects queued at once (one base image), a project
+  waiting its turn stays as the scan left it (up and marked autofixing, or
+  quarantined), and does not lose its patch to the wait. The detection and
+  start times are in the outcome, the oplog and the alert.
 
 Success lifts the quarantine taken for the patch (the scan's lift path,
 quarantine_lift.restore_from_quarantine), and one quiet notice says so: the
@@ -26,12 +28,15 @@ containers), one it leaves up or at risk stays so; then one urgent alert
 names the step. Upgrade probation does not hold this back; only the
 nightly flow waits for it.
 
-A queue entry that cannot be read is alerted and skipped; the rest of the
-queue still runs.
+A queue entry that cannot be read is logged on every run, alerted at most
+once a day per project, and skipped; the rest of the queue still runs.
+`only` limits a run to some projects: a single-project `security scan`
+runs its own project's entry at once, not at the next KEV watch tick.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from boxmunge.commands.quarantine_lift import Restored, restore_from_quarantine
@@ -57,6 +62,7 @@ from boxmunge.fileutil import LockError, project_lock
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths, InvalidProjectName
+from boxmunge.project_alerts import alert_once
 from boxmunge.state import StateError
 
 _COMPONENT = "autofix"
@@ -68,8 +74,10 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def run_urgent_queue(paths: BoxPaths, now: datetime) -> list[AutofixOutcome]:
-    """Run every queued urgent patch; the outcome of each that ran."""
+def run_urgent_queue(paths: BoxPaths, now: datetime, *,
+                     only: Collection[str] | None = None) -> list[AutofixOutcome]:
+    """Run every queued urgent patch (of ``only``, when given); the outcome
+    of each that ran. ``now``: the earliest the run can start."""
     try:
         projects = queued_projects(paths)
     except StateError as e:
@@ -77,6 +85,8 @@ def run_urgent_queue(paths: BoxPaths, now: datetime) -> list[AutofixOutcome]:
         return []
     outcomes = []
     for project in projects:
+        if only is not None and project not in only:
+            continue
         try:
             with project_lock(project, paths):
                 outcome = _run_one(paths, project, max(now, _now()))
@@ -99,18 +109,21 @@ def run_urgent_queue(paths: BoxPaths, now: datetime) -> list[AutofixOutcome]:
 
 
 def _problem(paths: BoxPaths, project: str | None, problem: str) -> None:
-    """A queue entry or the state it needs is unusable: logged and alerted."""
+    """A queue entry or the state it needs is unusable: logged on every run,
+    alerted at most once a day per project (a name that is not a project's
+    has no per-project record to throttle by: logged only)."""
     log_error(_COMPONENT, f"urgent autofix{f' of {project}' if project else ''} could not run: "
               f"{problem}", paths, project=project)
-    title = f"[boxmunge:{project}]" if project else "[boxmunge]"
-    _send(paths, Alert(kind="autofix_failed", priority=1,
-                       title=f"{title} Urgent autofix could not run",
-                       body="\n".join([
-                           problem, "",
-                           "Nothing was patched; what the scan decided stands. Fix or remove the",
-                           f"entry under {paths.autofix_queue_dir}; the next scan queues the",
-                           "patch again.",
-                       ])))
+    if project is None:
+        return
+    alert_once(paths, project, "autofix-queue", {"day": _now().date().isoformat()},
+               title=f"[boxmunge:{project}] Urgent autofix could not run", priority=1,
+               component=_COMPONENT, message="\n".join([
+                   problem, "",
+                   "Nothing was patched; what the scan decided stands. Fix or remove the",
+                   f"entry under {paths.autofix_queue_dir}; the next scan queues the",
+                   "patch again. Alerted once a day while it lasts.",
+               ]))
 
 
 def _send(paths: BoxPaths, alert: Alert) -> None:
@@ -154,29 +167,40 @@ def _run_one(paths: BoxPaths, project: str, now: datetime) -> AutofixOutcome | N
                       f"dropped: the stored scan no longer has them to patch", paths,
                       project=project)
         return None
-    deadline = entry.detected_at + AUTOFIX_URGENT_BUDGET
+    log_operation(_COMPONENT, f"{project}: urgent autofix of {', '.join(entry.cves)} "
+                  f"starting, found {entry.detected_at.isoformat()}", paths, project=project,
+                  detail={"detected_at": entry.detected_at.isoformat(),
+                          "started_at": now.isoformat()})
     if not meta.autofix:
         outcome = AutofixOutcome(False, None, "autofix was turned off for this project "
                                  "before the patch started", ())
-    elif now >= deadline:
-        outcome = AutofixOutcome(False, "budget", f"the patch had not started by "
-                                 f"{deadline.isoformat()}, {_minutes()} after detection", ())
     else:
-        outcome = _patch(paths, project, findings, deadline)
+        outcome = _patch(paths, project, findings, now + AUTOFIX_URGENT_BUDGET)
+    outcome = replace(outcome, detected_at=entry.detected_at, started_at=now)
     _done(paths, project)
     cves = sorted({fd.finding.cve_id for fd in findings})
+    timing = _timing(entry.detected_at, now, _now(), "patched" if outcome.ok else "failed")
+    log_operation(_COMPONENT, f"{project}: urgent autofix of {', '.join(cves)}: {timing}",
+                  paths, project=project, detail={
+                      "ok": outcome.ok, "detected_at": entry.detected_at.isoformat(),
+                      "started_at": now.isoformat()})
     if outcome.ok:
-        _send(paths, _succeeded(paths, project, meta, entry, cves, outcome))
+        _send(paths, _succeeded(paths, project, meta, entry, cves, outcome, timing))
     else:
         site = _fallback(paths, project, meta, decisions, findings)
         _send(paths, format_autofix_failed_alert(
             project, cves, step=outcome.failed_step, reason=outcome.reason, site=site,
-            rollback_problems=outcome.rollback_problems))
+            rollback_problems=outcome.rollback_problems, timing=timing))
     return outcome
 
 
-def _minutes() -> str:
-    return f"{int(AUTOFIX_URGENT_BUDGET.total_seconds() // 60)} minutes"
+def _timing(found: datetime, started: datetime, ended: datetime, verb: str) -> str:
+    """"Found 12:03 UTC, patch started 12:20, patched 12:21" (with the date
+    when the times span days)."""
+    fmt = "%H:%M" if found.date() == ended.date() else "%Y-%m-%d %H:%M"
+    return (f"Found {found.astimezone(timezone.utc):{fmt}} UTC, patch started "
+            f"{started.astimezone(timezone.utc):{fmt}}, {verb} "
+            f"{ended.astimezone(timezone.utc):{fmt}}.")
 
 
 def _patch(paths: BoxPaths, project: str, findings: Sequence[FindingDisposition],
@@ -197,14 +221,15 @@ def _quarantine_kwargs(paths: BoxPaths, project: str, meta: ProjectMeta) -> dict
 
 
 def _succeeded(paths: BoxPaths, project: str, meta: ProjectMeta, entry: QueueEntry,
-               cves: Sequence[str], outcome: AutofixOutcome) -> Alert:
+               cves: Sequence[str], outcome: AutofixOutcome, timing: str) -> Alert:
     """Lift the quarantine taken for the patch; the notice of what runs now."""
     urgent = False
     try:
         record = read_quarantine_state(project, paths)
     except QuarantineError as e:
-        return format_autofix_patched_alert(project, cves, outcome.records, urgent=True, site=(
-            f"Whether the project is quarantined cannot be read: {e}"))
+        return format_autofix_patched_alert(
+            project, cves, outcome.records, urgent=True, timing=timing,
+            site=f"Whether the project is quarantined cannot be read: {e}")
     if record is None:
         site = "The site stayed up while it was patched."
     elif record.get("cve_id") in entry.cves:
@@ -224,7 +249,7 @@ def _succeeded(paths: BoxPaths, project: str, meta: ProjectMeta, entry: QueueEnt
         except QuarantineError as e:
             site, urgent = f"{site} Re-asserting it failed: {e}; the next scan retries.", True
     return format_autofix_patched_alert(project, cves, outcome.records, site=site,
-                                        urgent=urgent)
+                                        urgent=urgent, timing=timing)
 
 
 def _lifted(restored: Restored) -> tuple[str, bool]:

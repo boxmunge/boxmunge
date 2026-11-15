@@ -11,9 +11,12 @@ on queues it here, under the project lock, before enforcement:
 - otherwise the site stays up: the quarantine its findings would take is
   held back while it is patched, and the autofixing marker says so.
 
-Either way the marker holds {cves, downtime}, the queue entry holds the
-findings and their detection time, and one notice says patching started.
-The patch itself runs at the end of the run (commands.autofix_urgent).
+Either way the marker holds {cves, downtime} and the queue entry holds the
+findings and their detection time. One alert says patching started: the
+QUARANTINED alert itself when the scan quarantines the project for the
+patch, the autofix_started notice otherwise (the site stays up, or it was
+quarantined already). The patch runs at the end of the run
+(commands.autofix_urgent).
 
 Nothing is queued when autofix cannot help: it is off, the project is down
 on purpose (paused, stopped by the health monitor), something else keeps it
@@ -59,6 +62,14 @@ class UrgentPlan:
     downtime: bool = False
     note: str | None = None
 
+    @property
+    def quarantine_note(self) -> str | None:
+        """What the QUARANTINED alert adds: why autofix cannot help, or that
+        the quarantine is for the patch now running."""
+        if self.queued and self.downtime:
+            return PATCHING_NOTE
+        return self.note
+
     def headline(self, headline: Urgent | None) -> Urgent | None:
         """The quarantine headline enforcement gets: none while the site stays
         up for its patch (nothing else quarantines it: see ``_blocker``)."""
@@ -74,6 +85,8 @@ class UrgentPlan:
 
 
 NOTHING_URGENT = UrgentPlan()
+PATCHING_NOTE = ("Autofix is patching it now; the site comes back automatically if the "
+                 "patch passes.")
 
 
 def with_note(alert: Alert, note: str | None) -> Alert:
@@ -105,7 +118,8 @@ def prepare_urgent(paths: BoxPaths, project: str, meta: ProjectMeta,
     keys = {_key(d, fd) for d, fd in urgent}
     if existing is not None and keys <= set(existing.findings):
         return UrgentPlan(existing.cves, queued=True, downtime=existing.downtime)
-    downtime = is_quarantined(project, paths) or (existing is not None and existing.downtime) \
+    quarantined = is_quarantined(project, paths)
+    downtime = quarantined or (existing is not None and existing.downtime) \
         or (not meta.dangerously and any(downtime_while_patching(fd, meta.posture)
                                          for _, fd in urgent))
     try:
@@ -115,7 +129,8 @@ def prepare_urgent(paths: BoxPaths, project: str, meta: ProjectMeta,
         log_warning(_COMPONENT, f"{project}: autofix of {', '.join(cves)} not queued: {e}",
                     paths, project=project)
         return UrgentPlan(cves, note=f"Autofix cannot help: it could not be queued ({e}).")
-    alerts.append(format_autofix_started_alert(project, cves, downtime=downtime))
+    if not downtime or quarantined:   # else the QUARANTINED alert says it (quarantine_note)
+        alerts.append(format_autofix_started_alert(project, cves, downtime=downtime))
     return UrgentPlan(cves, queued=True, downtime=downtime)
 
 
