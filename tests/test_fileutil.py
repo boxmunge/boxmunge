@@ -8,7 +8,13 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge.fileutil import atomic_write_bytes, atomic_write_text
-from boxmunge.fileutil import open_shared_lockfile, project_lock, LockError
+import threading
+import time
+
+from boxmunge import fileutil
+from boxmunge.fileutil import (
+    LockError, LockWaitTimeout, open_shared_lockfile, project_lock, project_lock_wait,
+)
 from boxmunge.fs_nofollow import mkdir_p_deploy
 from boxmunge.paths import BoxPaths
 
@@ -262,6 +268,69 @@ class TestProjectLock:
             pass
         with project_lock("myapp", paths):
             pass  # should not raise
+
+
+class TestProjectLockWait:
+    def _paths(self, tmp_path: Path) -> BoxPaths:
+        paths = BoxPaths(root=tmp_path)
+        paths.state.mkdir(parents=True, exist_ok=True)
+        return paths
+
+    def test_wait_succeeds_when_the_holder_releases(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(fileutil, "LOCK_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(fileutil, "lock_holder", lambda _p: None)
+        paths = self._paths(tmp_path)
+        held, release = threading.Event(), threading.Event()
+
+        def hold() -> None:
+            with project_lock("myapp", paths):
+                held.set()
+                release.wait(5)
+
+        t = threading.Thread(target=hold)
+        t.start()
+        held.wait(5)
+        threading.Timer(0.1, release.set).start()
+        with project_lock_wait("myapp", paths, timeout=5, on_wait=lambda _h: None):
+            pass
+        t.join()
+
+    def test_wait_times_out_naming_the_holder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(fileutil, "LOCK_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(fileutil, "lock_holder", lambda _p: "pid 4242: boxmunge backup")
+        paths = self._paths(tmp_path)
+        with project_lock("myapp", paths):
+            with pytest.raises(LockWaitTimeout, match="pid 4242: boxmunge backup") as e:
+                with project_lock_wait("myapp", paths, timeout=0.05, on_wait=lambda _h: None):
+                    pass
+        assert isinstance(e.value, LockError)
+        assert e.value.holder == "pid 4242: boxmunge backup"
+        assert e.value.project == "myapp"
+        assert e.value.waited_seconds >= 0.05
+
+    def test_on_wait_called_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(fileutil, "LOCK_POLL_SECONDS", 0.01)
+        monkeypatch.setattr(fileutil, "lock_holder", lambda _p: "pid 1")
+        paths = self._paths(tmp_path)
+        seen: list[str | None] = []
+        with project_lock("myapp", paths):
+            with pytest.raises(LockWaitTimeout):
+                with project_lock_wait("myapp", paths, timeout=0.1, on_wait=seen.append):
+                    pass
+        assert seen == ["pid 1"]
+
+    def test_lock_released_after_wait_block(self, tmp_path: Path) -> None:
+        paths = self._paths(tmp_path)
+        with project_lock_wait("myapp", paths, timeout=1, on_wait=lambda _h: None):
+            pass
+        with project_lock("myapp", paths):
+            pass
 
 
 class TestChownDeployErrorClass:

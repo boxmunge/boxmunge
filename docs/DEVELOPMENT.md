@@ -199,6 +199,9 @@ none: `api/actions/logs.py` reads nothing itself (the operational log goes throu
 `api/dev/fixture_host.py` (3 reads) serves canned answers from `dev/` of a fixture box, which `apid`
 dev mode accepts only with the fixture marker, never a real box, and which no deploy user writes.
 
+`lock_holder.py` (2 reads) takes `/proc/locks` and `/proc/<pid>/cmdline`, kernel files no deploy user
+writes, to name the process holding a project lock (`fileutil.project_lock_wait`).
+
 A project's YAML files go through `project_yaml.load_project_yaml` (`read_project_bytes` for the
 bytes), as the `caddy.read_override` rules: a git project's `manifest.yml` and `compose.yml` are
 links into `repo/`, so a link is followed when it resolves inside the project and no component of the

@@ -49,8 +49,10 @@ import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, Iterator
+import time
+from typing import TYPE_CHECKING, Callable, Iterator
 
+from boxmunge.lock_holder import lock_holder
 from boxmunge.fs_nofollow import fchown_deploy, mkdir_p_deploy, open_regular_nofollow
 
 if TYPE_CHECKING:
@@ -290,6 +292,61 @@ def project_lock(project_name: str, paths: "BoxPaths") -> Iterator[None]:
             f"Another operation is in progress for '{project_name}'. "
             f"Try again shortly."
         )
+    try:
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+LOCK_POLL_SECONDS = 1
+
+
+class LockWaitTimeout(LockError):
+    """The project lock stayed held for the whole bounded wait."""
+
+    def __init__(self, project: str, waited_seconds: float, holder: str | None) -> None:
+        self.project = project
+        self.waited_seconds = waited_seconds
+        self.holder = holder
+        who = holder or "an unknown process"
+        super().__init__(
+            f"'{project}' stayed locked for {waited_seconds:.0f}s, held by {who}."
+        )
+
+
+@contextmanager
+def project_lock_wait(
+    project: str, paths: "BoxPaths", *, timeout: float,
+    on_wait: Callable[[str | None], None],
+) -> Iterator[None]:
+    """Like project_lock, but poll for up to ``timeout`` seconds.
+
+    ``on_wait(holder)`` is called once, on the first refusal, with the
+    holder's description (or None). Raises LockWaitTimeout when the wait
+    runs out.
+    """
+    lock_path = paths.project_lock_file(project)
+    fd = open_shared_lockfile(lock_path)
+    start = time.monotonic()
+    announced = False
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                holder = lock_holder(lock_path)
+                if not announced:
+                    announced = True
+                    on_wait(holder)
+                waited = time.monotonic() - start
+                if waited >= timeout:
+                    raise LockWaitTimeout(project, waited, holder)
+                time.sleep(LOCK_POLL_SECONDS)
+    except BaseException:
+        os.close(fd)
+        raise
     try:
         yield
     finally:
