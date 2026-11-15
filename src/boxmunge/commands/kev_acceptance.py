@@ -90,6 +90,8 @@ def gate_exits(project: str, check: KevLiftCheck, paths: BoxPaths) -> list[str]:
     """What gets a fix deploy the gate refused through, from the route it
     took there."""
     acceptance = _CURRENT.get()
+    if check.stale_sources:
+        return [f"{fresh_data_advice()}; then deploy again."]
     if not check.acceptable:
         exits = ["Ship a release without those CVEs.",
                  f"Or: {fresh_data_advice()}; then deploy again."]

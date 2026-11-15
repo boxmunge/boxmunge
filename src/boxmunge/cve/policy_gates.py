@@ -59,6 +59,7 @@ def threshold_disposition(
     compare_sev: Severity,
     dangerously_disable_quarantine: bool,
     severity_sources: tuple[str, ...] = (),
+    listed_by: str = "",
 ) -> FindingDisposition:
     """Compare `compare_sev` against the posture's severity gate and dispose.
 
@@ -74,7 +75,8 @@ def threshold_disposition(
     label = _POSTURE_LABEL[posture]
     if over and action is Disposition.AWAITING_FIX:
         disposition = action
-        explanation = explain_awaiting_fix(base, effective, penalty, label, threshold.value)
+        explanation = explain_awaiting_fix(
+            base, effective, penalty, label, threshold.value, listed_by)
     else:
         if not over:
             disposition = Disposition.INFORMATIONAL

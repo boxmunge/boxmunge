@@ -230,7 +230,7 @@ def detect_transitions(
     # Standing, not transitions: alerted on every scan while live (B-01, B-09).
     kev_fix_pending: list[Hit] = []
     kev_at_risk: list[Hit] = []
-    # Listed only by VulnCheck and not quarantined: urgent, every scan.
+    # Listed only by VulnCheck and not quarantined: urgent, once per change.
     exploited_listed: list[Hit] = []
     for key, hit in now.items():
         fd = hit.disposition
@@ -243,7 +243,10 @@ def detect_transitions(
             kev_at_risk.append(hit)
         elif fd.exploited_by and disp in (Disposition.INFORMATIONAL,
                                           Disposition.AWAITING_FIX):
-            exploited_listed.append(hit)
+            # A transition, not standing: new, a source gained, or a changed
+            # disposition (a listing that merely persists is not repeated).
+            if changed or not fd.exploited_by <= old.disposition.exploited_by:
+                exploited_listed.append(hit)
         elif disp == Disposition.IGNORED_FIXED and fd.fix_would_quarantine and (
             changed or not old.disposition.fix_would_quarantine
         ):

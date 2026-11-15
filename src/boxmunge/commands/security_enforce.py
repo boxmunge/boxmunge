@@ -22,7 +22,7 @@ resume` follows too) until `resume` or `recover`.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -32,14 +32,18 @@ from boxmunge.cve.alerting import (
     findings_by_key, format_quarantine_alert, format_quarantine_lifted_alert, lift_reason,
     send_alerts,
 )
+from boxmunge.cve.exploited import ExploitedSource
+from boxmunge.cve.lift_rule import stale_listing_refusal
 from boxmunge.cve.policy import Disposition, FindingDisposition, Posture, ProjectDecision
 from boxmunge.cve.quarantine import (
     QuarantineError,
+    checked_quarantine_record,
     is_quarantined,
     quarantine_action_complete,
     quarantine_project,
     read_quarantine_state,
     reassert_quarantine,
+    recorded_exploited_by,
 )
 from boxmunge.lifecycle import BlockReason, is_blocked
 from boxmunge.log import log_operation, log_warning
@@ -64,14 +68,18 @@ def enforce(
     paths: BoxPaths, project: str, *,
     hosts: list[str], compose_files: list[str], policy: dict[str, Any],
     headline: tuple[ProjectDecision, FindingDisposition] | None,
+    exploited_by: frozenset[ExploitedSource],
     defer_new: bool,
     cleared: Sequence[ProjectDecision] | None = None,
+    stale_sources: Mapping[ExploitedSource, str] | None = None,
 ) -> Enforcement:
     """Take, re-assert or lift the quarantine action for ``project``.
 
     ``cleared`` is this scan's decisions when they clear the quarantine
-    (``clears_quarantine``); then an existing quarantine is lifted, unless
-    ``_lift_blocker`` says it must not be, or a KEV refresh withdrew its
+    (``clears_quarantine``), with ``stale_sources`` the known-exploited
+    sources that cannot be trusted now (required then); an existing
+    quarantine is lifted, unless a source that listed it is stale
+    (``listing_hold``), ``_lift_blocker`` says it must not be, or a KEV refresh withdrew its
     CVE and the images still contain it (kev_withdrawal). Otherwise an
     existing record is re-asserted, so a partially failed action converges
     (audit B-03). With ``defer_new`` no NEW quarantine fires here: the fleet
@@ -82,7 +90,10 @@ def enforce(
         if is_quarantined(project, paths):
             blocker = None
             if cleared is not None:
-                blocker = (withdrawal_hold(paths, project, cleared)
+                if stale_sources is None:
+                    raise ValueError("a clearing scan must say which sources are stale")
+                blocker = (listing_hold(paths, project, stale_sources)
+                           or withdrawal_hold(paths, project, cleared)
                            or _lift_blocker(paths, project))
             if cleared is not None and blocker is None:
                 return _lift_cleared(paths, project, cleared)
@@ -98,8 +109,8 @@ def enforce(
             quarantine_project(
                 project, paths, project_dir=project_dir,
                 hosts=hosts, compose_files=compose_files,
-                headline=headline[1], image_ref=headline[0].image_ref,
-                policy=policy,
+                headline=headline[1], exploited_by=exploited_by,
+                image_ref=headline[0].image_ref, policy=policy,
             )
             return Enforcement(landed=True)
     except QuarantineError as e:
@@ -117,6 +128,23 @@ def clears_quarantine(posture: Posture, decisions: Sequence[ProjectDecision], *,
     return (posture is Posture.BALANCED and complete and kev_fresh
             and not any(f.full_kev or f.disposition is Disposition.QUARANTINE
                         for f in findings))
+
+
+def quarantine_listing(decisions: Sequence[ProjectDecision]) -> frozenset[ExploitedSource]:
+    """Every known-exploited source listing a quarantine-level finding."""
+    return frozenset(s for d in decisions for f in d.findings
+                     if f.disposition is Disposition.QUARANTINE for s in f.exploited_by)
+
+
+def listing_hold(paths: BoxPaths, project: str,
+                 stale_sources: Mapping[ExploitedSource, str]) -> str | None:
+    """Why a cleared quarantine is kept because a source that listed it is
+    stale (it reads as "nothing is exploited"), or None. CISA is judged by
+    ``clears_quarantine`` itself."""
+    record = checked_quarantine_record(read_quarantine_state(project, paths),
+                                       paths.project_quarantine_state(project))
+    refusal = stale_listing_refusal(recorded_exploited_by(record), stale_sources)
+    return None if refusal is None else f"quarantine kept: {refusal}"
 
 
 def _lift_blocker(paths: BoxPaths, project: str) -> str | None:

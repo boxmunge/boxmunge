@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import json
+
 import pytest
 import yaml
 
@@ -176,6 +178,35 @@ def test_a_stale_kev_catalog_never_lifts(box) -> None:
     assert is_quarantined("demo", paths)
     assert paths.docker.calls == ["caddy_reload", "compose_stop"]
     assert not _titles(pushover, LIFTED_TITLE)
+
+
+def test_a_quarantine_an_eu_listing_caused_is_not_lifted_while_the_eu_list_is_stale(
+        box) -> None:
+    """A stale list reads as "nothing exploited": it cannot lift what it caused."""
+    paths, pushover = box()
+    seed_quarantine(paths, exploited_by=["eu_kev"])
+    scan = _scan(paths)  # CISA fresh and clear; the EU cache was never fetched
+    assert is_quarantined("demo", paths) and "compose_up" not in paths.docker.calls
+    assert scan.kept is not None and "EU KEV list is stale" in scan.kept
+    assert not _titles(pushover, LIFTED_TITLE)
+
+
+def test_a_quarantine_caused_by_cisa_lifts_while_only_the_eu_list_is_stale(box) -> None:
+    paths, pushover = box()
+    seed_quarantine(paths, exploited_by=["cisa_kev"])
+    _scan(paths)
+    assert not is_quarantined("demo", paths)
+
+
+def test_a_fresh_eu_list_lets_an_eu_caused_quarantine_lift(box) -> None:
+    paths, pushover = box()
+    seed_quarantine(paths, exploited_by=["eu_kev"])
+    now = datetime.now(timezone.utc).isoformat()
+    paths.kev_enisa.parent.mkdir(parents=True, exist_ok=True)
+    paths.kev_enisa.write_text(json.dumps({"fetched_at": now, "etag": None,
+                                           "last_modified": None, "entries": {}}))
+    _scan(paths)
+    assert not is_quarantined("demo", paths)
 
 
 def test_an_incomplete_scan_never_lifts(box, monkeypatch) -> None:

@@ -10,30 +10,46 @@ from __future__ import annotations
 from boxmunge.cve.scanner import AttackVector, Severity, VulnStatus
 
 
-def explain_relaxed_kev_only() -> str:
-    """Explanation for a non-KEV finding held informational under relaxed."""
-    return (
-        "relaxed posture: only actively-exploited (CISA KEV) findings "
-        "quarantine; everything else is informational regardless of distro "
+def explain_relaxed_kev_only(listed_by: str) -> str:
+    """Explanation for a non-KEV finding held informational under relaxed.
+    ``listed_by`` names a weaker listing (VulnCheck) the finding has, or is ""."""
+    text = (
+        "relaxed posture: only a finding on the CISA or EU KEV list "
+        "quarantines; everything else is informational regardless of distro "
         "severity. Raise the posture to strict for distro-severity-based "
         "quarantine."
     )
+    if listed_by:
+        text += (f" It is listed as exploited by {listed_by} only, which does "
+                 "not quarantine under relaxed; it is alerted urgently.")
+    return text
 
 
 def explain_awaiting_fix(
     base: Severity, effective: Severity, penalty: int,
-    posture_label: str, threshold_label: str,
+    posture_label: str, threshold_label: str, listed_by: str,
 ) -> str:
-    """Explanation for a finding at balanced's alert-only severity gate."""
+    """Explanation for a finding at balanced's alert-only severity gate.
+    ``listed_by`` names a weaker listing (VulnCheck) the finding has, or is ""."""
     rated = base.value if base == effective else (
         f"{base.value} → effective {effective.value} (hardening penalty: +{penalty})")
+    if listed_by:
+        exploited = (
+            f"It is listed as exploited by {listed_by} only, which does not "
+            f"quarantine under {posture_label} posture (gate: {threshold_label}): "
+            "the site stays up and you are alerted urgently. You will also be "
+            "alerted when a fix lands (then rebuild and redeploy) or if CISA or "
+            "the EU lists it (then it quarantines).")
+    else:
+        exploited = (
+            "It is not known to be exploited (not on the CISA or EU KEV lists), "
+            f"so under {posture_label} posture (gate: {threshold_label}) the site "
+            "stays up and nothing needs doing now. You will be alerted when a fix "
+            "lands (then rebuild and redeploy) or if it is listed as actively "
+            "exploited (then it quarantines).")
     return (
-        f"{rated}, network-reachable, and no fix exists yet. It is not known to "
-        f"be exploited (not on the CISA KEV catalog), so under {posture_label} "
-        f"posture (gate: {threshold_label}) the site stays up and nothing needs "
-        "doing now. You will be alerted when a fix lands (then rebuild and "
-        "redeploy) or if it is listed as actively exploited (then it "
-        "quarantines). `security.posture: strict` takes such findings down."
+        f"{rated}, network-reachable, and no fix exists yet. {exploited} "
+        "`security.posture: strict` takes such findings down."
     )
 
 

@@ -71,6 +71,7 @@ def _disp(
         suppression=None,
         explanation="explained",
         exploited_by=frozenset({ExploitedSource.CISA}) if kev else frozenset(),
+        kev_override=kev,
     )
 
 

@@ -23,7 +23,8 @@ from boxmunge.commands import quarantine_lift, security_resume, security_scan_co
 from boxmunge.commands.deploy_images import candidate_name
 from boxmunge.commands.security_resume import cmd_security_resume
 from boxmunge.cve.kev import KevCatalog
-from boxmunge.cve.lift_rule import check_kev_for_lift
+from boxmunge.cve.exploited import ExploitedSource
+from boxmunge.cve.lift_rule import check_exploited_for_lift, check_kev_for_lift
 from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision, Severity
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.docker_containers import LocalImage
@@ -95,11 +96,36 @@ class TestRule:
         assert check.refusal is not None and "no usable CISA KEV catalog" in check.refusal
 
 
+class TestListingSources:
+    EU = ExploitedSource.EU
+
+    def _check(self, listed_by, stale, kev=None):
+        return check_exploited_for_lift(
+            OTHER_CVE, _decisions(), kev or _catalog(age_days=0), TODAY,
+            listed_by=frozenset(listed_by), stale=stale)
+
+    def test_a_stale_listing_source_refuses_and_names_it(self) -> None:
+        check = self._check({self.EU}, {self.EU: "never fetched"})
+        assert check.refusal is not None and "EU KEV list is stale (never fetched)" in check.refusal
+        assert check.stale_sources == (self.EU,) and not check.acceptable
+
+    def test_a_stale_source_that_did_not_list_it_does_not_matter(self) -> None:
+        check = self._check({ExploitedSource.CISA}, {self.EU: "never fetched"})
+        assert check.refusal is None
+
+    def test_a_fresh_listing_source_lifts(self) -> None:
+        assert self._check({self.EU}, {}).refusal is None
+
+    def test_stale_cisa_keeps_todays_rule_with_a_fresh_eu(self) -> None:
+        check = self._check({self.EU}, {}, kev=_catalog(KEV_CVE, age_days=20))
+        assert check.refusal is None and "could not be checked" in check.gap
+
+
 # ---- security resume ----
 
-def _resume_box(tmp_path, monkeypatch, findings, *, cve=KEV_CVE, security=None):
+def _resume_box(tmp_path, monkeypatch, findings, *, cve=KEV_CVE, security=None, **record):
     paths = make_box(tmp_path, security=security or {"posture": "balanced"})
-    seed_quarantine(paths, cve_id=cve)
+    seed_quarantine(paths, cve_id=cve, **record)
     monkeypatch.setattr(security_scan_core, "scan_image",
                         lambda ref, timeout: scan_result(ref, findings))
     monkeypatch.setattr(security_resume, "refresh_db", lambda: None)
@@ -285,3 +311,14 @@ def test_staging_is_not_judged_against_the_catalog(gate_box) -> None:
     staged = dataclasses.replace(production_target(gate_box, "demo"), staging=True)
     clearance = gate.clear_release(gate_box, staged, _manifest())
     assert clearance.kev_gap is None
+
+
+def test_resume_refuses_an_eu_caused_quarantine_while_the_eu_list_is_stale(
+        tmp_path, monkeypatch, capsys) -> None:
+    paths = _resume_box(tmp_path, monkeypatch, [], cve=OTHER_CVE, exploited_by=["eu_kev"])
+    _write_kev(paths, KEV_CVE, age_days=0)  # CISA fresh; the EU cache was never fetched
+    assert cmd_security_resume(["demo", "--accept-stale-kev"], paths) == 1
+    assert is_quarantined("demo", paths)
+    err = capsys.readouterr().err
+    assert "EU KEV list is stale" in err and "stays in place" in err
+    assert "prod-deploy" not in err

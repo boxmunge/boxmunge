@@ -304,8 +304,9 @@ kev:
 Trivy DB refresh), so the KEV catalog stays as fresh as the scan that consumes
 it. There is no dedicated timer in v1; the daily scan cadence is sufficient.
 
-After refresh, the catalog is loaded and a single `kev_lookup` predicate is
-threaded into every project's `evaluate_finding` call for that run — the
+After refresh, the known-exploited lists are loaded and a single
+`exploited_lookup` (the sources that name a CVE) is threaded into every
+project's `evaluate_finding` call for that run — the
 exploitation signal is consistent fleet-wide within a scan run.
 
 The fleet view (`boxmunge security`, `--json` and the `security.summary`

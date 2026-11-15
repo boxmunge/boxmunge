@@ -88,6 +88,7 @@ def _stored(**overrides):
         "installed_version": "1", "attack_vector": None,
         "status": "affected", "pkg_class": "os-pkgs", "pkg_type": "debian",
         "cvss_score": None, "vendor_severities": {}, "severity_source": None,
+        "exploited_by": [],
     }
     finding.update(overrides)
     for key in [k for k, v in overrides.items() if v is _MISSING]:

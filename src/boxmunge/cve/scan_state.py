@@ -197,7 +197,7 @@ def _stored_exploited_by(raw: dict[str, Any]) -> frozenset[ExploitedSource]:
         raise StateError(
             "stored finding has 'kev_listed': the scan state predates "
             "'exploited_by'; the next `boxmunge security scan` rewrites it")
-    stored = raw.get("exploited_by", [])
+    stored = _required_key(raw, "exploited_by")
     if not isinstance(stored, list):
         raise StateError(f"stored 'exploited_by' is {stored!r}, not a list")
     return frozenset(stored_enum(ExploitedSource, v, "exploited_by") for v in stored)

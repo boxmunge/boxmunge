@@ -176,10 +176,18 @@ def evaluate_finding(
     )
     if d.exploited_by or not sources:
         return d
-    return replace(d, exploited_by=sources, explanation=(
-        f"{d.explanation} {finding.cve_id} is also listed as exploited "
-        f"({listing_label(sources)}); a listing by VulnCheck alone does not "
-        f"quarantine under {_POSTURE_LABEL[posture]}, but it is alerted urgently."))
+    label = listing_label(sources)
+    if label in d.explanation:
+        note = d.explanation  # the explainer already says so
+    elif d.disposition in (Disposition.QUARANTINE, Disposition.STILL_RUNNING_AT_RISK):
+        note = (f"{d.explanation} {finding.cve_id} is also listed as exploited "
+                f"({label}), but that listing did not decide this: "
+                f"{_POSTURE_LABEL[posture]} posture's own gate did.")
+    else:
+        note = (f"{d.explanation} {finding.cve_id} is also listed as exploited "
+                f"({label}), which alone does not quarantine under "
+                f"{_POSTURE_LABEL[posture]} posture; it is alerted urgently.")
+    return replace(d, exploited_by=sources, explanation=note)
 
 
 def _decide(
@@ -218,7 +226,7 @@ def _decide(
                 hardening_penalty=hardening_penalty, effective_severity=effective,
                 disposition=Disposition.STILL_RUNNING_AT_RISK, suppression=None,
                 explanation=explain_kev_opted_out(finding.cve_id, fix, listed_by),
-                exploited_by=sources,
+                exploited_by=sources, kev_override=True,
             )
         if fix is not None and posture is Posture.RELAXED:
             return FindingDisposition(
@@ -226,7 +234,7 @@ def _decide(
                 hardening_penalty=hardening_penalty, effective_severity=effective,
                 disposition=Disposition.IGNORED_FIXED, suppression=None,
                 explanation=explain_kev_fix_not_running(finding.cve_id, fix, listed_by),
-                exploited_by=sources,
+                exploited_by=sources, kev_override=True,
             )
         return FindingDisposition(
             finding=finding,
@@ -240,7 +248,7 @@ def _decide(
                 suppression.until.isoformat() if suppression else None,
                 fix,
             ),
-            exploited_by=sources,
+            exploited_by=sources, kev_override=True,
         )
 
     # 2. Upstream fix (not KEV): IGNORED_FIXED, flagged when the finding
@@ -309,6 +317,7 @@ def _decide(
             compare_sev=effective,
             dangerously_disable_quarantine=dangerously_disable_quarantine,
             severity_sources=severity_sources,
+            listed_by=listing_label(sources),
         )
 
     # 6. Relaxed: KEV is the ONLY quarantine trigger (already handled at step
@@ -321,7 +330,7 @@ def _decide(
             base,
             hardening_penalty,
             effective,
-            explain_relaxed_kev_only(),
+            explain_relaxed_kev_only(listing_label(sources)),
         )
 
     # 7. Package belongs to a language runtime this project never invokes.
@@ -389,6 +398,7 @@ def _decide(
         posture,
         compare_sev=distro_effective,
         dangerously_disable_quarantine=dangerously_disable_quarantine,
+        listed_by=listing_label(sources),
     )
 
 

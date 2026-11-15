@@ -119,6 +119,9 @@ class FindingDisposition:
     # the stricter hardening rule that takes full effect in 0.12: a warning
     # in 0.11.0, never a quarantine.
     hardening_would_quarantine: bool = False
+    # The KEV override decided this disposition (not persisted: it only
+    # shapes the alert of the scan that made the decision).
+    kev_override: bool = False
 
     @property
     def full_kev(self) -> bool:

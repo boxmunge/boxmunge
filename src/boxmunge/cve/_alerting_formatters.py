@@ -73,7 +73,7 @@ def format_quarantine_alert(project: str, hits: Sequence[Hit]) -> Alert:
     hits = _ordered(hits)
     head = hits[0].disposition
     cve = head.finding.cve_id
-    why = (f"actively exploited — {head.exploited_label}" if head.exploited_by
+    why = (f"actively exploited — {head.exploited_label}" if head.kev_override
            else head.effective_severity.value)
     title = (f"[boxmunge:{project}] QUARANTINED — {cve} ({why})"
              f"{_more(_cve_count(hits) - 1)}")
@@ -139,7 +139,8 @@ def format_kev_fix_pending_alert(project: str, hits: Sequence[Hit]) -> Alert:
 
 def format_exploited_listed_alert(project: str, hits: Sequence[Hit]) -> Alert:
     """A CVE only a weaker list (VulnCheck) names as exploited, on a project
-    that stays up. Urgent, every scan, so it is neither quarantined nor quiet."""
+    that stays up. Urgent (priority 1, never the digest), sent when the
+    finding is new, gains a listing source or changes disposition."""
     hits = _ordered(hits)
     head = hits[0].disposition
     title = (f"[boxmunge:{project}] KNOWN EXPLOITED — {head.finding.cve_id} "
@@ -151,8 +152,11 @@ def format_exploited_listed_alert(project: str, hits: Sequence[Hit]) -> Alert:
         head.explanation,
         "",
         "Only VulnCheck lists it as exploited, so this posture does not take the",
-        "project down for it. Patch or rebuild when a fix is available; this alert",
-        "repeats on every scan while the finding is live.",
+        "project down for it. Patch or rebuild when a fix is available. This alert",
+        "is not repeated while nothing changes; once reviewed, a suppression",
+        "records that:",
+        f"  boxmunge security suppress {head.finding.cve_id} --project {project} \\",
+        "      --until <date> --reason <text>",
     ])
     return Alert(kind="exploited_listed", title=title, body=body, priority=1)
 

@@ -9,6 +9,7 @@ security_actions.py.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
@@ -33,6 +34,7 @@ from boxmunge.commands.security_enforce import (
     clears_quarantine,
     enforce,
     headline_of,
+    quarantine_listing,
     raise_enforcement_error,
 )
 from boxmunge.compose_images import image_phrase
@@ -372,7 +374,7 @@ def scan_one_project_locked(
         # Audit-only (resume re-scan, audit A-3) leaves the prior alone.
         record_error = None
         if not audit_only:
-            outcome = _enforce(paths, project, meta, None, defer_new=defer_new)
+            outcome = _enforce(paths, project, meta, None, frozenset(), defer_new=defer_new)
             record_error = _record(
                 scan_state_path, decisions=(),
                 unscanned=tuple(_unscanned(unidentified=unidentified)), **basis,
@@ -403,8 +405,9 @@ def scan_one_project_locked(
             meta.posture, decisions, complete=not (failed or skipped or unidentified),
             kev_fresh=ExploitedSource.CISA not in exploited.stale)
         outcome = _enforce(
-            paths, project, meta, headline, defer_new=defer_new,
-            cleared=tuple(decisions) if cleared else None,
+            paths, project, meta, headline, quarantine_listing(decisions),
+            defer_new=defer_new, cleared=tuple(decisions) if cleared else None,
+            stale_sources=exploited.stale,
         )
 
     if failed and not decisions:
@@ -464,11 +467,14 @@ def _record(path, **kwargs) -> str | None:
 def _enforce(
     paths: BoxPaths, project: str, meta: ProjectMeta,
     headline: tuple[ProjectDecision, FindingDisposition] | None,
+    exploited_by: frozenset[ExploitedSource],
     *, defer_new: bool, cleared: tuple[ProjectDecision, ...] | None = None,
+    stale_sources: Mapping[ExploitedSource, str] | None = None,
 ) -> Enforcement:
     return enforce(
         paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
-        policy=meta.policy(), headline=headline, defer_new=defer_new, cleared=cleared,
+        policy=meta.policy(), headline=headline, exploited_by=exploited_by,
+        defer_new=defer_new, cleared=cleared, stale_sources=stale_sources,
     )
 
 
