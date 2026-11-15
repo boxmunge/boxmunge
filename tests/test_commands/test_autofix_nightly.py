@@ -582,3 +582,48 @@ def test_no_stored_scan_is_not_logged_every_night(tmp_path, monkeypatch) -> None
     box.update()
     box.update()
     assert "no stored scan" not in box.paths.log_file.read_text()
+
+
+def test_a_held_container_update_lock_still_patches_the_fleet(tmp_path, monkeypatch) -> None:
+    """Whoever holds it (a dry run, a single-project run) may not autofix the
+    fleet tonight; the maintenance run does, each project under its lock."""
+    import fcntl
+    box = Box(tmp_path, monkeypatch, projects=("blog", "shop"))
+    box.scan("blog")
+    box.scan("shop")
+    box.paths.container_update_state.mkdir(parents=True, exist_ok=True)
+    with open(box.paths.container_update_lock, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with project_lock("shop", box.paths):
+            assert box.update() == 0
+    assert box.updated == []
+    assert [c[0] for c in box.runner.calls] == ["blog"]
+    [(title, body, priority)] = box.digests()
+    assert priority == -1 and "patched: blog" in body
+    assert "skipped: shop: another operation holds the project" in body
+
+
+def test_a_held_lock_and_a_dry_run_never_patch(tmp_path, monkeypatch) -> None:
+    import fcntl
+    box = Box(tmp_path, monkeypatch)
+    box.scan()
+    box.paths.container_update_state.mkdir(parents=True, exist_ok=True)
+    with open(box.paths.container_update_lock, "w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        box.update(dry_run=True)
+    assert box.runner.calls == [] and box.digests() == []
+
+
+def test_an_error_after_patches_still_sends_their_digest(tmp_path, monkeypatch) -> None:
+    box = Box(tmp_path, monkeypatch, projects=("blog", "shop"))
+    box.scan("blog")
+    box.scan("shop")
+
+    def breaks(*args, **kwargs):
+        raise RuntimeError("retry broke")
+    monkeypatch.setattr(container_update_cmd, "_retry_locked", breaks)
+    with pytest.raises(RuntimeError, match="retry broke"):
+        box.update()
+    assert sorted(c[0] for c in box.runner.calls) == ["blog", "shop"]
+    [(title, body, _p)] = box.digests()
+    assert title.endswith("Nightly autofix: 2 projects patched")

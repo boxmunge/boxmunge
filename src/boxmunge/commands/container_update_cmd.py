@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from boxmunge.commands.autofix_nightly import (
-    after_update, describe, nightly_digest, window_end,
+    after_update, describe, nightly_digest, send_digest_after_error, window_end,
 )
 from boxmunge.config import ConfigError
 from boxmunge.host_config_alert import load_for_job
@@ -299,6 +299,10 @@ def run_container_update(
         except BlockingIOError:
             log_operation("container-update", "Skipped: another container-update is in progress", paths)
             print("Another container-update is in progress, skipping.")
+            # The holder may be a dry run or a single-project run, which
+            # does not autofix the fleet: this run does, project by project.
+            if nightly_until is not None:
+                nightly_digest(paths, [], (), only=only, until=nightly_until)
             return 0
 
         # Step 1: Probation gate (unless --force)
@@ -308,7 +312,15 @@ def run_container_update(
             return 0
 
         run = _Run()
-        rc = _update_all(paths, run, only=only, dry_run=dry_run, nightly_until=nightly_until)
+        try:
+            rc = _update_all(paths, run, only=only, dry_run=dry_run,
+                             nightly_until=nightly_until)
+        except BaseException as e:
+            # The patches already made are still reported; nothing more is
+            # started. The failure stays the failure.
+            if nightly_until is not None and not run.digested:
+                send_digest_after_error(paths, run.results, e)
+            raise
         if nightly_until is not None and not run.digested:
             nightly_digest(paths, run.results, run.done, only=only, until=nightly_until)
         return rc

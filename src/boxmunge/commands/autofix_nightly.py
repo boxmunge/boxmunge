@@ -25,7 +25,10 @@ recreate that was not rolled back healthy, a tag not pointed back, or an
 update that raised (unknown). An abort before the recreate changed nothing,
 so the patch goes ahead. Container-update runs this flow however its run
 ends (`nightly_digest`): after a failed Caddy update or a configuration
-error too, every project is visited.
+error too, and when another container-update holds its lock (a dry run or
+a single-project run does not autofix the fleet), every project is visited.
+An exception that stops the run still sends the digest of the attempts
+already made (`send_digest_after_error`).
 
 No patch starts unless AUTOFIX_NIGHTLY_BUDGET plus _START_MARGIN remain of
 NIGHTLY_AUTOFIX_WINDOW from container-update's start (the maintenance unit's
@@ -126,7 +129,7 @@ def nightly_digest(paths: BoxPaths, results: Sequence[dict[str, Any]], done: Col
     still busy after the retry, then the nightly autofix of every deployed
     project not in `done` (not updated tonight); one digest of them all.
     Returns the attempts."""
-    attempts = [r["autofix"] for r in results if r.get("autofix")]
+    attempts = _made(results)
     for r in results:
         if r["status"] == SKIPPED_LOCKED:
             busy = busy_attempt(paths, r["name"])
@@ -135,6 +138,20 @@ def nightly_digest(paths: BoxPaths, results: Sequence[dict[str, Any]], done: Col
     attempts += autofix_the_rest(paths, done, only=only, until=until)
     send_nightly_results(paths, attempts)
     return attempts
+
+
+def send_digest_after_error(paths: BoxPaths, results: Sequence[dict[str, Any]],
+                            error: BaseException) -> None:
+    """Container-update stopped on `error`: the digest of the attempts it
+    made. A failure here is noted on `error`, never raised over it."""
+    try:
+        send_nightly_results(paths, _made(results))
+    except Exception as e:  # noqa: BLE001 — the run's own failure is the one raised
+        error.add_note(f"the nightly autofix digest could not be sent: {type(e).__name__}: {e}")
+
+
+def _made(results: Sequence[dict[str, Any]]) -> list[NightlyAttempt]:
+    return [r["autofix"] for r in results if r.get("autofix")]
 
 
 def autofix_the_rest(paths: BoxPaths, done: Collection[str], *, only: str | None,
