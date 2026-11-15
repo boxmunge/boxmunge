@@ -1,0 +1,13 @@
+[Unit]
+Description=boxmunge KEV watch (rescan projects hit by a newly listed exploited CVE)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/opt/boxmunge/bin/boxmunge security kev-watch
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=3h

@@ -150,6 +150,9 @@ class BoxPaths:
         # ENISA's EU KEV and, when the operator opts in, VulnCheck's.
         self.kev_enisa = self.state / "kev" / "enisa.json"
         self.kev_vulncheck = self.state / "kev" / "vulncheck.json"
+        # Every CVE any source listed as of the KEV watch's last tick, and
+        # when that tick ran (commands.kev_watch).
+        self.kev_watch = self.state / "kev" / "watch.json"
         # Last auto-update discovery that installed nothing: any security or
         # break-fix release it could not install, and the alert sent for it.
         self.platform_update_state = self.state / "platform-updates.json"

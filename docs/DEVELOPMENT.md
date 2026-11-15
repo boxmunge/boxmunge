@@ -45,7 +45,7 @@ bootstrap/init-host.sh   one-time host provisioning (users, sshd, UFW, Docker, C
 install.sh               lays down /opt/boxmunge from a release bundle
 scripts/boxmunge-upgrade the root upgrade shim: download, verify signature, swap venvs, probation
 system/                  the boxmunge-system container (age, rclone)
-systemd/                 timers: backup, backup-sync, health, maintenance (scan then container-update), auto-update
+systemd/                 timers: backup, backup-sync, health, kev-watch (every 30 min), maintenance (scan then container-update), auto-update
 canary/                  the project self-test deploys to prove the pipeline works
 docs/on-server/          operator and agent docs, shipped to the box and served by agent-help
 services/version-check/  the public update-discovery service (itself deployed as a boxmunge project)
@@ -158,6 +158,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `cve/kev.py` | `load_kev` | `kev/catalog.json` | `state/` |
 | `cve/exploited.py` | `_read_cache` | `kev/enisa.json`, `kev/vulncheck.json` | `state/` |
 | `cve/kev_enisa.py` | `_cached` | `kev/enisa.json`, for its validators and entries before they are renewed | `state/` |
+| `cve/kev_watch_state.py` | `read_watch` | `kev/watch.json`, the KEV watch's last-seen set | `state/` |
 | `cve/kev_withdrawals.py` | `_entries` | `kev/withdrawn.json` | `state/` |
 | `cve/kev_source_history.py` | `_entries` | `kev/sources.json` | `state/` |
 | `cve/fix_grace.py` | `load` | `cve/fix_grace/<p>.json`, strict's fix deadlines (`FixGrace.load`) | `state/` |

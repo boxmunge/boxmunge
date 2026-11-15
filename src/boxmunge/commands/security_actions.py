@@ -304,6 +304,20 @@ def _enforce_fleet(paths: BoxPaths, run: FleetRun) -> None:
               f"({', '.join(sorted(run.held[name]))}) — still running")
 
 
+def scan_projects(paths: BoxPaths, targets: list[str], *, kev: KevCatalog) -> FleetRun:
+    """The scan loop of a fleet run over exactly ``targets``: scan each,
+    send the digest, apply the new quarantines through the circuit breaker
+    and send the run's alerts. Raises TrivyNotInstalledError."""
+    run = FleetRun()
+    try:
+        _scan_each(paths, targets, kev=kev, run=run)
+    finally:
+        _send_digest(paths, run)
+    _enforce_fleet(paths, run)
+    _alert_fleet(paths, run)
+    return run
+
+
 def _cmd_apply_held(paths: BoxPaths) -> int:
     """`security scan --apply-held`: apply the breaker's held quarantines."""
     try:

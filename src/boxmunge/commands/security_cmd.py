@@ -17,6 +17,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from boxmunge.commands.kev_watch import cmd_kev_watch
 from boxmunge.commands.security_actions import cmd_security_scan
 from boxmunge.commands.security_resume import cmd_security_resume
 from boxmunge.commands.security_suppress import cmd_security_suppress
@@ -56,6 +57,8 @@ Usage:
   boxmunge security <project> [--json]                 Per-project view
   boxmunge security scan [project]                     Scan all/one project(s)
   boxmunge security scan --apply-held                  Apply breaker-held quarantines (operator)
+  boxmunge security kev-watch                          Rescan projects hit by a newly listed
+                                                       exploited CVE (operator; the 30-minute timer)
   boxmunge security suppress <CVE>|--current (--project <name>|--host)
                              --until <YYYY-MM-DD> --reason <text>
   boxmunge security unsuppress <CVE> (--project <name>|--host)
@@ -63,11 +66,11 @@ Usage:
   boxmunge security resume <project> --accept-stale-kev
                              Lift with no usable KEV catalog (audited)
 
---host suppressions and scan --apply-held are operator-only (refused by the
+--host suppressions, scan --apply-held and kev-watch are operator-only (refused by the
 deploy shell). --until is at most 90 days ahead.
 """
 
-_SUBCOMMANDS = {"scan", "suppress", "unsuppress", "resume"}
+_SUBCOMMANDS = {"scan", "suppress", "unsuppress", "resume", "kev-watch"}
 
 
 def _paths() -> BoxPaths:
@@ -319,6 +322,8 @@ def cmd_security(args: list[str]) -> None:
         rest = args[1:]
         if sub == "scan":
             sys.exit(cmd_security_scan(rest, paths))
+        if sub == "kev-watch":
+            sys.exit(cmd_kev_watch(rest, paths))
         if sub == "suppress":
             sys.exit(cmd_security_suppress(rest, paths))
         if sub == "unsuppress":

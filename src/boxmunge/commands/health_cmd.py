@@ -358,6 +358,7 @@ def _checks(paths: BoxPaths) -> list[tuple[str, Callable[[], HealthCheck]]]:
         ("sshd-deploy-env", _in("sshd", "check_sshd_deploy_env")),
         ("security-profiles", _in("security", "check_security_profiles", paths)),
         ("cve-scan", _in("security", "check_cve_scan_freshness", paths)),
+        ("kev-watch", _in("security", "check_kev_watch_freshness", paths)),
         ("cve-hardening", _in("security", "check_cve_hardening_upcoming", paths)),
         ("service-users", _in("service_users", "check_service_users", paths)),
         ("registry", _in("registry", "check_registry_drift", paths)),

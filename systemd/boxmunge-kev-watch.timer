@@ -1,0 +1,9 @@
+[Unit]
+Description=boxmunge KEV watch timer
+
+[Timer]
+OnCalendar=*:00/30
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

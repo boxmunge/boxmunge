@@ -50,6 +50,10 @@ _CLOCK_SKEW = timedelta(seconds=60)
 Key = tuple[str, str]   # (CVE id, package)
 
 
+def _repair_hint(path: Path) -> str:
+    return f"remove {path} to restart that project's fix deadlines"
+
+
 @dataclass(frozen=True)
 class GraceEntry:
     first_seen: datetime
@@ -99,7 +103,8 @@ class FixGrace:
             raw = read_text_nofollow_or_none(path)
             return cls(path, {} if raw is None else _parse(raw))
         except (OSError, ValueError, KeyError, TypeError) as e:
-            raise StateError(f"cannot read the fix grace record {path}: {e!r}") from e
+            raise StateError(
+                f"cannot read the fix grace record {path}: {e!r}; {_repair_hint(path)}") from e
 
     def first_seen(self, key: Key) -> datetime | None:
         entry = self._entries.get(key)
@@ -183,7 +188,8 @@ def apply_fix_grace(
             if entry.first_seen > now + _CLOCK_SKEW:
                 raise StateError(
                     f"the fix grace record {grace.path} says {key[0]} in {key[1]} was first "
-                    f"seen at {entry.first_seen.isoformat()}, after this scan ({now.isoformat()})")
+                    f"seen at {entry.first_seen.isoformat()}, after this scan ({now.isoformat()}); "
+                    f"{_repair_hint(grace.path)}")
             if now >= entry.deadline:
                 fd = _overdue(fd, entry.first_seen.date(), dangerously)
             elif entry.warned_at is None and now >= entry.deadline - STRICT_FIX_WARN_BEFORE:

@@ -80,6 +80,7 @@ Container security & CVE policy:
   security unsuppress <CVE>       Remove a suppression (--project NAME; --host: operator)
   security resume <project>       Lift a CVE quarantine (re-scans first)
   security scan --apply-held      Apply quarantines the circuit breaker held (operator)
+  security kev-watch              Rescan projects hit by a newly listed exploited CVE (operator)
 
 Platform updates:
   upgrade                 Upgrade boxmunge platform from latest release

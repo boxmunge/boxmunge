@@ -269,6 +269,7 @@ Usage: boxmunge security [--json]
        boxmunge security <project> [--json]
        boxmunge security scan [project]
        boxmunge security scan --apply-held
+       boxmunge security kev-watch
        boxmunge security suppress <CVE>|--current (--project <name>|--host)
                                   --until <YYYY-MM-DD> --reason <text>
        boxmunge security unsuppress <CVE> (--project <name>|--host)
