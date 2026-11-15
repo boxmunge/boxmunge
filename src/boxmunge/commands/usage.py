@@ -405,9 +405,9 @@ job was left queued for the new code, 1 when the job is not queued.""",
 Usage: boxmunge _job-runner
 
 Internal: run every queued action API job, one worker each (used by
-boxmunge-jobs.service). Fails and alerts jobs whose worker was lost, and
-exits 0 once the queue is empty, or after an upgrade so the service
-restarts on the new code; 1 when a job's worker could not start it.""",
+boxmunge-jobs.service). Fails and alerts jobs whose worker was lost or
+crashed before starting, and exits 0 once the queue is empty, or after an
+upgrade so the service restarts on the new code.""",
     "mcp-serve": """\
 Usage: boxmunge mcp-serve
 

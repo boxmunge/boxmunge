@@ -11,6 +11,8 @@ a power loss the record is never older than the last step that returned:
   claim     temp synced; rename() over the queued record; sync queue/, jobs/
   finish    as claim, with the terminal state; link() into jobs/; sync
             jobs/; unlink() from queue/; sync queue/
+  fail_unclaimed  as finish, for a queued job whose worker died before
+            its claim (the runner's step; nothing ran)
 
 A publish that raises after its link removes the queued name again before
 it returns, so a publish that raised queued nothing (only a crash, which
@@ -160,6 +162,24 @@ def finish(paths: BoxPaths, job_id: str, *, state: str, error: dict[str, str] | 
                   "finished_at": format_utc(now)}
         if result_schemas is not None:
             _check_result(record, result_schemas)
+        _replace(paths, queued, record)
+        _move_to_done(paths, job_id)
+    return record
+
+
+def fail_unclaimed(paths: BoxPaths, job_id: str, *, error: dict[str, str],
+                   now: datetime) -> dict[str, Any] | None:
+    """Fail a job no worker ever claimed (its worker died before the claim),
+    then move it out of the queue, as finish does. Safe because nothing ran.
+    None if the job is no longer queued (a worker claimed it after all)."""
+    _check_outcome("failed", error, None, False)
+    queued = _queued(paths, _checked(job_id))
+    with exclusive_lock(paths.job_lock(job_id)):
+        _sweep_temps(paths, job_id)
+        record = _load(paths, job_id, queued)
+        if record is None or record["state"] != "queued":
+            return None
+        record = {**record, "state": "failed", "error": error, "finished_at": format_utc(now)}
         _replace(paths, queued, record)
         _move_to_done(paths, job_id)
     return record

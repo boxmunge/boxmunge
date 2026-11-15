@@ -183,11 +183,12 @@ def test_reboot_mid_promote_marks_lost_and_names_the_install_way_out(box):
     assert not (box.paths.jobs_queue / f"{job_id}.json").exists()
     assert record["state"] == "failed" and record["error"]["code"] == "worker_lost"
     assert "was not run again" in record["error"]["message"]
+    way_out = options_text("myapp", load_txn(box.paths, "myapp"))
+    assert way_out in record["error"]["message"]  # job show carries the way out
     [alert] = box.alerts
     assert alert["title"] == f"boxmunge: job {job_id} (project.promote myapp) was cut off"
     assert alert["priority"] == 1
-    assert record["error"]["message"] in alert["body"]
-    assert options_text("myapp", load_txn(box.paths, "myapp")) in alert["body"]
+    assert alert["body"] == record["error"]["message"]
     [audit] = [r for r in read_audit(box.paths) if r.get("job") == job_id]
     assert (audit["outcome"], audit["code"], audit["action"]) == \
         ("failed", "worker_lost", "project.promote")
@@ -244,19 +245,17 @@ def test_running_job_of_a_live_foreign_worker_is_left_and_waited_for(box):
     foreign = box.identity()
     box.live.add(foreign)
     assert job_writer.claim(box.paths, foreign_job, foreign, NOW)
-    finished_at: list[float] = []
-
     def foreign_worker() -> None:
         time.sleep(0.2)
         job_writer.finish(box.paths, foreign_job, state="succeeded", error=None, result=None,
                           now=NOW)
-        finished_at.append(time.monotonic())
         box.live.discard(foreign)
 
-    started_at: list[float] = []
+    foreign_queued = box.paths.jobs_queue / f"{foreign_job}.json"
+    started_while_foreign_ran: list[bool] = []
 
     def script(b: Box, job_id: str) -> int:
-        started_at.append(time.monotonic())
+        started_while_foreign_ran.append(foreign_queued.exists())
         return work()(b, job_id)
 
     box.scripts[queued] = script
@@ -265,7 +264,7 @@ def test_running_job_of_a_live_foreign_worker_is_left_and_waited_for(box):
     assert box.run() == 0
     thread.join()
     assert box.spawned == [queued]  # never the foreign worker's job
-    assert started_at[0] >= finished_at[0]  # its project's lane was busy until then
+    assert started_while_foreign_ran == [False]  # its project's lane was busy until then
     assert box.record(foreign_job)["state"] == "succeeded" and box.alerts == []
 
 
@@ -303,15 +302,84 @@ def test_unreadable_queue_record_is_set_aside_and_alerted(box):
     assert job_id in alert["body"] and "set aside" in alert["body"]
 
 
-def test_job_still_queued_after_its_worker_exited_is_not_respawned(box):
-    stuck, other = box.publish(0), box.publish(1, project="blog")
-    box.scripts[stuck] = exits(1)
-    assert box.run() == 1
-    assert box.spawned == [stuck, other]
-    assert box.record(stuck)["state"] == "queued"
+def test_worker_that_crashed_before_its_claim_fails_the_job_once(box):
+    crashed, other = box.publish(0), box.publish(1, project="blog")
+    box.scripts[crashed] = exits(1)  # e.g. an import error in the new code
+    assert box.run() == 0
+    assert box.spawned == [crashed, other]  # never started again
+    assert list(box.paths.jobs_queue.iterdir()) == []  # the queue drains
+    record = box.record(crashed)
+    assert (record["state"], record["error"]["code"], record["worker"]) == \
+        ("failed", "failed", None)
+    message = record["error"]["message"]
+    assert "exited 1" in message and "nothing was run" in message
+    assert "boxmunge job run project.backup '{\"project\":\"myapp\"}'" in message
     assert box.record(other)["state"] == "succeeded"
     [alert] = box.alerts
-    assert stuck in alert["body"] and "exited 1" in alert["body"]
+    assert alert["title"] == f"boxmunge: job {crashed} (project.backup myapp) could not start"
+    assert alert["body"] == message
+    [audit] = [r for r in read_audit(box.paths) if r.get("job") == crashed]
+    assert (audit["outcome"], audit["code"]) == ("failed", "failed")
+    events = (box.paths.jobs_dir / f"{crashed}.events.jsonl").read_text().splitlines()
+    assert json.loads(events[-1])["state"] == "failed"
+
+
+def test_a_job_on_a_free_lane_starts_while_a_long_job_runs(box):
+    long_job = box.publish(0)
+    box.scripts[long_job] = work(0.5)
+    seen_long_running: list[bool] = []
+
+    def script(b: Box, job_id: str) -> int:
+        seen_long_running.append(b.record(long_job)["state"] == "running")
+        return work()(b, job_id)
+
+    late = _id(1)
+    box.scripts[late] = script
+
+    def publish_late() -> None:
+        time.sleep(0.1)
+        box.publish(1, project="blog")
+
+    thread = threading.Thread(target=publish_late)
+    thread.start()
+    assert box.run() == 0
+    thread.join()
+    assert box.spawned == [long_job, late]
+    assert seen_long_running == [True]
+
+
+def test_an_error_mid_run_waits_for_running_workers_then_raises(box, monkeypatch):
+    job_id = box.publish(0)
+    box.scripts[job_id] = work(0.2)
+    real = job_runner.recover_queue
+    calls: list[int] = []
+
+    def failing(paths, alive):
+        calls.append(1)
+        if len(calls) > 1:
+            raise OSError("queue/ cannot be listed")
+        return real(paths, alive)
+
+    monkeypatch.setattr(job_runner, "recover_queue", failing)
+    with pytest.raises(OSError, match="cannot be listed"):
+        box.run()
+    assert box.record(job_id)["state"] == "succeeded"  # waited for, not cut off
+    assert any("running worker" in e for e in box.errors)
+
+
+def test_a_lost_job_another_runner_failed_first_is_left_to_it(box, monkeypatch):
+    job_id = _lost_running(box, 0)
+    theirs = {"code": "worker_lost", "message": "failed by the other runner"}
+    real = job_writer.finish
+
+    def raced(paths, jid, **kw):
+        real(paths, jid, state="failed", error=theirs, result=None, now=NOW)
+        return real(paths, jid, **kw)
+
+    monkeypatch.setattr(job_runner, "finish", raced)
+    assert box.run() == 0
+    assert box.record(job_id)["error"] == theirs
+    assert box.alerts == []
 
 
 def test_runner_exits_after_a_tempfail_so_systemd_restarts_it_on_new_code(box):

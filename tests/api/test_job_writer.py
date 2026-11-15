@@ -290,6 +290,23 @@ def test_finish_checks_a_result_against_its_action(paths) -> None:
     assert _read(_done(paths))["result"] == {"count": 3} == done["result"]
 
 
+def test_fail_unclaimed_fails_a_queued_job_and_moves_it_out(paths) -> None:
+    job_writer.publish(paths, _record())
+    error = {"code": "failed", "message": "its worker crashed before the claim"}
+    done = job_writer.fail_unclaimed(paths, JOB_ID, error=error, now=LATER)
+    assert (done["state"], done["error"], done["worker"]) == ("failed", error, None)
+    assert _read(_done(paths)) == done and not _queued(paths).exists()
+
+
+def test_fail_unclaimed_leaves_a_claimed_or_missing_job(paths) -> None:
+    error = {"code": "failed", "message": "x"}
+    assert job_writer.fail_unclaimed(paths, JOB_ID, error=error, now=LATER) is None
+    job_writer.publish(paths, _record())
+    job_writer.claim(paths, JOB_ID, WORKER, LATER)
+    assert job_writer.fail_unclaimed(paths, JOB_ID, error=error, now=LATER) is None
+    assert _read(_queued(paths))["state"] == "running"
+
+
 def test_complete_finish_moves_a_terminal_record_left_in_queue(paths) -> None:
     terminal = _record(state="failed", worker=WORKER.as_record(),
                        started_at="2026-11-15T12:00:05Z", finished_at="2026-11-15T12:01:00Z",

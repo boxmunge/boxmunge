@@ -16,6 +16,12 @@ once queue/ is empty and no worker of its own is left:
   its job queued for the new code. The runner then starts nothing more,
   waits for its other workers and exits 0, so boxmunge-jobs.path starts the
   service again on the code now installed.
+- A worker that exits before claiming its job (a crash on start) leaves it
+  queued; the runner fails it (nothing ran) instead of starting it again.
+
+The unit's KillMode=control-group (systemd's default) is relied on: a
+service stop signals every worker, and each fails its own job. So the
+runner never exits on an error while workers run: it waits for them.
 """
 from __future__ import annotations
 
@@ -26,16 +32,22 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
 from boxmunge.api.audit import AuditError, AuditLog, audit_record
 from boxmunge.api.job_events import EventLog
-from boxmunge.api.job_recovery import Recovery, classify, lost_message, recovery_advice
+from boxmunge.api.job_recovery import (
+    Recovery, advice_text, classify, lost_message, retry_command,
+)
 from boxmunge.api.job_worker import COMPONENT, EX_TEMPFAIL
-from boxmunge.api.job_writer import complete_finish, finish, load_for_recovery
+from boxmunge.api.job_writer import (
+    complete_finish, fail_unclaimed, finish, load_for_recovery,
+)
 from boxmunge.api.jobs import JOB_ID_PATTERN
+from boxmunge.api.result import ErrorCode
 from boxmunge.api.worker_identity import WorkerIdentity, is_alive
 from boxmunge.fileutil import exclusive_lock, fsync_dir
 from boxmunge.fs_nofollow import mkdir_p_deploy
@@ -84,8 +96,10 @@ def recover_queue(paths: BoxPaths, alive: Callable[[WorkerIdentity], bool]) -> S
         try:
             record = load_for_recovery(paths, job_id)
         except StateError as e:
+            events = paths.jobs_dir / f"{job_id}.events.jsonl"
             with exclusive_lock(paths.job_lock(job_id)):
-                _set_aside(paths, entry.name, f"job {job_id}'s record cannot be read: {e}")
+                _set_aside(paths, entry.name, f"job {job_id}'s record cannot be read: {e}. "
+                           f"Its events, if any, are in {events}")
             continue
         if record is None:
             continue  # it moved on since the listing
@@ -104,8 +118,8 @@ def recover_queue(paths: BoxPaths, alive: Callable[[WorkerIdentity], bool]) -> S
 
 def run_runner(paths: BoxPaths, *, spawn: Callable[[str], Child] = _spawn_worker,
                alive: Callable[[WorkerIdentity], bool] = is_alive) -> int:
-    """Run the queue dry: 0, or 1 when a job is left queued that its worker
-    exited without running (alerted; not started again by this run)."""
+    """Run the queue dry, then return 0. On an unexpected error it starts
+    nothing more, waits for its running workers, then raises."""
     return _Runner(paths, spawn, alive).run()
 
 
@@ -117,24 +131,38 @@ class _Runner:
         self._alive = alive
         self._children: dict[str, str | None] = {}  # job id -> its project (lane)
         self._exits: queue_mod.Queue[tuple[str, int]] = queue_mod.Queue()
-        self._unrunnable: set[str] = set()
         self._tempfailed = False
 
     def run(self) -> int:
+        try:
+            return self._loop()
+        except Exception as e:
+            # Exiting now would have systemd kill the running workers'
+            # cgroup mid-job, so they finish first.
+            log_error(COMPONENT, f"the job runner failed: {type(e).__name__}: {e}; it starts "
+                      f"no more jobs and exits once its {len(self._children)} running "
+                      f"worker(s) finish", self._paths,
+                      detail={"traceback": traceback.format_exc()})
+            while self._children:
+                self._reap(timeout=None)
+            raise
+
+    def _loop(self) -> int:
         while True:
             scan = recover_queue(self._paths, self._alive)
             if not self._tempfailed:
                 self._start(scan)
             foreign = any(r["id"] not in self._children for r in scan.running)
             if self._children:
-                self._reap(timeout=RUNNER_POLL_SECONDS if foreign else None)
+                # Bounded, so a job published meanwhile on a free lane starts
+                # without waiting for a long job to end.
+                self._reap(timeout=RUNNER_POLL_SECONDS)
             elif self._tempfailed:
                 return 0
             elif foreign:
                 time.sleep(RUNNER_POLL_SECONDS)
             else:
-                # Nothing runs, so every queued job that may start has.
-                return 1 if self._unrunnable else 0
+                return 0  # nothing runs, so every queued job that may start has
 
     def _start(self, scan: Scan) -> None:
         busy = set(self._children.values()) | {r["project"] for r in scan.running}
@@ -142,7 +170,7 @@ class _Runner:
             if len(self._children) >= MAX_CONCURRENT_JOBS:
                 return
             job_id, lane = record["id"], record["project"]
-            if job_id in self._children or job_id in self._unrunnable or lane in busy:
+            if job_id in self._children or lane in busy:
                 continue
             child = self._spawn(job_id)
             self._children[job_id] = lane
@@ -163,63 +191,78 @@ class _Runner:
         if code != 0:
             log_warning(COMPONENT, f"the worker for job {job_id} exited {code}", self._paths,
                         project=project)
-        try:
-            record = load_for_recovery(self._paths, job_id)
-        except StateError:
-            return  # the next scan sets the unreadable record aside and alerts it
-        if record is not None and record["state"] == "queued":
-            self._unrunnable.add(job_id)
-            message = (f"The worker for job {job_id} ({record['action']} {project}) exited "
-                       f"{code} without running it, so the job is still queued. The runner "
-                       f"will not start it again until it restarts; the worker's error is "
-                       f"in 'journalctl -u boxmunge-jobs'.")
-            log_error(COMPONENT, message, self._paths, project=project)
-            notify(self._paths, f"boxmunge: job {job_id} could not start", message,
-                   component=COMPONENT, project=project, priority=1)
+            _fail_if_unclaimed(self._paths, job_id, code)
+
+
+def _fail_if_unclaimed(paths: BoxPaths, job_id: str, code: int) -> None:
+    """A worker that exited (not EX_TEMPFAIL) leaving its job queued died
+    before its claim (a crash on start). Nothing ran, so the job is failed
+    rather than started again: retrying a crash would loop."""
+    try:
+        record = load_for_recovery(paths, job_id)
+    except StateError:
+        return  # the next scan sets the unreadable record aside and alerts it
+    if record is None or record["state"] != "queued":
+        return
+    message = (f"The worker for this job exited {code} before it started, so nothing was "
+               f"run. Its output is in 'journalctl -u boxmunge-jobs'. Once that is fixed, "
+               f"run the same call again: {retry_command(record)}")
+    error = {"code": ErrorCode.FAILED.value, "message": message}
+    if fail_unclaimed(paths, job_id, error=error, now=_now()) is None:
+        return  # a worker claimed it after all
+    _record_failure(paths, record, error, f"boxmunge: job {job_id} ({record['action']} "
+                    f"{record['project']}) could not start")
 
 
 def _mark_lost(paths: BoxPaths, record: dict[str, Any]) -> None:
-    """Fail a job whose worker is gone, record and alert it; never re-run it."""
+    """Fail a job whose worker is gone, record and alert it; never re-run it.
+    A job someone else finished first (another runner) is left to them."""
     job_id, action, project = record["id"], record["action"], record["project"]
-    message = lost_message(record)
+    message = (f"{lost_message(record)} To recover: "
+               f"{advice_text(paths, action, project)}.")
     error = {"code": "worker_lost", "message": message}
-    finish(paths, job_id, state="failed", error=error, result=None, now=_now())
-    _write_lost_events(paths, job_id, message, project)
+    try:
+        finish(paths, job_id, state="failed", error=error, result=None, now=_now())
+    except StateError:
+        now = load_for_recovery(paths, job_id)
+        if now is not None and (now["state"] == "running" or now["error"] == error):
+            raise  # not someone else's finish: this one failed part way
+        log_warning(COMPONENT, f"job {job_id} was lost, but was finished elsewhere before "
+                    f"the runner could fail it", paths, project=project)
+        return
+    _record_failure(paths, record, error, f"boxmunge: job {job_id} ({action} {project}) "
+                    f"was cut off")
+
+
+def _record_failure(paths: BoxPaths, record: dict[str, Any], error: dict[str, str],
+                    title: str) -> None:
+    """The events, outcome audit line and alert of a job the runner failed."""
+    _write_failure_events(paths, record, error["message"])
     _audit(paths, record, error)
-    notify(paths, f"boxmunge: job {job_id} ({action} {project}) was cut off",
-           f"{message} To recover: {_advice(paths, action, project)}.",
-           component=COMPONENT, project=project, priority=1)
+    notify(paths, title, error["message"], component=COMPONENT, project=record["project"],
+           priority=1)
 
 
-def _write_lost_events(paths: BoxPaths, job_id: str, message: str,
-                       project: str | None) -> None:
-    """Append the loss to the job's events. A worker killed mid-write leaves
-    a torn last line, which EventLog refuses (StateError): the record is
-    already failed, so that is logged, not raised."""
+def _write_failure_events(paths: BoxPaths, record: dict[str, Any], message: str) -> None:
+    """Append the failure to the job's events. A worker killed mid-write
+    leaves a torn last line, which EventLog refuses (StateError): the record
+    is already failed, so that is logged, not raised."""
+    job_id, project = record["id"], record["project"]
     path = paths.jobs_dir / f"{job_id}.events.jsonl"
     try:
         events = EventLog(paths, job_id)
     except (StateError, OSError) as e:
-        log_error(COMPONENT, f"job {job_id} was failed worker_lost, but its events "
-                  f"{path} cannot be appended ({e}); the job record holds the outcome.",
-                  paths, project=project)
+        log_error(COMPONENT, f"job {job_id} was failed, but its events {path} cannot be "
+                  f"appended ({e}); the job record holds the outcome.", paths, project=project)
         return
     try:
         events.log(message)
         events.state("failed")
     except OSError as e:
-        log_error(COMPONENT, f"job {job_id} was failed worker_lost, but writing to its "
-                  f"events {path} failed ({e}); the job record holds the outcome.",
-                  paths, project=project)
+        log_error(COMPONENT, f"job {job_id} was failed, but writing to its events {path} "
+                  f"failed ({e}); the job record holds the outcome.", paths, project=project)
     finally:
         events.close()
-
-
-def _advice(paths: BoxPaths, action: str, project: str | None) -> str:
-    try:
-        return recovery_advice(paths, action.split(".", 1)[-1], project)
-    except StateError as e:
-        return f"no way out is known for this action ({e}); check what it changed"
 
 
 def _audit(paths: BoxPaths, record: dict[str, Any], error: dict[str, str]) -> None:
@@ -234,7 +277,7 @@ def _audit(paths: BoxPaths, record: dict[str, Any], error: dict[str, str]) -> No
         log_error("audit", f"could not record the outcome of {record['action']} (job "
                   f"{record['id']}): {e}", paths, detail={"outcome": "failed"})
         notify(paths, "boxmunge: audit log write failed",
-               f"The outcome (failed, worker_lost) of {record['action']} by "
+               f"The outcome (failed, {error['code']}) of {record['action']} by "
                f"{record['principal']} (job {record['id']}) was not recorded: {e}. The job "
                f"record keeps it.", component="audit", priority=1)
 
