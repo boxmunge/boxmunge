@@ -142,7 +142,7 @@ def run_resume(
         return 1
     # Alert after releasing the lock: Pushover is a network call.
     if smoke_failure is not None:
-        _alert_smoke_failed(project_name, paths, smoke_failure)
+        alert_smoke_failed(project_name, paths, smoke_failure)
     return rc
 
 
@@ -373,7 +373,7 @@ def hand_to_deploy_locked(project_name: str, paths: BoxPaths) -> int:
     return 0
 
 
-def _alert_smoke_failed(project_name: str, paths: BoxPaths, smoke_msg: str) -> None:
+def alert_smoke_failed(project_name: str, paths: BoxPaths, smoke_msg: str) -> None:
     notify(
         paths, "boxmunge resume: smoke failed",
         f"{project_name} resumed but smoke test failed: {smoke_msg}",

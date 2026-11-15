@@ -31,6 +31,8 @@ PHASE_A_ACTIONS = {
 RELEASE_ACTIONS = {
     "project.stage", "project.promote", "project.unstage", "project.deploy", "project.rollback",
 }
+RUNTIME_ACTIONS = {"project.pause", "project.resume", "project.backup", "project.restore"}
+GOVERN_JOBS = {"project.recover", "project.abandon_install"}
 
 
 def _subschemas(schema: dict, path: str = "$"):
@@ -42,7 +44,8 @@ def _subschemas(schema: dict, path: str = "$"):
 
 
 def test_the_registry_holds_exactly_the_known_actions() -> None:
-    assert {a.name for a in REGISTRY.actions()} == PHASE_A_ACTIONS | RELEASE_ACTIONS
+    assert {a.name for a in REGISTRY.actions()} == (
+        PHASE_A_ACTIONS | RELEASE_ACTIONS | RUNTIME_ACTIONS | GOVERN_JOBS)
     observe = [a for a in REGISTRY.actions() if a.tier is Tier.OBSERVE]
     assert {a.name for a in observe} == PHASE_A_ACTIONS
     assert not any(a.job or a.locks for a in observe)
@@ -52,8 +55,10 @@ def test_every_operate_action_is_a_job_with_the_project_lock() -> None:
     """The job worker takes the project lock for the handler, which never
     takes it; the action names the command the operator runs instead."""
     operate = [a for a in REGISTRY.actions() if a.tier is Tier.OPERATE]
-    assert {a.name for a in operate} == RELEASE_ACTIONS
-    for action in operate:
+    assert {a.name for a in operate} == RELEASE_ACTIONS | RUNTIME_ACTIONS
+    govern = [a for a in REGISTRY.actions() if a.tier is Tier.GOVERN]
+    assert {a.name for a in govern} == GOVERN_JOBS
+    for action in operate + govern:
         assert (action.job, action.locks) == (True, ("project",)), action.name
         assert action.cli is not None, action.name
 
