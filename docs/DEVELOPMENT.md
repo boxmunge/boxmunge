@@ -163,7 +163,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `cve/kev_source_history.py` | `_entries` | `kev/sources.json` | `state/` |
 | `cve/fix_grace.py` | `load` | `cve/fix_grace/<p>.json`, strict's fix deadlines (`FixGrace.load`) | `state/` |
 | `image_pins.py` | `read_pins` | `image_pins/<p>.json`, the images autofix pinned a project's services to | `state/` |
-| `cve/autofix_record.py` | `_read_doc` | `autofix/<p>.json` (the patches autofix applied: `read_records`), `autofix/<p>.active` (the marker of a patch in progress: `read_autofixing`) `autofix/queue/<p>.json` (an urgent patch waiting for the autofix unit: `read_queue_entry`) and `autofix/<p>.journal` (what a killed autofix run must undo: `read_journal`) | `state/` |
+| `cve/autofix_record.py` | `_read_doc` | `autofix/<p>.json` (the patches autofix applied: `read_records`), `autofix/<p>.active` (the marker of a patch in progress: `read_autofixing`) `autofix/queue/<p>.json` (an urgent patch waiting for the autofix unit: `read_queue_entry`) `autofix/<p>.journal` (what a killed autofix run must undo: `read_journal`) and `autofix/<p>.failed` (the last failed patch of each trigger: `read_failed`) | `state/` |
 | `cve/quarantine.py` | `read_quarantine_state` | `deploy/<p>.quarantined.json` | `state/` |
 | `cve/scan_state.py` | `scan_problem` | `scans/<p>.json` | `state/` |
 | `cve/scan_cache.py` | `get` | `scans/cache/<image ID>.json`, the deploy guard's Trivy results by image | `state/` |

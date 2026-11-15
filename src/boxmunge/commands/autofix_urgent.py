@@ -48,7 +48,7 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
-from boxmunge.commands.autofix_urgent_scan import with_note
+from boxmunge.commands.autofix_urgent_scan import stuck, with_note
 from boxmunge.commands.quarantine_lift import Restored, restore_from_quarantine
 from boxmunge.commands.security_enforce import quarantine_listing
 from boxmunge.commands.security_scan_inputs import (
@@ -58,7 +58,10 @@ from boxmunge.cve.alerting import (
     Alert, format_autofix_failed_alert, format_autofix_gone_alert,
     format_autofix_interrupted_alert, format_autofix_patched_alert, send_alerts,
 )
-from boxmunge.cve.autofix_policy import AUTOFIX_URGENT_BUDGET, AutofixUrgency, urgency
+from boxmunge.cve.autofix_failed import forget, remember
+from boxmunge.cve.autofix_policy import (
+    AUTOFIX_QUEUE_MAX_WAIT, AUTOFIX_URGENT_BUDGET, AutofixUrgency, urgency,
+)
 from boxmunge.cve.autofix_record import (
     QueueEntry, clear_autofixing, journaled_projects, queued_projects, read_queue_entry,
     remove_queue_entry,
@@ -108,6 +111,7 @@ def run_urgent_queue(paths: BoxPaths, now: datetime, *,
         except LockError:
             log_operation(_COMPONENT, f"{project}: queued autofix left for the next run: the "
                           f"project is held by another operation", paths, project=project)
+            _stuck_if_late(paths, project, "another operation has held the project")
             continue
         except InvalidProjectName as e:
             _problem(paths, None, f"the autofix queue holds {project!r}, not a project "
@@ -118,6 +122,17 @@ def run_urgent_queue(paths: BoxPaths, now: datetime, *,
                   f"FAILED at {outcome.failed_step or 'an unexpected error'}: {outcome.reason}"))
             outcomes.append(outcome)
     return outcomes
+
+
+def _stuck_if_late(paths: BoxPaths, project: str, reason: str) -> None:
+    """A queued patch left again AUTOFIX_QUEUE_MAX_WAIT after its detection
+    is alerted as stuck (once a day); the scans stop holding it back."""
+    try:
+        entry = read_queue_entry(paths, project)
+    except (StateError, InvalidProjectName):
+        return   # a run that can take the lock alerts the entry itself
+    if entry is not None and _now() - entry.detected_at >= AUTOFIX_QUEUE_MAX_WAIT:
+        stuck(paths, project, entry, reason=reason)
 
 
 def _problem(paths: BoxPaths, project: str | None, problem: str) -> None:
@@ -166,6 +181,12 @@ def _read(paths: BoxPaths, project: str) -> _Job | None:
     if state is None:
         raise StateError(f"{project} has an autofix queued but no stored scan")
     decisions = decisions_from_scan_state(state, project_name=project)
+    scanned = datetime.fromisoformat(state["scanned_at"])
+    if (scanned if scanned.tzinfo else scanned.replace(tzinfo=timezone.utc)) < entry.queued_at:
+        # Read as gone, the patch would be dropped with its quarantine held back.
+        raise StateError(f"{project}'s stored scan ({scanned.isoformat()}) is older than its "
+                         f"queued patch ({entry.queued_at.isoformat()}): the scan that queued "
+                         f"it could not record its results, so the patch is kept queued")
     return _Job(entry, meta, decisions, _current(decisions, entry, meta))
 
 
@@ -266,6 +287,11 @@ def _conclude(paths: BoxPaths, project: str, job: _Job, outcome: AutofixOutcome)
         _nothing_to_patch(paths, project, cves, outcome.reason)
         return
     if outcome.ok:
+        forget(paths, project, "urgent")
+    elif job.meta.autofix:   # what it depends on must change before it is tried again
+        remember(paths, project, "urgent", [(d, fd) for d in job.decisions for fd in d.findings
+                                            if fd in job.findings], outcome, _now())
+    if outcome.ok:
         site, settled, urgent = _succeeded(paths, project, job)
         alert = format_autofix_patched_alert(project, cves, outcome.records, site=site,
                                              urgent=urgent, timing=timing)
@@ -297,6 +323,7 @@ def _nothing_to_patch(paths: BoxPaths, project: str, cves: Sequence[str], reason
         log_error(_COMPONENT, f"{project}: dropping its queued autofix failed: {e}", paths,
                   project=project)
         return
+    forget(paths, project, "urgent")
     _send(paths, format_autofix_gone_alert(project, cves, reason))
 
 

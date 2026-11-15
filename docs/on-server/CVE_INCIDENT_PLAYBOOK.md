@@ -41,6 +41,7 @@ which the per-project titles below show after it:
 | `[boxmunge:<p>] Autofix patched <CVEs>` | The patched images run; a quarantine taken for the patch is lifted. The project now runs images that differ from its release: bring the fix into the repo (section 8). Priority 1 means the smoke test failed or the quarantine could not be lifted: check the project first. |
 | `[boxmunge:<p>] Autofix FAILED at the <step> step — <CVEs>` | The patch was rolled back and the posture's own rule now applies (the body says whether the site is down). Rebuild with the fix and deploy (section 1). |
 | `[boxmunge:<p>] Autofix run interrupted — rolled back` | A killed autofix run was undone from its journal. Run `security <p>`; escalate any problems the body lists. |
+| `[boxmunge:<p>] Urgent autofix could not start` | A queued patch has not started for 2 hours, or the autofix unit cannot be started; the project is quarantined where its posture takes it down. As supervisor, check `journalctl -u boxmunge-autofix` and start `boxmunge-autofix.service`. |
 | `[<hostname>] Nightly autofix: ...` | Quiet digest of the nightly patches, one line per project. `patched`, `re-patched on new upstream` and `could not catch up with upstream`: bring the fix into the repo (section 8). `could not patch`: rebuild with the fix. The rest need nothing. |
 
 If you got an alert, run these two commands first — they tell you everything.

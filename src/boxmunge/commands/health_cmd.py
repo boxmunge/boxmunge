@@ -360,6 +360,7 @@ def _checks(paths: BoxPaths) -> list[tuple[str, Callable[[], HealthCheck]]]:
         ("cve-scan", _in("security", "check_cve_scan_freshness", paths)),
         ("kev-watch", _in("security", "check_kev_watch_freshness", paths)),
         ("cve-hardening", _in("security", "check_cve_hardening_upcoming", paths)),
+        ("autofix-queue", _in("autofix", "check_autofix_queue", paths)),
         ("service-users", _in("service_users", "check_service_users", paths)),
         ("registry", _in("registry", "check_registry_drift", paths)),
         ("ufw", lambda: _in("hardening", "check_ufw", ssh_port=_ssh_port(paths))()),

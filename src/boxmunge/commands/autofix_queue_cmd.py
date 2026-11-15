@@ -27,7 +27,8 @@ from boxmunge.commands.autofix_urgent import run_urgent_queue
 from boxmunge.cve.autofix_record import journaled_projects, queued_projects
 from boxmunge.cve.autofix_run import AutofixOutcome
 from boxmunge.log import log_error, log_operation
-from boxmunge.paths import BoxPaths
+from boxmunge.paths import BoxPaths, InvalidProjectName
+from boxmunge.project_alerts import alert_once
 from boxmunge.state import StateError
 
 AUTOFIX_UNIT = "boxmunge-autofix.service"
@@ -49,9 +50,11 @@ def _pending(paths: BoxPaths) -> set[str]:
 
 def start_autofix_unit(paths: BoxPaths) -> None:
     """Start the autofix unit when anything is queued; never waits. A start
-    that fails is logged and printed: the queue stays, and the next caller
-    starts it again."""
-    if not _pending(paths):
+    that fails is logged and printed, and alerted at most once a day for
+    each project waiting on it: the queue stays, and the next caller starts
+    it again."""
+    pending = _pending(paths)
+    if not pending:
         return
     try:
         result = subprocess.run(["systemctl", "start", "--no-block", AUTOFIX_UNIT],
@@ -67,6 +70,23 @@ def start_autofix_unit(paths: BoxPaths) -> None:
                f"the next scan or KEV watch tick to start it")
     log_error(_COMPONENT, message, paths)
     print(f"ERROR: {message}", file=sys.stderr)
+    for project in sorted(pending):
+        _unit_alert(paths, project, failure)
+
+
+def _unit_alert(paths: BoxPaths, project: str, failure: str) -> None:
+    try:
+        alert_once(paths, project, "autofix-unit",
+                   {"day": datetime.now(timezone.utc).date().isoformat()},
+                   title=f"[boxmunge:{project}] Urgent autofix could not start", priority=1,
+                   component=_COMPONENT, message="\n".join([
+                       f"{AUTOFIX_UNIT} could not be started ({failure}), so the patch",
+                       f"queued for {project} has not run. It stays queued, and the next scan",
+                       "or KEV watch tick starts the unit again; as supervisor:",
+                       f"sudo systemctl start {AUTOFIX_UNIT}. Alerted once a day while it lasts.",
+                   ]))
+    except InvalidProjectName:   # a name in the queue that is not a project's: logged above
+        return
 
 
 def after_scan(paths: BoxPaths, *, only: Collection[str] | None = None) -> list[AutofixOutcome]:

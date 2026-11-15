@@ -1,5 +1,6 @@
 """A successful release switch forgets the patch records, the autofixing
-marker and a queued urgent patch along with the image pins
+marker, a queued urgent patch and the remembered failures along with the
+image pins
 (deploy_steps.clear_release_overrides)."""
 from __future__ import annotations
 
@@ -8,7 +9,7 @@ from boxmunge.commands.deploy_steps import clear_release_overrides
 
 def test_switch_forgets_patch_records_marker_and_queued_patch(paths) -> None:
     files = [paths.project_autofix_records("shop"), paths.project_autofix_marker("shop"),
-             paths.project_autofix_queue("shop")]
+             paths.project_autofix_queue("shop"), paths.project_autofix_failed("shop")]
     for f in files:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("{}\n")

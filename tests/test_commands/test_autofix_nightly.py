@@ -218,7 +218,7 @@ def test_queued_urgent_patch_skips_nightly(tmp_path, monkeypatch) -> None:
     box = Box(tmp_path, monkeypatch)
     box.scan()
     write_queue_entry(box.paths, "demo", QueueEntry(
-        _now(), (QueuedFinding(CVE, "openssl", "demo-web:1"),), False))
+        _now(), _now(), (QueuedFinding(CVE, "openssl", "demo-web:1"),), False))
     box.update()
     assert box.runner.calls == []
 

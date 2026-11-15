@@ -11,6 +11,7 @@ failure whose rollback did not finish, which is the urgent failure alert.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 
 from boxmunge.cve._alerting_digest import DIGEST_PRIORITY
 from boxmunge.cve._alerting_types import Alert
@@ -166,6 +167,14 @@ def format_nightly_skipped_line(project: str, why: str) -> Alert:
     """A nightly patch that did not start, and why. One digest line, its title."""
     line = f"skipped: {project}: {why}"
     return Alert(kind="autofix_skipped", title=line, body=line, priority=DIGEST_PRIORITY,
+                 project=project)
+
+
+def format_nightly_unpatched_line(project: str, since: datetime, reason: str) -> Alert:
+    """A patch that failed and is not tried again until what it depends on
+    changes: one digest line, its title."""
+    line = f"still unpatched since {since.date().isoformat()}: {project}: {reason}"
+    return Alert(kind="autofix_failed", title=line, body=line, priority=DIGEST_PRIORITY,
                  project=project)
 
 

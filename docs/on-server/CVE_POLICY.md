@@ -617,7 +617,31 @@ probation does not hold an urgent patch back.
 
 When the patch passes, the patched image runs and a quarantine taken for
 the patch is lifted (one notice says so). When it fails, the fallback in
-table B applies and one priority-1 alert names the step that failed.
+table B applies and one priority-1 alert names the step that failed. When
+it finds no running image that still carries the CVEs (a deploy or an
+upstream update fixed them first), nothing is patched and no fallback
+applies: one quiet note says so, and a quarantine taken for the patch is
+lifted by the next scan under its usual rules. A release switch drops a
+queued patch with the release's pins.
+
+A later scan that finds the patch still queued keeps its detection time
+and adds any new finding to it. A patch that has not started 2 hours after
+it was found is stuck (the unit does not start, or another operation keeps
+holding the project): the scans stop holding the quarantine back, so the
+project is quarantined where table B takes it down (the patch, still
+queued, then runs with the site down), `Urgent autofix could not start` is
+alerted once a day, and the `autofix-queue` health check warns. A unit that
+cannot be started is alerted the same way.
+
+**A patch that fails every time.** A failed patch is remembered,
+`state/autofix/<project>.failed`, with the CVEs, the images that carried
+them and their fixed versions. While none of those change, the scans do not
+queue that urgent patch again and the nightly run does not try that nightly
+patch again: the posture's own rule stands, nothing is alerted again, and
+the nightly digest lists it as `still unpatched since <date>: <reason>`. A
+new base image, a new fixed version or another CVE is a change, and the
+patch is tried again. A patch that passes, one with nothing left to patch,
+a release switch and a project delete forget it.
 
 **Nightly** findings are patched in the nightly maintenance run: a fixable
 finding that is not on any known-exploited list and that, without its fix,
@@ -2081,7 +2105,9 @@ several findings are involved the title names the worst and adds
 | `[boxmunge:<project>] Autofix patched <CVEs>` (the patched images run; the body lists each package change and what it meant for the site) | normal; priority-1 when the quarantine could not be lifted or the smoke test failed |
 | `[boxmunge:<project>] Autofix FAILED at the <step> step — <CVEs>` (rolled back; the body names the fallback now in force, and says so if the rollback did not finish) | priority-1 |
 | `[boxmunge:<project>] Autofix run interrupted — rolled back` (a killed run, undone from its journal) | priority-1 |
-| `[<hostname>] Nightly autofix: <N> projects patched, ...` (one line per project: patched, fixed by tonight's update, could not patch, skipped, deferred, switched to upstream, re-patched on new upstream, could not catch up with upstream) | quiet (no sound) |
+| `[boxmunge:<project>] <CVEs> no longer in <project>'s running images: nothing to patch` (a deploy or an upstream update fixed it before the queued patch ran) | quiet (no sound) |
+| `[boxmunge:<project>] Urgent autofix could not start` (a queued patch has not started for 2 hours, or `boxmunge-autofix.service` cannot be started; once a day while it lasts) | priority-1 |
+| `[<hostname>] Nightly autofix: <N> projects patched, ...` (one line per project: patched, fixed by tonight's update, could not patch, still unpatched since, skipped, deferred, switched to upstream, re-patched on new upstream, could not catch up with upstream) | quiet (no sound) |
 
 Alerting is best-effort. The durable record is the on-disk scan state
 under `state/scans/<project>.json`. If Pushover isn't configured, or

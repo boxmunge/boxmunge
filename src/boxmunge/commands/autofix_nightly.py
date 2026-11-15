@@ -51,9 +51,14 @@ still needs it is patched again from it. Only what changed or failed is in
 the digest ("switched to upstream", "re-patched on new upstream", "could
 not catch up with upstream"); a patch kept is not.
 
+A nightly patch that failed is not attempted again while the CVEs, the
+images that carry them and their fixed versions are unchanged
+(cve.autofix_failed); the digest lists it, "still unpatched since <date>",
+as it lists an urgent patch remembered the same way.
+
 The outcomes go out as ONE quiet digest from container-update (priority -1),
 one line per project: patched, fixed by tonight's update (or no longer in
-the running images), could not patch, skipped, deferred. Skips and deferrals
+the running images), could not patch, still unpatched, skipped, deferred. Skips and deferrals
 are listed only for a project that had something to patch. A failure whose
 rollback did not finish may leave the project mixed: it is the urgent
 failure alert, at once, never quiet.
@@ -73,14 +78,17 @@ from boxmunge.container_update import SKIPPED_LOCKED
 from boxmunge.cve.alerting import (
     DIGEST_PRIORITY, Alert, format_autofix_digest, format_autofix_failed_alert,
     format_nightly_deferred_line, format_nightly_failed_line, format_nightly_gone_line,
-    format_nightly_patched_line, format_nightly_skipped_line, format_upstream_failed_line,
+    format_nightly_patched_line, format_nightly_skipped_line, format_nightly_unpatched_line,
+    format_upstream_failed_line,
     format_upstream_repatched_line, format_upstream_switched_line, send_alerts,
 )
+from boxmunge.cve.autofix_failed import forget, remember, remembered, still_failing
 from boxmunge.cve.autofix_policy import (
     AUTOFIX_NIGHTLY_BUDGET, NIGHTLY_AUTOFIX_WINDOW, AutofixUrgency, urgency,
 )
 from boxmunge.cve.autofix_run import AutofixOutcome, autofix_project_locked
-from boxmunge.cve.policy import FindingDisposition
+from boxmunge.cve.autofix_record import FailedPatch
+from boxmunge.cve.policy import FindingDisposition, ProjectDecision
 from boxmunge.cve.scan_state import decisions_from_scan_state, read_scan_state
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.lifecycle import Block, BlockReason, is_blocked
@@ -113,13 +121,16 @@ class NightlyAttempt:
     or, `outcome` None, why it did not run (`not_run`), or that only
     `upstream` has something to say. `updated`: tonight's container update
     moved the project onto new images first. `upstream`: its pinned
-    services caught up with upstream before it (kept ones included)."""
+    services caught up with upstream before it (kept ones included).
+    `unpatched`: the remembered failure it was not tried again for (with
+    `outcome` None)."""
     project: str
     cves: tuple[str, ...]
     outcome: AutofixOutcome | None
     not_run: str | None = None
     updated: bool = False
     upstream: tuple[UpstreamResult, ...] = ()
+    unpatched: FailedPatch | None = None
 
 
 def _now() -> datetime:
@@ -153,8 +164,23 @@ def nightly_digest(paths: BoxPaths, results: Sequence[dict[str, Any]], done: Col
             if busy is not None:
                 attempts.append(busy)
     attempts += autofix_the_rest(paths, done, only=only, until=until)
+    attempts += urgent_unpatched(paths, only=only)
     send_nightly_results(paths, attempts)
     return attempts
+
+
+def urgent_unpatched(paths: BoxPaths, *, only: str | None) -> list[NightlyAttempt]:
+    """A line for each deployed project whose urgent patch failed and is not
+    tried again until something it depends on changes."""
+    names = [only] if only is not None else project_dir_names(paths)
+    lines = []
+    for project in names:
+        if classify(project, paths) is not Inventory.DEPLOYED:
+            continue
+        failed = remembered(paths, project, "urgent")
+        if failed is not None:
+            lines.append(NightlyAttempt(project, failed.cves, None, unpatched=failed))
+    return lines
 
 
 def send_digest_after_error(paths: BoxPaths, results: Sequence[dict[str, Any]],
@@ -220,17 +246,23 @@ def run_nightly_autofix(paths: BoxPaths, project: str, *, until: datetime,
         return None
     upstream = _catch_up(paths, project, block, update, until)
     try:
-        findings = _nightly_findings(paths, project)
+        pairs = _nightly_pairs(paths, project)
     except _READ_PROBLEMS as e:
         reason = f"its stored scan or manifest cannot be read: {type(e).__name__}: {e}"
         log_error(_COMPONENT, f"{project}: nightly autofix could not run: {reason}", paths,
                   project=project)
         return NightlyAttempt(project, (), AutofixOutcome(False, None, reason, ()),
                               upstream=upstream)
-    if not findings:
+    if not pairs:
         return (NightlyAttempt(project, (), None, upstream=upstream)
                 if any(r.outcome != "kept" for r in upstream) else None)
+    findings = [fd for _, fd in pairs]
     cves = _cves(findings)
+    failed = still_failing(paths, project, "nightly", pairs)
+    if failed is not None:
+        log_operation(_COMPONENT, f"{project}: nightly autofix not tried again: nothing it "
+                      f"depends on changed since it failed", paths, project=project)
+        return NightlyAttempt(project, cves, None, upstream=upstream, unpatched=failed)
     not_run = ("paused" if block is not None
                else _MIXED if any(r.rollback_problems for r in upstream)
                else _not_now(update, until))
@@ -248,6 +280,10 @@ def run_nightly_autofix(paths: BoxPaths, project: str, *, until: datetime,
         outcome = AutofixOutcome(False, None, f"{type(e).__name__}: {e}", (),
                                  tuple(getattr(e, "__notes__", ())))
     print(f"{project}: nightly autofix " + _said(outcome))
+    if outcome.ok or outcome.nothing_to_patch:
+        forget(paths, project, "nightly")
+    else:
+        remember(paths, project, "nightly", pairs, outcome, _now())
     return NightlyAttempt(project, cves, replace(outcome, started_at=started),
                           updated=update is not None and update["status"] == "succeeded",
                           upstream=upstream)
@@ -314,8 +350,13 @@ def _skip_reason(paths: BoxPaths, project: str, block: Block | None) -> str | No
 
 
 def _nightly_findings(paths: BoxPaths, project: str) -> list[FindingDisposition]:
-    """The findings of the stored scan to patch tonight. Raises what the
-    reads raise (_READ_PROBLEMS)."""
+    return [fd for _, fd in _nightly_pairs(paths, project)]
+
+
+def _nightly_pairs(paths: BoxPaths, project: str
+                   ) -> list[tuple[ProjectDecision, FindingDisposition]]:
+    """The findings of the stored scan to patch tonight, with the decision
+    (image) of each. Raises what the reads raise (_READ_PROBLEMS)."""
     meta = load_project_meta(paths, project)
     if not meta.autofix:
         return []
@@ -323,7 +364,7 @@ def _nightly_findings(paths: BoxPaths, project: str) -> list[FindingDisposition]
     if state is None:   # the security health check reports a project never scanned
         return []
     decisions = decisions_from_scan_state(state, project_name=project)
-    return [fd for d in decisions for fd in d.findings
+    return [(d, fd) for d in decisions for fd in d.findings
             if urgency(fd, meta.posture) is AutofixUrgency.NIGHTLY]
 
 
@@ -352,11 +393,18 @@ def _lines(a: NightlyAttempt) -> list[Alert]:
     """The attempt's digest lines (quiet), or urgent alerts: one per pinned
     service caught up with upstream that changed or failed, then the patch's."""
     lines = [_upstream_line(r) for r in a.upstream if r.outcome != "kept"]
+    if a.unpatched is not None:
+        return [*lines, format_nightly_unpatched_line(a.project, a.unpatched.at,
+                                                      _failure(a.unpatched))]
     if a.outcome is None and a.not_run is None:
         if not lines:
             raise ValueError(f"{a.project}: a nightly attempt with no outcome says why")
         return lines
     return [*lines, _line(a)]
+
+
+def _failure(f: FailedPatch) -> str:
+    return f"{f.failed_step}: {f.reason}" if f.failed_step else f.reason
 
 
 def _upstream_line(r: UpstreamResult) -> Alert:

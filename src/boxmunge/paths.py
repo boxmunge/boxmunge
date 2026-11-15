@@ -289,6 +289,11 @@ class BoxPaths:
         name = _checked(name)
         return self.state / "autofix" / f"{name}.journal"
 
+    def project_autofix_failed(self, name: str) -> Path:
+        """The last failed autofix of each trigger (cve.autofix_record)."""
+        name = _checked(name)
+        return self.state / "autofix" / f"{name}.failed"
+
     def project_fix_grace(self, name: str) -> Path:
         """Strict's fix deadlines for a project (cve.fix_grace)."""
         name = _checked(name)

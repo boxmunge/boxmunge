@@ -27,7 +27,8 @@ def test_delete_removes_pins_fix_deadlines_and_the_start_alert_throttle(
 def test_delete_removes_autofix_records_and_marker(paths, fake_containers) -> None:
     prod_and_stage(paths)
     left = [paths.project_autofix_records("myapp"), paths.project_autofix_marker("myapp"),
-            paths.project_autofix_queue("myapp"), paths.project_autofix_journal("myapp")]
+            paths.project_autofix_queue("myapp"), paths.project_autofix_journal("myapp"),
+            paths.project_autofix_failed("myapp")]
     for path in left:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("{}\n")

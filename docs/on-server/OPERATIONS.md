@@ -1666,6 +1666,7 @@ unless `health` also ran past its budget before the upgrade.
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
 | `kev-watch` | the KEV watch has not run for 75 minutes (or its timer is installed and it has never run), its record cannot be read, or a known-exploited source that is turned on (the EU list, VulnCheck) is stale or was never fetched | the supervisor user runs `systemctl status boxmunge-kev-watch.timer`; for a source, `log --component cve-scan` names its error. See `agent-help cve`, "Known-exploited sources" |
 | `cve-hardening` | under posture `strict` or `paranoid`, a finding will quarantine from 0.12 because a compose-only service lacks `read_only: true` (or the manifest adds `cap_add` / `no_new_privileges: false`); not quarantined now | add `read_only: true` in compose.yml, or declare the service in the manifest; to accept the risk instead, suppress the CVE after review or choose `security.posture: balanced` (KEV-only quarantine); `security <project>` names it |
+| `autofix-queue` | an urgent autofix has waited 2 hours since it was found without starting (the autofix unit does not start, or another operation keeps holding the project), or a queue entry cannot be read | the supervisor user runs `journalctl -u boxmunge-autofix` and `systemctl start boxmunge-autofix.service`; `log --component autofix` says why. The scans have stopped holding the quarantine back |
 | `ufw`, `crowdsec`, `aide`, `auditd`, `sysctl` | a host hardening component is off or misconfigured | `doctor`, then the supervisor user |
 | `auto-updates` | OS security updates are not being fetched or installed | see [OS security updates](#os-security-updates) |
 | `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, maintenance, kev-watch) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
@@ -2483,6 +2484,12 @@ out with `security.autofix: false`. It runs in two places:
   project: `patched`, `fixed by tonight's update`, `could not patch: <step>: <reason>`,
   `skipped: <why>`, `deferred to the next maintenance window`, `switched to upstream`,
   `re-patched on new upstream`, `could not catch up with upstream`.
+
+A patch queued 2 hours ago that has not started (the unit does not start, or the project stays
+busy) is alerted `Urgent autofix could not start` once a day, the `autofix-queue` health check
+warns, and the scans no longer hold its quarantine back. A patch that failed is remembered in
+`state/autofix/<project>.failed` and not tried again until its image, its fixed versions or its
+CVEs change; the nightly digest lists it as `still unpatched since <date>`.
 
 While a patch runs, `state/autofix/<project>.active` marks it (`status` shows `autofixing`).
 Just before it swaps images in, it writes `state/autofix/<project>.journal`, and removes it once
