@@ -50,3 +50,42 @@ def test_no_holder_listed_is_none(tmp_path: Path) -> None:
     proc.mkdir()
     (proc / "locks").write_text("1: FLOCK  ADVISORY  WRITE 7 08:01:999999999 0 EOF\n")
     assert lock_holder(lock, proc) is None
+
+
+def _locks(tmp_path: Path, lock: Path, lines: list[str]) -> Path:
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    (proc / "locks").write_text("\n".join(lines) + "\n")
+    return proc
+
+
+def _id(lock: Path) -> str:
+    st = lock.stat()
+    return f"{os.major(st.st_dev):02x}:{os.minor(st.st_dev):02x}:{st.st_ino}"
+
+
+def test_waiter_line_for_another_inode_is_skipped(tmp_path: Path) -> None:
+    lock = tmp_path / "myapp.lock"
+    lock.write_text("")
+    proc = _locks(tmp_path, lock, [
+        "1: -> FLOCK  ADVISORY  WRITE 55 08:01:999999999 0 EOF",
+        f"2: FLOCK  ADVISORY  WRITE 4242 {_id(lock)} 0 EOF",
+    ])
+    assert lock_holder(lock, proc) == "pid 4242"
+
+
+def test_waiter_on_our_inode_is_not_named_as_holder(tmp_path: Path) -> None:
+    lock = tmp_path / "myapp.lock"
+    lock.write_text("")
+    proc = _locks(tmp_path, lock, [
+        f"1: FLOCK  ADVISORY  WRITE 4242 {_id(lock)} 0 EOF",
+        f"1: -> FLOCK  ADVISORY  WRITE 77 {_id(lock)} 0 EOF",
+    ])
+    assert lock_holder(lock, proc) == "pid 4242"
+
+
+def test_holder_in_an_unseen_pid_namespace_is_none(tmp_path: Path) -> None:
+    lock = tmp_path / "myapp.lock"
+    lock.write_text("")
+    proc = _locks(tmp_path, lock, [f"1: FLOCK  ADVISORY  WRITE 0 {_id(lock)} 0 EOF"])
+    assert lock_holder(lock, proc) is None

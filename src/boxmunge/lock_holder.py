@@ -1,9 +1,13 @@
 """Name the process holding an flock, from /proc/locks."""
 
 import os
+import re
 from pathlib import Path
 
 CMDLINE_MAX = 200
+# A held lock. A blocked waiter is listed as "N: -> FLOCK ...", which this
+# does not match, so a waiter is never named as the holder.
+_HELD = re.compile(r"^\d+: (?:FLOCK|POSIX|OFDLCK) +\S+ +\S+ +(\d+) +([0-9a-f]+):([0-9a-f]+):(\d+) ")
 
 
 def lock_holder(lock_path: Path, proc: Path = Path("/proc")) -> str | None:
@@ -16,12 +20,11 @@ def lock_holder(lock_path: Path, proc: Path = Path("/proc")) -> str | None:
     st = lock_path.stat()
     wanted = (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino)
     for line in (proc / "locks").read_text().splitlines():
-        fields = line.split()
-        if len(fields) < 6:
-            continue
-        major, minor, inode = fields[5].split(":")
-        if (int(major, 16), int(minor, 16), int(inode)) == wanted:
-            return _describe(int(fields[4]), proc)
+        m = _HELD.match(line)
+        if m and (int(m[2], 16), int(m[3], 16), int(m[4])) == wanted:
+            pid = int(m[1])
+            # pid 0: the holder is in a pid namespace we cannot see.
+            return _describe(pid, proc) if pid else None
     return None
 
 
