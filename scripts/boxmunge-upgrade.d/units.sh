@@ -15,11 +15,11 @@
 # replaces them; a slot with no copy yet records the live units as its own
 # (seed_slot_units). A rollback installs the slot's units, disables and removes
 # every boxmunge unit the slot does not ship, and enables its timers
-# (restore_slot_units). A rollback run by a shim from before 0.12 (one that
-# failed the upgrade to 0.12 itself) does not; the 0.12 shim is on disk by
-# then (self_update_shim comes before the swap), so its next check-probation
-# or upgrade, holding the upgrade lock with nothing in flight, finds the live
-# units are not the live slot's and restores them (heal_slot_units).
+# (restore_slot_units). A shim from before 0.11.11 does not, so 0.12 installs
+# only over 0.11.11 or later: the upgrade that adds 0.12's units is run by a
+# shim that can take them away again. Every check-probation and upgrade,
+# holding the upgrade lock with nothing in flight, also puts the live slot's
+# units back where they differ (heal_slot_units).
 
 SYSTEMD_UNIT_DIR="${BOXMUNGE_SYSTEMD_DIR:-/etc/systemd/system}"
 

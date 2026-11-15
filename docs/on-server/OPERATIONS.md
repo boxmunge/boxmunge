@@ -2164,11 +2164,10 @@ them. It also puts back the previous release's systemd units: each venv slot kee
 its release's units (`env-<slot>/boxmunge-systemd`), so the units the newer release added (in
 0.12, `boxmunge-maintenance.timer`, `boxmunge-kev-watch.timer` and `boxmunge-autofix.service`)
 are disabled and removed, and the ones it retired come back enabled. The next upgrade then runs
-the new release's `install.sh` again. A rollback during the upgrade to 0.12 itself (its dry run
-passed but `upgrade --apply` or the first health check failed) is run by the previous release's
-shim, which does not do this; the 0.12 shim is installed by then, and the health timer's next
-`check-probation` (within minutes) finds the live units are not the live slot's and puts them
-back. The same check runs on every `check-probation` and upgrade, so it also reverts hand edits
+the new release's `install.sh` again. Shims before 0.11.11 do not do this, which is why 0.12
+installs only over 0.11.11 or later: the shim running that upgrade is one that does. Every
+`check-probation` and upgrade also checks that the live units are the live slot's and, if not,
+puts the slot's back (within minutes, on the health timer). So it also reverts hand edits
 to the `boxmunge-*` unit files in `/etc/systemd/system`: put local changes in drop-ins
 (`sudo systemctl edit boxmunge-<unit>`), which it leaves alone. A slot with no copy keeps the
 newer units, logged as an error: reinstall the running release to put its own units back. A
