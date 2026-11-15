@@ -20,15 +20,14 @@ from boxmunge.commands.upgrade_steps import (
     ManifestMigration,
     Regeneration,
     Restart,
-    UnresolvedStages,
     UpgradeGateError,
     git_ownership_warnings,
     restart_projects,
 )
 from boxmunge.commands.upgrade_notify import (
-    notify_locked_skips, notify_refused, notify_unresolved_stages,
+    notify_locked_skips, notify_refused,
 )
-from boxmunge.deploy_dirs import fix_command, prepare_deploy_dirs
+from boxmunge.deploy_dirs import prepare_deploy_dirs
 from boxmunge.docker import caddy_reload, DockerError
 from boxmunge.log import log_operation, log_error
 from boxmunge.manifest import ManifestError
@@ -42,9 +41,8 @@ from boxmunge.version import read_installed_version, write_installed_version, ge
 
 def _run_dry(paths: BoxPaths) -> int:
     """Pre-flight for the shim: render every project's migrated manifest and
-    configs in memory. Changes and locks nothing, and logs and alerts only
-    a refusal for an unresolved stage. Returns 0 if --apply would get
-    through migration and regeneration, 1 otherwise."""
+    configs in memory. Changes, locks, logs and alerts nothing. Returns 0 if
+    --apply would get through migration and regeneration, 1 otherwise."""
     print("boxmunge upgrade --dry-run")
     print("==========================\n")
     try:
@@ -60,8 +58,6 @@ def _run_dry(paths: BoxPaths) -> int:
                  f"is fixed, run `sudo /opt/boxmunge/bin/boxmunge-upgrade clear-blocklist "
                  f"{semver}` and retry.")
         print(f"  ERROR: {e}\n  {retry}", file=sys.stderr)
-        if isinstance(e, UnresolvedStages):
-            notify_unresolved_stages(paths, semver, f"{e}\n{retry}")
         return 1
     for line in report:
         print(f"  {line.text}")
@@ -84,14 +80,7 @@ def _migrate_regenerate_reload(
     ones, is not an upgrade that should report success. Excluded projects
     are reported and alerted, and do not fail it."""
     print(f"[{step}/{total}] Migrating manifests and regenerating configs, project by project...")
-    # Directories root made before v0.9.3 are root's; deploy writes there.
-    reowned = prepare_deploy_dirs(paths)
-    for directory in reowned.done:
-        print(f"  Gave {directory} to the deploy user (root had made it).")
-        log_operation("upgrade", f"Re-owned {directory} to deploy", paths)
-    for directory in reowned.failed:
-        print(f"  FAIL: {directory} is still not owned by deploy; run: "
-              f"{fix_command(directory)}", file=sys.stderr)
+    prepare_deploy_dirs(paths)
     migrated, regen, excluded = apply_projects(paths)
     if migrated.written:
         print(f"  Migrated: {', '.join(migrated.written)}")

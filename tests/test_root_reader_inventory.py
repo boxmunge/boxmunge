@@ -53,7 +53,6 @@ def _sites(helpers: set[str], *, read_only: bool = False) -> set[Site]:
 ELSEWHERE: dict[Site, str] = {
     ("health_checks/upgrade_slot.py", "check_upgrade_slot"): "test_health_checks/test_upgrade_slot.py",
     ("commands/quarantine_gate.py", "lift_after_deploy"): "test_commands/test_quarantine_gate.py",
-    ("unresolved_stage.py", "_state_active"): "test_unresolved_stage.py",
     ("release_keep.py", "_reads_as"): "test_release_record_reads.py",
     ("release_txn.py", "_sha"): "test_release_record_reads.py",
     ("start_alerts.py", "record"): "test_root_state_reads.py (recorded over a link)",

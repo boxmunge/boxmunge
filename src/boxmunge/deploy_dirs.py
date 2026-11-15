@@ -2,14 +2,9 @@
 """The directories the deploy user writes and root code paths may create.
 
 Commands run in the deploy shell (and over MCP) write into these. Root's
-timers and upgrade write there too, and before v0.9.3 whichever of them ran
-first created the directory, as root, so deploy could not write it
-afterwards (a manual `security scan` died with EACCES in state/scans).
-`prepare_deploy_dirs` (run by the upgrade) creates what is missing and
-re-owns what root made; `unwritable_by_deploy` (doctor) reports what is
-still out of deploy's reach.
-The re-owning first shipped in 0.11.1, so it stays
-until the upgrade floor reaches that.
+timers and upgrade write there too. `prepare_deploy_dirs` (run by the
+upgrade) creates what is missing, as deploy's; `unwritable_by_deploy`
+(doctor) reports any that are out of deploy's reach.
 
 Deliberately absent, because only root writes there: state/container-updates
 (boxmunge container-update, a root timer, is not in the deploy shell) and
@@ -17,17 +12,12 @@ state/jobs (the action API's records).
 """
 from __future__ import annotations
 
-import errno
 import os
 import stat
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from boxmunge.fs_nofollow import (
-    chown_open_tree_deploy, deploy_ids, mkdir_p_deploy, running_as_root,
-)
-from boxmunge.log import log_error, log_warning
+from boxmunge.fs_nofollow import deploy_ids, mkdir_p_deploy, running_as_root
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -41,9 +31,6 @@ STATE_DIRS = ("health", "deploy", "scans", "kev",
               "start-refused", "project-alerts", "secrets-locks", "backup")
 # Under projects/<name>/: `security suppress` writes suppressions.yml here.
 PROJECT_DIRS = ("security",)
-
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-
 
 def _project_dir_names(paths: BoxPaths) -> list[str]:
     try:
@@ -67,80 +54,14 @@ def deploy_dirs(paths: BoxPaths) -> list[Path]:
             if (parent / name).is_dir() and not (parent / name).is_symlink()]
 
 
-ROOT_UID = 0
-
-
-def _uid_of(fd: int) -> int:
-    return os.fstat(fd).st_uid
-
-
-@dataclass
-class Reowned:
-    """What prepare_deploy_dirs did: directories that were not deploy's and
-    now are, and those still not deploy's after the attempt."""
-
-    done: list[Path] = field(default_factory=list)
-    failed: list[Path] = field(default_factory=list)
-
-
-def _open_dir(paths: BoxPaths, name: str, dir_fd: int | None, shown: Path) -> int | None:
-    """A directory opened without following a link; None (a link or a
-    non-directory is warned about, never re-owned) when absent or not one."""
-    try:
-        return os.open(name, _DIR_FLAGS, dir_fd=dir_fd)
-    except FileNotFoundError:
-        return None
-    except OSError as e:
-        if e.errno in (errno.ELOOP, errno.ENOTDIR):
-            log_warning("upgrade", f"{shown} is not a plain directory; not re-owned", paths)
-            return None
-        raise
-
-
-def _reown(paths: BoxPaths, parent: Path, name: str, uid: int, result: Reowned) -> None:
-    """Re-own parent/name and what root made under it to deploy, through
-    descriptors that refuse a link, so a link deploy swapped in is left
-    alone. Records the directory in ``result`` when it was not deploy's."""
-    shown = parent / name
-    pfd = _open_dir(paths, str(parent), None, parent)
-    if pfd is None:
+def prepare_deploy_dirs(paths: BoxPaths) -> None:
+    """Create state/<dir>, as deploy's, for each STATE_DIRS entry that is
+    missing. As root only; never changes a parent (/opt/boxmunge stays
+    root's; state/ and projects/ are deploy's from install)."""
+    if not running_as_root() or deploy_ids() is None:
         return
-    try:
-        fd = _open_dir(paths, name, pfd, shown)
-        if fd is None:
-            return
-        try:
-            was_deploys = _uid_of(fd) == uid
-            chown_open_tree_deploy(fd, str(shown), only_uid=ROOT_UID)
-            now_deploys = _uid_of(fd) == uid
-        finally:
-            os.close(fd)
-    finally:
-        os.close(pfd)
-    if not now_deploys:
-        log_error("upgrade", f"{shown} is still not owned by deploy after the chown", paths)
-        result.failed.append(shown)
-    elif not was_deploys:
-        result.done.append(shown)
-
-
-def prepare_deploy_dirs(paths: BoxPaths) -> Reowned:
-    """Create state/<dir> for each STATE_DIRS entry that is missing, and
-    re-own every directory of the set (and what root made in it) to deploy.
-    As root only.
-
-    Never re-owns a parent (/opt/boxmunge stays root's; state/ and
-    projects/ are deploy's from install).
-    """
-    result = Reowned()
-    ids = deploy_ids()
-    if not running_as_root() or ids is None:
-        return result
     for name in STATE_DIRS:
         mkdir_p_deploy(paths.state / name)
-    for parent, name in _targets(paths):
-        _reown(paths, parent, name, ids[0], result)
-    return result
 
 
 def fix_command(directory: Path) -> str:

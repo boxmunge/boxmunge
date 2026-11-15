@@ -24,16 +24,10 @@ def fake_root(monkeypatch) -> list[str]:
         monkeypatch.setattr(module, "running_as_root", lambda: True)
         monkeypatch.setattr(module, "deploy_ids", lambda: ids)
     monkeypatch.setattr(os, "getgrouplist", lambda user, gid: [gid])
-    # "root" is whoever runs the test; a re-owned inode moves to the deploy uid.
-    monkeypatch.setattr(deploy_dirs, "ROOT_UID", os.getuid())
-    moved: dict[int, int] = {}
-    monkeypatch.setattr(deploy_dirs, "_uid_of",
-                        lambda fd: moved.get(os.fstat(fd).st_ino, os.fstat(fd).st_uid))
     chowned: list[str] = []
 
     def fchown(fd, uid, gid):
         chowned.append(str(os.fstat(fd).st_ino))
-        moved[os.fstat(fd).st_ino] = uid
         os.fchmod(fd, 0o775)  # stand-in for "deploy owns it now"
 
     def chown(path, uid, gid, *, dir_fd=None, follow_symlinks=True):

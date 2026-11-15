@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Doctor, health and the upgrade report root-made deploy directories and
+"""Doctor and health report root-made deploy directories and
 registry entries with no project directory."""
 from __future__ import annotations
 
@@ -8,12 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
-from boxmunge import deploy_dirs
 from boxmunge.commands.doctor import run_doctor
-from boxmunge.commands.upgrade_cmd import run_upgrade
 from boxmunge.health_checks.registry import check_registry_drift
-from boxmunge.paths import BoxPaths
-from boxmunge.version import write_installed_version
 from tests.test_commands.cve_helpers import make_box
 
 pytestmark = pytest.mark.skipif(os.getuid() == 0, reason="root can write a 0555 directory")
@@ -72,37 +68,3 @@ def test_health_check_reports_an_unfinished_removal_but_not_a_pending_name(tmp_p
     check = check_registry_drift(paths)
     assert check.status == "warn" and "project-forget gone" in check.detail
     assert "pending" not in check.detail
-
-
-def test_upgrade_prints_fail_when_the_chown_does_not_take(tmp_path, fake_root, monkeypatch, capsys):
-    paths = BoxPaths(root=tmp_path / "bm")
-    for d in ["config", "projects", "state/deploy", "stashes", "logs",
-              "caddy/sites", "upgrade-state"]:
-        (paths.root / d).mkdir(parents=True)
-    paths.config_file.write_text("hostname: test\nadmin_email: t@t\n")
-    write_installed_version(paths, "0.2.0", "abc1234")
-    (paths.state / "scans").mkdir()
-    (paths.state / "scans").chmod(0o555)
-    monkeypatch.setattr(os, "fchown", lambda fd, u, g: None)
-    with patch("boxmunge.commands.upgrade_cmd.caddy_reload"):
-        run_upgrade(paths, apply_only=True)
-    cap = capsys.readouterr()
-    assert "Gave" not in cap.out
-    assert f"FAIL: {paths.state / 'scans'} is still not owned by deploy" in cap.err
-
-
-def test_upgrade_apply_reowns_a_root_made_scans_dir(tmp_path, fake_root, capsys):
-    paths = BoxPaths(root=tmp_path / "bm")
-    for d in ["config", "projects", "state/deploy", "stashes", "logs",
-              "caddy/sites", "upgrade-state"]:
-        (paths.root / d).mkdir(parents=True)
-    paths.config_file.write_text("hostname: test\nadmin_email: t@t\n")
-    write_installed_version(paths, "0.2.0", "abc1234")
-    (paths.state / "scans").mkdir()
-    (paths.state / "scans").chmod(0o555)
-
-    with patch("boxmunge.commands.upgrade_cmd.caddy_reload"):
-        assert run_upgrade(paths, apply_only=True) == 0
-
-    assert f"Gave {paths.state / 'scans'} to the deploy user" in capsys.readouterr().out
-    assert deploy_dirs.unwritable_by_deploy(paths) == []
