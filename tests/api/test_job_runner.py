@@ -324,6 +324,23 @@ def test_worker_that_crashed_before_its_claim_fails_the_job_once(box):
     assert json.loads(events[-1])["state"] == "failed"
 
 
+def test_a_finish_cut_off_mid_move_gets_its_outcome_line_once(box):
+    """The worker audits only after the move, so a finish cut off between
+    link and unlink never wrote the outcome: the runner writes it from the
+    record (a failed one keeps its code and message), once."""
+    job_id = box.publish(0)
+    assert job_writer.claim(box.paths, job_id, box.identity(), NOW)
+    error = {"code": "failed", "message": "the core exited 1"}
+    job_writer.finish(box.paths, job_id, state="failed", error=error, result=None, now=NOW)
+    os.link(box.paths.jobs_dir / f"{job_id}.json", box.paths.jobs_queue / f"{job_id}.json")
+    assert box.run() == 0 and box.run() == 0
+    assert box.spawned == [] and list(box.paths.jobs_queue.iterdir()) == []
+    [audit] = [r for r in read_audit(box.paths) if r.get("job") == job_id]
+    assert (audit["outcome"], audit["code"], audit["message"], audit["params"]) == \
+        ("failed", "failed", "the core exited 1", None)
+    assert box.alerts == [] and box.errors == []
+
+
 def test_a_job_on_a_free_lane_starts_while_a_long_job_runs(box):
     long_job = box.publish(0)
     box.scripts[long_job] = work(0.5)

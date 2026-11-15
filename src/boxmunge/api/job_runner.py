@@ -51,7 +51,7 @@ from boxmunge.api.result import ErrorCode
 from boxmunge.api.worker_identity import WorkerIdentity, is_alive
 from boxmunge.fileutil import exclusive_lock, fsync_dir
 from boxmunge.fs_nofollow import mkdir_p_deploy
-from boxmunge.log import log_error, log_warning
+from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError
@@ -108,6 +108,7 @@ def recover_queue(paths: BoxPaths, alive: Callable[[WorkerIdentity], bool]) -> S
             _mark_lost(paths, record)
         elif recovery is Recovery.COMPLETE_FINISH:
             complete_finish(paths, job_id)
+            _recover_outcome_line(paths, record)
         elif recovery is Recovery.LEAVE:
             scan.running.append(record)
         else:
@@ -238,7 +239,7 @@ def _record_failure(paths: BoxPaths, record: dict[str, Any], error: dict[str, st
                     title: str) -> None:
     """The events, outcome audit line and alert of a job the runner failed."""
     _write_failure_events(paths, record, error["message"])
-    _audit(paths, record, error)
+    _audit(paths, record, "failed", error)
     notify(paths, title, error["message"], component=COMPONENT, project=record["project"],
            priority=1)
 
@@ -265,19 +266,33 @@ def _write_failure_events(paths: BoxPaths, record: dict[str, Any], message: str)
         events.close()
 
 
-def _audit(paths: BoxPaths, record: dict[str, Any], error: dict[str, str]) -> None:
+def _recover_outcome_line(paths: BoxPaths, record: dict[str, Any]) -> None:
+    """A finish cut off mid-move: its worker audits strictly after the move
+    (and finish holds the job lock across it), so it never wrote the
+    outcome line. Write it from the record, once."""
+    _audit(paths, record, record["state"], record["error"])
+    log_operation(COMPONENT, f"job {record['id']}: its worker died while moving the finished "
+                  f"record out of the queue; the move was completed and the outcome audit "
+                  f"line ({record['state']}) recovered from the record", paths,
+                  project=record["project"])
+
+
+def _audit(paths: BoxPaths, record: dict[str, Any], outcome: str,
+           error: dict[str, str] | None) -> None:
     """The outcome audit line the worker could not write. params are left
     out: the runner loads no registry to redact them, and the job's
     accepted line already carries them."""
-    line = audit_record(record["principal"], record["action"], "failed",
-                        code=error["code"], message=error["message"], job=record["id"])
+    code = None if error is None else error["code"]
+    line = audit_record(record["principal"], record["action"], outcome, code=code,
+                        message=None if error is None else error["message"], job=record["id"])
     try:
         AuditLog(paths.audit_log, create=False).append(line)
     except AuditError as e:
+        shown = outcome if code is None else f"{outcome}, {code}"
         log_error("audit", f"could not record the outcome of {record['action']} (job "
-                  f"{record['id']}): {e}", paths, detail={"outcome": "failed"})
+                  f"{record['id']}): {e}", paths, detail={"outcome": outcome})
         notify(paths, "boxmunge: audit log write failed",
-               f"The outcome (failed, {error['code']}) of {record['action']} by "
+               f"The outcome ({shown}) of {record['action']} by "
                f"{record['principal']} (job {record['id']}) was not recorded: {e}. The job "
                f"record keeps it.", component="audit", priority=1)
 

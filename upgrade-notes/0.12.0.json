@@ -164,7 +164,7 @@
    "when": "after",
    "kind": "fact",
    "title": "The action audit log is append-only and rotated monthly",
-   "change": "'logs/audit.jsonl' is append-only ('chattr +a'); 'boxmunge-audit-rotate.timer' rotates it monthly and keeps 12 months; 'health' reports an error if the attribute is missing, or a warning on a host that cannot set it (some container-based VPS plans). The installer seals the log; nobody, deploy included, can truncate, rewrite or delete it. The fix for the audit-log error is sudo boxmunge-server _audit-seal. On a host that cannot set the attribute, install still completes, records why in upgrade-root/audit-append-unsupported, and deploy can still rewrite the log there.",
+   "change": "'logs/audit.jsonl' is append-only ('chattr +a'); 'boxmunge-audit-rotate.timer' rotates it monthly and keeps 12 months; 'health' reports an error if the attribute is missing, or a warning on a host that cannot set it (some container-based VPS plans). The installer seals the log: deploy cannot truncate, rewrite or delete it; only root can, by lifting the attribute. The fix for the audit-log error is sudo boxmunge-server _audit-seal. On a host that cannot set the attribute, install still completes, records why in upgrade-root/audit-append-unsupported, and deploy can still rewrite the log there.",
    "verify": "As root, 'lsattr /opt/boxmunge/logs/audit.jsonl' shows the a attribute, and 'boxmunge health' passes the audit-log check (or warns that this host cannot set it).",
    "files": [],
    "superseded_by": null,

@@ -214,6 +214,12 @@ def test_crash_during_finish_completes_the_move(box, counted) -> None:
     assert handler.runs == 1
     record = _record(box, job_id)
     assert (record["state"], record["result"]) == ("succeeded", {"n": 1})
+    assert _outcomes(box, job_id) == ["accepted", "succeeded"]  # recovered by the runner
+    recovered = [r for r in read_audit(box) if r.get("job") == job_id][-1]
+    assert (recovered["principal"], recovered["action"], recovered["params"]) == \
+        ("operator:ssh", "project.backup", None)
+    assert _run_runner(box, registry) == []
+    assert _outcomes(box, job_id) == ["accepted", "succeeded"]  # once
     assert _queue_is_empty(box) and box.alerts == []
 
 
