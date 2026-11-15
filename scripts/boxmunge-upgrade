@@ -180,6 +180,7 @@ upgrade_to() {
     [[ "$mode" != "force" ]] || userns_guard_target "$version"
     cmd_install_sudoers
     seed_slot_docs "$ACTIVE_SLOT"
+    heal_slot_units
     seed_slot_units "$ACTIVE_SLOT"
 
     local prev_slot from_version standby

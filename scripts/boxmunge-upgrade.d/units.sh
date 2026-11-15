@@ -15,7 +15,11 @@
 # replaces them; a slot with no copy yet records the live units as its own
 # (seed_slot_units). A rollback installs the slot's units, disables and removes
 # every boxmunge unit the slot does not ship, and enables its timers
-# (restore_slot_units).
+# (restore_slot_units). A rollback run by a shim from before 0.12 (one that
+# failed the upgrade to 0.12 itself) does not; the 0.12 shim is on disk by
+# then (self_update_shim comes before the swap), so its next check-probation
+# or upgrade, holding the upgrade lock with nothing in flight, finds the live
+# units are not the live slot's and restores them (heal_slot_units).
 
 SYSTEMD_UNIT_DIR="${BOXMUNGE_SYSTEMD_DIR:-/etc/systemd/system}"
 
@@ -40,6 +44,35 @@ seed_slot_units() {
     if [[ ! -d "$dest" ]] && compgen -G "$SYSTEMD_UNIT_DIR/boxmunge-*.timer" >/dev/null; then
         copy_units "$SYSTEMD_UNIT_DIR" "$dest"
     fi
+}
+
+# units_match <dir>: the live boxmunge units are exactly <dir>'s, by name
+# and content.
+units_match() {
+    local unit name
+    for unit in "$1"/boxmunge-*.service "$1"/boxmunge-*.timer; do
+        [[ -f "$unit" ]] || continue
+        cmp -s "$unit" "$SYSTEMD_UNIT_DIR/${unit##*/}" || return 1
+    done
+    for unit in "$SYSTEMD_UNIT_DIR"/boxmunge-*.service "$SYSTEMD_UNIT_DIR"/boxmunge-*.timer; do
+        [[ -e "$unit" || -L "$unit" ]] || continue
+        name="${unit##*/}"
+        [[ -e "$1/$name" ]] || return 1
+    done
+    return 0
+}
+
+# heal_slot_units: the live slot has a record of its units and the live
+# units are not those, so a rollback left the newer release's: put them back.
+# The caller holds the upgrade lock and nothing is in flight.
+heal_slot_units() {
+    local src
+    src="$(slot_units "$ACTIVE_SLOT")"
+    compgen -G "$src/boxmunge-*.timer" >/dev/null || return 0
+    units_match "$src" && return 0
+    log "The live systemd units are not those of the release on slot $ACTIVE_SLOT (a rollback left them); restoring them"
+    bm_log warn upgrade "systemd units differ from the live slot's; restoring" "{\"slot\": \"$ACTIVE_SLOT\"}"
+    restore_slot_units "$ACTIVE_SLOT"
 }
 
 # restore_slot_units <slot>: best effort, since a units failure must not undo

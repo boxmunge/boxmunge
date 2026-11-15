@@ -82,6 +82,39 @@ with_shim_functions seed_slot_units a
     && pass "a slot's own record is kept" || fail "seed overwrote the slot's record"
 drop_root
 
+# Self-heal: a rollback by a shim from before 0.12 left the newer units. The
+# next check-probation (the 0.12 shim, no probation, nothing in flight) puts
+# the live slot's own back; units that already match are left alone.
+new_root a
+mkdir -p "$BOXMUNGE_ROOT/env-a/boxmunge-systemd"
+for u in boxmunge-cve-scan.timer boxmunge-cve-scan.service boxmunge-health.timer; do
+    unit "$BOXMUNGE_ROOT/env-a/boxmunge-systemd/$u" "old $u"
+done
+for u in boxmunge-kev-watch.timer boxmunge-maintenance.timer boxmunge-health.timer; do
+    unit "$BOXMUNGE_SYSTEMD_DIR/$u" "new $u"
+done
+run_shim check-probation
+expect 0 "restoring them" "check-probation heals units a rollback left"
+installed="$(cd "$BOXMUNGE_SYSTEMD_DIR" && ls | sort | tr '\n' ' ')"
+[[ "$installed" == "boxmunge-cve-scan.service boxmunge-cve-scan.timer boxmunge-health.timer " ]] \
+    && pass "the live slot's units are back" || fail "installed after heal: $installed"
+: > "$BOXMUNGE_ROOT/calls"
+run_shim check-probation
+expect 0 "" "a second check-probation runs"
+[[ "$OUT" != *"restoring them"* && "$(cat "$BOXMUNGE_ROOT/calls")" != *"enable"* ]] \
+    && pass "units that match are left alone" || fail "healed again: $OUT"
+drop_root
+
+# A live slot with no record (the first 0.12 slot, upgraded by an older
+# shim) is left alone.
+new_root a
+unit "$BOXMUNGE_SYSTEMD_DIR/boxmunge-kev-watch.timer" "new"
+run_shim check-probation
+expect 0 "" "check-probation without a units record"
+[[ -e "$BOXMUNGE_SYSTEMD_DIR/boxmunge-kev-watch.timer" && "$OUT" != *"restoring them"* ]] \
+    && pass "no record: no heal" || fail "healed without a record: $OUT"
+drop_root
+
 grep -q 'restore_slot_units "$prev_slot"' "$REPO_DIR/scripts/boxmunge-upgrade.d/slots.sh" \
     && pass "complete_rollback restores the units" || fail "complete_rollback does not restore units"
 grep -q 'copy_units "$bundle/systemd" "$(slot_units "$standby")"' "$REPO_DIR/scripts/boxmunge-upgrade" \
