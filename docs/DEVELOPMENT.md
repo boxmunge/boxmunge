@@ -97,8 +97,8 @@ MCP still keep their own tables, so adding a command means touching several plac
 
 - **Lock before you mutate.** Per-project changes take the project lock (`fileutil`), Caddy reloads
   take the Caddy lock, registry changes take the registry lock. The health check runs every five
-  minutes as root, and the container-update and CVE-scan timers also run as root, so unlocked
-  writers race with them.
+  minutes as root, and the nightly maintenance run (CVE scan, then container update) and the
+  KEV watch also run as root, so unlocked writers race with them.
 - **Write state atomically** with `fileutil.atomic_write_text` or `state.write_state`.
 - **Mind file ownership.** Some code runs as root (timers, the upgrade shim) and some as `deploy`.
   A file root creates under a deploy-owned directory can become unreadable to `deploy` or to the

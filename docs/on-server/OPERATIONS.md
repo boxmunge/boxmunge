@@ -698,7 +698,7 @@ Every snapshot is named `<project>-<UTC timestamp>-<unique>-<kind>.tar.gz.age`, 
 | `premigrate` | `userns-migrate`, before its downtime (not for a paused project) | 2 |
 | `prechown` | `data chown`, before it stops the service; when that is the backup service and it has not run since, the next deploy uses it as its pre-deploy snapshot | 3 |
 | `prepause` | `pause`, before it stops the project (unless `--no-snapshot`); while the backup service has not run since, the deploy that ends the pause (`resume --no-start`) uses it as its pre-deploy snapshot | 3 |
-| `preupdate` | the container-update timer, only when a pulled image changed and the project is about to be recreated | 3 |
+| `preupdate` | the nightly container update (the second step of the maintenance run), only when a pulled image changed and the project is about to be recreated | 3 |
 | `prerestore` | `restore`, a safety snapshot of the data about to be replaced (unless `--no-safety-snapshot`) | 3 |
 | `manual` | `backup <project>`, the MCP `backup` tool, the console, `self-test` | 5 |
 
@@ -1241,7 +1241,7 @@ boxmunge runs Compose without `HOME` or `DOCKER_CONFIG` (see TRUST_MODEL.md, "Co
 | Who runs Compose | Credentials used |
 |---|---|
 | deploy (`prod-deploy`, `stage`, `resume`, `restore`, ...) | `/home/deploy/.docker/config.json` |
-| root (the container-update and other timers, upgrades, `sudo boxmunge ...`) | `/root/.docker/config.json` |
+| root (the nightly maintenance run's container update and the other timers, upgrades, `sudo boxmunge ...`) | `/root/.docker/config.json` |
 
 A project that pulls from a private registry needs a login for both users. Run these as `supervisor`:
 
@@ -1658,10 +1658,11 @@ unless `health` also ran past its budget before the upgrade.
 | `sshd-hardening`, `sshd-deploy-env` | `00-boxmunge.conf` is missing or changed, or `sshd -T` shows a later setting widening what deploy accepts (error; `sshd-deploy-env` needs root); `sshd -T` itself fails or times out (warning) | the supervisor user re-runs the installer, or removes the widening setting; `sudo sshd -t` names a config error |
 | `operational-log` | the active log file's first line is not a log entry, which stops all logging | move the file aside (see [Reading Logs](#reading-logs)) |
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
+| `kev-watch` | the KEV watch has not run for 75 minutes (or its timer is installed and it has never run), its record cannot be read, or a known-exploited source that is turned on (the EU list, VulnCheck) is stale or was never fetched | the supervisor user runs `systemctl status boxmunge-kev-watch.timer`; for a source, `log --component cve-scan` names its error. See `agent-help cve`, "Known-exploited sources" |
 | `cve-hardening` | under posture `strict` or `paranoid`, a finding will quarantine from 0.12 because a compose-only service lacks `read_only: true` (or the manifest adds `cap_add` / `no_new_privileges: false`); not quarantined now | add `read_only: true` in compose.yml, or declare the service in the manifest; to accept the risk instead, suppress the CVE after review or choose `security.posture: balanced` (KEV-only quarantine); `security <project>` names it |
 | `ufw`, `crowdsec`, `aide`, `auditd`, `sysctl` | a host hardening component is off or misconfigured | `doctor`, then the supervisor user |
 | `auto-updates` | OS security updates are not being fetched or installed | see [OS security updates](#os-security-updates) |
-| `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, container-update, cve-scan) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
+| `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, maintenance, kev-watch) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
 
 Because an error during probation that was not there before the upgrade rolls it back, only two
 things report an error. One is a
@@ -2413,12 +2414,13 @@ needs `--project` (it is refused without one).
 
 ## CVE Policy
 
-boxmunge enforces a CVE policy on every deployed image: a daily Trivy
+boxmunge enforces a CVE policy on every deployed image: a nightly Trivy
 scan, a posture-based quarantine (under the default `balanced`, only for
-actively exploited CVEs on CISA KEV, and then lifted by the scan once nothing
-exploited is left),
-and an operator-driven suppression workflow for findings reviewed and
-judged not exploitable.
+actively exploited CVEs on CISA's or the EU's KEV list, and then lifted by
+the scan once nothing exploited is left), a deploy guard that refuses a
+release carrying such a CVE, and an operator-driven suppression workflow
+for findings reviewed and judged not exploitable. `agent-help cve` opens
+with which posture to pick.
 
 Scan cadence:
 
@@ -2427,8 +2429,19 @@ Scan cadence:
   always finishes before the update starts. A failure in one step does not
   skip the other. (Upgrades retire the former separate scan and update
   timers.)
-- Not yet at deploy time: run `security scan <project>` after a deploy to
-  check a new image at once
+- Every 30 minutes via `boxmunge-kev-watch.timer` (`security kev-watch`):
+  it refreshes the known-exploited lists (CISA, ENISA's EU list and, if a
+  token is set, VulnCheck) and rescans only the projects whose last scan
+  holds a newly listed CVE. A missed tick is not replayed; the next one
+  comes within half an hour. The nightly scan and a tick never run at
+  once: they share `state/.cve-fleet.lock`, a tick that finds the nightly
+  scan running skips itself, and the nightly scan waits for a running
+  tick (at most an hour, the watch service's time limit).
+- At deploy time, the deploy guard: `stage`, `prod-deploy`, `promote` and
+  `rollback` scan the release's images and refuse a release that carries a
+  known-exploited CVE (`agent-help cve`, "The deploy guard"). That scan
+  records nothing, so run `security scan <project>` after a deploy to see
+  the release judged in full at once
 - Ad-hoc:
 
   ```

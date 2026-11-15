@@ -17,16 +17,18 @@ which the per-project titles below show after it:
 
 | Alert title prefix | What it means |
 |---|---|
-| `[boxmunge:<p>] QUARANTINED — <CVE>` | Project taken offline by policy. Maintenance page is being served. `(+N more)` means several CVEs. |
+| `[boxmunge:<p>] QUARANTINED — <CVE>` | Project taken offline by policy. Maintenance page is being served. `(+N more)` means several CVEs. `(actively exploited — <lists>)` names the known-exploited lists; `(<severity>, fix not deployed)` is a `strict` fix deadline that passed, or a `paranoid` finding whose fix is not running: deploy the fix (see "Fix-deadline alert"). |
 | `[boxmunge:<p>] [STILL RUNNING — quarantine disabled by config]` | Would have quarantined but `dangerously_disable_quarantine: true`. Project is up at known risk. With `ACTIVELY EXPLOITED … (CISA KEV)` it repeats every scan: escalate. |
-| `[boxmunge:<p>] ACTIVELY EXPLOITED — <CVE> fix available but not running` | `relaxed` project with a fixable KEV CVE. Still up. Repeats every scan until the image is rebuilt. Escalate the rebuild. |
+| `[boxmunge:<p>] ACTIVELY EXPLOITED — <CVE> fix available but not running` | A fixable known-exploited CVE on a project that stays up: full KEV under `relaxed`, or listed by VulnCheck only below `paranoid`. Repeats every scan until the image is rebuilt. Escalate the rebuild. |
+| `[boxmunge:<p>] KNOWN EXPLOITED — <CVE> (VulnCheck KEV), still running` | Only VulnCheck lists it as exploited, so below `paranoid` the site stays up. Sent when it is new or changes. Treat it as urgent: hand off a rebuild once a fix exists; after review, a suppression records the decision. |
+| `[boxmunge:<p>] Fix deadline <date> — <CVE> in <package>: deploy the fix or the site is quarantined` | `strict`: a scan first found this fix available 5 days ago, and it is still not running. Quarantined on the date unless it is deployed. See "Fix-deadline alert". |
 | `[boxmunge:<p>] <N> new CVE findings (informational)` | New findings below the quarantine gate. One digest per scan. |
 | `[boxmunge:<p>] Suppression expired` / `[<hostname>] Host suppression expired` | A previously-suppressed CVE is an active finding again. |
 | `[<hostname>] CVE scan incomplete` | Some images were not scanned. They are unprotected until a scan succeeds. |
 | `[<hostname>] Circuit breaker held <N> quarantines` | Many projects would have quarantined at once for the same CVE(s). They are still running. Escalate: applying (`security scan --apply-held`) or host-suppressing is an operator decision. |
 | `[boxmunge:<p>] <N> fixable CVE findings over the posture's gate — rebuild to apply the fix` | Findings over the posture's gate have an upstream fix the image does not run yet (including a fix landing for an `AWAITING_FIX` finding). Not quarantined (unless on KEV). Hand off a rebuild and redeploy. |
-| `[boxmunge:<p>] <N> CVE findings with no fix yet — site stays up, nothing to do now` | `balanced`: serious, network-reachable findings with no fix, not known to be exploited. Nothing to do now; once per finding. The next alert is the fix landing (rebuild) or a KEV listing (it quarantines). Only `strict` or `paranoid` would take the site down for these: that is the operator's call. |
-| `[boxmunge:<p>] Quarantine lifted — back online (<CVE>)` | A `balanced` project's scan found nothing quarantine-level and nothing on KEV, and lifted the quarantine on its own; the body says why (gone, or no longer quarantining under balanced's KEV-only rule from 0.11.2). `smoke test FAILED` in the title (priority 1): check the project. |
+| `[boxmunge:<p>] <N> CVE findings with no fix yet — site stays up, nothing to do now` | `balanced` (High and up) or `strict` (Medium and up): network-reachable findings with no fix, not known to be exploited. Nothing to do now; once per finding. The next alert is the fix landing (rebuild; under `strict` that starts a 7-day deadline) or a KEV listing (it quarantines). Only `paranoid` takes the site down for these: that is the operator's call. |
+| `[boxmunge:<p>] Quarantine lifted — back online (<CVE>)` | A `balanced` or `strict` project's scan found nothing quarantine-level and nothing on full KEV, and lifted the quarantine on its own; the body says why (gone, or no longer quarantining under the posture rules that changed in 0.11.2 for `balanced` and 0.12.0 for `strict`). `smoke test FAILED` in the title (priority 1): check the project. |
 | `[boxmunge:<p>] <N> CVE findings will quarantine from 0.12 (warning only)` | Findings the stricter 0.12 hardening penalty would quarantine. Not quarantined now; once per finding. Hand off the hardening fix it names (see B below). |
 | `[<hostname>] CISA KEV feed stale — exploitation defense degraded` / `CISA KEV refresh rejected — previous catalog kept` | The actively-exploited gate is working from an old catalog. The body says why (no catalog accepted, or the catalog is lagging) and lists each KEV source's error. `security` shows which source last answered. Escalate: a source the box cannot reach (e.g. `HTTP 403`) is an egress problem, or a `kev.sources` change in `boxmunge.yml`. |
 | `[<hostname>] CISA KEV sources disagree — newer catalog kept` | A source ranked earlier in `kev.sources` served an older catalog missing CVEs the cached one lists, so a later source's catalog was kept instead (no CVE was dropped). Nothing is at risk now. Check that the source it names (often a mirror the operator runs) is syncing. If no later source answers, the run sends `CISA KEV refresh rejected` (priority 1) instead. |
@@ -34,6 +36,7 @@ which the per-project titles below show after it:
 | `[<hostname>] CISA KEV no longer lists <N> CVEs` | CISA withdrew up to 3 entries; the body names them. Check it against CISA's KEV page if it is unexpected. If more than 3 are missing, the refresh is rejected instead (priority 1). The recovery is in CVE_POLICY.md, "Refresh checks". |
 | `[boxmunge:<p>] Quarantine kept — CISA KEV withdrew <CVE>` | The KEV catalog from one source no longer lists a CVE that is still in the project's images (the quarantine's own CVE, or another). Scans keep the quarantine, and deploys that still ship the CVE are refused, until it is accepted. Escalate: check CISA's KEV page. If the withdrawal is real, the operator runs `security resume <p>`. A release without the CVE lifts it as usual. |
 | `[<hostname>] <p>: quarantine lifted by deploying <ref>` | A deploy cleared the quarantine. Priority 1 when it did so by relaxing the security policy, not by a fix: check what it relaxed. |
+| `[<hostname>] <p>: deploying past the deploy guard` | Someone deployed a release the deploy guard refused, with `--allow-security-regression`. The body has the reason given and what was overridden. Check that the operator meant it, and that a fix is on its way. |
 
 If you got an alert, run these two commands first — they tell you everything.
 
@@ -67,7 +70,7 @@ For every finding marked `QUARANTINE` or `STILL_RUNNING_AT_RISK`:
 
 If the finding has `fix_available: true` (and a `fixed_version`, in
 `security <project> --json`), a fixed package exists but the running image
-predates it. boxmunge does not rebuild images on its own. A `build:`
+predates it. boxmunge does not rebuild images on its own yet. A `build:`
 service is rebuilt on the base image's current digest by its next `stage`
 and `promote`, or `prod-deploy` (`prod-deploy <project> --redeploy` when
 nothing new was uploaded). A `FROM` pinned by digest needs a new digest, and
@@ -78,16 +81,22 @@ sets `container_updates: {enabled: false}`), but not while the project is
 quarantined: container-update skips it and a deploy pulls only images
 missing from the box, so the release must name the fixed image's new tag or
 digest. A fix under a new tag comes from a release that names it, deployed.
-Hand that off. A fixable finding not on KEV is `IGNORED_FIXED` and does not
-quarantine; a fixable KEV finding is still `QUARANTINE` until the fix is
-running (under `relaxed` it keeps running and alerts every scan).
+Hand that off. A fixable finding not on full KEV is `IGNORED_FIXED` and does
+not quarantine, except under `paranoid` (quarantined until the fix runs) and
+under `strict` once its 7-day fix deadline passes. A fixable full-KEV
+finding is still `QUARANTINE` until the fix is running (under `relaxed` it
+keeps running and alerts every scan).
 
-### 2. Is it on CISA KEV?
+### 2. Is it on a known-exploited list?
 
-If the explanation says the CVE is on the CISA Known Exploited
-Vulnerabilities catalog, it is being exploited in the wild. Suppressions do
-not apply to it — `security suppress` refuses it, and an older suppression
-was overridden when CISA listed it. The only ways forward are a fixed
+If the explanation says the CVE is on CISA's Known Exploited
+Vulnerabilities catalog or ENISA's EU KEV list (full KEV), it is being
+exploited in the wild. Suppressions do not apply to it — `security
+suppress` refuses a CISA-listed one (it accepts an EU-only one, but that
+suppression has no effect), and an older suppression was overridden when
+the CVE was listed. A CVE listed by VulnCheck only is a weaker signal:
+below `paranoid` it is judged like any other finding and a suppression
+applies to it; under `paranoid` it is treated like full KEV. The only ways forward are a fixed
 image or accepting the quarantine. If the distro ships the fixed package
 (`fixed_version` is set) but no rebuilt upstream image exists yet, the
 operator can build the fix on top of the image: a `build:` service `FROM`
@@ -112,9 +121,9 @@ context. You do (or you can find out).
 > AV:Local / Adjacent / Physical and AV-unknown findings are auto-routed
 > to informational — they aren't reachable from the network surface a
 > hardened web container exposes. So if you see a `QUARANTINE` row, the
-> CVE is on CISA KEV (which ignores the AV), the project is on `strict`
-> and the AV is known to be Network, or the project is on `paranoid`.
-> Under the default `balanced`, only a KEV listing quarantines. The AV:L "is this exploitable from network" branch of the
+> CVE is on full KEV (which ignores the AV), the project is on `strict`
+> and its fix deadline passed, or the project is on `paranoid`.
+> Under the default `balanced`, only a full-KEV listing quarantines. The AV:L "is this exploitable from network" branch of the
 > reasoning below is now handled automatically. Most "high but not
 > exploitable" suppressions written under v0.6 / v0.7.0 are no longer
 > needed for AV:L findings — operators MAY clean up moot suppressions
@@ -172,6 +181,56 @@ Escalation message template:
 > deployed config because `<specific gap>`. Recommendation: human review
 > before suppress / resume / accept-quarantine.
 > Trivy: `<primary_url>`.
+
+### 6. A deploy was refused by the deploy guard
+
+`stage`, `prod-deploy`, `promote` and `rollback` scan the release's images
+and refuse one that carries a full-KEV CVE (under `paranoid`, a
+VulnCheck-only one too). The refusal starts nothing. It opens with `This
+release carries a known-exploited CVE; nothing was started in <where>:`,
+lists each CVE with its package, installed and fixed version, service and
+image, and the lists that name it, and ends with the fix.
+
+1. **Fix it in the repo.** Bump the base image to a new tag or digest, or
+   upgrade the package in the Dockerfile, rebundle and deploy again. If the
+   distro ships the fixed package but no upstream image has it yet, build
+   it on top of the image (`agent-help cve`, "Shipping a fix the upstream
+   image does not have yet"). This is the answer almost every time.
+2. **Only the catalog is missing.** If the refusal says there is no usable
+   CISA KEV catalog, run `security scan` to fetch it, then deploy again. If
+   no source can be reached, `prod-deploy <project> --accept-stale-kev` is
+   the narrower exit: it lets only that refusal through, is logged and
+   alerted, and never overrides a stale catalog that lists a CVE in the
+   images. Escalate before using it: it is the operator's risk.
+3. **Last resort, operator's decision only:** `--allow-security-regression
+   --reason "<why>"` on the same command deploys the release anyway. The
+   reason is logged and alerted. Never add it on your own judgment: ask the
+   operator, and put their reason in `--reason`.
+
+If the refusal says the scan failed or did not cover every image, fix that
+cause (a registry or Trivy DB that could not be reached, an image that did
+not build) and deploy again; it is not a CVE.
+
+### 7. Fix-deadline alert (`strict`)
+
+Under `strict`, an available fix must be running within 7 days of the scan
+that first found it. 48 hours before the deadline, one alert names the CVE,
+the package, the fixed version and the date. At the deadline the site is
+quarantined until the fix runs (with `dangerously_disable_quarantine: true`
+it runs at risk instead).
+
+- **Ship the fix before the date.** A `build:` service is rebuilt on its
+  base image's current digest by its next `stage` and `promote`, or
+  `prod-deploy <project> --redeploy`; a package the Dockerfile installs
+  may need `build: {no_cache: true}`; an `image:` service needs the fixed
+  tag or digest. Hand that off now, with the date.
+- **Already quarantined:** deploy the fix; the deploy lifts the quarantine
+  once it is live, or the next scan does once the fix runs. `security
+  resume` refuses while the finding is still there.
+- **Cannot ship in time:** escalate. Suppressing the CVE after a real
+  exploitability review (section 4) takes it off the deadline; moving the
+  project off `strict` is the operator's call, and coming back to `strict`
+  starts every deadline afresh.
 
 ---
 
@@ -305,7 +364,7 @@ incident log to write.
 | `security suppress` | `<project>/security/suppressions.yml`, visible via `security <project>` |
 | `security unsuppress` | Same file, entry removed; ops log records the change |
 | `security resume` | Quarantine state file removed; ops log records the resume |
-| Quarantine lifted by a scan (`balanced`) | Quarantine state file removed; ops log (`cve-scan`) records why |
+| Quarantine lifted by a scan (`balanced`, `strict`) | Quarantine state file removed; ops log (`cve-scan`) records why |
 | `security scan` | `state/scans/<project>.json`, visible via `security <project> --json` |
 | Quarantine fired | `state/deploy/<project>.quarantined.json`; ops log entry |
 | Pushover alerts (if configured) | Operator's phone |
@@ -327,7 +386,7 @@ security <project>         # Current dispositions + active suppressions
 | Read suppressions.yml directly | No `cat` | `security <project>` shows active entries |
 | Run `trivy` against an image | No subprocess access | `security scan <project>` does it via boxmunge |
 | Edit compose.yml | No file editor | Escalate or rebundle locally and redeploy |
-| Disable the cron timer | No `systemctl` | Escalate — if the timer is misbehaving, that's a supervisor concern |
+| Disable a CVE timer (maintenance, KEV watch) | No `systemctl` | Escalate — if the timer is misbehaving, that's a supervisor concern |
 | Read state/* files | No filesystem access | `--json` views surface everything an agent needs |
 
 ---
