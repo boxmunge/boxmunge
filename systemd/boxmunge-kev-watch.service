@@ -10,4 +10,6 @@ User=root
 ExecStart=/opt/boxmunge/bin/boxmunge security kev-watch
 StandardOutput=journal
 StandardError=journal
-TimeoutStartSec=3h
+# Bounds how long the nightly scan can wait on a stuck tick (it holds the
+# fleet lock); the maintenance unit's 4h still fits scan plus update.
+TimeoutStartSec=1h

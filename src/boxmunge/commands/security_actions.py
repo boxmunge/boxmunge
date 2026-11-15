@@ -26,7 +26,7 @@ from boxmunge.cve.alerting import (
     send_alerts,
 )
 from boxmunge.commands.security_kev import refresh_kev_and_alert
-from boxmunge.cve.fleet_lock import FLEET_WAIT_SECONDS, FleetLockBusy, fleet_lock
+from boxmunge.cve.fleet_lock import fleet_lock
 from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.scan_state import last_scanned_at
 from boxmunge.cve.policy import Disposition, ProjectDecision
@@ -419,15 +419,13 @@ def cmd_security_scan(args: list[str], paths: BoxPaths) -> int:
         return _cmd_apply_held(paths)
     if args:  # one project: its own lock is the whole guard
         return _scan_targets_cmd(args, paths)
-    try:
-        with fleet_lock(paths, wait_seconds=FLEET_WAIT_SECONDS):
-            return _scan_targets_cmd(args, paths)
-    except FleetLockBusy as e:
-        # Not run beside the watch, and not skipped silently: the scan is the
-        # box's CVE enforcement, so the failure is loud.
-        print(f"ERROR: {e}; waited {FLEET_WAIT_SECONDS:.0f}s. Scan not run.", file=sys.stderr)
-        log_warning("cve-scan", f"fleet scan not run: {e}", paths)
-        return 1
+
+    def waiting() -> None:
+        print("waiting for the KEV watch to finish")
+        log_warning("cve-scan", "fleet scan: waiting for the KEV watch to finish", paths)
+
+    with fleet_lock(paths, wait=True, on_wait=waiting):
+        return _scan_targets_cmd(args, paths)
 
 
 def _scan_targets_cmd(args: list[str], paths: BoxPaths) -> int:

@@ -33,17 +33,21 @@ def refresh_kev_and_alert(paths: BoxPaths, now: datetime, *, nightly: bool = Tru
     source, kev_refresh.KEV_OVERRIDE_RUNS), and the priority-1 alert when
     none was.
 
-    ``nightly`` False (the KEV watch) sends only the withdrawal and
-    disagreement notices, which only the run that caches the catalog can
-    see, and not the degraded-catalog alert, and does not count passed-over
-    runs: both stay with the nightly scan. The `kev-watch` health check
+    ``nightly`` False (the KEV watch) sends only the withdrawal notice
+    (one-shot: only the run that caches the catalog sees it). The
+    disagreement notice (it would repeat every tick) and the degraded-catalog
+    alert stay with the nightly scan, and the watch does not count
+    passed-over runs. It logs a disagreement instead. The `kev-watch` health check
     shows a stale source during the day.
     """
     refresh = refresh_kev(paths, nightly=nightly)
     kev = load_kev(paths)
     if refresh.withdrawn:
         _send(paths, format_kev_withdrawn_alert(refresh.source, refresh.withdrawn))
-    if refresh.updated and refresh.disagreements:
+    if refresh.updated and refresh.disagreements and not nightly:
+        log_warning("cve-scan", "KEV sources disagree (notice left to the nightly scan): "
+                    + "; ".join(f.line() for f in refresh.disagreements), paths, project=None)
+    elif refresh.updated and refresh.disagreements:
         _send(paths, format_kev_sources_disagree_alert(
             refresh.source, [f.line() for f in refresh.disagreements],
             overridden=[f.source for f in refresh.overridden]))

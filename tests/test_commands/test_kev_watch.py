@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -271,7 +272,7 @@ def test_a_tick_skips_itself_while_the_fleet_lock_is_held(env) -> None:
     assert read_watch(env.paths).seen_at == NOW - timedelta(hours=1)
 
 
-def test_the_fleet_scan_holds_the_lock_and_waits_for_it(env, monkeypatch, capsys) -> None:
+def test_the_fleet_scan_holds_the_lock(env, monkeypatch) -> None:
     held: list[bool] = []
 
     def inner(args, paths):
@@ -290,12 +291,34 @@ def test_the_fleet_scan_holds_the_lock_and_waits_for_it(env, monkeypatch, capsys
     security_actions.cmd_security_scan(["shop"], env.paths)
     assert held == [False]  # a single-project scan does not
 
-    monkeypatch.setattr(security_actions, "FLEET_WAIT_SECONDS", 0.0)
+
+def test_the_fleet_scan_waits_for_a_held_lock_and_then_proceeds(env, monkeypatch, capsys) -> None:
+    ran: list[str] = []
     monkeypatch.setattr(security_actions, "_scan_targets_cmd",
-                        lambda a, p: pytest.fail("ran beside the watch"))
-    with fleet_lock(env.paths):
-        assert security_actions.cmd_security_scan([], env.paths) == 1
-    assert "Scan not run" in capsys.readouterr().err
+                        lambda a, p: ran.append("scan") or 0)
+    monkeypatch.setattr("boxmunge.lifecycle.migration_refusal", lambda what, paths: None)
+    release = threading.Event()
+    taken = threading.Event()
+
+    def watch_tick() -> None:
+        with fleet_lock(env.paths):
+            taken.set()
+            release.wait(10)
+
+    holder = threading.Thread(target=watch_tick)
+    holder.start()
+    assert taken.wait(10)
+    result: list[int] = []
+    scan = threading.Thread(
+        target=lambda: result.append(security_actions.cmd_security_scan([], env.paths)))
+    scan.start()
+    scan.join(0.5)
+    assert scan.is_alive() and ran == []  # blocked, not given up
+    release.set()
+    holder.join(10)
+    scan.join(10)
+    assert result == [0] and ran == ["scan"]
+    assert capsys.readouterr().out.count("waiting for the KEV watch to finish") == 1
 
 
 def _box(tmp_path, monkeypatch, kev_block):

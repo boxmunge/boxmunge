@@ -249,7 +249,7 @@ added again under the same name reuses them. Create a new lock under `state/` wi
 | `state/secrets-locks/<project>.lock` | `SecretsFile.locked` | writes of the project's secrets file | kept for good, as above |
 | `state/secrets-locks/.host.lock` | `SecretsFile.locked` | writes of the host secrets file | kept for good |
 | `state/.registry.lock` | `fileutil.registry_lock` | read, change and save of `projects.txt` | kept for good |
-| `state/.cve-fleet.lock` | `cve.fleet_lock.fleet_lock`: the KEV watch doesn't wait (skips its tick); the fleet `security scan` waits up to 10 minutes, then fails | one fleet-wide CVE run at a time | kept for good |
+| `state/.cve-fleet.lock` | `cve.fleet_lock.fleet_lock`: the KEV watch doesn't wait (skips its tick); the fleet `security scan` blocks until it is free; the watch service's 1h `TimeoutStartSec` bounds that | one fleet-wide CVE run at a time | kept for good |
 | `state/.caddy.lock` | `docker.caddy_config_lock` | writing Caddy site config and reloading | kept for good |
 | `state/.legacy-stages.lock` | nothing since 0.11.7: `legacy-stage` took it, up to 0.11.6 | (the legacy-stage records) | left on a box where an older release made it |
 | `state/container-updates/.lock` | `commands/container_update_cmd.py` (doesn't wait) | one container-update run at a time | kept for good |

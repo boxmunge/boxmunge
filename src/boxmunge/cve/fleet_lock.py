@@ -3,22 +3,19 @@
 watch's tick each hold ``state/.cve-fleet.lock`` for their whole run, so a
 watch rescan and a fleet scan never judge, quarantine or hold the same
 projects at once (the circuit breaker counts a run's quarantines as a unit).
-The watch does not wait for it (it skips the tick); the fleet scan waits up
-to ``FLEET_WAIT_SECONDS`` and then fails, rather than run beside the watch.
+The watch does not wait for it (it skips the tick); the fleet scan blocks
+until it is free. The wait is bounded by the watch service's
+TimeoutStartSec (1h): systemd kills a stuck tick and the flock goes with it.
 """
 from __future__ import annotations
 
 import fcntl
 import os
-import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 
 from boxmunge.fileutil import open_shared_lockfile
 from boxmunge.paths import BoxPaths
-
-FLEET_WAIT_SECONDS = 600.0
-_POLL_SECONDS = 2.0
 
 
 class FleetLockBusy(Exception):
@@ -26,24 +23,23 @@ class FleetLockBusy(Exception):
 
 
 @contextmanager
-def fleet_lock(paths: BoxPaths, *, wait_seconds: float = 0.0) -> Iterator[None]:
-    """Hold the fleet lock for the block. Raises FleetLockBusy if it is not
-    free within ``wait_seconds`` (0: do not wait)."""
+def fleet_lock(paths: BoxPaths, *, wait: bool = False,
+               on_wait: Callable[[], None] | None = None) -> Iterator[None]:
+    """Hold the fleet lock for the block. With ``wait`` False, raises
+    FleetLockBusy if it is held; with ``wait`` True, calls ``on_wait`` once
+    and blocks until it is free."""
     fd = open_shared_lockfile(paths.cve_fleet_lock)
     try:
-        # Counted polls, not a clock: the wait is approximate by design.
-        attempts = int(wait_seconds / _POLL_SECONDS) + 1
-        for attempt in range(attempts):
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except OSError:
-                if attempt + 1 < attempts:
-                    time.sleep(_POLL_SECONDS)
-        else:
-            raise FleetLockBusy(
-                f"another CVE run (the nightly scan or the KEV watch) holds "
-                f"{paths.cve_fleet_lock}")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            if not wait:
+                raise FleetLockBusy(
+                    f"another CVE run (the nightly scan or the KEV watch) holds "
+                    f"{paths.cve_fleet_lock}") from None
+            if on_wait is not None:
+                on_wait()
+            fcntl.flock(fd, fcntl.LOCK_EX)
         try:
             yield
         finally:
