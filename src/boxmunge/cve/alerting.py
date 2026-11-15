@@ -81,6 +81,7 @@ from boxmunge.cve._alerting_formatters import (
 )
 from boxmunge.cve._alerting_types import Alert, AlertKind, Hit
 from boxmunge.cve._alerting_digest import (
+    DIGEST_PRIORITY,
     format_autofix_digest,
     format_scan_digest,
     is_low_urgency,
@@ -125,6 +126,7 @@ __all__ = [
     "detect_transitions",
     "format_scan_digest",
     "format_autofix_digest",
+    "DIGEST_PRIORITY",
     "format_nightly_patched_line",
     "format_nightly_failed_line",
     "format_nightly_gone_line",

@@ -367,6 +367,9 @@ def _outcome(paths: BoxPaths, run: _Run, cves: tuple[str, ...],
     if outcome.ok:
         log_operation(_COMPONENT, f"Autofix of {project} patched {', '.join(services)} for "
                       f"{', '.join(cves)}", paths, project=project, detail=detail)
+    elif outcome.nothing_to_patch and not outcome.rollback_problems:
+        log_operation(_COMPONENT, f"Autofix of {project}: nothing to patch: {outcome.reason}",
+                      paths, project=project, detail=detail)
     else:
         log_error(_COMPONENT, f"Autofix of {project} failed at {outcome.failed_step}, rolled "
                   f"back: {outcome.reason}", paths, project=project, detail=detail)

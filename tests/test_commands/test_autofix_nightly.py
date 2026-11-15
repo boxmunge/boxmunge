@@ -86,7 +86,7 @@ class Box:
         if target.is_caddy:
             return {"name": target.name, "status": "no_change"}
         return {"name": target.name, "status": self.update_status, "tags_not_restored": [],
-                "rollback_attempted": False, "rollback_succeeded": None,
+                "rollback_attempted": False, "rollback_succeeded": None, "recreated": False,
                 **self.update_result}
 
     def scan(self, project: str = "demo") -> None:
@@ -244,7 +244,7 @@ def test_autofix_off_skips_nightly(tmp_path, monkeypatch) -> None:
 @pytest.mark.parametrize("result", [
     pytest.param({"reason": "pull_failed: registry down"}, id="pull-failed"),
     pytest.param({"reason": "backup_failed"}, id="backup-failed"),
-    pytest.param({"reason": "unhealthy: web", "rollback_attempted": True,
+    pytest.param({"reason": "unhealthy: web", "recreated": True, "rollback_attempted": True,
                   "rollback_succeeded": True}, id="rolled-back-healthy"),
 ])
 def test_failed_update_on_previous_images_still_patches(tmp_path, monkeypatch,
@@ -257,13 +257,15 @@ def test_failed_update_on_previous_images_still_patches(tmp_path, monkeypatch,
 
 
 @pytest.mark.parametrize(("result", "why"), [
-    pytest.param({"reason": "unhealthy: web"}, "unhealthy: web", id="left-broken"),
-    pytest.param({"reason": "recreate_failed: x", "rollback_attempted": True,
+    pytest.param({"reason": "unhealthy: web", "recreated": True}, "unhealthy: web",
+                 id="left-broken"),
+    pytest.param({"reason": "recreate_failed: x", "recreated": True, "rollback_attempted": True,
                   "rollback_succeeded": False}, "recreate_failed: x", id="rollback-failed"),
     pytest.param({"reason": "pull_failed: x; tag_restore_failed: web:1",
                   "tags_not_restored": ["web:1"]}, "pull_failed: x; tag_restore_failed: web:1",
                  id="tags-not-restored"),
-    pytest.param({"reason": "exception: boom"}, "exception: boom", id="unknown-state"),
+    pytest.param({"reason": "exception: boom", "recreated": None, "tags_not_restored": None},
+                 "exception: boom", id="unknown-state"),
 ])
 def test_failed_update_that_left_the_project_changed_skips(tmp_path, monkeypatch, result,
                                                            why) -> None:
@@ -283,7 +285,8 @@ def test_failed_update_that_left_the_project_changed_skips(tmp_path, monkeypatch
 def test_failed_update_with_nothing_to_patch_sends_nothing(tmp_path, monkeypatch) -> None:
     box = Box(tmp_path, monkeypatch, sev=Severity.LOW)
     box.scan()
-    box.update_status, box.update_result = "failed", {"reason": "unhealthy: web"}
+    box.update_status, box.update_result = "failed", {"reason": "unhealthy: web",
+                                                      "recreated": True}
     box.update()
     assert box.digests() == []
 
@@ -475,3 +478,107 @@ def test_not_updated_project_busy_with_nothing_to_patch_is_not_listed(tmp_path,
     with project_lock("demo", box.paths):
         box.update()
     assert box.digests() == []
+
+
+def _box_with_config(tmp_path, monkeypatch, **config) -> Box:
+    box = Box(tmp_path, monkeypatch)
+    doc = yaml.safe_load(box.paths.config_file.read_text())
+    doc.update(config)
+    box.paths.config_file.write_text(yaml.safe_dump(doc))
+    box.scan()
+    return box
+
+
+def test_busy_enrolled_project_is_listed(tmp_path, monkeypatch) -> None:
+    box = Box(tmp_path, monkeypatch)
+    box.scan()
+    with project_lock("demo", box.paths):
+        box.update()
+    assert box.runner.calls == []
+    [(_t, body, _p)] = box.digests()
+    assert "skipped: demo: another operation holds the project" in body
+
+
+def test_caddy_failure_still_patches_every_project(tmp_path, monkeypatch) -> None:
+    box = Box(tmp_path, monkeypatch)
+    box.scan()
+    monkeypatch.setattr(container_update_cmd, "update_target_locked",
+                        lambda paths, target: {"name": target.name, "status": "failed",
+                                               "reason": "pull_failed: caddy"})
+    assert box.update() == 1
+    assert [c[0] for c in box.runner.calls] == ["demo"]
+    assert len(box.digests()) == 1
+
+
+def test_config_error_still_patches_every_project(tmp_path, monkeypatch) -> None:
+    from boxmunge.config import ConfigError
+
+    def broken(*args, **kwargs):
+        raise ConfigError("container_updates: must be a mapping")
+    box = Box(tmp_path, monkeypatch)
+    box.scan()
+    monkeypatch.setattr(container_update_cmd, "load_for_job", broken)
+    assert box.update() == 1
+    assert [c[0] for c in box.runner.calls] == ["demo"]
+    assert len(box.digests()) == 1
+
+
+def test_only_a_project_not_enrolled_still_patches_and_says_so(tmp_path, monkeypatch,
+                                                               capsys) -> None:
+    box = Box(tmp_path, monkeypatch)
+    manifest = box.paths.project_manifest("demo")
+    doc = yaml.safe_load(manifest.read_text())
+    doc["container_updates"] = {"enabled": False}
+    manifest.write_text(yaml.safe_dump(doc))
+    box.scan()
+    assert box.update(only="demo") == 1
+    assert [c[0] for c in box.runner.calls] == ["demo"]
+    err = capsys.readouterr().err
+    assert "not found or not enrolled" in err
+    assert f"nightly autofix: patched: demo: {CVE} (2 packages)" in err
+    assert len(box.digests()) == 1
+
+
+def test_only_a_project_not_enrolled_with_nothing_to_patch(tmp_path, monkeypatch,
+                                                           capsys) -> None:
+    box = Box(tmp_path, monkeypatch, sev=Severity.LOW)
+    manifest = box.paths.project_manifest("demo")
+    doc = yaml.safe_load(manifest.read_text())
+    doc["container_updates"] = {"enabled": False}
+    manifest.write_text(yaml.safe_dump(doc))
+    box.scan()
+    assert box.update(only="demo") == 1
+    assert "nightly autofix: nothing patched" in capsys.readouterr().err
+
+
+def test_paused_project_is_listed_not_patched(tmp_path, monkeypatch) -> None:
+    box = Box(tmp_path, monkeypatch)
+    box.scan()
+    monkeypatch.setattr(container_update_cmd, "_prefetch_paused",
+                        lambda paths, target: {"name": target.name, "status": "paused"})
+    from boxmunge.pause import mark_pause_complete, write_paused_state
+    write_paused_state("demo", box.paths)
+    mark_pause_complete("demo", box.paths)
+    box.update()
+    assert box.runner.calls == []
+    [(_t, body, _p)] = box.digests()
+    assert "skipped: demo: paused" in body
+
+
+def test_nothing_to_patch_is_logged_as_an_operation(tmp_path, monkeypatch, capsys) -> None:
+    box = Box(tmp_path, monkeypatch)
+    box.scan()
+    box.runner.outcome = AutofixOutcome(False, "scan", "no image carries it", (),
+                                        nothing_to_patch=True)
+    box.update()
+    out = capsys.readouterr().out
+    assert "demo: nightly autofix nothing to patch: no image carries it" in out
+    assert "FAILED" not in out
+
+
+def test_no_stored_scan_is_not_logged_every_night(tmp_path, monkeypatch) -> None:
+    box = Box(tmp_path, monkeypatch)
+    box.paths.log_file.parent.mkdir(parents=True, exist_ok=True)
+    box.update()
+    box.update()
+    assert "no stored scan" not in box.paths.log_file.read_text()

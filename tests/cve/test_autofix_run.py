@@ -483,3 +483,10 @@ def test_cve_gone_from_the_running_images_is_nothing_to_patch(paths, box) -> Non
 def test_other_scan_failures_are_not_nothing_to_patch(paths, box) -> None:
     box.patched_findings["web"] = [_fd(disposition=Disposition.IGNORED_FIXED)]
     assert _run(paths).nothing_to_patch is False
+
+
+def test_nothing_to_patch_is_logged_as_an_operation(paths, box) -> None:
+    box.findings[WEB] = []
+    _run(paths)
+    assert not [m for level, m, _ in box.log if level == "error"]
+    assert any("nothing to patch" in m for level, m, _ in box.log if level == "op")

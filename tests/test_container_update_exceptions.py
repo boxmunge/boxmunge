@@ -133,3 +133,16 @@ def test_dry_run_interruption_puts_the_tags_back(paths, monkeypatch, fake_contai
         _dry_run_target(paths, target)
 
     assert _restart(docker) == _ALL_OLD
+
+
+def test_an_update_that_raised_is_not_on_its_previous_images(paths, monkeypatch,
+                                                             fake_containers) -> None:
+    """_update_one's last-resort handler cannot know what the update did."""
+    from boxmunge.commands import container_update_cmd
+    from boxmunge.commands.autofix_nightly import on_previous_images
+    docker, target = _project(paths, monkeypatch, fake_containers)
+    monkeypatch.setattr(container_update_cmd, "update_target_locked",
+                        _raiser(RuntimeError("persist failed")))
+    result = container_update_cmd._update_one(paths, target, dry_run=False)
+    assert result["status"] == "failed" and result["recreated"] is None
+    assert not on_previous_images(result)

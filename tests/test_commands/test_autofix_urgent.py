@@ -180,6 +180,19 @@ def test_failure_applies_table_b_and_alerts_step(tmp_path, monkeypatch) -> None:
     assert read_autofixing(box.paths, "demo") is None
 
 
+def test_urgent_nothing_to_patch_still_alerts_as_a_failure(tmp_path, monkeypatch) -> None:
+    """Only the nightly digest lists a CVE gone from the images as fixed: the
+    urgent flow alerts it as the failure it is there (table B applies)."""
+    box = _box(tmp_path, monkeypatch, "balanced", cvss=7.5)
+    box.scan()
+    box.runner.outcome = AutofixOutcome(False, "scan", "no image production runs carries it",
+                                        (), nothing_to_patch=True)
+    box.run()
+    [failed] = box.sent("Autofix FAILED")
+    assert failed[2] == 1 and "at the scan step" in failed[0]
+    assert is_quarantined("demo", box.paths)
+
+
 @pytest.mark.parametrize(("posture", "listed", "expect"), [
     pytest.param("balanced", VULNCHECK, "stays up", id="balanced-vulncheck-stays-up"),
     pytest.param("relaxed", CISA, "stays up", id="relaxed-kev-with-fix-stays-up"),

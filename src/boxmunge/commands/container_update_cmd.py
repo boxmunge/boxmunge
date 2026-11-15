@@ -4,11 +4,12 @@
 import fcntl
 import os
 import sys
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from boxmunge.commands.autofix_nightly import (
-    after_update, autofix_the_rest, send_nightly_results, window_end,
+    after_update, describe, nightly_digest, window_end,
 )
 from boxmunge.config import ConfigError
 from boxmunge.host_config_alert import load_for_job
@@ -142,7 +143,9 @@ def _update_one(paths: BoxPaths, target: UpdateTarget, dry_run: bool) -> dict[st
         # but defense in depth: don't let one project crash the loop.
         log_error("container-update", f"Unhandled exception updating {target.name}: {e}",
                   paths, project=target.name)
-        return {"name": target.name, "status": "failed", "reason": f"exception: {e}"}
+        # How far it got is unknown: None, not False, for what it changed.
+        return {"name": target.name, "status": "failed", "reason": f"exception: {e}",
+                "recreated": None, "rollback_succeeded": None, "tags_not_restored": None}
 
 
 def update_project(paths: BoxPaths, target: UpdateTarget, dry_run: bool,
@@ -304,75 +307,11 @@ def run_container_update(
             print("Platform is in probation, skipping container update.")
             return 0
 
-        # Step 2: Load config
-        try:
-            config = load_for_job(paths, "container-update", reads=("container_updates",))
-        except ConfigError as e:
-            log_error("container-update", f"Config error: {e}", paths)
-            print(f"ERROR: {e}", file=sys.stderr)
-            return 1
-
-        cu = config.get("container_updates", {})
-        if not cu.get("enabled", True):
-            log_operation("container-update", "Skipped: container updates disabled", paths)
-            print("Container updates disabled in config, skipping.")
-            if nightly_until is not None:
-                send_nightly_results(paths, autofix_the_rest(paths, (), only=only,
-                                                             until=nightly_until))
-            return 0
-
-        # Step 3: Build target list
-        targets = build_targets(paths, config)
-        if only:
-            targets = [t for t in targets if t.name == only]
-            if not targets:
-                print(f"ERROR: target '{only}' not found or not enrolled", file=sys.stderr)
-                return 1
-
-        # Step 4: Update Caddy first; abort cascade on failure
-        results: list[dict[str, Any]] = []
-        for target in targets:
-            if target.is_caddy:
-                result = (
-                    _dry_run_target(paths, target) if dry_run
-                    else update_target_locked(paths, target)
-                )
-                results.append(result)
-                if result["status"] == "failed":
-                    log_error("container-update", "Aborted: Caddy update failed", paths)
-                    _send_summary_alert(paths, results)
-                    return 1
-
-        # Step 5: Update user projects independently
-        for target in targets:
-            if not target.is_caddy:
-                results.append(update_project(paths, target, dry_run, nightly_until))
-
-        # Step 5b: a project whose lock was held (a deploy, scan, or health
-        # tick in progress) gets one more try now the others are done.
-        results = _retry_locked(paths, targets, results, dry_run, nightly_until)
-
-        # Step 6: Summary
-        succeeded = [r["name"] for r in results if r["status"] == "succeeded"]
-        failed = [r["name"] for r in results if r["status"] == "failed"]
-        no_change = [r["name"] for r in results if r["status"] == "no_change"]
-        skipped = [r["name"] for r in results if r["status"] == SKIPPED_LOCKED]
-        log_operation(
-            "container-update", "Run complete", paths,
-            detail={"succeeded": succeeded, "failed": failed,
-                    "no_change": no_change, "skipped_locked": skipped},
-        )
-        if failed:
-            _send_summary_alert(paths, results)
-        if nightly_until is not None:
-            send_nightly_results(paths, [r["autofix"] for r in results if r.get("autofix")]
-                                 + autofix_the_rest(paths, {t.name for t in targets},
-                                                    only=only, until=nightly_until))
-        print(
-            f"\nSummary: {len(succeeded)} succeeded, {len(failed)} failed, "
-            f"{len(no_change)} no-change, {len(skipped)} skipped (busy)"
-        )
-        return 0 if not failed else 1
+        run = _Run()
+        rc = _update_all(paths, run, only=only, dry_run=dry_run, nightly_until=nightly_until)
+        if nightly_until is not None and not run.digested:
+            nightly_digest(paths, run.results, run.done, only=only, until=nightly_until)
+        return rc
 
     finally:
         try:
@@ -380,6 +319,99 @@ def run_container_update(
         except OSError:
             pass
         lock_file.close()
+
+
+@dataclass
+class _Run:
+    """What a run updated, for the nightly autofix that follows it however
+    the run ends: the update results, the projects they cover, and whether
+    the digest went out already."""
+    results: list[dict[str, Any]] = field(default_factory=list)
+    done: set[str] = field(default_factory=set)
+    digested: bool = False
+
+
+def _update_all(paths: BoxPaths, run: _Run, *, only: str | None, dry_run: bool,
+                nightly_until: datetime | None) -> int:
+    """Steps 2 to 6, the lock held: the exit code."""
+    # Step 2: Load config
+    try:
+        config = load_for_job(paths, "container-update", reads=("container_updates",))
+    except ConfigError as e:
+        log_error("container-update", f"Config error: {e}", paths)
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+
+    cu = config.get("container_updates", {})
+    if not cu.get("enabled", True):
+        log_operation("container-update", "Skipped: container updates disabled", paths)
+        print("Container updates disabled in config, skipping.")
+        return 0
+
+    # Step 3: Build target list
+    targets = build_targets(paths, config)
+    if only:
+        targets = [t for t in targets if t.name == only]
+        if not targets:
+            nightly = _only_nightly(paths, run, only, nightly_until)
+            print(f"ERROR: target '{only}' not found or not enrolled{nightly}",
+                  file=sys.stderr)
+            return 1
+
+    # Step 4: Update Caddy first; abort cascade on failure
+    results = run.results
+    for target in targets:
+        if target.is_caddy:
+            result = (
+                _dry_run_target(paths, target) if dry_run
+                else update_target_locked(paths, target)
+            )
+            results.append(result)
+            if result["status"] == "failed":
+                log_error("container-update", "Aborted: Caddy update failed", paths)
+                _send_summary_alert(paths, results)
+                return 1
+
+    # Step 5: Update user projects independently
+    run.done = {t.name for t in targets if not t.is_caddy}
+    for target in targets:
+        if not target.is_caddy:
+            results.append(update_project(paths, target, dry_run, nightly_until))
+
+    # Step 5b: a project whose lock was held (a deploy, scan, or health
+    # tick in progress) gets one more try now the others are done.
+    results[:] = _retry_locked(paths, targets, results, dry_run, nightly_until)
+
+    # Step 6: Summary
+    succeeded = [r["name"] for r in results if r["status"] == "succeeded"]
+    failed = [r["name"] for r in results if r["status"] == "failed"]
+    no_change = [r["name"] for r in results if r["status"] == "no_change"]
+    skipped = [r["name"] for r in results if r["status"] == SKIPPED_LOCKED]
+    log_operation(
+        "container-update", "Run complete", paths,
+        detail={"succeeded": succeeded, "failed": failed,
+                "no_change": no_change, "skipped_locked": skipped},
+    )
+    if failed:
+        _send_summary_alert(paths, results)
+    print(
+        f"\nSummary: {len(succeeded)} succeeded, {len(failed)} failed, "
+        f"{len(no_change)} no-change, {len(skipped)} skipped (busy)"
+    )
+    return 0 if not failed else 1
+
+
+def _only_nightly(paths: BoxPaths, run: _Run, only: str,
+                  nightly_until: datetime | None) -> str:
+    """The nightly autofix of `only`, not a container-update target, and
+    what came of it, for the error."""
+    if nightly_until is None:
+        return ""
+    run.digested = True
+    attempts = nightly_digest(paths, [], (), only=only, until=nightly_until)
+    if not attempts:
+        return "; nightly autofix: nothing patched"
+    return "; nightly autofix: " + "; ".join(describe(a) for a in attempts)
 
 
 def cmd_container_update(args: list[str]) -> None:
