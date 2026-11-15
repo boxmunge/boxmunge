@@ -49,8 +49,8 @@ from boxmunge.container_update import one_shot_services
 from boxmunge.commands.security_scan_inputs import load_project_meta
 from boxmunge.cve import autofix_plan
 from boxmunge.cve.autofix_build import (
-    NotPatchable, Patchable, PatchBuildError, PatchedImage, build_patched, probe,
-    remove_patched,
+    NotPatchable, Patchable, PatchBuildError, PatchedImage, build_patched, check_versions,
+    probe, remove_patched,
 )
 from boxmunge.cve.autofix_plan import PROD, ServicePlan, Step, StepFailed
 from boxmunge.cve.autofix_record import (
@@ -72,10 +72,15 @@ _COMPONENT = "autofix"
 
 @dataclass(frozen=True)
 class AutofixOutcome:
+    """`rollback_problems`: what a failed run's rollback could not undo, one
+    line each (also in `reason`); empty when it was undone cleanly. When it
+    is not empty the project may be left mixed (pins restored, containers
+    still on a patched image): the flows alert it."""
     ok: bool
     failed_step: Step | None
     reason: str
     records: tuple[PatchRecord, ...]
+    rollback_problems: tuple[str, ...] = ()
 
 
 @dataclass
@@ -131,8 +136,9 @@ def autofix_project_locked(paths: BoxPaths, project: str,
     try:
         records = _steps(paths, run, cves, trigger, deadline)
     except StepFailed as e:
-        reason = "; ".join([str(e), *_rollback(paths, run)])
-        return _outcome(paths, run, cves, AutofixOutcome(False, e.step, reason, ()))
+        problems = tuple(_rollback(paths, run))
+        reason = "; ".join([str(e), *problems])
+        return _outcome(paths, run, cves, AutofixOutcome(False, e.step, reason, (), problems))
     except BaseException as e:
         problems = _rollback(paths, run)
         for problem in problems:
@@ -148,6 +154,7 @@ def autofix_project_locked(paths: BoxPaths, project: str,
 def _steps(paths: BoxPaths, run: _Run, cves: tuple[str, ...], trigger: Trigger,
            deadline: datetime) -> tuple[PatchRecord, ...]:
     project = run.project
+    _check_deadline(deadline)
     meta = load_project_meta(paths, project)
     now = autofix_plan.running(paths, project, meta)
     run.deployed = now.services
@@ -157,18 +164,21 @@ def _steps(paths: BoxPaths, run: _Run, cves: tuple[str, ...], trigger: Trigger,
         _check_deadline(deadline)
         patchability = _probe(p)
         _check_deadline(deadline)
-        run.built.append((p.service, _build(project, p, patchability)))
+        _build(run, p, patchability)
     _check_deadline(deadline)
     patched = dict(run.built)
     after = autofix_plan.scan_images(paths, project, meta,
-                                     {svc: img.ref for svc, img in patched.items()})
+                                     {svc: img.ref for svc, img in patched.items()},
+                                     "the patched images")
     autofix_plan.judge_patched(plans, now.decisions, after)
     _check_deadline(deadline)
     _swap(paths, run, patched)
     _check_deadline(deadline)
     _health(project, now.services, "the patched images")
     _check_deadline(deadline)
-    return _record(paths, project, plans, patched, trigger)
+    records = _record(paths, project, plans, patched, trigger)
+    _remove_replaced(paths, run, patched)
+    return records
 
 
 def _probe(p: ServicePlan) -> Patchable:
@@ -181,11 +191,28 @@ def _probe(p: ServicePlan) -> Patchable:
     return found
 
 
-def _build(project: str, p: ServicePlan, patchability: Patchable) -> PatchedImage:
+def _build(run: _Run, p: ServicePlan, patchability: Patchable) -> None:
+    """Build the patch (into run.built, for the rollback), then check every
+    other fixed version a package has against the image's own ordering."""
     try:
-        return build_patched(project, p.service, p.base, p.packages, patchability)
+        image = build_patched(run.project, p.service, p.base, p.packages, patchability)
+        run.built.append((p.service, image))
+        for floors in p.check_floors():
+            check_versions(image.image_id, patchability, floors)
     except (PatchBuildError, DockerError) as e:
         raise StepFailed("build", f"building {p.service}'s patched image failed: {e}") from e
+
+
+def _remove_replaced(paths: BoxPaths, run: _Run, patched: dict[str, PatchedImage]) -> None:
+    """Remove the earlier patched image of each service patched again, by
+    its pin's own ref. Logged, not raised: the patch is in place."""
+    for pin in run.pins_before:
+        if pin.service in patched and patched[pin.service].ref != pin.ref:
+            try:
+                remove_patched(pin)
+            except (PatchBuildError, DockerError) as e:
+                log_error(_COMPONENT, f"Autofix of {run.project}: could not remove the "
+                          f"replaced patched image {pin.ref}: {e}", paths, project=run.project)
 
 
 def _swap(paths: BoxPaths, run: _Run, patched: dict[str, PatchedImage]) -> None:
@@ -262,7 +289,8 @@ def _outcome(paths: BoxPaths, run: _Run, cves: tuple[str, ...],
              outcome: AutofixOutcome) -> AutofixOutcome:
     project, services = run.project, run.patching
     detail = {"cves": list(cves), "services": services, "ok": outcome.ok,
-              "step": outcome.failed_step, "reason": outcome.reason}
+              "step": outcome.failed_step, "reason": outcome.reason,
+              "rollback_problems": list(outcome.rollback_problems)}
     if outcome.ok:
         log_operation(_COMPONENT, f"Autofix of {project} patched {', '.join(services)} for "
                       f"{', '.join(cves)}", paths, project=project, detail=detail)

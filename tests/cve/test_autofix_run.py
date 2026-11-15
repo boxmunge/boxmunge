@@ -61,6 +61,10 @@ class Box:
         self.unhealthy_on_patched = False
         self.probe_result: Patchable | NotPatchable = Patchable("apk", "")
         self.on_health = None
+        self.scans = 0
+        self.checked: list[dict] = []
+        self.check_error: Exception | None = None
+        self.scan_error: Exception | None = None
         self.log: list[tuple[str, str, dict]] = []
         self._ids = itertools.count(1)
         for name, fake in [("load_deployed_inventory", self._inventory),
@@ -70,6 +74,7 @@ class Box:
         for name, fake in [("load_project_meta", lambda paths, project: object()),
                            ("probe", lambda ref: self.probe_result),
                            ("build_patched", self._build),
+                           ("check_versions", self._check_versions),
                            ("remove_patched", lambda pin: self.removed.append(pin.ref)),
                            ("read_pins", lambda paths, project: self.pins),
                            ("write_pins", self._write_pins),
@@ -91,7 +96,16 @@ class Box:
                 f"{project}-{svc}-1", svc, img, (), True, "healthy", False, None, "always"),))
             for svc, (_cid, img) in self.containers.items()})
 
+    def _check_versions(self, image, patchability, packages):
+        self.checked.append(dict(packages))
+        if self.check_error is not None:
+            raise self.check_error
+        return dict(packages)
+
     def _scan(self, paths, target, meta, starts, unnamed, kev):
+        self.scans += 1
+        if self.scan_error is not None:
+            raise self.scan_error
         decisions, targets, ids = [], [], {}
         for svc, start in starts.items():
             image = self.refs.get(start.scan_ref, start.scan_ref)
@@ -274,6 +288,7 @@ def test_pinned_service_is_patched_again_from_its_records_base(paths, box) -> No
     assert box.built == [("web", WEB, {"openssl": "3.0.9", "zlib": "1.3"})]
     (record,) = outcome.records
     assert record.cves == ("CVE-2026-0002", CVE) and record.base_digest == WEB
+    assert box.removed == [pin.ref]   # the replaced patch, by its own pin's ref
 
 
 def test_unexpected_error_rolls_back_and_raises(paths, box, monkeypatch) -> None:
@@ -302,3 +317,55 @@ def test_refuses_without_the_project_lock(paths, box) -> None:
         autofix_project_locked(paths, NAME, [_fd()], trigger="nightly",
                                deadline=datetime.now(timezone.utc) + timedelta(minutes=5))
     assert box.built == [] and box.log == []
+
+
+def test_rollback_recreate_failure_is_reported_structured(paths, box, monkeypatch) -> None:
+    """The rollback's recreate fails: the pins are back, the containers are
+    not, and the outcome says so in rollback_problems, still at health."""
+    box.unhealthy_on_patched = True
+    real = box._recreate
+
+    def second_fails(*a, **k):
+        if box.recreates:
+            raise DockerError("compose up failed")
+        real(*a, **k)
+    monkeypatch.setattr(autofix_run, "recreate_project", second_fails)
+    outcome = _run(paths)
+    assert (outcome.ok, outcome.failed_step) == (False, "health")
+    assert outcome.rollback_problems
+    assert "recreate the previous containers" in outcome.rollback_problems[0]
+    assert box.pins == ()
+    assert box.log[-1][2]["rollback_problems"] == list(outcome.rollback_problems)
+
+
+def test_clean_rollback_has_no_problems(paths, box) -> None:
+    box.unhealthy_on_patched = True
+    assert _run(paths).rollback_problems == ()
+
+
+def test_every_fixed_version_is_checked_in_the_image(paths, box) -> None:
+    box.findings[WEB] = [_fd(fix="3.0.10"), _fd("CVE-2026-2222", fix="3.0.9")]
+    outcome = _run(paths, [_fd(), _fd("CVE-2026-2222")])
+    assert outcome.ok, outcome.reason
+    (_svc, _base, packages), = box.built
+    assert [packages, *box.checked] == [{"openssl": "3.0.10"}, {"openssl": "3.0.9"}]
+
+
+def test_a_fixed_version_the_image_misses_fails_at_build(paths, box) -> None:
+    from boxmunge.cve.autofix_build import PatchBuildError
+    box.findings[WEB] = [_fd(fix="3.0.10"), _fd("CVE-2026-2222", fix="3.0.9")]
+    box.check_error = PatchBuildError("openssl 3.0.9 is below the fixed 3.0.10")
+    outcome = _run(paths, [_fd(), _fd("CVE-2026-2222")])
+    assert outcome.failed_step == "build" and len(box.removed) == 1
+
+
+def test_deadline_already_past_scans_nothing(paths, box) -> None:
+    outcome = _run(paths, deadline=datetime.now(timezone.utc) - timedelta(seconds=1))
+    assert outcome.failed_step == "budget" and box.scans == 0
+
+
+def test_the_two_scan_failures_read_differently(paths, box) -> None:
+    from boxmunge.cve.scanner import ScannerError
+    box.scan_error = ScannerError("trivy timed out")
+    outcome = _run(paths)
+    assert outcome.failed_step == "scan" and "the scan of the running images" in outcome.reason

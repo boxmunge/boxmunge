@@ -21,14 +21,17 @@ import pytest
 
 from boxmunge.commands import quarantine_gate
 from boxmunge.cve import autofix_plan
-from boxmunge.cve.autofix_build import BASE_LABEL
-from boxmunge.cve.autofix_record import read_records
+from boxmunge.container_recreate import recreate_project
+from boxmunge.cve.autofix_build import BASE_LABEL, build_patched, probe
+from boxmunge.cve.autofix_record import (
+    PackageChange, PatchRecord, read_records, write_records,
+)
 from boxmunge.cve.autofix_run import autofix_project_locked
 from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.scanner import Severity
 from boxmunge.fileutil import project_lock
-from boxmunge.image_pins import read_pins
+from boxmunge.image_pins import ImagePin, read_pins, write_pins
 from tests.integration import nonroot_cases as nc
 from tests.integration.conftest import skip_no_docker
 from tests.test_commands.cve_helpers import finding, scan_result
@@ -86,21 +89,24 @@ def deployed(int_paths, capsys, monkeypatch):
     monkeypatch.setattr("boxmunge.container_recreate.HEALTHCHECK_POLL_INTERVAL_SEC", 1)
     p = f"bmaf{uuid.uuid4().hex[:8]}"
 
-    def deploy(healthcheck: str | None) -> None:
+    def deploy(healthcheck: str | None, *, side: bool = False) -> None:
         web = {"image": ALPINE, "command": nc.SLEEP, "restart": "unless-stopped"}
         if healthcheck:
             web["healthcheck"] = {"test": ["CMD-SHELL", healthcheck], "interval": "1s",
                                   "retries": 2, "start_period": "0s"}
-        rc, out = nc.deploy(int_paths, p, nc.bundle(p, {"web": web},
-                                                     declare={"web": NOBODY}), capsys)
+        services = {"web": web, **({"side": {"image": ALPINE, "command": nc.SLEEP,
+                                             "restart": "unless-stopped"}} if side else {})}
+        rc, out = nc.deploy(int_paths, p, nc.bundle(p, services,
+                                                     declare={s: NOBODY for s in services}),
+                            capsys)
         assert rc == 0, out
     try:
         yield int_paths, p, old, deploy
     finally:
         nc.teardown(int_paths, p)
-        refs = subprocess.run(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}",
-                               f"boxmunge.invalid/{p}/web"], capture_output=True,
-                              text=True).stdout.split()
+        refs = [ref for svc in ("web", "side") for ref in subprocess.run(
+            ["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}",
+             f"boxmunge.invalid/{p}/{svc}"], capture_output=True, text=True).stdout.split()]
         if refs:
             subprocess.run(["docker", "image", "rm", "-f", *refs], capture_output=True)
 
@@ -132,15 +138,37 @@ def test_patch_runs_pinned_and_is_recorded(deployed) -> None:
     assert _inspect(pin.ref, "{{.Id}}") == pin.image_id
 
 
+def _pin_side(paths, p: str, base: str) -> tuple[ImagePin, PatchRecord]:
+    """Patch and pin the side service, as an earlier autofix would have."""
+    with project_lock(p, paths):
+        image = build_patched(p, "side", base, {"busybox": FIXED}, probe(base))
+        pin = ImagePin("side", image.ref, image.image_id, "autofix")
+        record = PatchRecord(p, "side", base, base, image.ref, image.image_id,
+                             (PackageChange("busybox", "old", image.versions["busybox"]),),
+                             ("CVE-2026-0001",), datetime.now(timezone.utc), "nightly")
+        write_pins(paths, p, [pin])
+        write_records(paths, p, [record])
+        recreate_project(paths, p, ["compose.yml", "compose.boxmunge.yml"], component="test")
+    return pin, record
+
+
 def test_unhealthy_patch_rolls_back(deployed) -> None:
-    """Healthy only on the old busybox: the patched image fails its check."""
+    """Healthy only on the old busybox: the patched image fails its check.
+    The side service, pinned before, keeps its pin and patched image."""
     paths, p, old, deploy = deployed
-    deploy(f"test \"$(apk list --installed busybox | cut -d' ' -f1)\" = busybox-{old}")
-    (_cid, before), = _containers(p).values()
+    deploy(f"test \"$(apk list --installed busybox | cut -d' ' -f1)\" = busybox-{old}",
+           side=True)
+    before = _containers(p)["web"][1]
+    side_pin, side_record = _pin_side(paths, p, before)
+    side_container = _containers(p)["side"]
+    assert side_container[1] == side_pin.image_id
     outcome = _autofix(paths, p)
     assert (outcome.ok, outcome.failed_step) == (False, "health"), outcome.reason
+    assert outcome.rollback_problems == ()
     assert _containers(p)["web"][1] == before
-    assert read_pins(paths, p) == () and read_records(paths, p) == ()
+    assert _containers(p)["side"][1] == side_pin.image_id
+    assert read_pins(paths, p) == (side_pin,) and read_records(paths, p) == (side_record,)
+    assert _inspect(side_pin.ref, "{{.Id}}") == side_pin.image_id
     tags = subprocess.run(["docker", "image", "ls", "--format", "{{.Tag}}",
                            f"boxmunge.invalid/{p}/web"],
                           capture_output=True, text=True, check=True).stdout.split()

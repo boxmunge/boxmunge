@@ -61,14 +61,27 @@ class StepFailed(Exception):
 @dataclass(frozen=True)
 class ServicePlan:
     """One service's patch: built FROM `base` (an image ID or exact digest;
-    `base_ref` is how the record names it), upgrading `packages` (name:
-    fixed version) from `before` (name: version in the base), for `cves`."""
+    `base_ref` is how the record names it), upgrading each package of
+    `floors` to at least every fixed version it lists (the CVEs' fixes can
+    differ, and only the distro's own ordering in the image can compare
+    them), from `before` (name: version in the base), for `cves`."""
     service: str
     base_ref: str
     base: str
-    packages: Mapping[str, str]
+    floors: Mapping[str, tuple[str, ...]]
     before: Mapping[str, str]
     cves: tuple[str, ...]
+
+    @property
+    def packages(self) -> dict[str, str]:
+        """{package: a fixed version} for the build; check_floors checks the rest."""
+        return {name: versions[0] for name, versions in self.floors.items()}
+
+    def check_floors(self) -> list[dict[str, str]]:
+        """The other fixed versions, as package maps for check_versions."""
+        depth = max(len(v) for v in self.floors.values())
+        return [{n: v[i] for n, v in self.floors.items() if len(v) > i}
+                for i in range(1, depth)]
 
 
 @dataclass(frozen=True)
@@ -81,19 +94,19 @@ class Running:
 
 
 def scan_images(paths: BoxPaths, project: str, meta: ProjectMeta,
-                images: Mapping[str, str]) -> dict[str, ProjectDecision]:
+                images: Mapping[str, str], label: str) -> dict[str, ProjectDecision]:
     """{service: decision} of an audit-only scan of `images` ({service:
-    local image ref or ID}). Raises StepFailed("scan") when the scan fails
-    or does not cover every image."""
+    local image ref or ID}; `label` names them in a failure). Raises
+    StepFailed("scan") when the scan fails or does not cover every image."""
     try:
         scan, _ids, targets, _profile = scan_release_images(
             paths, production_target(paths, project), meta,
             {svc: StartImage(ref, ref) for svc, ref in images.items()}, {}, load_kev(paths))
     except (ScannerError, StateError, OSError, RuntimeError, ComposeResolveError,
             DockerError) as e:   # what the deploy guard's scan of a release raises
-        raise StepFailed("scan", f"the scan failed: {type(e).__name__}: {e}") from e
+        raise StepFailed("scan", f"the scan of {label} failed: {type(e).__name__}: {e}") from e
     if not scan.complete:
-        raise StepFailed("scan", "the scan did not cover every image: "
+        raise StepFailed("scan", f"the scan of {label} did not cover every image: "
                          + "; ".join(scan.incomplete_reasons()))
     by_ref = {d.image_ref: d for d in scan.decisions}
     return {t.service: by_ref[t.image_ref] for t in targets}
@@ -110,13 +123,14 @@ def running(paths: BoxPaths, project: str, meta: ProjectMeta) -> Running:
     except (InventoryError, UpdateError) as e:
         raise StepFailed("scan", f"cannot tell what production runs: {e}") from e
     decisions = scan_images(paths, project, meta,
-                            {svc: c.image_id for svc, c in containers.items()})
+                            {svc: c.image_id for svc, c in containers.items()},
+                            "the running images")
     return Running(containers, services, decisions)
 
 
 def _fixes(decision: ProjectDecision, cves: Collection[str],
-           service: str) -> tuple[dict[str, str], dict[str, str], set[str]]:
-    """({package: fixed}, {package: installed}, CVEs found) for every finding
+           service: str) -> tuple[dict[str, set[str]], dict[str, str], set[str]]:
+    """({package: fixed versions}, {package: installed}, CVEs found) for every finding
     of `cves` in the image. Raises StepFailed("probe") for one autofix cannot
     patch: not an OS package, or no fixed version."""
     fixed: dict[str, set[str]] = {}
@@ -134,11 +148,7 @@ def _fixes(decision: ProjectDecision, cves: Collection[str],
         found.add(f.cve_id)
         fixed.setdefault(f.package, set()).add(f.fixed_version)
         before[f.package] = f.installed_version
-    # One floor per package, any of its findings' (by text): the package
-    # manager installs the newest version its repositories have, so the
-    # floor only sanity-checks the build; the scan of the patched image is
-    # what shows each CVE is gone.
-    return {p: max(v) for p, v in fixed.items()}, before, found
+    return fixed, before, found
 
 
 def plan(now: Running, cves: Collection[str], pins: Collection[ImagePin],
@@ -162,10 +172,11 @@ def plan(now: Running, cves: Collection[str], pins: Collection[ImagePin],
                                  f"unknown")
             base_ref, base = prior.base_ref, prior.base_digest
             for change in prior.packages:
-                packages.setdefault(change.name, change.after)
+                packages.setdefault(change.name, set()).add(change.after)
                 before[change.name] = change.before
             found |= set(prior.cves)
-        plans.append(ServicePlan(service, base_ref, base, packages, before,
+        plans.append(ServicePlan(service, base_ref, base,
+                                 {n: tuple(sorted(v)) for n, v in packages.items()}, before,
                                  tuple(sorted(found))))
     if not plans:
         raise StepFailed("scan", f"no image production runs carries {', '.join(sorted(cves))} "
