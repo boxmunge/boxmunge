@@ -290,8 +290,10 @@ From 0.12 on, an upgrade also waits for running jobs (the operations boxmunge ru
 background, listed by `boxmunge jobs --running`), as it waits for another upgrade. It prints
 `Waiting up to 60 minutes for running jobs to finish` and goes ahead as soon as they finish.
 No new job starts while an upgrade runs. If jobs are still running after 60 minutes, it stops
-and installs nothing; run it again once they finish. The health timer's probation check
-skips its runs while jobs run or an upgrade waits for them, and those skips raise no alert.
+and installs nothing; run it again once they finish. Jobs that keep overlapping, each
+starting before the last ends, can hold an upgrade off for all 60 minutes, and then it stops
+and says so. The health timer's probation check skips its runs while jobs run or an
+upgrade waits for them, and those skips raise no alert.
 
 ## After the upgrade
 

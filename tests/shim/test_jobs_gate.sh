@@ -41,7 +41,10 @@ new_root a
 hold_shared
 PATH="$FAILVISUDO:$PATH" bash "$SHIM" target 1.2.3 > "$BOXMUNGE_ROOT/run.out" 2>&1 7<&- &
 waiter=$!
-sleep 2
+for _ in $(seq 600); do  # up to a minute for the upgrade to reach its wait
+    [[ ! -s "$BOXMUNGE_ROOT/upgrade-root/jobs-wait" ]] && kill -0 "$waiter" 2>/dev/null || break
+    sleep 0.1
+done
 kill -0 "$waiter" 2>/dev/null && pass "an upgrade waits while a job holds the gate" \
     || fail "the upgrade did not wait: $(cat "$BOXMUNGE_ROOT/run.out")"
 [[ "$(cat "$BOXMUNGE_ROOT/upgrade-root/jobs-wait" 2>/dev/null)" =~ ^[0-9]+$ ]] \
@@ -111,7 +114,39 @@ PATH="$BUSYLOCK:$PATH" run_shim check-probation
 expect 0 "skipping (12 in a row: upgrade.lock is held)" "a stale wait record does not hide a held lock"
 [[ "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" == *"bm_log error check-probation could not take upgrade.lock 12 times"* ]] \
     && pass "the held lock alerts as usual" || fail "no alert: $(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)"
+echo $(( $(date +%s) + 600 )) > "$BOXMUNGE_ROOT/upgrade-root/jobs-wait"
+PATH="$BUSYLOCK:$PATH" run_shim check-probation
+expect 0 "skipping (13 in a row: upgrade.lock is held)" "a future-dated wait record does not hide a held lock"
 drop_root
+
+# The wait is a test knob, never zero or less.
+new_root a
+JOBS_GATE_WAIT_SECS=0 run_shim check-probation
+expect 1 "JOBS_GATE_WAIT_SECS must be a positive number of seconds, not '0'" "a zero wait is refused"
+drop_root
+
+# auto takes the gate only once discovery names an upgrade: with nothing to
+# install, a running job holds nothing up, and nothing is logged.
+for answer in up_to_date upgrade; do
+    new_root a
+    record_bm_log
+    body='[[ "$1" != _discover-update ]] || { echo "{\"action\": \"'"$answer"'\", \"version\": \"1.2.3\", \"class\": \"feature\"}"; exit 0; }'
+    mock_server a "$body"
+    hold_shared
+    RC=0
+    OUT="$(JOBS_GATE_WAIT_SECS=1 PATH="$FAILVISUDO:$PATH" bash "$SHIM" auto 2>&1 7<&-)" || RC=$?
+    exec 7<&-
+    if [[ "$answer" == up_to_date ]]; then
+        expect 0 "Already on latest version" "auto with nothing to install goes ahead while a job runs"
+        [[ "$OUT" != *"Waiting up to"* && "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" != *"bm_log error"* ]] \
+            && pass "auto with nothing to install never waits for jobs, and logs no error" \
+            || fail "waited or logged: $OUT / $(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)"
+    else
+        expect 1 "Waiting up to 60 minutes for running jobs" "auto that found an upgrade waits for running jobs"
+        expect 1 "Jobs were still running after the 60 minutes" "and gives up at the end of its wait"
+    fi
+    drop_root
+done
 
 # test_readiness_check_does_not_take_the_gate: _check-run exits 75 when it
 # cannot take the lock, 76 when it has it and the installed release differs
@@ -183,6 +218,36 @@ want="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino, os.stat(s
     || fail "rc=$RC want inodes $want: $OUT"
 drop_root
 rm -f "$PROBE"
+
+# Deploy, who may write state/, swaps another directory in at state/jobs
+# between root's mkdir and its open: the stand-in is refused, not given.
+RACE="$(mktemp -d)"
+REAL_PYTHON3="$(command -v python3)"
+cat > "$RACE/python3" <<EOS
+#!/usr/bin/env bash
+if [[ "\$1" == -c && "\$2" == *'os.mkdir("jobs"'* ]]; then
+    script="\$2"; shift 2
+    exec $(printf %q "$REAL_PYTHON3") -c "import os as _os
+_mkdir = _os.mkdir
+def _swap(name, mode=0o777, *, dir_fd=None):
+    _mkdir(name, mode, dir_fd=dir_fd)
+    _os.rename(name, name + '.moved', src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    _os.rename(_os.environ['STANDIN'], name, dst_dir_fd=dir_fd)
+_os.mkdir = _swap
+\$script" "\$@"
+fi
+exec $(printf %q "$REAL_PYTHON3") "\$@"
+EOS
+chmod +x "$RACE/python3"
+new_root a
+mkdir -m 0700 "$BOXMUNGE_ROOT/state/standin"
+: > "$BOXMUNGE_ROOT/state/standin/keep"
+STANDIN="$BOXMUNGE_ROOT/state/standin" PATH="$RACE:$PATH" run_shim check-probation
+expect 1 "state/jobs was replaced while being made" "a directory swapped in while jobs/ is made is refused"
+[[ "$(mode_of "$BOXMUNGE_ROOT/state/jobs")" == 700 && ! -e "$BOXMUNGE_ROOT/state/jobs/gate.lock" ]] \
+    && pass "the swapped-in directory is left as it was" || fail "changed: $(ls -la "$BOXMUNGE_ROOT/state/jobs" 2>&1)"
+drop_root
+rm -rf "$RACE"
 
 # test_a_missing_gate_is_created_deploy_owned: a missing state/jobs/ (0750)
 # and gate (0660) are made as install makes them, deploy's when root runs the
