@@ -69,7 +69,7 @@ from boxmunge.paths import BoxPaths
 # (cve.scanner._DEFAULT_TIMEOUT, 300s) bounds one scan, this bounds the sum
 # over one project's images, so N hung images cannot starve every project
 # after it of the unit's TimeoutStartSec. The unit timeouts
-# (boxmunge-cve-scan.service 60m, boxmunge-maintenance.service 4h for scan
+# (boxmunge-cve-scan.service 60m, boxmunge-maintenance.service 5h for scan
 # plus update) are the outer cap.
 _PROJECT_BUDGET_SECONDS = 600
 

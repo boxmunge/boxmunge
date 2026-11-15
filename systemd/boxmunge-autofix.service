@@ -1,6 +1,7 @@
 [Unit]
 Description=boxmunge urgent autofix (patch the queued known-exploited findings)
-After=docker.service
+After=network-online.target docker.service
+Wants=network-online.target
 Requires=docker.service
 
 [Service]
