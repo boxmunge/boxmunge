@@ -2160,7 +2160,14 @@ rollback, and the older release ignores what is left.
 
 A rollback swaps the venvs back, restores the stash the upgrade made (never just the newest in
 `stashes/`), and re-runs `upgrade --apply` with the previous release, so its overlays and Caddy sites are regenerated and projects restarted on
-them. Pause and quarantine markers are not restored from the stash: a project you resumed after
+them. It also puts back the previous release's systemd units: each venv slot keeps a copy of
+its release's units (`env-<slot>/boxmunge-systemd`), so the units the newer release added (in
+0.12, `boxmunge-maintenance.timer`, `boxmunge-kev-watch.timer` and `boxmunge-autofix.service`)
+are disabled and removed, and the ones it retired come back enabled. The next upgrade then runs
+the new release's `install.sh` again. A slot with no copy keeps the newer units, logged as an
+error. A rollback during the upgrade to 0.12 itself (its dry run passed but `upgrade --apply` or
+the first health check failed) is run by the previous release's shim, which does not do this
+either. In both cases, reinstall the running release to put its own units back. Pause and quarantine markers are not restored from the stash: a project you resumed after
 the upgrade stays resumed. Nor are the users records: a service you gave to a new user with
 `data chown` after the upgrade keeps running as that user. If either the restore or the re-apply fails, you get a "ROLLBACK
 PARTIAL" alert and the shim exits 2; inspect the box as `supervisor`.

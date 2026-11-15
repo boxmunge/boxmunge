@@ -13,7 +13,7 @@ SCRIPT = REPO / "bootstrap" / "systemd-units.sh"
 TIMERS = sorted(p.name for p in (REPO / "systemd").glob("*.timer"))
 
 
-def _run(tmp_path: Path, bundle: Path) -> list[str]:
+def _run(tmp_path: Path, bundle: Path, **env: str) -> list[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     log = tmp_path / "systemctl.log"
@@ -25,7 +25,7 @@ def _run(tmp_path: Path, bundle: Path) -> list[str]:
     dest.mkdir(exist_ok=True)
     subprocess.run(["bash", str(SCRIPT), str(bundle)], check=True, capture_output=True,
                    env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
-                        "BOXMUNGE_SYSTEMD_DIR": str(dest)})
+                        "BOXMUNGE_SYSTEMD_DIR": str(dest), **env})
     return log.read_text().splitlines()
 
 
@@ -62,4 +62,32 @@ def test_a_changed_timer_is_restarted_so_its_schedule_applies(tmp_path) -> None:
 def test_install_sh_installs_the_units_through_it() -> None:
     text = (REPO / "install.sh").read_text()
     assert 'bash "${SCRIPT_DIR}/bootstrap/systemd-units.sh" "${SCRIPT_DIR}"' in text
+    assert 'BOXMUNGE_SLOT_UNITS="${BOXMUNGE_ROOT}/env-active/boxmunge-systemd"' in text
     assert "enable --now" not in text
+
+
+def test_an_upgrade_records_the_units_the_live_slot_ran_before_replacing_them(tmp_path) -> None:
+    """The previous release's units, the timers this release retires among
+    them, are what a rollback to the live slot installs again."""
+    dest = tmp_path / "etc-systemd"
+    dest.mkdir()
+    for name in ("boxmunge-cve-scan.timer", "boxmunge-health.timer", "boxmunge-health.service",
+                 "other.service"):
+        (dest / name).write_text(f"old {name}\n")
+    record = tmp_path / "env-a" / "boxmunge-systemd"
+    bundle = _bundle(tmp_path)
+    _run(tmp_path, bundle, BOXMUNGE_SLOT_UNITS=str(record), FROM_UPGRADE_SHIM="1")
+    assert sorted(p.name for p in record.iterdir()) == [
+        "boxmunge-cve-scan.timer", "boxmunge-health.service", "boxmunge-health.timer"]
+    assert (record / "boxmunge-health.timer").read_text() == "old boxmunge-health.timer\n"
+    _run(tmp_path, bundle, BOXMUNGE_SLOT_UNITS=str(record), FROM_UPGRADE_SHIM="1")
+    assert (record / "boxmunge-cve-scan.timer").exists()   # a record is kept as it is
+
+
+def test_an_install_by_hand_records_the_bundles_units(tmp_path) -> None:
+    record = tmp_path / "env-a" / "boxmunge-systemd"
+    record.mkdir(parents=True)
+    (record / "boxmunge-stale.timer").write_text("stale\n")
+    _run(tmp_path, _bundle(tmp_path), BOXMUNGE_SLOT_UNITS=str(record), FROM_UPGRADE_SHIM="0")
+    assert sorted(p.name for p in record.iterdir()) == sorted(
+        p.name for p in (REPO / "systemd").iterdir())
