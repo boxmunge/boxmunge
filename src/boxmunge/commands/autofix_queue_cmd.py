@@ -9,7 +9,9 @@ would hold up the fleet lock and the container update. A caller running as
 root (the fleet scan, the KEV watch, a supervisor's single-project scan)
 queues its patches, then starts the unit without waiting; systemd never
 runs two at once, and starting it while it runs is a no-op, so the command
-goes round the queue again until nothing new was queued while it ran. A
+goes round the queue again while it holds projects this run has not tried
+yet: each project at most once per run (one left queued, busy or failed,
+waits for the next start). A
 caller that is not root (a deploy-shell `security scan <project>`) cannot
 start units, and runs its own project's patch itself.
 """
@@ -77,8 +79,8 @@ def after_scan(paths: BoxPaths, *, only: Collection[str] | None = None) -> list[
 
 
 def cmd_autofix_queue(args: list[str], paths: BoxPaths) -> int:
-    """boxmunge security autofix-queue: run the queue until nothing new is
-    in it. Exit 2 when a patch failed (its fallback applied), 1 when it
+    """boxmunge security autofix-queue: run the queue, each project at most
+    once. Exit 2 when a patch failed (its fallback applied), 1 when it
     cannot run."""
     if args:
         print("ERROR: security autofix-queue takes no arguments", file=sys.stderr)

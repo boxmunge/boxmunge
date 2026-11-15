@@ -398,7 +398,7 @@ def test_a_killed_run_is_rolled_back_from_its_journal(paths, box) -> None:
     from boxmunge.cve.autofix_record import AutofixJournal, read_journal, write_journal
     patched = "sha256:" + "e" * 64
     built = ImagePin("web", pin_ref(NAME, "web", patched), patched, "autofix")
-    write_journal(paths, NAME, AutofixJournal(datetime.now(timezone.utc), (), (built,)))
+    write_journal(paths, NAME, AutofixJournal(datetime.now(timezone.utc), (), (), (built,)))
     box.pins, box.containers["web"] = (built,), ("c-web-9", patched)
     with project_lock(NAME, paths):
         assert autofix_run.recover_interrupted(paths, NAME) == ()
@@ -406,3 +406,65 @@ def test_a_killed_run_is_rolled_back_from_its_journal(paths, box) -> None:
     assert box.pins == () and box.running()["web"] == WEB
     assert box.removed == [built.ref] and read_journal(paths, NAME) is None
     assert any(level == "error" and "interrupted" in msg for level, msg, _ in box.log)
+
+
+def _repatch_setup(paths, box) -> tuple[ImagePin, PatchRecord]:
+    """web already runs an earlier patch, which this run replaces."""
+    old = "sha256:" + "b" * 64
+    pin = ImagePin("web", pin_ref(NAME, "web", old), old, "autofix")
+    box.pins, box.release["web"] = (pin,), old
+    box.containers["web"] = ("c-web-0", old)
+    box.findings[old] = [_fd()]
+    record = PatchRecord(
+        NAME, "web", "example/web:1", WEB, pin.ref, old, (PackageChange("zlib", "1.2", "1.3"),),
+        ("CVE-2026-0002",), datetime.now(timezone.utc), "nightly")
+    write_records(paths, NAME, [record])
+    return pin, record
+
+
+def test_the_journal_goes_before_the_records_and_the_replaced_image(paths, box,
+                                                                    monkeypatch) -> None:
+    from boxmunge.cve.autofix_record import read_journal
+    pin, _ = _repatch_setup(paths, box)
+    seen: dict[str, object] = {}
+    real_write, real_remove = autofix_run.write_records, autofix_run.remove_patched
+
+    def write(p, project, records):
+        seen["records"] = read_journal(paths, NAME)
+        real_write(p, project, records)
+
+    def remove(p):
+        seen["remove"] = read_journal(paths, NAME)
+        real_remove(p)
+
+    monkeypatch.setattr(autofix_run, "write_records", write)
+    monkeypatch.setattr(autofix_run, "remove_patched", remove)
+    assert _run(paths).ok
+    assert seen == {"records": None, "remove": None} and box.removed == [pin.ref]
+
+
+def test_a_journal_left_after_a_patch_keeps_what_recovery_restores(paths, box,
+                                                                   monkeypatch) -> None:
+    """The journal could not be removed once the patch was healthy: the image
+    it replaced is kept, so a recovery from the journal restores a pin that
+    still names an image, and the records it had."""
+    from boxmunge.cve.autofix_record import read_journal
+    from boxmunge.state import StateError
+    pin, record = _repatch_setup(paths, box)
+    real_remove = autofix_run.remove_journal
+
+    def stuck(p, project):
+        raise StateError("cannot remove the autofix journal: read-only file system")
+
+    monkeypatch.setattr(autofix_run, "remove_journal", stuck)
+    outcome = _run(paths)
+    assert outcome.ok and box.removed == []          # the replaced patch is kept
+    assert read_journal(paths, NAME) is not None
+    assert any(level == "error" and "replaced are kept" in msg for level, msg, _ in box.log)
+    assert read_records(paths, NAME) == outcome.records
+    monkeypatch.setattr(autofix_run, "remove_journal", real_remove)
+    with project_lock(NAME, paths):
+        assert autofix_run.recover_interrupted(paths, NAME) == ()
+    assert box.pins == (pin,) and box.running()["web"] == pin.image_id
+    assert read_records(paths, NAME) == (record,)     # no record claims the undone patch
+    assert pin.ref not in box.removed and read_journal(paths, NAME) is None

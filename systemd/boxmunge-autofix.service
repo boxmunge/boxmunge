@@ -6,9 +6,11 @@ Requires=docker.service
 [Service]
 # No timer: the nightly scan, the KEV watch and a supervisor's single-project
 # scan start it (systemctl start --no-block) when they queue a patch. systemd
-# never runs two at once; the run goes round the queue until it is empty. It
-# takes project locks only, never the CVE fleet lock, so patching does not
-# hold up the scans.
+# never runs two at once. A run goes round the queue again while patches it
+# has not tried yet were queued meanwhile, trying each project at most once
+# (one left queued, busy or failed, waits for the next start). It takes
+# project locks only, never the CVE fleet lock, so patching does not hold up
+# the scans.
 Type=oneshot
 User=root
 ExecStart=/opt/boxmunge/bin/boxmunge security autofix-queue

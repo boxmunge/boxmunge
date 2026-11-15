@@ -671,7 +671,7 @@ def test_a_killed_run_is_rolled_back_then_the_patch_carries_on(tmp_path, monkeyp
     box.scan()
     patched = "sha256:" + "e" * 64
     built = ImagePin("web", pin_ref("demo", "web", patched), patched, "autofix")
-    write_journal(box.paths, "demo", AutofixJournal(_now(), (), (built,)))
+    write_journal(box.paths, "demo", AutofixJournal(_now(), (), (), (built,)))
     undone: list = []   # the runner's own Docker seams (tests/cve/test_autofix_run.py)
     monkeypatch.setattr(autofix_run, "clear_pins", lambda p, project: undone.append("pins"))
     monkeypatch.setattr(autofix_run, "recreate_project",
@@ -699,3 +699,44 @@ def test_the_real_probe_decides_queueing(tmp_path, monkeypatch) -> None:
     box.scan()
     assert read_queue_entry(box.paths, "demo") is not None
     assert ran and ran[0][:2] == ["docker", "run"]
+
+
+# ---------- fix round 2 ----------
+
+
+def test_a_stale_entry_that_cannot_be_dropped_does_not_stall_the_queue(tmp_path,
+                                                                     monkeypatch) -> None:
+    box = _box(tmp_path, monkeypatch, "relaxed", projects=("blog", "shop"))
+    box.scan("blog")
+    box.scan("shop")
+    box.found = []
+    box.scan("blog")                       # blog's finding is gone: its entry is stale
+    box.found = [replace(finding(CVE, fix="2"), cvss_score=9.8)]
+    real = autofix_urgent.remove_queue_entry
+
+    def stuck(paths, project):
+        if project == "blog":
+            raise StateError("cannot remove the autofix queue entry: read-only file system")
+        real(paths, project)
+
+    monkeypatch.setattr(autofix_urgent, "remove_queue_entry", stuck)
+    [outcome] = box.run()
+    assert outcome.ok and [c[0] for c in box.runner.calls] == ["shop"]
+
+
+def test_an_interrupted_run_with_an_unreadable_entry_says_so(tmp_path, monkeypatch) -> None:
+    box = _box(tmp_path, monkeypatch, "balanced", cvss=7.5)
+    box.scan()
+    box.paths.project_autofix_queue("demo").write_text("{not json")
+    patched = "sha256:" + "e" * 64
+    built = ImagePin("web", pin_ref("demo", "web", patched), patched, "autofix")
+    write_journal(box.paths, "demo", AutofixJournal(_now(), (), (), (built,)))
+    for name, fake in [("clear_pins", lambda p, project: None),
+                       ("recreate_project", lambda p, project, files, component: None),
+                       ("wait_healthy", lambda *a, **k: (True, [])),
+                       ("remove_patched", lambda pin: None)]:
+        monkeypatch.setattr(autofix_run, name, fake)
+    assert box.run() == []
+    [interrupted] = box.sent("interrupted")
+    assert "cannot be read" in interrupted[1] and "no fallback was applied" in interrupted[1]
+    assert "queued any more" not in interrupted[1]

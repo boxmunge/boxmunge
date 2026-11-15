@@ -190,19 +190,31 @@ def _process(paths: BoxPaths, project: str, now: datetime) -> AutofixOutcome | N
     except StateError as e:
         _problem(paths, project, f"its autofix journal cannot be used: {e}")
         return None
+    unreadable = None
     try:
         job = _read(paths, project)
     except _PROBLEMS as e:
-        _problem(paths, project, f"{type(e).__name__}: {e}")
+        unreadable = f"{type(e).__name__}: {e}"
+        _problem(paths, project, unreadable)
         job = None
     if interrupted is not None:
-        site = ("Nothing it was patching is queued any more." if job is None or not job.findings
-                else _fallback(paths, project, job)[0])
+        if unreadable is not None:
+            site = (f"Its queued patch cannot be read ({unreadable}), so no fallback was "
+                    f"applied for it; a separate alert names the problem.")
+        elif job is None or not job.findings:
+            site = "Nothing it was patching is queued any more."
+        else:
+            site = _fallback(paths, project, job)[0]
         _send(paths, format_autofix_interrupted_alert(project, interrupted, site=site))
     if job is None:
         return None
     if not job.findings:
-        _done(paths, project)
+        try:
+            _done(paths, project)
+        except StateError as e:   # logged; never stops the rest of the queue
+            log_error(_COMPONENT, f"{project}: dropping its stale queued autofix failed: {e}",
+                      paths, project=project)
+            return None
         log_operation(_COMPONENT, f"{project}: queued autofix of {', '.join(job.entry.cves)} "
                       f"dropped: the stored scan no longer has them to patch", paths,
                       project=project)

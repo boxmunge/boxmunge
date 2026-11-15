@@ -20,10 +20,11 @@ A finding the urgent flow patches waits in `state/autofix/queue/<project>.json`,
 end of the scan or KEV watch run that found it (commands.autofix_urgent).
 
 From just before an autofix swaps its images in until it has finished
-(patched, or rolled back), `state/autofix/<project>.journal` holds
-{started_at, pins_before, built}: the project's pins exactly as they were,
-and the images the run built, as pins. A journal left behind means the run
-was killed; the next run undoes it first (cve.autofix_run.recover_interrupted).
+(its patched images healthy, or rolled back), `state/autofix/<project>.journal`
+holds {started_at, pins_before, records_before, built}: the project's pins and
+patch records exactly as they were, and the images the run built, as pins.
+A journal left behind means the run was killed; the next run undoes it
+first (cve.autofix_run.recover_interrupted).
 
 All four are deploy-writable state that root reads: through fs_nofollow,
 times timezone-aware UTC and not in the future, and anything unusable
@@ -212,15 +213,18 @@ def write_records(paths: BoxPaths, project: str, records: Sequence[PatchRecord])
         _unique_services(records)
     except ValueError as e:
         raise StateError(f"refusing to write a bad autofix record for {project}: {e}") from e
-    rows = [{"project": r.project, "service": r.service, "base_ref": r.base_ref,
+    _write_doc(paths.project_autofix_records(project),
+               {"version": RECORD_VERSION, "records": _record_rows(records)}, "autofix record")
+
+
+def _record_rows(records: Sequence[PatchRecord]) -> list[dict[str, Any]]:
+    return [{"project": r.project, "service": r.service, "base_ref": r.base_ref,
              "base_digest": r.base_digest, "patched_ref": r.patched_ref,
              "patched_image_id": r.patched_image_id,
              "packages": [{"name": p.name, "before": p.before, "after": p.after}
                           for p in r.packages],
              "cves": list(r.cves), "created_at": r.created_at.isoformat(),
              "trigger": r.trigger} for r in records]
-    _write_doc(paths.project_autofix_records(project),
-               {"version": RECORD_VERSION, "records": rows}, "autofix record")
 
 
 def clear_records(paths: BoxPaths, project: str) -> None:
@@ -333,6 +337,7 @@ class AutofixJournal:
     """What an autofix run that was killed left to undo."""
     started_at: datetime
     pins_before: tuple[ImagePin, ...]
+    records_before: tuple[PatchRecord, ...]
     built: tuple[ImagePin, ...]
 
 
@@ -350,7 +355,9 @@ def _pins(rows: Any, field: str) -> tuple[ImagePin, ...]:
 def write_journal(paths: BoxPaths, project: str, journal: AutofixJournal) -> None:
     _write_doc(paths.project_autofix_journal(project), {
         "started_at": journal.started_at.isoformat(),
-        "pins_before": _pin_rows(journal.pins_before), "built": _pin_rows(journal.built),
+        "pins_before": _pin_rows(journal.pins_before),
+        "records_before": _record_rows(journal.records_before),
+        "built": _pin_rows(journal.built),
     }, "autofix journal")
 
 
@@ -361,10 +368,16 @@ def read_journal(paths: BoxPaths, project: str) -> AutofixJournal | None:
     if doc is None:
         return None
     try:
-        if not isinstance(doc, dict) or set(doc) != {"started_at", "pins_before", "built"}:
-            raise ValueError("expected {started_at, pins_before, built}")
+        keys = {"started_at", "pins_before", "records_before", "built"}
+        if not isinstance(doc, dict) or set(doc) != keys:
+            raise ValueError("expected {started_at, pins_before, records_before, built}")
+        rows = doc["records_before"]
+        if not isinstance(rows, list):
+            raise ValueError("records_before is not a list")
+        records = tuple(_record(item, project) for item in rows)
+        _unique_services(records)
         return AutofixJournal(_time(doc["started_at"], "started_at"),
-                              _pins(doc["pins_before"], "pins_before"),
+                              _pins(doc["pins_before"], "pins_before"), records,
                               _pins(doc["built"], "built"))
     except (ValueError, KeyError, TypeError) as e:
         raise StateError(f"{path} is not an autofix journal: {e!r}") from e
