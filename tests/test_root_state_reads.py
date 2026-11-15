@@ -34,6 +34,7 @@ from boxmunge import (
     upgrade_state, user_drift,
 )
 from boxmunge.api.job_retention import JOB_RETAIN_COUNT, prune
+from boxmunge.api.job_events import EventLog
 from boxmunge.api.jobs import JobStore
 from boxmunge.backup_evidence import project_evidence, sync_evidence
 from boxmunge.bind_sources import read_record
@@ -130,6 +131,15 @@ def _prune_oldest(paths: BoxPaths) -> list[str]:
     if kept is not None and not name.exists():
         name.write_text(kept)
     return deleted
+
+
+def _event_log_resumed(paths: BoxPaths) -> int:
+    """The worker reopening a job's event log numbers on from its last line."""
+    log = EventLog(paths, JOB_ID)
+    try:
+        return log.log("m")
+    finally:
+        log.close()
 
 
 def _alerted(paths: BoxPaths) -> bool:
@@ -301,6 +311,8 @@ READERS = [
            dangling=lambda o, p: o == ("value", []) and str(p.jobs_dir) in p.log_file.read_text()),
     Reader("job events", lambda p: p.jobs_dir / f"{JOB_ID}.events.jsonl", JOB_EVENT,
            lambda p: _jobs(p).events(JOB_ID)),
+    Reader("job event log", lambda p: p.jobs_dir / f"{JOB_ID}.events.jsonl", JOB_EVENT,
+           _event_log_resumed),
     Reader("backup sync evidence", lambda p: p.backup_sync_state, {"synced_at": ISO},
            sync_evidence),
     Reader("health backup_freshness", lambda p: p.project_backup_state(P),
