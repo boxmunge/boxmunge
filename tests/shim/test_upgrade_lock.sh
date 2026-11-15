@@ -56,7 +56,7 @@ done
 for held in "$ROOT_LOCK"; do
     new_root a
     hold "$BOXMUNGE_ROOT/$held"
-    PATH="$FAILVISUDO:$PATH" bash "$SHIM" run 1.2.3 ignored-url > "$BOXMUNGE_ROOT/run.out" 2>&1 7>&- &
+    PATH="$FAILVISUDO:$PATH" bash "$SHIM" run 1.2.3 ignored-url feature > "$BOXMUNGE_ROOT/run.out" 2>&1 7>&- &
     waiter=$!
     sleep 1
     exec 7>&-
@@ -72,7 +72,7 @@ printf '%s\n' '#!/usr/bin/env bash' \
 WAITLOCK="$(mktemp -d)"
 printf '#!/usr/bin/env bash\necho "flock $*" >> "$BOXMUNGE_ROOT/calls"\nexit 1\n' > "$WAITLOCK/flock"
 chmod +x "$WAITLOCK/flock"
-PATH="$WAITLOCK:$PATH" run_shim run 1.2.3 ignored-url
+PATH="$WAITLOCK:$PATH" run_shim run 1.2.3 ignored-url feature
 expect 1 "upgrade.lock was held for the whole 15 minutes the auto-update timer waited" "run gives up after its wait, saying so"
 grep -q "^flock -w 900 9$" "$BOXMUNGE_ROOT/calls" && grep -q "bm_log error .*sudo lslocks | grep upgrade.lock" "$BOXMUNGE_ROOT/calls" \
     && pass "run waits 900 s, and a lock held past it is an error naming the holder's search" \

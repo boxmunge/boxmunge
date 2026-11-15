@@ -180,7 +180,7 @@ drop_root
 for bad_blocklist in '["1.2.3"]' '{"../x": {}}' '{"1.2.3": {}, "evil\nkey": {}}' 'not json'; do
     new_root a
     printf '%s' "$bad_blocklist" > "$BOXMUNGE_ROOT/upgrade-state/blocklist.json"
-    run_shim run 1.2.3 ignored-url
+    run_shim run 1.2.3 ignored-url feature
     expect 1 "blocklist.json is malformed" "malformed blocklist is refused: $bad_blocklist"
     drop_root
 done

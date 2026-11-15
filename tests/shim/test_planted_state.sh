@@ -29,7 +29,7 @@ planted_fifo() {
 
 planted_fifo probation.json check-probation check-probation
 planted_fifo active-slot check-probation check-probation
-planted_fifo blocklist.json run run 1.2.3 ignored-url
+planted_fifo blocklist.json run run 1.2.3 ignored-url feature
 
 # upgrade-state/upgrade.lock (where shims up to 0.10.1 locked) is no lock
 # now: a dangling link there is never opened, so its target is never made.
@@ -48,7 +48,7 @@ new_root a
 victim="$(mktemp)"
 echo '{}' > "$victim"
 ln -s "$victim" "$BOXMUNGE_ROOT/$STATE/blocklist.json"
-run_shim run 1.2.3 ignored-url
+run_shim run 1.2.3 ignored-url feature
 expect 1 "is a symlink" "a linked blocklist.json is refused"
 rm -f "$victim"
 drop_root

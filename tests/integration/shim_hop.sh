@@ -199,7 +199,7 @@ if [[ "$MODE" == floor ]]; then
     echo "CLEAR rc=$(shim /tmp/clear.log clear-blocklist "$NEW")"
     box_facts CLEARED_
 else
-    for c in "check-probation" "run $NEXT https://example.com/x" "target $NEXT"; do
+    for c in "check-probation" "run $NEXT https://example.com/x feature" "target $NEXT"; do
         # shellcheck disable=SC2086  # word-split the subcommand on purpose
         rc="$(shim /tmp/cmd.log $c)"
         echo "CMD ${c%% *} rc=$rc :: $(tr '\n' ' ' < /tmp/cmd.log | cut -c1-2000)"
