@@ -214,7 +214,7 @@ def _finding_lines(scan: ProjectScan, services: dict[str, list[str]],
 
 
 def _upcoming_lines(scan: ProjectScan, services: dict[str, list[str]]) -> list[str]:
-    """Findings that quarantine from 0.12 but not now: warned, never refused."""
+    """Findings that meet the gate from 0.12 but not now: warned, never refused."""
     lines: dict[tuple[str, str, str], str] = {}
     for decision in scan.decisions:
         service = ", ".join(services[decision.image_ref])
@@ -286,8 +286,9 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
             *gate_exits(project, kev_check, paths)])
     upcoming = _upcoming_lines(scan, services)
     if upcoming and profile.upcoming is not None:
-        print(f"  WARNING: from 0.12 this release would still be quarantined for "
-              f"{len(upcoming)} finding(s); 0.11.0 does not refuse it:")
+        print(f"  WARNING: from 0.12 the stricter hardening penalty lifts {len(upcoming)} "
+              f"finding(s) to the posture's gate (paranoid quarantines them; strict "
+              f"alerts and patches them); this release is not refused for it:")
         for line in upcoming:
             print(f"    {line}")
         print(f"    Cause: {hardening_cause(profile.upcoming.services)}. {HARDENING_UPCOMING_FIX}")

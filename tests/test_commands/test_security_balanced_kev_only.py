@@ -80,7 +80,7 @@ def test_unfixable_critical_stays_up_and_alerts_once(box) -> None:
     assert AWAITING_TITLE in title and priority == 0
     for words in ("no fix exists yet", "not known to be exploited", "nothing needs doing now",
                   "when a fix lands", "listed as actively exploited",
-                  "`security.posture: strict` takes such findings down", _CVE):
+                  "`security.posture: paranoid` takes such findings down", _CVE):
         assert words in body
     for _ in range(2):  # daily scans: silent while nothing changes
         pushover.clear()
@@ -115,8 +115,16 @@ def test_a_kev_listing_quarantines_it(box) -> None:
     assert priority == 1 and "CISA KEV" in title
 
 
-def test_strict_takes_the_same_finding_down(box) -> None:
+def test_strict_alerts_on_the_same_finding_and_stays_up(box) -> None:
+    """0.12: with no fix, strict quarantines only on KEV, like balanced."""
     paths, pushover = box("strict")
+    assert _scan(paths).decisions[0].findings[0].disposition is Disposition.AWAITING_FIX
+    assert not is_quarantined("demo", paths)
+    assert _titles(pushover, AWAITING_TITLE) and not _titles(pushover, "QUARANTINED")
+
+
+def test_paranoid_takes_the_same_finding_down(box) -> None:
+    paths, pushover = box("paranoid")
     assert _scan(paths).decisions[0].findings[0].disposition is Disposition.QUARANTINE
     assert is_quarantined("demo", paths)
     assert _titles(pushover, "QUARANTINED") and not _titles(pushover, AWAITING_TITLE)

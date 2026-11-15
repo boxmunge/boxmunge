@@ -16,8 +16,8 @@ def explain_relaxed_kev_only(listed_by: str) -> str:
     text = (
         "relaxed posture: only a finding on the CISA or EU KEV list "
         "quarantines; everything else is informational regardless of distro "
-        "severity. Raise the posture to strict for distro-severity-based "
-        "quarantine."
+        "severity. Raise the posture to balanced or strict to be alerted on "
+        "distro severity, or paranoid to quarantine on it."
     )
     if listed_by:
         text += (f" It is listed as exploited by {listed_by} only, which does "
@@ -29,7 +29,7 @@ def explain_awaiting_fix(
     base: Severity, effective: Severity, penalty: int,
     posture_label: str, threshold_label: str, listed_by: str,
 ) -> str:
-    """Explanation for a finding at balanced's alert-only severity gate.
+    """Explanation for a finding at an alert-only severity gate (balanced, strict).
     ``listed_by`` names a weaker listing (VulnCheck) the finding has, or is ""."""
     rated = base.value if base == effective else (
         f"{base.value} → effective {effective.value} (hardening penalty: +{penalty})")
@@ -49,7 +49,7 @@ def explain_awaiting_fix(
             "exploited (then it quarantines).")
     return (
         f"{rated}, network-reachable, and no fix exists yet. {exploited} "
-        "`security.posture: strict` takes such findings down."
+        "`security.posture: paranoid` takes such findings down."
     )
 
 
@@ -110,32 +110,45 @@ def explain_kev_fix_not_running(
     )
 
 
+_REBUILD_ADVICE = (
+    "A `build:` service is rebuilt on its base image's current digest by its "
+    "next stage and promote, or prod-deploy (--redeploy when nothing new was "
+    "uploaded); otherwise bump the image tag or digest, or, for a package the "
+    "Dockerfile installs, set compose `build: {no_cache: true}`, then redeploy "
+    "(CVE_POLICY.md, \"Base images and the build cache\"); boxmunge does not "
+    "rebuild images for you."
+)
+
+
 def explain_fix_available(
-    fixed_version: str | None, *, meets_gate: bool, gate_quarantines: bool,
-    posture_label: str,
+    fixed_version: str | None, *, meets_gate: bool, posture_label: str,
 ) -> str:
     """Explanation for a non-KEV finding with an upstream fix."""
     text = (
         f"Fix available upstream ({fixed_version}) but not running in this "
-        "image. A `build:` service is rebuilt on its base image's current "
-        "digest by its next stage and promote, or prod-deploy (--redeploy "
-        "when nothing new was uploaded); otherwise bump the image tag or "
-        "digest, or, for a package the Dockerfile installs, set compose "
-        "`build: {no_cache: true}`, then redeploy (CVE_POLICY.md, \"Base "
-        "images and the build cache\"); boxmunge does not rebuild images for "
-        "you."
+        f"image. {_REBUILD_ADVICE}"
     )
-    if meets_gate and gate_quarantines:
-        text += (
-            f" Without the fix this finding meets the {posture_label} "
-            "quarantine gate."
-        )
-    elif meets_gate:
+    if meets_gate:
         text += (
             f" It meets the {posture_label} alert gate: not known to be "
             "exploited, so the site stays up, but apply the fix."
         )
     return text
+
+
+def explain_fix_quarantine(fixed_version: str | None, *, dangerously_disabled: bool) -> str:
+    """Explanation for a fixable finding at paranoid's gate: it takes the
+    downtime until the fix runs."""
+    if dangerously_disabled:
+        held = ("it would be quarantined until the fix runs, but "
+                "dangerously_disable_quarantine: true, so it keeps running")
+    else:
+        held = "it is quarantined until the fixed image runs"
+    return (
+        f"Fix available upstream ({fixed_version}) but not running in this "
+        f"image. It meets the paranoid quarantine gate, so {held}. "
+        f"{_REBUILD_ADVICE}"
+    )
 
 
 def explain_distro_deprioritized(
@@ -263,16 +276,24 @@ def hardening_cause(services: tuple[str, ...]) -> str:
 
 
 def explain_hardening_upcoming(
-    services: tuple[str, ...], penalty: int, threshold_detail: str,
+    services: tuple[str, ...], penalty: int, threshold_detail: str, *, quarantines: bool,
 ) -> str:
-    """Why a finding that does not quarantine today will from 0.12, and the fix.
+    """Why a finding below the posture's gate today meets it from 0.12, and the fix.
 
     ``threshold_detail`` is the explanation the finding gets under the 0.12
-    penalty. 0.11 only warns, and only strict and paranoid are judged under
-    it (the postures whose severity gate quarantines)."""
+    penalty; ``quarantines`` says whether that is a quarantine (paranoid) or
+    the alert and patch gate (strict). 0.11 only warns, and only strict and
+    paranoid are judged under it (the postures where the penalty can decide
+    downtime)."""
+    if quarantines:
+        head = ("WARNING, not quarantined yet: the stricter hardening penalty would "
+                "quarantine this finding. From 0.12 that penalty applies.")
+    else:
+        head = ("WARNING, not acted on yet: the stricter hardening penalty lifts this "
+                "finding to the posture's gate. From 0.12 that penalty applies: it "
+                "raises the threshold at which a finding is alerted and patched, and "
+                "a fix that is not deployed can start the fix deadline.")
     return (
-        f"WARNING, not quarantined yet: the stricter hardening penalty would "
-        f"quarantine this finding. From 0.12 that penalty applies. "
-        f"{threshold_detail} The extra penalty (+{penalty}) comes from "
+        f"{head} {threshold_detail} The extra penalty (+{penalty}) comes from "
         f"{hardening_cause(services)}. {HARDENING_UPCOMING_FIX}"
     )

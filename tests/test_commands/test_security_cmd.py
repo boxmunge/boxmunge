@@ -1306,11 +1306,11 @@ def test_suppress_validation_failure_emits_log_error(
 # ---------- scan ----------
 
 
-def _scan_paths(tmp_path):
+def _scan_paths(tmp_path, posture: str = "paranoid"):
     """Build a paths fixture with a single 'demo' project ready to scan.
 
-    The posture is strict: these tests quarantine on plain (non-KEV)
-    findings, which balanced only alerts on.
+    The posture defaults to paranoid: these tests quarantine on plain
+    (non-KEV) findings, which balanced and strict only alert on.
     """
     paths = _make_paths(tmp_path)
     proj = paths.projects / "demo"
@@ -1324,7 +1324,7 @@ def _scan_paths(tmp_path):
         "services": {
             "web": {"port": 3000, "routes": [{"path": "/"}], "smoke": "x.sh", "image": "myapp:1.0"},
         },
-        "security": {"posture": "strict"},
+        "security": {"posture": posture},
     }
     (proj / "manifest.yml").write_text(yaml.safe_dump(manifest))
     (proj / "compose.yml").write_text(yaml.safe_dump({
@@ -1450,7 +1450,7 @@ def test_scan_does_not_quarantine_unused_runtime_package(
     from boxmunge.cve.scanner import (
         AttackVector, Finding, PkgClass, ScanResult, Severity, VulnStatus,
     )
-    paths = _scan_paths(tmp_path)
+    paths = _scan_paths(tmp_path, posture="strict")
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
@@ -1504,7 +1504,7 @@ def test_scan_does_not_quarantine_unused_runtime_package(
     assert "q" not in called, "perl-base must not quarantine a Python project"
 
 
-def test_scan_quarantines_runtime_the_project_actually_uses(
+def test_scan_judges_runtime_the_project_actually_uses_at_the_gate(
     monkeypatch, tmp_path,
 ) -> None:
     """Negative control for the relevance gate.
@@ -1512,14 +1512,15 @@ def test_scan_quarantines_runtime_the_project_actually_uses(
     Mirrors test_scan_does_not_quarantine_unused_runtime_package, but the
     OS-package CVE here (python3) belongs to a runtime the project's own
     ``lang_types`` says it uses. The gate must discriminate, not exempt
-    everything: this must still quarantine.
+    everything: this must still meet strict's gate (alerted, awaiting a fix;
+    strict below KEV takes nothing down at scan time, 0.12).
     """
     from datetime import datetime, timezone
     from boxmunge.commands.security_actions import cmd_security_scan
     from boxmunge.cve.scanner import (
         AttackVector, Finding, PkgClass, ScanResult, Severity, VulnStatus,
     )
-    paths = _scan_paths(tmp_path)
+    paths = _scan_paths(tmp_path, posture="strict")
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
@@ -1556,7 +1557,10 @@ def test_scan_quarantines_runtime_the_project_actually_uses(
     )
     rc = cmd_security_scan([], paths)
     assert rc == 0
-    assert "q" in called, "python3 must still quarantine a Python project"
+    state = json.loads(paths.project_scan_state("demo").read_text())
+    [judged] = state["decisions"][0]["findings"]
+    assert judged["disposition"] == "awaiting_fix", "python3 must reach a Python project's gate"
+    assert "q" not in called
 
 
 def test_scan_invalid_declared_runtimes_fails_loudly(
@@ -1647,7 +1651,7 @@ def test_scan_warns_on_empty_inferred_runtime_deescalation(
     from boxmunge.cve.scanner import (
         AttackVector, Finding, PkgClass, ScanResult, Severity, VulnStatus,
     )
-    paths = _scan_paths(tmp_path)
+    paths = _scan_paths(tmp_path, posture="strict")
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
@@ -1727,7 +1731,7 @@ def test_scan_does_not_warn_when_deescalation_is_over_determined(
     from boxmunge.cve.scanner import (
         Finding, PkgClass, ScanResult, Severity, VulnStatus,
     )
-    paths = _scan_paths(tmp_path)
+    paths = _scan_paths(tmp_path, posture="strict")
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
@@ -1778,7 +1782,7 @@ def test_scan_does_not_warn_when_runtimes_declared(
     from boxmunge.cve.scanner import (
         AttackVector, Finding, PkgClass, ScanResult, Severity, VulnStatus,
     )
-    paths = _scan_paths(tmp_path)
+    paths = _scan_paths(tmp_path, posture="strict")
     manifest_path = paths.projects / "demo" / "manifest.yml"
     manifest = yaml.safe_load(manifest_path.read_text())
     manifest["security"] = {"runtimes": ["ruby"]}
@@ -2168,7 +2172,7 @@ def test_scan_passes_prior_decision_on_second_scan(monkeypatch, tmp_path) -> Non
 
 def _quarantine_scan(monkeypatch, paths) -> None:
     """Wire up scan-related stubs: returns a Critical finding that
-    quarantines a strict project."""
+    quarantines a paranoid project."""
     from datetime import datetime, timezone
     from boxmunge.cve.scanner import (
         AttackVector, Finding, ScanResult, Severity, VulnStatus,

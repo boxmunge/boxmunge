@@ -131,7 +131,9 @@ def test_fleet_view_shows_held_projects(fleet, monkeypatch, capsys):
     cmd_security(["--json"])
     payload = json.loads(capsys.readouterr().out)
     assert payload["held_by_breaker"] == {p: [_SHARED] for p in ("aaa", "bbb", "ccc")}
-    assert payload["posture_distribution"]["paranoid"] == 0
+    # The fleet runs the helper's default posture (paranoid: a plain finding quarantines).
+    assert payload["posture_distribution"]["paranoid"] == 3
+    assert payload["posture_distribution"]["strict"] == 0
     cmd_security([])
     assert "Held by the CVE circuit breaker (still running): 3" in capsys.readouterr().out
 

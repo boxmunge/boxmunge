@@ -76,6 +76,7 @@ def _serialize_disposition(d: Any) -> dict[str, Any]:
         "severity_source": f.severity_source,
         "exploited_by": sorted(s.value for s in d.exploited_by),
         "fix_would_quarantine": d.fix_would_quarantine,
+        "fix_meets_patch_gate": d.fix_meets_patch_gate,
         "hardening_would_quarantine": d.hardening_would_quarantine,
     }
 
@@ -288,6 +289,7 @@ def decisions_from_scan_state(
                     explanation=raw.get("explanation", "") or "",
                     exploited_by=_stored_exploited_by(raw),
                     fix_would_quarantine=raw.get("fix_would_quarantine") is True,
+                    fix_meets_patch_gate=raw.get("fix_meets_patch_gate") is True,
                     hardening_would_quarantine=raw.get("hardening_would_quarantine") is True,
                 ),
             )

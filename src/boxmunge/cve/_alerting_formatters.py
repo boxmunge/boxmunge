@@ -230,12 +230,13 @@ def format_awaiting_fix_alert(project: str, hits: Sequence[Hit]) -> Alert:
 
 
 def format_hardening_upcoming_alert(project: str, hits: Sequence[Hit]) -> Alert:
-    """Findings that quarantine from 0.12 but not now. Warned once per finding;
-    not quarantined. Priority 0."""
+    """Findings that meet the posture's gate from 0.12 but not now. Warned once
+    per finding; nothing is acted on. Priority 0."""
     hits = _ordered(hits)
     n = len(hits)
-    title = (f"[boxmunge:{project}] {n} CVE finding{'s' if n != 1 else ''} will "
-             f"quarantine from 0.12 (warning only)")
+    title = (f"[boxmunge:{project}] {n} CVE finding{'s' if n != 1 else ''} "
+             f"meet{'s' if n == 1 else ''} the gate under the 0.12 hardening rule "
+             f"(warning only)")
     body = "\n".join([
         f"Project: {project} — still running; nothing is quarantined for this in 0.11.",
         *_listing(hits),

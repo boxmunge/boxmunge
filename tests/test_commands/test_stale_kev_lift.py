@@ -226,7 +226,7 @@ def test_accept_stale_kev_lifts_logs_and_alerts(tmp_path, monkeypatch, capsys) -
 
 def test_accept_stale_kev_still_refuses_a_quarantine_level_finding(
         tmp_path, monkeypatch, capsys) -> None:
-    paths = _resume_box(tmp_path, monkeypatch, [CRIT], security={"posture": "strict"})
+    paths = _resume_box(tmp_path, monkeypatch, [CRIT], security={"posture": "paranoid"})
     assert cmd_security_resume(["demo", "--accept-stale-kev"], paths) == 1
     assert is_quarantined("demo", paths)
     assert "would still quarantine" in capsys.readouterr().err

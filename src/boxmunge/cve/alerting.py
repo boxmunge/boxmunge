@@ -205,7 +205,7 @@ def detect_transitions(
     fixable under relaxed (B-01) — is alerted on EVERY scan, not only on a
     transition.
 
-    A finding that quarantines from 0.12 but not now (hardening_would_quarantine)
+    A finding that meets the gate from 0.12 but not now (hardening_would_quarantine)
     is warned once, when it first carries the flag.
 
     An AWAITING_FIX finding (balanced: no fix yet, not exploited) is alerted
@@ -257,7 +257,7 @@ def detect_transitions(
             new_awaiting.append(hit)
         elif disp in (Disposition.INFORMATIONAL, Disposition.IGNORED_FIXED) and old is None:
             # A new below-gate finding, fixable or not, is still reported;
-            # one that quarantines from 0.12 has its own warning below.
+            # one that meets the gate from 0.12 has its own warning below.
             if not fd.hardening_would_quarantine:
                 new_info.append(hit)
 

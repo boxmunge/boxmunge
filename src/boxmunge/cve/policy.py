@@ -17,10 +17,11 @@ postures trust the distro's own triage):
     balanced → quarantine only on CISA KEV, fixable or not. A distro
                status:affected + distro severity ≥ High + AV:N finding with
                no fix is AWAITING_FIX: alerted once, never downtime.
-    strict   → KEV OR distro status:affected + distro severity ≥ Medium + AV:N.
-    paranoid → anything ≥ Medium over threshold; no distro trust, no AV
-               filter, the highest severity any source reports (NVD, the
-               distro, GHSA, ...). KEV can still escalate.
+    strict   → quarantine only on KEV at scan time, like balanced, at a lower
+               gate: distro severity ≥ Medium (AWAITING_FIX with no fix).
+    paranoid → anything ≥ Medium over threshold, fixable or not; no distro
+               trust, no AV filter, the highest severity any source reports
+               (NVD, the distro, GHSA, ...). KEV can still escalate.
 
 KEV is the first gate: an actively exploited CVE quarantines regardless of
 posture, distro status, attack vector, threshold, an operator suppression
@@ -36,8 +37,8 @@ under_investigation), when there is no distro verdict at all (only NVD/GHSA
 rated it), or when it fails the v0.7.1 Attack Vector filter. Only the
 remaining distro-acknowledged, network-reachable findings reach the severity
 gate — compared against the *distro* severity, elevated by the hardening
-penalty. Meeting it quarantines under strict and alerts (AWAITING_FIX) under
-balanced, so under balanced and relaxed the penalty never decides downtime.
+penalty. Meeting it alerts (AWAITING_FIX) under balanced and strict; a fixable
+finding there is flagged for the patch instead (autofix_policy.py).
 
 A finding is also routed to INFORMATIONAL — below paranoid — when its
 package belongs to a language runtime the project does not use (a Perl bug
@@ -79,6 +80,7 @@ from boxmunge.cve.scanner import (
 )
 from boxmunge.cve.policy_types import (
     _POSTURE_LABEL,
+    GATE_MET,
     Disposition,
     FindingDisposition,
     PolicyError,
@@ -87,7 +89,7 @@ from boxmunge.cve.policy_types import (
     elevate_severity,
     listing_label,
     parse_posture,
-    severity_gate_quarantines,
+    penalty_can_decide_downtime,
 )
 from boxmunge.cve.policy_gates import (
     informational,
@@ -99,6 +101,7 @@ from boxmunge.cve.policy_explain import (
     explain_av_filter,
     explain_distro_deprioritized,
     explain_fix_available,
+    explain_fix_quarantine,
     explain_kev_fix_not_running,
     explain_kev_opted_out,
     explain_irrelevant_runtime,
@@ -117,7 +120,7 @@ __all__ = [
     "evaluate_finding",
     "evaluate_project",
     "parse_posture",
-    "severity_gate_quarantines",
+    "penalty_can_decide_downtime",
 ]
 
 
@@ -159,13 +162,12 @@ def evaluate_finding(
 
     Order of checks (see the module docstring for the rationale of each):
     KEV override → QUARANTINE (fixable KEV under relaxed → IGNORED_FIXED);
-    fix → IGNORED_FIXED; suppression → SUPPRESSED;
+    fix → IGNORED_FIXED (paranoid at its gate: QUARANTINE); suppression → SUPPRESSED;
     UNKNOWN severity → INFORMATIONAL; paranoid → highest-rating threshold; relaxed →
     INFORMATIONAL (KEV-only, handled above); else (balanced/strict)
     irrelevant-runtime / distro-deprioritized / no-distro-verdict /
-    non-network AV → INFORMATIONAL; else distro-severity gate → strict:
-    QUARANTINE / STILL_RUNNING_AT_RISK, balanced: AWAITING_FIX; below it
-    INFORMATIONAL.
+    non-network AV → INFORMATIONAL; else distro-severity gate →
+    AWAITING_FIX; below it INFORMATIONAL.
     """
     sources = exploited_lookup(finding.cve_id)
     d = _decide(
@@ -176,13 +178,10 @@ def evaluate_finding(
     )
     if d.exploited_by or not sources:
         return d
+    # Below paranoid a VulnCheck-only listing decides nothing: it is alerted.
     label = listing_label(sources)
     if label in d.explanation:
         note = d.explanation  # the explainer already says so
-    elif d.disposition in (Disposition.QUARANTINE, Disposition.STILL_RUNNING_AT_RISK):
-        note = (f"{d.explanation} {finding.cve_id} is also listed as exploited "
-                f"({label}), but that listing did not decide this: "
-                f"{_POSTURE_LABEL[posture]} posture's own gate did.")
     else:
         note = (f"{d.explanation} {finding.cve_id} is also listed as exploited "
                 f"({label}), which alone does not quarantine under "
@@ -252,19 +251,34 @@ def _decide(
         )
 
     # 2. Upstream fix (not KEV): IGNORED_FIXED, flagged when the finding
-    # would otherwise meet the gate (quarantine, at risk, or balanced's
-    # AWAITING_FIX) so it is alerted with the rebuild advice, never silently
-    # ignored (B-01). The but-for evaluation is the same pure function.
+    # would otherwise meet the gate (balanced's or strict's AWAITING_FIX) so
+    # it is alerted with the rebuild advice, never silently ignored (B-01).
+    # Paranoid takes the downtime instead: a fixable finding at its gate is
+    # quarantined until the fix runs. The but-for evaluation is the same pure
+    # function; relaxed patches at balanced's gate but alerts at its own.
     if finding.fix_available:
-        but_for = evaluate_finding(
-            replace(finding, fixed_version=None), posture=posture,
-            hardening_penalty=hardening_penalty,
-            dangerously_disable_quarantine=dangerously_disable_quarantine,
-            suppressions=suppressions, today=today, exploited_lookup=exploited_lookup,
-            runtimes=runtimes,
-        ).disposition
-        would = but_for in (Disposition.QUARANTINE, Disposition.STILL_RUNNING_AT_RISK,
-                            Disposition.AWAITING_FIX)
+        def but_for(p: Posture) -> Disposition:
+            return evaluate_finding(
+                replace(finding, fixed_version=None), posture=p,
+                hardening_penalty=hardening_penalty,
+                dangerously_disable_quarantine=dangerously_disable_quarantine,
+                suppressions=suppressions, today=today,
+                exploited_lookup=exploited_lookup, runtimes=runtimes,
+            ).disposition
+        without = but_for(posture)
+        would = without in GATE_MET
+        patch_gate = (but_for(Posture.BALANCED) in GATE_MET
+                      if posture is Posture.RELAXED else would)
+        if posture is Posture.PARANOID and would:
+            return FindingDisposition(
+                finding=finding, base_severity=base,
+                hardening_penalty=hardening_penalty, effective_severity=effective,
+                disposition=without, suppression=None,
+                explanation=explain_fix_quarantine(
+                    finding.fixed_version,
+                    dangerously_disabled=without is Disposition.STILL_RUNNING_AT_RISK),
+                fix_meets_patch_gate=True,
+            )
         return FindingDisposition(
             finding=finding,
             base_severity=base,
@@ -274,10 +288,10 @@ def _decide(
             suppression=None,
             explanation=explain_fix_available(
                 finding.fixed_version, meets_gate=would,
-                gate_quarantines=but_for is not Disposition.AWAITING_FIX,
                 posture_label=_POSTURE_LABEL[posture],
             ),
             fix_would_quarantine=would,
+            fix_meets_patch_gate=patch_gate,
         )
 
     # 3. Active suppression.
@@ -387,8 +401,8 @@ def _decide(
     # penalty). effective_severity now reflects the distro severity the
     # decision was actually made on. Reached only by balanced/strict with a
     # distro severity and a status outside _DEPRIORITIZED_STATUS (AFFECTED,
-    # END_OF_LIFE, or UNKNOWN — a missing status fails closed). Strict's gate
-    # quarantines; balanced's alerts (AWAITING_FIX).
+    # END_OF_LIFE, or UNKNOWN — a missing status fails closed). Both gates
+    # alert (AWAITING_FIX).
     distro_effective = elevate_severity(distro_sev, hardening_penalty)
     return threshold_disposition(
         finding,
@@ -425,9 +439,9 @@ def evaluate_project(
     ``upcoming`` is the stricter hardening the policy will apply from 0.12.
     A finding that does not quarantine under ``hardening_profile`` but would
     under it keeps its disposition and is flagged hardening_would_quarantine:
-    a warning, never a quarantine. Only a posture whose severity gate
-    quarantines (strict, paranoid) is judged under it: under relaxed and
-    balanced the penalty decides no quarantine, so there is nothing to warn of.
+    a warning, never a quarantine. Only a posture where the penalty can
+    decide downtime (strict, paranoid) is judged under it: under relaxed and
+    balanced it decides none, so there is nothing to warn of.
     """
     penalty = calculate_hardening_penalty(hardening_profile)
 
@@ -444,7 +458,7 @@ def evaluate_project(
         )
 
     dispositions = tuple(judge(f, penalty) for f in scan_result.findings)
-    if upcoming is not None and severity_gate_quarantines(posture):
+    if upcoming is not None and penalty_can_decide_downtime(posture):
         upcoming_penalty = calculate_hardening_penalty(upcoming.profile)
         dispositions = tuple(
             flag_upcoming(d, judge(d.finding, upcoming_penalty), upcoming)

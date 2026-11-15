@@ -201,6 +201,6 @@ def test_cve_texts_name_real_actions():
     body = format_fixable_alert("demo", []).body
     assert "pull: true" not in body and "prod-deploy demo --redeploy" in body
     assert "Shipping a fix the upstream image does not have yet" in body
-    assert "pull the base image" not in explain_fix_available("1.2", meets_gate=False, gate_quarantines=True, posture_label="x")
+    assert "pull the base image" not in explain_fix_available("1.2", meets_gate=False, posture_label="x")
     assert "suppress the CVE after review" in HARDENING_UPCOMING_FIX
     assert "`security` declaration" not in HARDENING_UPCOMING_FIX
