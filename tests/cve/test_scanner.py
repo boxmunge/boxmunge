@@ -741,6 +741,7 @@ def test_distro_severity_prefers_os_vendor_over_nvd():
         cve_id="CVE-1", severity=Severity.HIGH, package="p",
         installed_version="1", fixed_version=None, title="t", primary_url=None,
         vendor_severities={"nvd": Severity.HIGH, "debian": Severity.LOW},
+        pkg_type="debian",
     )
     assert distro_severity(f) is Severity.LOW
 

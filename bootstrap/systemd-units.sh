@@ -14,6 +14,15 @@ set -euo pipefail
 SRC="${1:?Usage: systemd-units.sh <bundle_dir>}/systemd"
 DEST="${BOXMUNGE_SYSTEMD_DIR:-/etc/systemd/system}"
 
+# The scan and container-update timers were replaced by boxmunge-maintenance
+# (scan, then update, in one unit). Retire them; a no-op once they are gone.
+for old in boxmunge-cve-scan.timer boxmunge-container-update.timer; do
+    if [[ -e "${DEST}/${old}" ]]; then
+        systemctl disable --now "${old}"
+        rm -f "${DEST}/${old}"
+    fi
+done
+
 changed=()
 for timer in "${SRC}/"*.timer; do
     cmp -s "${timer}" "${DEST}/${timer##*/}" || changed+=("${timer##*/}")
@@ -24,9 +33,8 @@ systemctl enable --now \
     boxmunge-auto-update.timer \
     boxmunge-backup-sync.timer \
     boxmunge-backup.timer \
-    boxmunge-container-update.timer \
-    boxmunge-cve-scan.timer \
-    boxmunge-health.timer
+    boxmunge-health.timer \
+    boxmunge-maintenance.timer
 if [[ "${#changed[@]}" -gt 0 ]]; then
     systemctl restart "${changed[@]}"
 fi

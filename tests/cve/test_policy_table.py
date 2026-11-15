@@ -43,6 +43,7 @@ def _f(
         fixed_version=fix, title="", primary_url=None, attack_vector=av,
         status=status,
         vendor_severities=vendor if vendor is not None else {"debian": sev},
+        pkg_type="debian",
         pkg_class=PkgClass.OS,
     )
 

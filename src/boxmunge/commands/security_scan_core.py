@@ -75,8 +75,9 @@ from boxmunge.paths import BoxPaths
 # that hasn't been scanned yet. With it, a single hung image consumes at
 # most 600s of wall time and the next project gets its fair share.
 #
-# Companion to systemd/boxmunge-cve-scan.service's TimeoutStartSec=60m:
-# the per-project budget is the inner cap, the unit timeout is the outer.
+# Companion to the unit timeouts (boxmunge-cve-scan.service 60m for manual
+# runs, boxmunge-maintenance.service 4h for scan plus update): the
+# per-project budget is the inner cap, the unit timeout is the outer.
 _PROJECT_BUDGET_SECONDS = 600
 
 

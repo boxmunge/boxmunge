@@ -1,0 +1,15 @@
+[Unit]
+Description=boxmunge nightly maintenance (CVE scan, then container update)
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+# In order. The leading "-" means a failed step does not skip the next.
+ExecStart=-/opt/boxmunge/bin/boxmunge security scan
+ExecStart=-/opt/boxmunge/bin/boxmunge container-update
+StandardOutput=journal
+StandardError=journal
+TimeoutStartSec=4h
