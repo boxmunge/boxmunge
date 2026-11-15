@@ -238,7 +238,7 @@ def test_an_incomplete_rollback_says_the_project_may_be_mixed(tmp_path, monkeypa
     box.run()
     [failed] = box.sent("Autofix FAILED")
     assert "may be left mixed" in failed[1] and "DockerError: boom" in failed[1]
-    assert "boxmunge status demo" in failed[1]
+    assert "boxmunge security demo" in failed[1]
     assert is_quarantined("demo", box.paths)   # quarantined regardless
 
 

@@ -81,7 +81,7 @@ def format_autofix_failed_alert(
         mixed = ["", "The rollback did not finish, so the project may be left mixed (its",
                  "previous image pins restored, containers still on a patched image):",
                  *(f"- {p}" for p in rollback_problems),
-                 f"Check it with `boxmunge status {project}`; redeploying its release brings",
+                 f"Check it with `boxmunge security {project}`; redeploying its release brings",
                  "every service back onto the image the release names."]
     return Alert(kind="autofix_failed",
                  title=f"[boxmunge:{project}] Autofix FAILED {where} — {_cves(cves)}",
@@ -105,7 +105,7 @@ def format_autofix_interrupted_alert(project: str, problems: Sequence[str], *,
     rolled back from the journal; ``site`` is the fallback applied for what
     it was patching. Priority 1."""
     undone = (["", "The rollback did not finish:", *(f"- {p}" for p in problems),
-               f"Check it with `boxmunge status {project}`."] if problems else [])
+               f"Check it with `boxmunge security {project}`."] if problems else [])
     return Alert(kind="autofix_failed",
                  title=f"[boxmunge:{project}] Autofix run interrupted — rolled back",
                  body="\n".join([

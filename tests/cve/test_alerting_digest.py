@@ -153,3 +153,17 @@ def test_autofix_digest_orders_every_group() -> None:
         "skipped: web: container update failed: unhealthy: app",
         "deferred to the next maintenance window: zed",
     ]
+
+
+def test_a_mixed_project_alert_names_a_command_that_takes_the_project() -> None:
+    """`status` takes no project; `security <project>` shows the patches."""
+    from boxmunge.cve.alerting import (
+        format_autofix_failed_alert, format_autofix_interrupted_alert,
+    )
+    failed = format_autofix_failed_alert("demo", ("CVE-2026-0001",), step="health",
+                                         reason="unhealthy", site="up", timing="t",
+                                         rollback_problems=("recreate failed",))
+    interrupted = format_autofix_interrupted_alert("demo", ("recreate failed",), site="up")
+    for alert in (failed, interrupted):
+        assert "`boxmunge security demo`" in alert.body
+        assert "boxmunge status demo" not in alert.body
