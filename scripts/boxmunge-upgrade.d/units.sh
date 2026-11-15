@@ -23,9 +23,11 @@
 # check-probation and upgrade, holding the upgrade lock with nothing in
 # flight, also puts the live slot's units back where they differ
 # (heal_slot_units), which reverts hand edits to the unit files too. A
-# rollback to 0.11.11 is run by its own shim, whose restore knows only
-# .service and .timer units and so leaves boxmunge-jobs.path behind; the heal
-# of the next check-probation removes it.
+# rollback run by 0.11.11's shim, whose restore knows only .service and
+# .timer units, leaves boxmunge-jobs.path behind; the heal of the 0.12
+# shim's next check-probation removes it. A downgrade (upgrade target
+# 0.11.11) leaves it for good, inert (nothing on 0.11.11 writes the queue);
+# docs/on-server/ARCHITECTURE.md says how to tidy it.
 
 SYSTEMD_UNIT_DIR="${BOXMUNGE_SYSTEMD_DIR:-/etc/systemd/system}"
 
