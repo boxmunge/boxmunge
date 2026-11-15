@@ -82,8 +82,8 @@ def decide_release_users(project_name: str, paths: BoxPaths, manifest: dict,
         with tempfile.TemporaryDirectory(prefix="boxmunge-users-") as scratch:
             overlay = Path(scratch) / "compose.boxmunge.yml"
             overlay.write_text(_candidate_overlay(
-                render_compose_override(paths, manifest, user_compose), user_compose,
-                project_name))
+                render_compose_override(paths, manifest, user_compose, installing=True),
+                user_compose, project_name))
             target = production_target(paths, project_name, overlay)
             users = deploy_images.prepare_release_users(
                 paths, target, manifest,
@@ -107,7 +107,8 @@ def decide_release_users(project_name: str, paths: BoxPaths, manifest: dict,
 def generate_release_config(project_name: str, paths: BoxPaths, manifest: dict,
                             component: str, users: dict[str, ServiceUser]) -> None:
     """Write the release's Caddy site and compose overlay (not yet live)
-    with `users`, then record them. A paused project (awaiting this deploy:
+    with `users` and none of the replaced release's image pins, then record
+    them. A paused project (awaiting this deploy:
     deploy_handover) keeps its maintenance site until its start has run.
     Raises OSError or ValueError."""
     if is_paused(project_name, paths):
@@ -119,7 +120,8 @@ def generate_release_config(project_name: str, paths: BoxPaths, manifest: dict,
         print("  Generating Caddy config...")
         prepare_caddy_config(paths, manifest)
     print("  Generating compose overlay...")
-    prepare_compose_override(paths, manifest, component=component, users=users or None)
+    prepare_compose_override(paths, manifest, component=component, users=users or None,
+                             installing=True)
     deploy_images.record_release_users(paths, production_target(paths, project_name),
                                        manifest, users, component=component)
 

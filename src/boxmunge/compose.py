@@ -11,6 +11,7 @@ from boxmunge.bind_sources import OVERLAY, refresh_control_hash
 from boxmunge.compose_images import built_image_name, describe_image
 from boxmunge.compose_mounts import SMOKE_SOURCE
 from boxmunge.fileutil import atomic_write_text
+from boxmunge.image_pins import ImagePin, read_pins
 from boxmunge.log import log_operation
 from boxmunge.paths import BoxPaths
 from boxmunge.published_ports import overlay_ports
@@ -19,6 +20,7 @@ from boxmunge.run_as import RunAsError, read_users
 from boxmunge.security_warn import (
     warn_off_services, warn_published_ports, warn_writable_state,
 )
+from boxmunge.state import StateError
 from boxmunge.writable import WritableState, classify_state
 
 if TYPE_CHECKING:
@@ -244,19 +246,22 @@ def generate_compose_override(
     *,
     user_compose: dict[str, Any],
     users: dict[str, ServiceUser] | None = None,
+    pins: tuple[ImagePin, ...] = (),
 ) -> str:
     """Generate compose.boxmunge.yml content.
 
     Hardens every service in `user_compose` and the manifest, adds
     boxmunge-proxy network aliases to routable services, env_file
     directives to manifest services, and resource limits where declared.
+    Each of `pins` sets its service's image to `<ref>@<digest>`
+    (image_pins).
 
     `user_compose`: the parsed user compose.yml dict, the same document
     `validate_user_compose` checked. Required: without it the overlay
     could not see compose-only services, and they would run unhardened.
     """
     return _render_override(manifest, env_files, user_compose, alias_prefix=None,
-                            users=users)
+                            users=users, pins=pins)
 
 
 def _render_override(
@@ -265,12 +270,21 @@ def _render_override(
     user_compose: dict[str, Any],
     alias_prefix: str | None,
     users: dict[str, ServiceUser] | None,
+    pins: tuple[ImagePin, ...] = (),
 ) -> str:
     env_file_list = _build_env_file_list(env_files)
     services = _build_service_override(
         manifest, env_file_list, user_compose=user_compose, alias_prefix=alias_prefix,
         users=users,
     )
+    declared = _user_services(user_compose)
+    for pin in pins:
+        if pin.service not in declared:
+            raise ComposeError(
+                f"the image pin of service {pin.service!r} ({pin.image}): compose.yml has "
+                f"no such service. A pin belongs to the release it was written for, and "
+                f"the switch to another release clears it")
+        services.setdefault(pin.service, {})["image"] = pin.image
     override: dict[str, Any] = {"networks": {"boxmunge-proxy": {"external": True}}}
     if services:
         override["services"] = services
@@ -321,17 +335,31 @@ def recorded_users(paths: BoxPaths, project_name: str, *,
         raise ComposeError(str(e)) from e
 
 
+def recorded_pins(paths: BoxPaths, project_name: str) -> tuple[ImagePin, ...]:
+    """The image pins the overlay runs. Raises ComposeError for a record
+    that cannot be read: dropping a pin would run the image it replaced."""
+    try:
+        return read_pins(paths, project_name)
+    except StateError as e:
+        raise ComposeError(str(e)) from e
+
+
 def render_compose_override(paths: BoxPaths, manifest: dict[str, Any],
                             user_compose: dict[str, Any],
-                            users: dict[str, ServiceUser] | None = None) -> str:
+                            users: dict[str, ServiceUser] | None = None, *,
+                            installing: bool = False) -> str:
     """compose.boxmunge.yml's content for the release in the project dir
     (`user_compose`: its resolved compose.yml), with the users the record
-    holds; nothing is written."""
+    holds and the project's image pins; nothing is written. `installing`:
+    the release is one a deploy, promote or rollback is switching to, which
+    runs its own images, so no pin of the release it replaces is rendered
+    (the switch clears them: image_pins)."""
     project_name = manifest["project"]
     return generate_compose_override(
         manifest, env_files=production_env_files(paths, project_name) or None,
         user_compose=user_compose,
         users=users if users is not None else recorded_users(paths, project_name),
+        pins=() if installing else recorded_pins(paths, project_name),
     )
 
 
@@ -341,9 +369,11 @@ def prepare_compose_override(
     component: str = "deploy",
     *,
     users: dict[str, ServiceUser] | None = None,
+    installing: bool = False,
 ) -> None:
     """Generate compose.boxmunge.yml for the release in the project dir,
-    with `users`, or (None) the users the record holds.
+    with `users`, or (None) the users the record holds, and the image pins
+    unless `installing` (render_compose_override).
 
     `component` labels the SECURITY OFF log entry so callers from upgrade /
     resume don't misattribute the warning as "deploy". Lives here, not in
@@ -355,7 +385,8 @@ def prepare_compose_override(
     override_path.parent.mkdir(parents=True, exist_ok=True)
 
     user_compose = load_user_compose(project_dir / "compose.yml", project_name)
-    content = render_compose_override(paths, manifest, user_compose, users)
+    content = render_compose_override(paths, manifest, user_compose, users,
+                                      installing=installing)
     atomic_write_text(override_path, content)
     refresh_control_hash(project_dir, paths.project_bind_record(project_name), OVERLAY)
     # Before the overlay named built images under boxmunge.invalid/, Compose

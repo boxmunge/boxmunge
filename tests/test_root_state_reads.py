@@ -29,8 +29,9 @@ from unittest.mock import patch
 import pytest
 
 from boxmunge import (
-    bind_mounts, bind_sources, compose_up_steps, data_dirs, fs_nofollow, overlay_users, pause,
-    release, release_txn, run_as, staged_release, unresolved_stage, upgrade_state, user_drift,
+    bind_mounts, bind_sources, compose_up_steps, data_dirs, fs_nofollow, image_pins,
+    overlay_users, pause, release, release_txn, run_as, staged_release, unresolved_stage,
+    upgrade_state, user_drift,
 )
 from boxmunge.api.jobs import JobStore
 from boxmunge.backup_evidence import project_evidence, sync_evidence
@@ -166,6 +167,10 @@ READERS = [
            {"entries": [{"cve_id": "CVE-1", "package": "openssl", "first_seen": ISO,
                          "warned_at": None}]},
            lambda p: fix_grace.FixGrace.load(p, P).first_seen(("CVE-1", "openssl"))),
+    Reader("image_pins", lambda p: p.project_image_pins(P),
+           {"version": 1, "pins": [{"service": "web", "ref": "boxmunge.local/myapp/web:a",
+                                    "digest": "sha256:" + "a" * 64, "reason": "autofix"}]},
+           lambda p: image_pins.read_pins(p, P)),
     Reader("kev_source_history", lambda p: p.kev_sources,
            {"sources": {"https://cisa.example/kev.json":
                         {"released_at": ISO, "disagreed_runs": 0}}},
