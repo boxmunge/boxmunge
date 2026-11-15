@@ -98,6 +98,8 @@ class BoxPaths:
         # unfinished (queued or running) record under queue/.
         self.jobs_dir = self.state / "jobs"
         self.jobs_queue = self.jobs_dir / "queue"
+        # What the job runner found in queue/ that is not a job record.
+        self.jobs_rejected = self.jobs_dir / "rejected"
         # Held shared by every running job, exclusively by the upgrade shim.
         self.jobs_gate = self.jobs_dir / "gate.lock"
         self.templates = root / "templates" / "project"
