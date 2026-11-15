@@ -20,7 +20,7 @@ _SBIN_DIRS = ["/usr/local/sbin", "/usr/sbin", "/sbin"]
 BOXMUNGE_TIMERS = (
     "boxmunge-health.timer", "boxmunge-backup.timer",
     "boxmunge-backup-sync.timer", "boxmunge-auto-update.timer",
-    "boxmunge-container-update.timer", "boxmunge-cve-scan.timer",
+    "boxmunge-maintenance.timer",
 )
 
 

@@ -2422,9 +2422,11 @@ judged not exploitable.
 
 Scan cadence:
 
-- Daily between 03:00 and 03:30 via `boxmunge-cve-scan.timer`, after the
-  nightly container update (02:30 to 03:00), so the images it pulled are
-  scanned that night
+- Nightly between 02:30 and 03:00 via `boxmunge-maintenance.timer`, which
+  runs the scan and then the container update in one unit, so the scan
+  always finishes before the update starts. A failure in one step does not
+  skip the other. (Upgrades retire the former separate scan and update
+  timers.)
 - Not yet at deploy time: run `security scan <project>` after a deploy to
   check a new image at once
 - Ad-hoc:

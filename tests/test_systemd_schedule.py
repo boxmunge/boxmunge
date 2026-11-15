@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The nightly CVE scan runs after the container update (deep review E-3):
-the update's timer always fires first, and a scan due while it still runs
-waits for it, so the scan judges the images the update left running and
-never finds a project the update has locked."""
+"""The nightly CVE scan finishes before the container update starts: both
+run, in that order, inside one maintenance unit fired by one timer. Two
+independent timers could not guarantee the order."""
 from __future__ import annotations
 
 import configparser
@@ -28,18 +27,30 @@ def _window(timer: str) -> tuple[timedelta, timedelta]:
     return start, start + timedelta(seconds=int(section.get("RandomizedDelaySec", "0")))
 
 
-def test_the_scan_is_ordered_after_the_container_update() -> None:
-    after = _unit("boxmunge-cve-scan.service")["Unit"]["After"].split()
-    assert "boxmunge-container-update.service" in after
+def _steps() -> list[str]:
+    text = (UNITS / "boxmunge-maintenance.service").read_text()
+    return [line.split("=", 1)[1] for line in text.splitlines()
+            if line.startswith("ExecStart=")]
 
 
-def test_the_container_update_always_fires_before_the_scan() -> None:
-    _, update_latest = _window("boxmunge-container-update.timer")
-    scan_earliest, _ = _window("boxmunge-cve-scan.timer")
-    assert update_latest <= scan_earliest
+def test_scan_runs_before_container_update_in_one_unit() -> None:
+    assert _steps() == ["-/opt/boxmunge/bin/boxmunge security scan",
+                        "-/opt/boxmunge/bin/boxmunge container-update"]
+    service = _unit("boxmunge-maintenance.service")["Service"]
+    assert service["Type"] == "oneshot" and service["User"] == "root"
+    assert service["TimeoutStartSec"] == "4h"
 
 
-def test_the_update_does_not_start_alongside_the_backup() -> None:
+def test_maintenance_starts_30min_after_backup() -> None:
     backup, _ = _window("boxmunge-backup.timer")
-    update_earliest, _ = _window("boxmunge-container-update.timer")
-    assert update_earliest - backup >= timedelta(minutes=30)
+    earliest, _ = _window("boxmunge-maintenance.timer")
+    assert earliest - backup >= timedelta(minutes=30)
+    timer = _unit("boxmunge-maintenance.timer")["Timer"]
+    assert timer["OnCalendar"] == "*-*-* 02:30:00"
+    assert timer["RandomizedDelaySec"] == "1800"
+
+
+def test_the_old_timers_are_gone_and_the_services_have_no_ordering_on_each_other() -> None:
+    assert not (UNITS / "boxmunge-cve-scan.timer").exists()
+    assert not (UNITS / "boxmunge-container-update.timer").exists()
+    assert "boxmunge-container-update.service" not in _unit("boxmunge-cve-scan.service")["Unit"]["After"]

@@ -9,3 +9,4 @@ User=root
 ExecStart=/opt/boxmunge/bin/boxmunge container-update
 StandardOutput=journal
 StandardError=journal
+TimeoutStartSec=3h
