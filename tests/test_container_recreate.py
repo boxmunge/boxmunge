@@ -35,7 +35,8 @@ def test_paused_project_is_refused(box, dark) -> None:
     paths, up = box
     write_paused_state(NAME, paths)
     with pytest.raises(ComposeRefused, match="paused"):
-        recreate_project(paths, NAME, PROD, component="test", quarantined_for_patch=dark)
+        recreate_project(paths, NAME, PROD, component="test",
+                         patch_cves=("CVE-2026-0001",) if dark else ())
     up.assert_not_called()
 
 
@@ -45,20 +46,29 @@ def test_quarantine_refused_unless_for_the_patch(box) -> None:
     with pytest.raises(ComposeRefused, match="CVE-quarantined"):
         recreate_project(paths, NAME, PROD, component="test")
     up.assert_not_called()
-    recreate_project(paths, NAME, PROD, component="test", quarantined_for_patch=True)
+    recreate_project(paths, NAME, PROD, component="test", patch_cves=("CVE-2026-0001",))
     up.assert_called_once()
+
+
+def test_quarantine_for_another_cve_is_refused_for_the_patch(box) -> None:
+    paths, up = box
+    seed_quarantine(paths, NAME)   # for CVE-2026-0001
+    with pytest.raises(ComposeRefused, match="does not fix"):
+        recreate_project(paths, NAME, PROD, component="test", patch_cves=("CVE-2026-0002",))
+    up.assert_not_called()
 
 
 def test_quarantined_and_paused_is_refused_even_for_the_patch(box) -> None:
     paths, up = box
     seed_quarantine(paths, NAME)
     write_paused_state(NAME, paths)
-    assert "paused as well" in start_refusal(paths, NAME, quarantined_for_patch=True)
+    assert "paused as well" in start_refusal(paths, NAME, patch_cves=("CVE-2026-0001",))
 
 
 def test_monitor_stopped_project_is_refused(box) -> None:
     paths, up = box
     with patch.object(container_recreate, "is_monitor_stopped", return_value=True):
         with pytest.raises(ComposeRefused, match="health monitor"):
-            recreate_project(paths, NAME, PROD, component="test", quarantined_for_patch=True)
+            recreate_project(paths, NAME, PROD, component="test",
+                             patch_cves=("CVE-2026-0001",))
     up.assert_not_called()

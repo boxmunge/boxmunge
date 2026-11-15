@@ -182,16 +182,16 @@ def _done(paths: BoxPaths, project: str) -> None:
     clear_autofixing(paths, project)
 
 
-def _dark(paths: BoxPaths, project: str) -> bool:
-    """Whether the queued patch took the project down (quarantined it), so
-    undoing a killed run may start it behind its maintenance page. An entry
-    that cannot be read says no: the undo then starts nothing, and _read
-    alerts the entry."""
+def _dark(paths: BoxPaths, project: str) -> tuple[str, ...]:
+    """The CVEs of the queued patch when it took the project down
+    (quarantined it), so undoing a killed run may start it behind its
+    maintenance page; else (). An entry that cannot be read gives (): the
+    undo then starts nothing, and _read alerts the entry."""
     try:
         entry = read_queue_entry(paths, project)
     except StateError:
-        return False
-    return entry is not None and entry.downtime
+        return ()
+    return entry.cves if entry is not None and entry.downtime else ()
 
 
 def _process(paths: BoxPaths, project: str, now: datetime) -> AutofixOutcome | None:
@@ -199,7 +199,7 @@ def _process(paths: BoxPaths, project: str, now: datetime) -> AutofixOutcome | N
     (a read that fails is alerted and changes nothing), run it, conclude."""
     try:
         interrupted = recover_interrupted(
-            paths, project, quarantined_for_patch=_dark(paths, project))
+            paths, project, patch_cves=_dark(paths, project))
     except StateError as e:
         _problem(paths, project, f"its autofix journal cannot be used: {e}")
         return None

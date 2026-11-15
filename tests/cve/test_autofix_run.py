@@ -132,7 +132,7 @@ class Box:
     def _clear_pins(self, paths, project):
         self.pins = ()
 
-    def _recreate(self, paths, project, files, *, component, quarantined_for_patch=False):
+    def _recreate(self, paths, project, files, *, component, patch_cves=()):
         self.recreates += 1
         pinned = {p.service: p.image_id for p in self.pins}
         for svc, (cid, img) in list(self.containers.items()):
@@ -403,8 +403,8 @@ def test_a_killed_run_is_rolled_back_from_its_journal(paths, box) -> None:
     write_journal(paths, NAME, AutofixJournal(datetime.now(timezone.utc), (), (), (built,)))
     box.pins, box.containers["web"] = (built,), ("c-web-9", patched)
     with project_lock(NAME, paths):
-        assert autofix_run.recover_interrupted(paths, NAME, quarantined_for_patch=False) == ()
-        assert autofix_run.recover_interrupted(paths, NAME, quarantined_for_patch=False) is None   # nothing left to undo
+        assert autofix_run.recover_interrupted(paths, NAME, patch_cves=()) == ()
+        assert autofix_run.recover_interrupted(paths, NAME, patch_cves=()) is None   # nothing left to undo
     assert box.pins == () and box.running()["web"] == WEB
     assert box.removed == [built.ref] and read_journal(paths, NAME) is None
     assert any(level == "error" and "interrupted" in msg for level, msg, _ in box.log)
@@ -469,7 +469,7 @@ def test_a_journal_left_after_a_patch_keeps_what_recovery_restores(paths, box,
     assert read_records(paths, NAME) == outcome.records
     monkeypatch.setattr(autofix_run, "remove_journal", real_remove)
     with project_lock(NAME, paths):
-        assert autofix_run.recover_interrupted(paths, NAME, quarantined_for_patch=False) == ()
+        assert autofix_run.recover_interrupted(paths, NAME, patch_cves=()) == ()
     assert box.pins == (pin,) and box.running()["web"] == pin.image_id
     assert read_records(paths, NAME) == (record,)     # no record claims the undone patch
     assert pin.ref not in box.removed and read_journal(paths, NAME) is None
@@ -492,5 +492,18 @@ def test_quarantined_project_is_refused_unless_quarantined_for_the_patch(paths, 
     refused = _run(paths)
     assert refused.failed_step == "swap" and "CVE-quarantined" in refused.reason
     assert box.recreates == 0
+    seed_quarantine(paths, NAME, cve_id=CVE)
     dark = _run(paths, dark=True)
     assert dark.ok, dark.reason
+
+
+def test_dark_patch_refused_when_quarantined_for_another_cve(paths, box) -> None:
+    """Quarantined for CVE-A, the dark patch is for CVE-B: nothing starts;
+    the patch waits until that quarantine is resolved."""
+    from tests.test_commands.cve_helpers import seed_quarantine
+    seed_quarantine(paths, NAME, cve_id="CVE-2026-0404")
+    before = dict(box.containers)
+    outcome = _run(paths, dark=True)
+    assert (outcome.ok, outcome.failed_step) == (False, "swap")
+    assert "CVE-2026-0404" in outcome.reason and "does not fix" in outcome.reason
+    assert box.containers == before and box.recreates == 0 and box.pins == ()
