@@ -154,16 +154,23 @@ _TRIVY_CLASS_MAP: dict[str, PkgClass] = {
     c.value: c for c in PkgClass if c is not PkgClass.UNKNOWN
 }
 
-# Trivy OS result `Type` -> the VendorSeverity key of that distro's own
-# security team. distro_severity() reads only the scanned image's own distro:
-# another distro's rating (ubuntu or the redhat family on a Debian image) is
-# not the verdict of the team that triaged the package, and counting it let a
-# finding Debian triaged as minor quarantine a site. Unlisted types have no
-# distro verdict.
-_OS_TYPE_VENDOR: dict[str, str] = {
-    "debian": "debian", "ubuntu": "ubuntu", "alpine": "alpine",
-    "redhat": "redhat", "centos": "redhat", "rocky": "rocky", "alma": "alma",
-    "amazon": "amazon", "oracle": "oracle-oval", "photon": "photon",
+# Trivy OS result `Type` -> the VendorSeverity keys of that distro's own
+# security team (trivy-db source ids), in preference order. distro_severity()
+# reads only the scanned image's own distro: another distro's rating (ubuntu
+# or the redhat family on a Debian image) is not the verdict of the team that
+# triaged the package, and counting it let a finding Debian triaged as minor
+# quarantine a site. Types and keys checked against Trivy 0.58.0 output for
+# real images: debian, ubuntu, alpine, amazon, rocky, oracle, sles (suse-cvrf),
+# azurelinux (azure), cbl-mariner. Mapped from Trivy's names but not seen
+# rating anything: alma, centos/redhat, photon, wolfi, chainguard, openSUSE.
+_OS_TYPE_VENDOR: dict[str, tuple[str, ...]] = {
+    "debian": ("debian",), "ubuntu": ("ubuntu",), "alpine": ("alpine",),
+    "redhat": ("redhat",), "centos": ("redhat",), "rocky": ("rocky",),
+    "alma": ("alma",), "amazon": ("amazon",), "oracle": ("oracle-oval",),
+    "photon": ("photon",), "wolfi": ("wolfi",), "chainguard": ("chainguard",),
+    "sles": ("suse-cvrf",), "opensuse-leap": ("suse-cvrf",),
+    "opensuse-tumbleweed": ("suse-cvrf",),
+    "azurelinux": ("azure",), "cbl-mariner": ("cbl-mariner", "azure"),
 }
 
 
@@ -326,10 +333,21 @@ def _parse_findings(payload: dict[str, Any]) -> tuple[Finding, ...]:
     results = payload.get("Results") or []
     findings: list[Finding] = []
     unknown_severity_logged = False
+    image = payload.get("ArtifactName") or "<unknown image>"
+    warned_types: set[tuple[str, str | None]] = set()
 
     for result in results:
         pkg_class = PkgClass.from_trivy_string(result.get("Class"))
         pkg_type = result.get("Type") or None
+        if (pkg_class is PkgClass.OS and pkg_type not in _OS_TYPE_VENDOR
+                and (image, pkg_type) not in warned_types):
+            warned_types.add((image, pkg_type))
+            _LOGGER.warning(
+                "scan of %s: OS type %r has no distro severity mapping; its "
+                "findings get no distro verdict (informational below paranoid)",
+                image, pkg_type,
+                extra=_extra(detail={"image": image, "os_type": pkg_type}),
+            )
 
         for vuln in result.get("Vulnerabilities") or []:
             raw_sev = vuln.get("Severity")
@@ -416,9 +434,11 @@ def distro_severity(finding: Finding) -> Severity | None:
     it (NVD, GHSA, other distros), so the policy engine has no distro opinion
     to quarantine on below paranoid posture.
     """
-    vendor = _OS_TYPE_VENDOR.get(finding.pkg_type or "")
-    sev = finding.vendor_severities.get(vendor) if vendor else None
-    return None if sev is Severity.UNKNOWN else sev
+    for vendor in _OS_TYPE_VENDOR.get(finding.pkg_type or "", ()):
+        sev = finding.vendor_severities.get(vendor)
+        if sev is not None and sev is not Severity.UNKNOWN:
+            return sev
+    return None
 
 
 def _parse_attack_vector(cvss: dict[str, Any]) -> AttackVector | None:

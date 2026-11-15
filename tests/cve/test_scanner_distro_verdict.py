@@ -71,3 +71,37 @@ def test_debian_low_urgency_below_strict_gate() -> None:
     f = _FINDINGS[_UNIMPORTANT]
     assert distro_severity(f) is Severity.LOW
     assert _decide(_UNIMPORTANT, Posture.STRICT) is Disposition.INFORMATIONAL
+
+
+def _os_payload(os_type: str, image: str = "img:1") -> dict:
+    vuln = {"VulnerabilityID": "CVE-2026-0001", "PkgName": "p", "Severity": "HIGH",
+            "Status": "affected", "VendorSeverity": {"nvd": 3, "madeup": 3}}
+    return {"ArtifactName": image, "Results": [
+        {"Class": "os-pkgs", "Type": os_type, "Vulnerabilities": [vuln, vuln | {"VulnerabilityID": "CVE-2026-0002"}]},
+    ]}
+
+
+def test_unmapped_os_type_gets_no_verdict_and_one_warning(caplog) -> None:
+    with caplog.at_level("WARNING", logger="boxmunge"):
+        findings = _parse_findings(_os_payload("madeup"))
+    assert all(distro_severity(f) is None for f in findings)
+    warnings = [r for r in caplog.records if "no distro severity mapping" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "'madeup'" in warnings[0].getMessage() and "img:1" in warnings[0].getMessage()
+
+
+@pytest.mark.parametrize("os_type,vendor", [
+    ("sles", "suse-cvrf"), ("opensuse-leap", "suse-cvrf"), ("azurelinux", "azure"),
+    ("cbl-mariner", "cbl-mariner"), ("wolfi", "wolfi"), ("alpine", "alpine"),
+    ("amazon", "amazon"), ("rocky", "rocky"), ("photon", "photon"),
+])
+def test_mapped_os_types_read_their_own_vendor_and_do_not_warn(
+    os_type: str, vendor: str, caplog,
+) -> None:
+    payload = _os_payload(os_type)
+    for v in payload["Results"][0]["Vulnerabilities"]:
+        v["VendorSeverity"] = {vendor: 3, "ubuntu": 1}
+    with caplog.at_level("WARNING", logger="boxmunge"):
+        findings = _parse_findings(payload)
+    assert [distro_severity(f) for f in findings] == [Severity.HIGH] * 2
+    assert not caplog.records
