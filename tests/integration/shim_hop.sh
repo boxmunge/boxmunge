@@ -130,9 +130,6 @@ case "$MODE" in
           echo 'cp "$BOXMUNGE_SUDOERS_FILE" /tmp/sudoers-before-install-sh'
           grep -Fx '"${BOXMUNGE_ROOT}/bin/boxmunge-upgrade" install-sudoers' "$I"
           sed -n '/^INSTALLED_VERSION=/,/^fi$/p' "$I"
-          # The jobs directory and gate the installer makes. The new shim makes
-          # them deploy's when missing, and this box has no deploy user.
-          echo 'install -d -m 0750 "$BOXMUNGE_ROOT/state/jobs"; install -m 0660 /dev/null "$BOXMUNGE_ROOT/state/jobs/gate.lock"'
           # The release's units, as bootstrap/systemd-units.sh installs them.
           echo 'rm -f "$BOXMUNGE_SYSTEMD_DIR"/boxmunge-*; cp "$SCRIPT_DIR"/systemd/boxmunge-* "$BOXMUNGE_SYSTEMD_DIR/"'
           echo 'ls "$BOXMUNGE_SYSTEMD_DIR" | sort | paste -sd, - > /tmp/units-after-install-sh'
@@ -141,8 +138,11 @@ case "$MODE" in
 esac
 release "$NEW" /bundle/boxmunge/scripts/boxmunge-upgrade /tmp/install.sh
 
-# The box: <installed> live in slot a, with the old shim. Releases before
-# 0.10.1 kept docs/ as a plain directory.
+# The box: <installed> live in slot a, with the old shim, and the deploy
+# user every box has. <installed> predates state/jobs/, so the new shim makes
+# its gate (deploy's) on first use. Releases before 0.10.1 kept docs/ as a
+# plain directory.
+useradd -m -s /bin/bash deploy
 mkdir -p "$R"/{upgrade-state,bin,state/deploy,config,projects,caddy/sites,env-a/boxmunge-docs}
 install -d -m 0770 "$R/stashes"
 printf 'hostname: box.example.com\nadmin_email: ops@example.com\n' > "$R/config/boxmunge.yml"
@@ -207,6 +207,9 @@ else
         rc="$(shim /tmp/cmd.log $c)"
         echo "CMD ${c%% *} rc=$rc :: $(tr '\n' ' ' < /tmp/cmd.log | cut -c1-2000)"
     done
+    # After the new shim's own commands: the jobs gate as they left it.
+    gate="$(stat -c '%U:%G:%a' "$R/state/jobs" "$R/state/jobs/gate.lock" 2>/dev/null | paste -sd, -)"
+    echo "JOBS_GATE=${gate:-none}"
     for f in /tmp/during-*.log; do
         [[ -e "$f" ]] || continue
         name="${f#/tmp/during-}"
