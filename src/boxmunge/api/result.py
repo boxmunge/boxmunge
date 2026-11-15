@@ -64,7 +64,9 @@ class ActionError(Exception):
 
 @dataclass(frozen=True)
 class ActionResult:
-    """A successful inline call: the action's name and its typed result."""
+    """A successful call: the action's name and its typed result. For a job
+    action (job=True) data is the queued job record, not the action's result."""
 
     action: str
     data: dict[str, Any]
+    job: bool = False

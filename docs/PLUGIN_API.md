@@ -118,6 +118,15 @@ POST /v1/actions/project.get
 `params` is required; send `{}` for an action that takes none. The only other field allowed is
 `approval` (planned, operate calls only).
 
+Invoking a job action does not run it. Once the call is admitted, the server checks that the
+project exists (`not_found`), writes the accepted audit record naming the new job's id, and queues
+the job durably before it answers: `data` is the job record, in state `queued`. Follow it with
+`job.get` and `job.events`. The job runner takes the project lock and writes the outcome to the
+audit log when the job ends. While a boxmunge upgrade is running, a new job is refused with
+`unavailable` and a message that says the upgrade is under way, how to follow it
+(`boxmunge log --component upgrade`), and to make the same call again once it finishes. Jobs
+already queued run after the upgrade, on the new code.
+
 ## Schemas
 
 Parameter and result schemas use a small JSON Schema subset: `type`, `properties`, `required`,
@@ -167,7 +176,7 @@ Parameter and result schemas use a small JSON Schema subset: `type`, `properties
 | `stale_approval` | 409 | The project changed after the operator approved; request a new approval |
 | `governed_change` | 403 | A plugin deploy would change the project's policy; the operator deploys it over SSH |
 | `failed` | 500 | The action ran and failed, or box state could not be read; the message says why |
-| `unavailable` | 503 | A dependency is down (Docker, the audit log), a job action has no runner yet, or the server has too many connections open; retry shortly |
+| `unavailable` | 503 | A dependency is down (Docker, the audit log), a job action has no runner yet, an upgrade is running (new jobs wait for it), a job could not be queued, or the server has too many connections open; retry shortly |
 
 A request the HTTP layer cannot parse (an over-long header line, say) gets its HTTP status, such
 as 400 or 431, with the same JSON envelope and code `invalid_params`.
