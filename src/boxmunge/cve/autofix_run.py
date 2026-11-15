@@ -46,7 +46,7 @@ and the reason.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -74,6 +74,7 @@ from boxmunge.state import StateError
 if TYPE_CHECKING:
     from boxmunge.cve.policy_types import FindingDisposition
     from boxmunge.deployed_inventory import DeployedService
+    from boxmunge.docker_containers import LocalImage
     from boxmunge.paths import BoxPaths
 
 _COMPONENT = "autofix"
@@ -115,7 +116,7 @@ class _Run:
     records_before: tuple[PatchRecord, ...] = ()
 
 
-def _require_lock_held(paths: BoxPaths, project: str) -> None:
+def require_lock_held(paths: BoxPaths, project: str) -> None:
     """The caller holds the project lock: taking it here must fail."""
     try:
         with project_lock(project, paths):
@@ -147,19 +148,47 @@ def autofix_project_locked(paths: BoxPaths, project: str,
     dark patch), the quarantine is for one of the patch's CVEs, and it is
     all that keeps the project down. Returns the
     outcome; a failed one has been rolled back."""
+    return _autofix(paths, project, findings, trigger, deadline,
+                    quarantined_for_patch=quarantined_for_patch, upstream={})
+
+
+def repatch_on_upstream_locked(paths: BoxPaths, project: str,
+                               findings: Sequence[FindingDisposition], *,
+                               upstream: Mapping[str, LocalImage],
+                               deadline: datetime) -> AutofixOutcome:
+    """The nightly autofix of `findings`, as autofix_project_locked, with
+    each pinned service of `upstream` patched from its new upstream image
+    ({service: the image its release's tag now names}) instead of the image
+    its current patch was built from: upstream shipped a new image that
+    still needs patching (commands.autofix_upstream). The new patch replaces
+    the old; a failed run keeps the old. Raises ValueError for no services,
+    or one that is not pinned."""
+    require_lock_held(paths, project)
+    pinned = {p.service for p in read_pins(paths, project)}
+    if not upstream or not set(upstream) <= pinned:
+        raise ValueError(f"autofix from a new upstream image is for pinned services; "
+                         f"{', '.join(sorted(set(upstream) - pinned)) or 'none given'} "
+                         f"of {project}: not pinned")
+    return _autofix(paths, project, findings, "nightly", deadline,
+                    quarantined_for_patch=False, upstream=upstream)
+
+
+def _autofix(paths: BoxPaths, project: str, findings: Sequence[FindingDisposition],
+             trigger: Trigger, deadline: datetime, *, quarantined_for_patch: bool,
+             upstream: Mapping[str, LocalImage]) -> AutofixOutcome:
     if deadline.tzinfo is None:
         raise ValueError(f"deadline {deadline.isoformat()} has no timezone")
     cves = tuple(sorted({fd.finding.cve_id for fd in findings}))
     if not cves:
         raise ValueError("autofix needs at least one finding to fix")
-    _require_lock_held(paths, project)
+    require_lock_held(paths, project)
     run = _Run(project, read_pins(paths, project),
                patch_cves=cves if quarantined_for_patch else ())
     log_operation(_COMPONENT, f"Autofix of {project} started for {', '.join(cves)}", paths,
                   project=project, detail={"cves": list(cves), "trigger": trigger,
                                            "deadline": deadline.isoformat()})
     try:
-        records = _steps(paths, run, cves, trigger, deadline)
+        records = _steps(paths, run, cves, trigger, deadline, upstream)
     except StepFailed as e:
         problems = tuple(_rollback(paths, run))
         _finish(paths, project)
@@ -202,7 +231,7 @@ def recover_interrupted(paths: BoxPaths, project: str, *,
     None when there is no journal; else what could not be undone, one line
     each. The caller holds the project lock. Raises
     StateError for a journal it cannot read."""
-    _require_lock_held(paths, project)
+    require_lock_held(paths, project)
     journal = read_journal(paths, project)
     if journal is None:
         return None
@@ -225,14 +254,19 @@ def recover_interrupted(paths: BoxPaths, project: str, *,
 
 
 def _steps(paths: BoxPaths, run: _Run, cves: tuple[str, ...], trigger: Trigger,
-           deadline: datetime) -> tuple[PatchRecord, ...]:
+           deadline: datetime, upstream: Mapping[str, LocalImage]) -> tuple[PatchRecord, ...]:
     project = run.project
     _check_deadline(deadline)
     meta = load_project_meta(paths, project)
     now = autofix_plan.running(paths, project, meta)
     run.deployed = now.services
     run.records_before = read_records(paths, project)
-    plans = autofix_plan.plan(now, cves, run.pins_before, run.records_before)
+    if upstream:
+        now = autofix_plan.on_upstream(now, upstream, autofix_plan.scan_images(
+            paths, project, meta, {svc: img.image_id for svc, img in upstream.items()},
+            "the new upstream images"))
+    plans = autofix_plan.plan(now, cves, run.pins_before, run.records_before,
+                              rebased=upstream.keys())
     run.patching = [p.service for p in plans]
     for p in plans:
         _check_deadline(deadline)

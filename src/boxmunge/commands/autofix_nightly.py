@@ -43,6 +43,14 @@ paused or busy project is not patched either, and is listed in the digest.
 A project never scanned is left to the security health check, which
 reports it; it is not logged here every night.
 
+Before a project container update has just updated (or found unchanged)
+is patched, its pinned services are caught up with upstream
+(commands.autofix_upstream, under the same lock, while a patch could still
+start in the window): a clean new upstream image replaces a patch, one that
+still needs it is patched again from it. Only what changed or failed is in
+the digest ("switched to upstream", "re-patched on new upstream", "could
+not catch up with upstream"); a patch kept is not.
+
 The outcomes go out as ONE quiet digest from container-update (priority -1),
 one line per project: patched, fixed by tonight's update (or no longer in
 the running images), could not patch, skipped, deferred. Skips and deferrals
@@ -58,13 +66,15 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from boxmunge.commands.autofix_upstream import UpstreamResult, reconcile_upstream
 from boxmunge.commands.health_state import is_monitor_stopped
 from boxmunge.commands.security_scan_inputs import ProjectScanError, load_project_meta
 from boxmunge.container_update import SKIPPED_LOCKED
 from boxmunge.cve.alerting import (
     DIGEST_PRIORITY, Alert, format_autofix_digest, format_autofix_failed_alert,
     format_nightly_deferred_line, format_nightly_failed_line, format_nightly_gone_line,
-    format_nightly_patched_line, format_nightly_skipped_line, send_alerts,
+    format_nightly_patched_line, format_nightly_skipped_line, format_upstream_failed_line,
+    format_upstream_repatched_line, format_upstream_switched_line, send_alerts,
 )
 from boxmunge.cve.autofix_policy import (
     AUTOFIX_NIGHTLY_BUDGET, NIGHTLY_AUTOFIX_WINDOW, AutofixUrgency, urgency,
@@ -90,19 +100,26 @@ _START_MARGIN = timedelta(minutes=10)
 # others (quarantined, migrating, monitor-stopped, busy) were skipped by the
 # update, which logged why; a busy one is listed by nightly_digest.
 _VISITED = frozenset({"succeeded", "no_change", "failed", "paused"})
+# Container update statuses after which the pinned services are caught up
+# with upstream: the update ran to the end.
+_CAUGHT_UP = frozenset({"succeeded", "no_change"})
 DEFERRED = "deferred to the next maintenance window"
+_MIXED = "catching it up with upstream did not roll back cleanly"
 
 
 @dataclass(frozen=True)
 class NightlyAttempt:
     """One project's nightly patch: the CVEs it was for, and its outcome;
-    or, `outcome` None, why it did not run (`not_run`). `updated`: tonight's
-    container update moved the project onto new images first."""
+    or, `outcome` None, why it did not run (`not_run`), or that only
+    `upstream` has something to say. `updated`: tonight's container update
+    moved the project onto new images first. `upstream`: its pinned
+    services caught up with upstream before it (kept ones included)."""
     project: str
     cves: tuple[str, ...]
     outcome: AutofixOutcome | None
     not_run: str | None = None
     updated: bool = False
+    upstream: tuple[UpstreamResult, ...] = ()
 
 
 def _now() -> datetime:
@@ -201,21 +218,26 @@ def run_nightly_autofix(paths: BoxPaths, project: str, *, until: datetime,
         log_operation(_COMPONENT, f"{project}: nightly autofix skipped: {why}", paths,
                       project=project)
         return None
+    upstream = _catch_up(paths, project, block, update, until)
     try:
         findings = _nightly_findings(paths, project)
     except _READ_PROBLEMS as e:
         reason = f"its stored scan or manifest cannot be read: {type(e).__name__}: {e}"
         log_error(_COMPONENT, f"{project}: nightly autofix could not run: {reason}", paths,
                   project=project)
-        return NightlyAttempt(project, (), AutofixOutcome(False, None, reason, ()))
+        return NightlyAttempt(project, (), AutofixOutcome(False, None, reason, ()),
+                              upstream=upstream)
     if not findings:
-        return None
+        return (NightlyAttempt(project, (), None, upstream=upstream)
+                if any(r.outcome != "kept" for r in upstream) else None)
     cves = _cves(findings)
-    not_run = "paused" if block is not None else _not_now(update, until)
+    not_run = ("paused" if block is not None
+               else _MIXED if any(r.rollback_problems for r in upstream)
+               else _not_now(update, until))
     if not_run is not None:
         log_operation(_COMPONENT, f"{project}: nightly autofix skipped: {not_run}", paths,
                       project=project)
-        return NightlyAttempt(project, cves, None, not_run)
+        return NightlyAttempt(project, cves, None, not_run, upstream=upstream)
     started = _now()
     try:
         outcome = autofix_project_locked(paths, project, findings, trigger="nightly",
@@ -227,7 +249,22 @@ def run_nightly_autofix(paths: BoxPaths, project: str, *, until: datetime,
                                  tuple(getattr(e, "__notes__", ())))
     print(f"{project}: nightly autofix " + _said(outcome))
     return NightlyAttempt(project, cves, replace(outcome, started_at=started),
-                          updated=update is not None and update["status"] == "succeeded")
+                          updated=update is not None and update["status"] == "succeeded",
+                          upstream=upstream)
+
+
+def _catch_up(paths: BoxPaths, project: str, block: Block | None,
+              update: dict[str, Any] | None, until: datetime) -> tuple[UpstreamResult, ...]:
+    """Catch the pinned services up with upstream, after a container update
+    of the project that ran to the end, on a project nothing keeps down."""
+    if block is not None or update is None or update["status"] not in _CAUGHT_UP:
+        return ()
+    results = reconcile_upstream(paths, project,
+                                 start_by=until - AUTOFIX_NIGHTLY_BUDGET - _START_MARGIN)
+    for r in results:
+        if r.outcome is not None:
+            print(f"{project}/{r.service}: upstream catch-up: {r.outcome}")
+    return results
 
 
 def _said(outcome: AutofixOutcome) -> str:
@@ -294,7 +331,7 @@ def send_nightly_results(paths: BoxPaths, attempts: Sequence[NightlyAttempt]) ->
     """One quiet digest of the attempts; a failure whose rollback did not
     finish is the urgent failure alert instead. Best-effort delivery:
     notify logs anything it could not send."""
-    lines = [_line(a) for a in attempts]
+    lines = [line for a in attempts for line in _lines(a)]
     quiet = [alert for alert in lines if alert.priority == DIGEST_PRIORITY]
     alerts = (*(alert for alert in lines if alert.priority != DIGEST_PRIORITY),
               *((format_autofix_digest(quiet),) if quiet else ()))
@@ -307,8 +344,34 @@ def send_nightly_results(paths: BoxPaths, attempts: Sequence[NightlyAttempt]) ->
 
 
 def describe(attempt: NightlyAttempt) -> str:
-    """The attempt in one line: its digest line, or the urgent alert's title."""
-    return _line(attempt).title
+    """The attempt in one line: its digest lines, or the urgent alerts' titles."""
+    return "; ".join(alert.title for alert in _lines(attempt))
+
+
+def _lines(a: NightlyAttempt) -> list[Alert]:
+    """The attempt's digest lines (quiet), or urgent alerts: one per pinned
+    service caught up with upstream that changed or failed, then the patch's."""
+    lines = [_upstream_line(r) for r in a.upstream if r.outcome != "kept"]
+    if a.outcome is None and a.not_run is None:
+        if not lines:
+            raise ValueError(f"{a.project}: a nightly attempt with no outcome says why")
+        return lines
+    return [*lines, _line(a)]
+
+
+def _upstream_line(r: UpstreamResult) -> Alert:
+    if r.outcome == "switched":
+        return format_upstream_switched_line(r.project, str(r.service))
+    if r.outcome == "repatched":
+        return format_upstream_repatched_line(r.project, str(r.service))
+    if not r.rollback_problems:
+        return format_upstream_failed_line(r.project, r.service, r.reason)
+    return format_autofix_failed_alert(
+        r.project, r.cves, step="upstream catch-up", reason=r.reason,
+        site=("The site was not quarantined: catching a patched service up with upstream "
+              "keeps it up."),
+        timing=f"Upstream catch-up failed {_now():%H:%M} UTC.",
+        rollback_problems=r.rollback_problems)
 
 
 def _line(a: NightlyAttempt) -> Alert:

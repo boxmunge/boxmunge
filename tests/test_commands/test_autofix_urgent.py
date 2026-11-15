@@ -56,7 +56,7 @@ class Runner:
         self.dark: list[bool] = []
 
     def __call__(self, paths, project, findings, *, trigger, deadline, quarantined_for_patch):
-        autofix_run._require_lock_held(paths, project)
+        autofix_run.require_lock_held(paths, project)
         self.dark.append(quarantined_for_patch)
         self.calls.append((project, tuple(fd.finding.cve_id for fd in findings), trigger,
                            deadline))

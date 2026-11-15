@@ -45,7 +45,7 @@ class Runner:
 
     def __call__(self, paths, project, findings, *, trigger, deadline, quarantined_for_patch):
         assert quarantined_for_patch is False   # nightly never runs on a quarantined project
-        autofix_run._require_lock_held(paths, project)
+        autofix_run.require_lock_held(paths, project)
         self.calls.append((project, tuple(sorted({fd.finding.cve_id for fd in findings})),
                            trigger, deadline))
         if self.raises is not None:

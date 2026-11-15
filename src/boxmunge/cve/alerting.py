@@ -62,6 +62,9 @@ from boxmunge.cve._alerting_autofix import (
     format_nightly_deferred_line,
     format_nightly_skipped_line,
     format_nightly_patched_line,
+    format_upstream_failed_line,
+    format_upstream_repatched_line,
+    format_upstream_switched_line,
 )
 from boxmunge.cve._alerting_formatters import (
     format_awaiting_fix_alert,
@@ -132,6 +135,9 @@ __all__ = [
     "format_nightly_gone_line",
     "format_nightly_skipped_line",
     "format_nightly_deferred_line",
+    "format_upstream_failed_line",
+    "format_upstream_repatched_line",
+    "format_upstream_switched_line",
     "is_low_urgency",
     "send_alerts",
     "emit_scan_alerts",

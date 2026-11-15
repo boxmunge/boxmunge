@@ -61,8 +61,10 @@ def format_scan_digest(alerts: Sequence[Alert]) -> Alert:
 
 def format_autofix_digest(alerts: Sequence[Alert]) -> Alert:
     """One line per project the nightly autofix visited with something to
-    patch: patched, already fixed (nothing left to patch), could not patch,
-    skipped, deferred; by project within each. Each alert's title is
+    patch, and per pinned service it caught up with upstream: patched (or
+    re-patched on a new upstream image), already fixed (nothing left to
+    patch, or switched to upstream), could not patch (or catch up), skipped,
+    deferred; by project within each, each count a count of projects. Each alert's title is
     its line (_alerting_autofix.format_nightly_*). ``alerts``: at least one,
     all quiet."""
     if not alerts or not all(a.kind in NIGHTLY_AUTOFIX_KINDS
@@ -70,10 +72,12 @@ def format_autofix_digest(alerts: Sequence[Alert]) -> Alert:
         raise ValueError("an autofix digest summarises quiet nightly autofix outcomes only")
     groups = [sorted((a for a in alerts if a.kind == kind), key=lambda a: a.project)
               for kind, _ in _AUTOFIX_GROUPS]
-    counts = [f"{len(group)} {verb}" for group, (_, verb) in zip(groups, _AUTOFIX_GROUPS)
-              if group]
+    # Projects, not lines: one project can have a line per service caught up
+    # with upstream as well as its own.
+    counts = [f"{len({a.project for a in group})} {verb}"
+              for group, (_, verb) in zip(groups, _AUTOFIX_GROUPS) if group]
     # "2 projects patched, 1 could not be patched": the noun once, first.
-    first = len(next(group for group in groups if group))
+    first = len({a.project for a in next(group for group in groups if group)})
     counts[0] = counts[0].replace(" ", f" project{'s' if first != 1 else ''} ", 1)
     body = "\n".join([
         *(a.title for group in groups for a in group), "",

@@ -13,6 +13,9 @@ A service that already runs a patched image is patched again from the
 image its patch was built from (the record's base), with the packages of
 both patches, so the new patch keeps the old one's fixes; a patch is
 never built on another patch (cve.autofix_build).
+When upstream ships a new image for a pinned service that still needs
+the patch, that image stands in for the patched one (on_upstream), and
+the service is patched from it alone (commands.autofix_upstream).
 
 The patched images are then scanned the same way. A patch fails when a
 CVE it was for is still in its image, or a finding that is quarantine-level
@@ -21,7 +24,7 @@ image it replaces.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from boxmunge.commands.quarantine_gate import StartImage, scan_release_images
@@ -42,7 +45,7 @@ if TYPE_CHECKING:
     from boxmunge.commands.security_scan_inputs import ProjectMeta
     from boxmunge.cve.autofix_record import PatchRecord
     from boxmunge.cve.policy_types import ProjectDecision
-    from boxmunge.docker_containers import ProjectContainer
+    from boxmunge.docker_containers import LocalImage, ProjectContainer
     from boxmunge.image_pins import ImagePin
     from boxmunge.paths import BoxPaths
 
@@ -160,12 +163,29 @@ def _fixes(decision: ProjectDecision, cves: Collection[str],
     return fixed, before, found
 
 
+def on_upstream(now: Running, upstream: Mapping[str, LocalImage],
+                decisions: Mapping[str, ProjectDecision]) -> Running:
+    """`now` with each service of `upstream` standing on its new upstream
+    image (and that image's scan, `decisions`) in place of the patched
+    image it runs: its patch is built from that image (upstream catch-up,
+    commands.autofix_upstream)."""
+    containers = dict(now.containers)
+    for service, image in upstream.items():
+        containers[service] = replace(containers[service], image_id=image.image_id,
+                                      repo_digests=image.repo_digests)
+    return Running(containers, now.services, {**now.decisions, **decisions})
+
+
 def plan(now: Running, cves: Collection[str], pins: Collection[ImagePin],
-         records: Collection[PatchRecord]) -> tuple[ServicePlan, ...]:
-    """The services to patch, by name. Raises StepFailed: "scan" when no
-    running image carries any of `cves` (NothingToPatch), "probe" for one
-    that cannot be patched or a pinned service with no patch record."""
-    pinned = {p.service for p in pins}
+         records: Collection[PatchRecord], *,
+         rebased: Collection[str]) -> tuple[ServicePlan, ...]:
+    """The services to patch, by name. A pinned service is patched from its
+    record's base, with its patch's packages too, unless it is `rebased`
+    onto a new upstream image (on_upstream): then from that image alone.
+    Raises StepFailed: "scan" when no running image carries any of `cves`
+    (NothingToPatch), "probe" for one that cannot be patched or a pinned
+    service with no patch record."""
+    pinned = {p.service for p in pins} - set(rebased)
     recorded = {r.service: r for r in records}
     plans = []
     for service in sorted(now.decisions):

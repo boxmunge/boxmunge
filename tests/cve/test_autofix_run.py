@@ -526,3 +526,50 @@ def test_dark_patch_refused_when_quarantined_for_another_cve(paths, box) -> None
     assert (outcome.ok, outcome.failed_step) == (False, "swap")
     assert "CVE-2026-0404" in outcome.reason and "does not fix" in outcome.reason
     assert box.containers == before and box.recreates == 0 and box.pins == ()
+
+
+UP = "sha256:" + "f" * 64
+
+
+def _run_on_upstream(paths, findings=None, upstream=None):
+    from boxmunge.docker_containers import LocalImage
+    with project_lock(NAME, paths):
+        return autofix_run.repatch_on_upstream_locked(
+            paths, NAME, findings if findings is not None else [_fd()],
+            upstream=upstream or {"web": LocalImage(UP, ("example/web@sha256:" + "f" * 64,))},
+            deadline=datetime.now(timezone.utc) + timedelta(minutes=30))
+
+
+def test_repatch_on_upstream_builds_from_the_new_upstream_not_the_old_base(paths,
+                                                                          box) -> None:
+    """web runs a patch of WEB; upstream shipped UP, which still carries the
+    CVE: the new patch is built FROM UP, with UP's own packages, and the
+    record names UP as its base."""
+    pin, record = _repatch_setup(paths, box)
+    box.findings[pin.image_id] = []          # the running patch is clean
+    box.findings[UP] = [_fd()]
+    outcome = _run_on_upstream(paths)
+    assert outcome.ok, outcome.reason
+    [(svc, base, packages)] = box.built
+    assert (svc, base, packages) == ("web", UP, {"openssl": "3.0.9"})   # not zlib, not WEB
+    [new] = outcome.records
+    assert (new.base_digest, new.base_ref) == (UP, "example/web@sha256:" + "f" * 64)
+    assert new.cves == (CVE,) and new.trigger == "nightly"
+    assert read_records(paths, NAME) == (new,)
+    assert box.removed == [pin.ref]          # the old patch went
+
+
+def test_repatch_on_upstream_failure_keeps_the_old_patch(paths, box) -> None:
+    pin, record = _repatch_setup(paths, box)
+    box.findings[pin.image_id] = []
+    box.findings[UP] = [_fd()]
+    box.unhealthy_on_patched = True
+    outcome = _run_on_upstream(paths)
+    assert (outcome.ok, outcome.failed_step) == (False, "health")
+    assert box.pins == (pin,) and box.running()["web"] == pin.image_id
+    assert read_records(paths, NAME) == (record,)
+
+
+def test_repatch_on_upstream_names_a_service_that_is_not_pinned(paths, box) -> None:
+    with pytest.raises(ValueError, match="not pinned"):
+        _run_on_upstream(paths)

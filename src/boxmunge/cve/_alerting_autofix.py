@@ -159,3 +159,28 @@ def format_nightly_failed_line(project: str, *, step: str | None, reason: str) -
     line = f"could not patch: {project}: {step or 'unexpected error'}: {reason}"
     return Alert(kind="autofix_failed", title=line, body=line, priority=DIGEST_PRIORITY,
                  project=project)
+
+
+def format_upstream_switched_line(project: str, service: str) -> Alert:
+    """A pinned service's new upstream image is clean: it runs it, and its
+    patch is gone (counted with the already fixed). One digest line."""
+    line = f"switched to upstream: {project}/{service}"
+    return Alert(kind="autofix_gone", title=line, body=line, priority=DIGEST_PRIORITY,
+                 project=project)
+
+
+def format_upstream_repatched_line(project: str, service: str) -> Alert:
+    """A pinned service's new upstream image still needed the patch: it was
+    patched again from that image. One digest line."""
+    line = f"re-patched on new upstream: {project}/{service}"
+    return Alert(kind="autofix_patched", title=line, body=line, priority=DIGEST_PRIORITY,
+                 project=project)
+
+
+def format_upstream_failed_line(project: str, service: str | None, reason: str) -> Alert:
+    """Catching a pinned service up with upstream failed and was rolled back
+    cleanly; it keeps its patch. One digest line."""
+    line = f"could not catch up with upstream: {project}{'/' + service if service else ''}: " \
+           f"{reason}"
+    return Alert(kind="autofix_failed", title=line, body=line, priority=DIGEST_PRIORITY,
+                 project=project)
