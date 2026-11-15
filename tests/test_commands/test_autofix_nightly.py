@@ -43,7 +43,8 @@ class Runner:
         self.outcome: AutofixOutcome | None = None
         self.raises: Exception | None = None
 
-    def __call__(self, paths, project, findings, *, trigger, deadline):
+    def __call__(self, paths, project, findings, *, trigger, deadline, quarantined_for_patch):
+        assert quarantined_for_patch is False   # nightly never runs on a quarantined project
         autofix_run._require_lock_held(paths, project)
         self.calls.append((project, tuple(sorted({fd.finding.cve_id for fd in findings})),
                            trigger, deadline))
@@ -368,9 +369,10 @@ def test_patches_stop_starting_near_the_window_end(tmp_path, monkeypatch) -> Non
     monkeypatch.setattr(autofix_nightly, "_now", lambda: clock[0])
     real = box.runner.__call__
 
-    def slow(paths, project, findings, *, trigger, deadline):
+    def slow(paths, project, findings, *, trigger, deadline, quarantined_for_patch):
         clock[0] += timedelta(hours=2, minutes=21)   # 39 minutes left: under 30 + 10
-        return real(paths, project, findings, trigger=trigger, deadline=deadline)
+        return real(paths, project, findings, trigger=trigger, deadline=deadline,
+                    quarantined_for_patch=quarantined_for_patch)
 
     monkeypatch.setattr(autofix_nightly, "autofix_project_locked", slow)
     box.update()
@@ -388,9 +390,10 @@ def test_window_leaves_room_for_a_whole_patch(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(autofix_nightly, "_now", lambda: clock[0])
     real = box.runner.__call__
 
-    def slow(paths, project, findings, *, trigger, deadline):
+    def slow(paths, project, findings, *, trigger, deadline, quarantined_for_patch):
         clock[0] += timedelta(hours=2, minutes=20)   # exactly 40 minutes left
-        return real(paths, project, findings, trigger=trigger, deadline=deadline)
+        return real(paths, project, findings, trigger=trigger, deadline=deadline,
+                    quarantined_for_patch=quarantined_for_patch)
 
     monkeypatch.setattr(autofix_nightly, "autofix_project_locked", slow)
     box.update()
@@ -431,11 +434,12 @@ def test_digest_covers_every_project(tmp_path, monkeypatch) -> None:
     outcomes = {"blog": AutofixOutcome(False, "probe", "no package manager", ())}
     real = box.runner.__call__
 
-    def runner(paths, project, findings, *, trigger, deadline):
+    def runner(paths, project, findings, *, trigger, deadline, quarantined_for_patch):
         if project in outcomes:
             box.runner.calls.append((project, (), trigger, deadline))
             return outcomes[project]
-        return real(paths, project, findings, trigger=trigger, deadline=deadline)
+        return real(paths, project, findings, trigger=trigger, deadline=deadline,
+                    quarantined_for_patch=quarantined_for_patch)
 
     monkeypatch.setattr(autofix_nightly, "autofix_project_locked", runner)
     box.update()

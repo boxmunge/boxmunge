@@ -219,7 +219,9 @@ def run_nightly_autofix(paths: BoxPaths, project: str, *, until: datetime,
     started = _now()
     try:
         outcome = autofix_project_locked(paths, project, findings, trigger="nightly",
-                                         deadline=started + AUTOFIX_NIGHTLY_BUDGET)
+                                         deadline=started + AUTOFIX_NIGHTLY_BUDGET,
+                                         # nightly never patches a quarantined project
+                                         quarantined_for_patch=False)
     except Exception as e:  # noqa: BLE001 — rolled back and logged by the runner
         outcome = AutofixOutcome(False, None, f"{type(e).__name__}: {e}", (),
                                  tuple(getattr(e, "__notes__", ())))
