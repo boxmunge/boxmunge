@@ -36,7 +36,7 @@ def finding(cve: str, severity: str, disposition: str, package: str,
         "attack_vector": "Network", "status": "fixed" if fixed else "affected",
         "pkg_class": "os-pkgs", "pkg_type": "debian", "exploited_by": ["cisa_kev"] if kev else [],
         "cvss_score": None, "vendor_severities": {}, "severity_source": None,
-        "fix_would_quarantine": False,
+        "fix_would_quarantine": False, "fix_meets_patch_gate": False,
         "hardening_would_quarantine": False,
     }
 

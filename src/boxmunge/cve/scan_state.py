@@ -223,6 +223,13 @@ def _stored_vendor_severities(raw: dict[str, Any]) -> dict[str, Severity]:
             for source, value in stored.items()}
 
 
+def _stored_patch_gate(raw: dict[str, Any]) -> bool:
+    stored = _required_key(raw, "fix_meets_patch_gate")
+    if not isinstance(stored, bool):
+        raise StateError(f"stored 'fix_meets_patch_gate' is {stored!r}, not a boolean")
+    return stored
+
+
 def _stored_cvss_score(raw: dict[str, Any]) -> float | None:
     score = _required_key(raw, "cvss_score")
     if score is None:
@@ -289,7 +296,7 @@ def decisions_from_scan_state(
                     explanation=raw.get("explanation", "") or "",
                     exploited_by=_stored_exploited_by(raw),
                     fix_would_quarantine=raw.get("fix_would_quarantine") is True,
-                    fix_meets_patch_gate=raw.get("fix_meets_patch_gate") is True,
+                    fix_meets_patch_gate=_stored_patch_gate(raw),
                     hardening_would_quarantine=raw.get("hardening_would_quarantine") is True,
                 ),
             )
