@@ -20,7 +20,7 @@ A finding the urgent flow patches waits in `state/autofix/queue/<project>.json`,
 end of the scan or KEV watch run that found it (commands.autofix_urgent).
 
 From just before an autofix swaps its images in until it has finished
-(its patched images healthy, or rolled back), `state/autofix/<project>.journal`
+(its patched images healthy and recorded, or rolled back), `state/autofix/<project>.journal`
 holds {started_at, pins_before, records_before, built}: the project's pins and
 patch records exactly as they were, and the images the run built, as pins.
 A journal left behind means the run was killed; the next run undoes it

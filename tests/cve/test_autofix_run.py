@@ -422,8 +422,10 @@ def _repatch_setup(paths, box) -> tuple[ImagePin, PatchRecord]:
     return pin, record
 
 
-def test_the_journal_goes_before_the_records_and_the_replaced_image(paths, box,
-                                                                    monkeypatch) -> None:
+def test_the_journal_goes_after_the_records_and_before_the_replaced_image(
+        paths, box, monkeypatch) -> None:
+    """A kill before the journal goes is recovered whole: the journal restores
+    the pins and the records the run found."""
     from boxmunge.cve.autofix_record import read_journal
     pin, _ = _repatch_setup(paths, box)
     seen: dict[str, object] = {}
@@ -440,7 +442,8 @@ def test_the_journal_goes_before_the_records_and_the_replaced_image(paths, box,
     monkeypatch.setattr(autofix_run, "write_records", write)
     monkeypatch.setattr(autofix_run, "remove_patched", remove)
     assert _run(paths).ok
-    assert seen == {"records": None, "remove": None} and box.removed == [pin.ref]
+    assert seen["records"] is not None and seen["remove"] is None
+    assert box.removed == [pin.ref]
 
 
 def test_a_journal_left_after_a_patch_keeps_what_recovery_restores(paths, box,

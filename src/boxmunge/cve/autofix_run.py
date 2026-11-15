@@ -19,11 +19,10 @@ The steps, each a `failed_step` of the outcome when it fails:
 The patch records are written only once the services are healthy.
 
 Just before the swap the run writes its journal (cve.autofix_record: the
-pins and patch records it found, the images it built). It removes it as
-soon as the patched images are healthy, before the records are written and
-before the images they replace are removed; when that removal fails, the
-replaced images are kept (logged), so the journal's pins still name images
-that exist. A failed run removes it once rolled back. A journal left behind
+pins and patch records it found, the images it built). Once the patched
+images are healthy and their records written, it removes it, and only then
+the images they replace; when that removal fails, the replaced images are
+kept (logged), so the journal's pins still name images that exist. A failed run removes it once rolled back. A journal left behind
 means the run was killed; recover_interrupted undoes it the way a rollback
 would, records included.
 
@@ -233,10 +232,10 @@ def _steps(paths: BoxPaths, run: _Run, cves: tuple[str, ...], trigger: Trigger,
     _swap(paths, run, patched)
     _check_deadline(deadline)
     _health(project, now.services, "the patched images")
-    journal_gone = _finish(paths, project)   # healthy: nothing for a recovery to undo
     _check_deadline(deadline)
     records = _record(paths, project, plans, patched, trigger)
-    if journal_gone:
+    # Recorded: a recovery from here would restore the pins and records alike.
+    if _finish(paths, project):
         _remove_replaced(paths, run, patched)
     else:   # the journal's pins_before must still name images that exist
         log_error(_COMPONENT, f"Autofix of {project}: the images the patch replaced are kept, "
