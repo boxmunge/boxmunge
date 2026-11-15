@@ -264,13 +264,20 @@ def _imports_of_the_api(path: Path) -> list[str]:
     return found
 
 
+# Modules outside boxmunge.api that route through it, each added deliberately.
+API_FRONTENDS = frozenset({
+    "commands/run_job_cmd.py",  # _run-job: the job worker, started by the job runner
+})
+
+
 def test_nothing_outside_the_api_package_imports_it() -> None:
-    """Phase A ships inert: no CLI command, shell, MCP tool or timer routes
-    through boxmunge.api, so production boxes behave exactly as before. The
-    only way in is the boxmunge-apid console script. Update this
-    deliberately when a frontend converts."""
+    """Phase A shipped inert: no CLI command, shell, MCP tool or timer routed
+    through boxmunge.api. The only ways in are the boxmunge-apid console
+    script and API_FRONTENDS. Update this deliberately when a frontend
+    converts."""
     src = REPO / "src" / "boxmunge"
-    outside = [p for p in src.rglob("*.py") if (src / "api") not in p.parents]
+    outside = [p for p in src.rglob("*.py") if (src / "api") not in p.parents
+               and p.relative_to(src).as_posix() not in API_FRONTENDS]
     assert len(outside) > 50
     assert [hit for module in outside for hit in _imports_of_the_api(module)] == []
     for module in ("cli.py", "shell.py", "mcp_server.py", "mcp_tools.py"):

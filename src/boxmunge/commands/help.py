@@ -112,8 +112,8 @@ Operator only (as root, not in the deploy shell):
   boxmunge-upgrade userns-migrate [--check] | userns-rollback | userns-commit
                           Remap Docker's user namespaces (OPERATIONS.md)
 
-Internal (run by the upgrade shim, not by hand): stash, _discover-update,
-staging-teardown-all
+Internal (run by the upgrade shim or the job runner, not by hand): stash,
+_discover-update, staging-teardown-all, _run-job
 
 Options (run 'help <command>' to see exactly which a command accepts):
   -h, --help              Show a command's usage; never runs the command

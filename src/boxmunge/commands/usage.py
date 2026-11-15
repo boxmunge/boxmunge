@@ -382,6 +382,12 @@ Usage: boxmunge _discover-update --json [--auto]
 Internal: report an available release as JSON (used by the upgrade shim).
 Without --auto, the newest release of any class. With --auto, what
 auto-update would apply under this box's auto_update policy.""",
+    "_run-job": """\
+Usage: boxmunge _run-job <job-id>
+
+Internal: run one queued action API job (used by the job runner). Exits 0
+once the job has finished, 75 when an upgrade held the jobs gate and the
+job was left queued for the new code, 1 when the job is not queued.""",
     "mcp-serve": """\
 Usage: boxmunge mcp-serve
 

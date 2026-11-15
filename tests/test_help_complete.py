@@ -20,7 +20,7 @@ from tests.test_command_surface import DRY_RUN_SUPPORTED
 REPO = Path(__file__).resolve().parents[1]
 SHIM = "boxmunge-upgrade"
 OPERATOR_SECTION = "Operator only (as root, not in the deploy shell):"
-INTERNAL_PREFIX = "Internal (run by the upgrade shim, not by hand):"
+INTERNAL_PREFIX = "Internal (run by the upgrade shim or the job runner, not by hand):"
 # Registered so that typing it explains it is the root bootstrap script.
 NOT_A_COMMAND = {"init-host"}
 # The userns migration is run through the shim's userns-* subcommands.
