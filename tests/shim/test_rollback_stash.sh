@@ -3,9 +3,8 @@
 # stashes/ is deploy-writable, so a rollback neither takes the newest-named
 # stash there nor opens one by name: it restores a root-only copy of the stash
 # the upgrade recorded, opened without following a link and only if it is a
-# plain file of root's with the recorded size and sha256. An upgrade a shim
-# before 0.11.5 ran recorded none; its rollback takes the newest-named stash,
-# under the same checks.
+# plain file of root's with the recorded size and sha256. Without a record of
+# this upgrade's stash it restores nothing and says how to by hand.
 # pass() always returns 0, so "cond && pass || fail" is a safe if/else here.
 # shellcheck disable=SC2015,SC2016  # SC2016: mock bodies are literal bash
 set -euo pipefail
@@ -37,6 +36,7 @@ box() {
     [[ "${1:-}" == none ]] || echo "1.5.0 $RECORDED $(record_of "$BOXMUNGE_ROOT/stashes/$RECORDED")" \
         > "$BOXMUNGE_ROOT/upgrade-root/upgrade-stash"
     write_probation "1.5.0" "b" "$SOON"
+    [[ "${1:-}" != none ]] || rm "$BOXMUNGE_ROOT/upgrade-root/upgrade-stash"
     : > "$BOXMUNGE_ROOT/calls"
 }
 calls() { cat "$BOXMUNGE_ROOT/calls"; }
@@ -87,10 +87,10 @@ run_shim check-probation
 expect 2 "stashes/$RECORDED cannot be opened" "a missing recorded stash is refused"
 drop_root
 
-# The record a released shim's own record_stash writes (0.11.5 is the first
-# that records one, 0.11.6 the bridge release) is the one this shim's rollback
-# restores, not the newer-named stash planted beside it.
-for released in v0.11.5 v0.11.6; do
+# The record a released shim's own record_stash writes (0.11.11, the upgrade
+# floor) is the one this shim's rollback restores, not the newer-named stash
+# planted beside it.
+for released in v0.11.11; do
     box none
     echo "deploy's stash" > "$BOXMUNGE_ROOT/stashes/$PLANTED"
     written="$(
@@ -109,21 +109,18 @@ for released in v0.11.5 v0.11.6; do
         && pass "the $released shim records the stash with its size and sha256" || fail "the $released record_stash: $written"
     run_shim check-probation
     expect 1 "Rollback complete" "a record of the $released shim: the rollback completes"
-    restored "$RECORDED" "the upgrade's stash" && [[ "$OUT" != *"no stash recorded"* ]] \
+    restored "$RECORDED" "the upgrade's stash" \
         && pass "a record of the $released shim: the recorded stash is restored" || fail "$(calls); out: $OUT"
     drop_root
 done
 
-# No record (a shim before 0.11.5 ran the upgrade): the newest-named stash, checked.
+# No record: nothing is restored, not even the newest-named stash, and the
+# refusal says what to do.
 box none
 run_shim check-probation
-expect 1 "no stash recorded for this upgrade; restoring the newest-named, $RECORDED" "no record: the newest-named stash, said"
-restored "$RECORDED" "the upgrade's stash" && pass "no record: the newest-named stash is restored" || fail "$(calls)"
-drop_root
-box none
-ln -s "$BOXMUNGE_ROOT/stashes/$RECORDED" "$BOXMUNGE_ROOT/stashes/$PLANTED"
-run_shim check-probation
-expect 2 "stashes/$PLANTED is a symlink" "no record: a newest-named link is refused, not skipped"
+expect 2 "records no stash for the upgrade to 1.5.0" "no record: the rollback is partial"
+[[ "$OUT" == *"sudo boxmunge-server stash restore --latest"* ]] && pass "no record: the refusal says what to do" || fail "out: $OUT"
+[[ "$(calls)" != *restore* ]] && pass "no record: nothing is restored" || fail "restored: $(calls)"
 drop_root
 
 # The record carries the stash's size and sha256: a different root-made
@@ -145,12 +142,12 @@ for record in "1.5.0 $RECORDED 12 nothex" "1.5.0 $RECORDED"; do
     drop_root
 done
 
-# A record of another upgrade is not this one's.
+# A record of another upgrade is not this one's: refused like no record.
 box
 echo "1.4.9 $OLD_STASH $(record_of "$BOXMUNGE_ROOT/stashes/$OLD_STASH")" > "$BOXMUNGE_ROOT/upgrade-root/upgrade-stash"
 run_shim check-probation
-expect 1 "is not the stash of the upgrade to 1.5.0" "a record of another version is not used"
-restored "$RECORDED" "the upgrade's stash" && pass "another version's record: the newest-named stash is restored" || fail "$(calls)"
+expect 2 "is not the stash of the upgrade to 1.5.0" "a record of another version is not used"
+[[ "$(calls)" != *restore* ]] && pass "another version's record: nothing is restored" || fail "restored: $(calls)"
 drop_root
 
 finish

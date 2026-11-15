@@ -6,9 +6,7 @@
 # probation, again each time it ends, would hold off security updates for
 # good. The shim acts only on a probation root recorded when an upgrade
 # started it (upgrade-root/probation-expiry: "<slot> <version> <expiry>", or
-# "none"); anything else is removed, logged and alerted. A probation an older
-# shim started has no record, and is adopted only when root's own state shows
-# that upgrade (config/version and a recent env-active swap).
+# "none"); anything else is removed, logged and alerted.
 # pass() always returns 0, so "cond && pass || fail" is a safe if/else here.
 # shellcheck disable=SC2015,SC2016  # SC2016: mock bodies are literal bash
 set -euo pipefail
@@ -79,19 +77,12 @@ PATH="$FAILVISUDO:$PATH" run_shim target 1.5.0
 expect 1 "failed visudo" "target goes past the probation guard once it is removed"
 drop_root
 
-# With no record at all (an older shim's upgrade, and no check since) a
-# probation of the installed release whose swap is older than a probation has
-# already run its length: a box that was off past its end, say. It is
-# adopted as ended and promoted, not alerted as planted; that is all a
-# planted one could do, and from then on the record says none is running.
+# With no record at all, even a probation of the installed release just
+# after a swap is refused: every upgrade records the probation it starts.
 box
-age_swap 7
 forge_probation 1.4.0 b "$SOON"
 run_shim check-probation
-expect 0 "promoted" "an older shim's probation that ran past its end is promoted"
-[[ "$OUT" == *"ran past its end with no check"* && "$OUT" != *"planted"* ]] \
-    && pass "it is said why, not alerted as planted" || fail "out: $OUT"
-[[ "$(record)" == none ]] && pass "then the record says none is running" || fail "record: $(record)"
+expect_refused "an unrecorded probation of the installed release"
 drop_root
 
 # After a probation ends (promoted here), root records that none is running,
@@ -132,32 +123,15 @@ expect 0 "" "a recorded probation carries on"
     && pass "a recorded probation and its record are kept as they are" || fail "record $(record), was $before"
 drop_root
 
-# --- a probation an older shim started (no record) ------------------------------
-
-for old_record in "" "a $(( $(date +%s) + 6 * 3600 ))"; do
-    box
-    age_swap 1
-    forge_probation 1.4.0 b "$SOON"
-    [[ -z "$old_record" ]] || { mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"; echo "$old_record" > "$BOXMUNGE_ROOT/$RECORD"; }
-    run_shim check-probation
-    what="an older shim's probation (record '${old_record:-none at all}')"
-    expect 0 "adopted" "$what is adopted"
-    read -r slot version expiry <<< "$(record)"
-    swapped=$(( $(date +%s) - 3600 ))
-    [[ "$slot $version" == "a 1.4.0" && "$expiry" -ge $(( swapped + 6 * 3600 - 60 )) \
-        && "$expiry" -le $(( swapped + 6 * 3600 + 60 )) && -f "$BOXMUNGE_ROOT/$PROBATION" ]] \
-        && pass "$what ends a probation's length after the swap" || fail "$what: record $(record)"
-    [[ "$(calls)" == *"bm_log warn probation started by an older shim adopted"* ]] \
-        && pass "$what: the adoption is logged" || fail "$what: not logged: $(calls)"
-    drop_root
-done
-
-# An older shim's probation of a release the box does not run is refused.
+# A record without the release ("<slot> <expiry>") is not one: it is named
+# as malformed, and nothing acts on the probation.
 box
-age_swap 1
-forge_probation 1.5.0 b "$SOON"
+forge_probation 1.4.0 b "$SOON"
+mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+echo "a $(( $(date +%s) + 6 * 3600 ))" > "$BOXMUNGE_ROOT/$RECORD"
 run_shim check-probation
-expect_refused "an unrecorded probation of a release the box does not run"
+expect 1 "probation-expiry is malformed" "a record without the release is malformed"
+[[ -f "$BOXMUNGE_ROOT/$PROBATION" ]] && pass "a malformed record: nothing acted on the probation" || fail "probation removed"
 drop_root
 
 rm -rf "$UPGRADEBIN"

@@ -118,8 +118,7 @@ box() {
     echo "1.5.0 $OLD_STASH" > "$r/upgrade-stash"
     echo 3 > "$r/lock-skips"
     : > "$r/upgrade.lock"
-    : > "$BOXMUNGE_ROOT/upgrade-state/upgrade.lock"
-    chmod 0600 "$r/upgrade.lock" "$BOXMUNGE_ROOT/upgrade-state/upgrade.lock"
+    chmod 0600 "$r/upgrade.lock"
     run_shim install-sudoers
     mkdir "$BOXMUNGE_ROOT/mock"
     printf '%s' "$PASSING" > "$BOXMUNGE_ROOT/mock/readiness.out"

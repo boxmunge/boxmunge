@@ -121,7 +121,8 @@ drop_root
 # A temp file a run killed between writing and renaming left in
 # upgrade-root/ is removed by the next write of that file.
 on_probation
-rm "$BOXMUNGE_ROOT/upgrade-root/probation-expiry"  # an older shim's probation: adopted, so recorded
+# A record more than a probation's length ahead (the clock went back) is rewritten.
+echo "a 1.4.0 $(( $(date +%s) + 30 * 3600 ))" > "$BOXMUNGE_ROOT/upgrade-root/probation-expiry"
 echo "half" > "$BOXMUNGE_ROOT/upgrade-root/.probation-expiry.AbC123"
 run_shim check-probation
 [[ ! -e "$BOXMUNGE_ROOT/upgrade-root/.probation-expiry.AbC123" && -f "$BOXMUNGE_ROOT/upgrade-root/probation-expiry" ]] \

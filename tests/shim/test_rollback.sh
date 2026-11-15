@@ -81,6 +81,7 @@ new_root a  # a: proven, already swapped back to; b: the interrupted release
 mock_server a 'echo "$*" >> "$BOXMUNGE_ROOT/calls"; exit 0'
 printf '1.5.0\ninterrupted\n1\n' > "$BOXMUNGE_ROOT/env-a/rollback-inflight"
 mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+record_upgrade_stash 1.5.0
 echo 'not json' > "$BOXMUNGE_ROOT/upgrade-root/interrupted.json"
 run_shim check-probation
 [[ "$RC" -ne 0 && "$OUT" == *"interrupted.json is malformed"* && "$(calls)" == *"stash restore $OLD_STASH;upgrade --apply;"* ]] \

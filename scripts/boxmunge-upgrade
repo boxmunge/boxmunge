@@ -57,7 +57,6 @@ PROBATION_FILE="$STATE_DIR/probation.json"
 # failure_count in state.sh.
 UPGRADE_ROOT_DIR="$BOXMUNGE_ROOT/upgrade-root"
 LOCK_FILE="$UPGRADE_ROOT_DIR/upgrade.lock"
-LEGACY_LOCK_FILE="$STATE_DIR/upgrade.lock"
 INTERRUPTED_FILE="$UPGRADE_ROOT_DIR/interrupted.json"
 PIP_FAILURES_FILE="$UPGRADE_ROOT_DIR/pip-failures.json"
 COSIGN_FAILURES_FILE="$UPGRADE_ROOT_DIR/cosign-failures.json"

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # tests/shim/test_planted_state.sh — upgrade-state/ is deploy-writable, so
-# deploy can plant a FIFO or a link at any name in it, including the legacy
-# upgrade.lock older shims take (test_upgrade_lock.sh). The root shim must
+# deploy can plant a FIFO or a link at any name in it. The root shim must
 # refuse each without blocking (a hang holds upgrade.lock, so every later
 # upgrade and probation check is skipped) and without creating or reading
 # a link's target, naming the file and saying to remove it.
@@ -28,19 +27,19 @@ planted_fifo() {
     drop_root
 }
 
-planted_fifo upgrade.lock check-probation check-probation
 planted_fifo probation.json check-probation check-probation
 planted_fifo active-slot check-probation check-probation
 planted_fifo blocklist.json run run 1.2.3 ignored-url
 
-# A dangling link at upgrade.lock: root must not create its target.
+# upgrade-state/upgrade.lock (where shims up to 0.10.1 locked) is no lock
+# now: a dangling link there is never opened, so its target is never made.
 new_root a
 target="$(mktemp -d)/created-by-root"
 ln -s "$target" "$BOXMUNGE_ROOT/$STATE/upgrade.lock"
 run_shim check-probation
-expect 1 "is a symlink" "a dangling upgrade.lock link is refused"
-[[ ! -e "$target" ]] && pass "root did not create the lock link's target" \
-    || fail "root created $target through the lock link"
+expect 0 "" "a link at the old lock name does not stop check-probation"
+[[ ! -e "$target" ]] && pass "root did not create the old lock link's target" \
+    || fail "root created $target through the old lock link"
 rm -rf "$(dirname "$target")"
 drop_root
 
@@ -54,38 +53,17 @@ expect 1 "is a symlink" "a linked blocklist.json is refused"
 rm -f "$victim"
 drop_root
 
-# A directory at upgrade.lock is not a lock file.
-new_root a
-mkdir "$BOXMUNGE_ROOT/$STATE/upgrade.lock"
-run_shim check-probation
-expect 1 "Remove it" "a directory at upgrade.lock is refused"
-drop_root
-
-# The lock is still taken through a regular upgrade.lock left by a run.
-new_root a
-: > "$BOXMUNGE_ROOT/$STATE/upgrade.lock"
-run_shim check-probation
-expect 0 "" "an existing regular upgrade.lock is used"
-[[ -f "$BOXMUNGE_ROOT/$STATE/upgrade.lock" && ! -L "$BOXMUNGE_ROOT/$STATE/upgrade.lock" ]] \
-    && pass "upgrade.lock stays a regular file" || fail "upgrade.lock was replaced"
-drop_root
 
 # --- writes and opens by name in upgrade-state ----------------------------
 
 # HOSTILE: prepend to PATH. Its python3 stands in for deploy winning a race:
-# with SWAP_LOCK it swaps upgrade.lock for a link to $VICTIM just after root
-# checked it; with SLOT_PLANT it runs that Python file ahead of the script
+# with SLOT_PLANT it runs that Python file ahead of the script
 # that rewrites active-slot (the only stdin script naming .active-slot.).
 HOSTILE="$(mktemp -d)"
 REAL_PYTHON="$(command -v python3)"
 export REAL_PYTHON
 cat > "$HOSTILE/python3" <<'EOS'
 #!/usr/bin/env bash
-for a in "$@"; do
-    if [[ "$a" == */upgrade-state/upgrade.lock && -n "${SWAP_LOCK:-}" ]]; then
-        rm -f "$a"; ln -s "$VICTIM" "$a"
-    fi
-done
 if [[ "$#" -eq 1 && "$1" == - && -n "${SLOT_PLANT:-}" ]]; then
     script="$(cat)"
     [[ "$script" == *'prefix=".active-slot."'* ]] && script="$(cat "$SLOT_PLANT")
@@ -172,27 +150,6 @@ expect 1 "is a symlink" "the next run refuses the link the race left at active-s
 victim_untouched "the next run did not read or write through that link"
 rm -rf "$(dirname "$VICTIM")"
 drop_root
-unset VICTIM
-
-# upgrade.lock swapped for a link after the shim's checks, right before it
-# is opened: neither an existing target nor a missing one is opened or made.
-for victim_kind in existing missing; do
-    new_root a
-    VICTIM="$(mktemp -d)/victim"
-    [[ "$victim_kind" == missing ]] || echo "precious" > "$VICTIM"
-    export VICTIM
-    SWAP_LOCK=1 PATH="$HOSTILE:$PATH" run_shim check-probation
-    expect 1 "is a symlink" "upgrade.lock swapped for a link to a $victim_kind file is refused"
-    if [[ "$victim_kind" == missing ]]; then
-        [[ ! -e "$VICTIM" ]] && pass "root did not create the swapped link's target" \
-            || fail "root created $VICTIM through a swapped upgrade.lock"
-    else
-        [[ "$(cat "$VICTIM")" == "precious" ]] && pass "swapped link's existing target untouched" \
-            || fail "swapped link's target changed"
-    fi
-    rm -rf "$(dirname "$VICTIM")"
-    drop_root
-done
 unset VICTIM
 
 # A lock descriptor handed in by the environment must be upgrade.lock itself.
