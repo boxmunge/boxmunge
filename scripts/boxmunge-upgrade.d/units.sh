@@ -25,14 +25,44 @@ SYSTEMD_UNIT_DIR="${BOXMUNGE_SYSTEMD_DIR:-/etc/systemd/system}"
 
 slot_units() { echo "$BOXMUNGE_ROOT/env-$1/boxmunge-systemd"; }
 
-# copy_units <from_dir> <to_dir>: <to_dir> anew, with the boxmunge-*.service
-# and boxmunge-*.timer files of <from_dir>.
+# copy_units <from_dir> <record>: <record> anew, with the boxmunge-*.service
+# and boxmunge-*.timer files of <from_dir>. The record is a link to a
+# versioned directory beside it, written in full first and swapped in by
+# rename, so a copy cut short leaves the previous record whole (the same
+# scheme as bootstrap/systemd-units.sh's record_units).
 copy_units() {
-    local from="$1" to="$2" unit
-    rm -rf "$to"
-    mkdir -p "$to"
+    local from="$1" to="$2" unit stage previous
+    mkdir -p "$(dirname "$to")"
+    stage="$(mktemp -d "$(dirname "$to")/.boxmunge-systemd.XXXXXX")"
     for unit in "$from"/boxmunge-*.service "$from"/boxmunge-*.timer; do
-        if [[ -f "$unit" ]]; then cp "$unit" "$to/"; fi
+        if [[ -f "$unit" ]] && ! cp "$unit" "$stage/"; then
+            rm -rf "$stage"
+            log "ERROR: could not copy $unit into a units record; $to is left as it was"
+            return 1
+        fi
+    done
+    previous="$(readlink "$to" 2>/dev/null || true)"
+    ln -s "$(basename "$stage")" "$stage.link"
+    python3 -I -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$stage.link" "$to"
+    if [[ "$previous" =~ ^\.boxmunge-systemd\.[A-Za-z0-9]+$ ]]; then
+        rm -rf "${to%/*}/$previous"
+    fi
+}
+
+# Units every release ships: a record without one of them that is live is
+# damaged (cut short, emptied), and is never installed.
+ALWAYS_SHIPPED_UNITS=(boxmunge-health.timer boxmunge-health.service boxmunge-backup.timer
+                      boxmunge-backup-sync.timer boxmunge-auto-update.timer)
+
+# record_damaged <dir>: why <dir> cannot be a release's units, or nothing.
+record_damaged() {
+    local name
+    [[ -f "$1/boxmunge-health.timer" ]] || { echo "it has no boxmunge-health.timer"; return 0; }
+    for name in "${ALWAYS_SHIPPED_UNITS[@]}"; do
+        if [[ -e "$SYSTEMD_UNIT_DIR/$name" && ! -f "$1/$name" ]]; then
+            echo "it lacks $name, which every release ships"
+            return 0
+        fi
     done
 }
 
@@ -72,7 +102,7 @@ heal_slot_units() {
     units_match "$src" && return 0
     log "The live systemd units are not those of the release on slot $ACTIVE_SLOT (a rollback left them); restoring them"
     bm_log warn upgrade "systemd units differ from the live slot's; restoring" "{\"slot\": \"$ACTIVE_SLOT\"}"
-    restore_slot_units "$ACTIVE_SLOT"
+    restore_slot_units "$ACTIVE_SLOT" || true   # a refusal is logged; the check goes on
 }
 
 # restore_slot_units <slot>: best effort, since a units failure must not undo
@@ -86,6 +116,13 @@ restore_slot_units() {
         log "ERROR: slot $1 has no record of its systemd units ($src), so the units of the release rolled back from stay installed; put the running release's own back by reinstalling it (sudo bash boxmunge-install.sh)"
         bm_log error upgrade "systemd units not restored" "{\"slot\": \"$1\"}"
         return 0
+    fi
+    local damaged
+    damaged="$(record_damaged "$src")"
+    if [[ -n "$damaged" ]]; then
+        log "ERROR: refusing slot $1's record of its systemd units ($src): $damaged. The live units are left as they are; reinstall the running release to put its own back (sudo bash boxmunge-install.sh)"
+        bm_log error upgrade "systemd units record refused" "{\"slot\": \"$1\"}"
+        return 1
     fi
     for unit in "$SYSTEMD_UNIT_DIR"/boxmunge-*.service "$SYSTEMD_UNIT_DIR"/boxmunge-*.timer; do
         [[ -e "$unit" || -L "$unit" ]] || continue

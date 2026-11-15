@@ -2168,8 +2168,12 @@ the new release's `install.sh` again. A rollback during the upgrade to 0.12 itse
 passed but `upgrade --apply` or the first health check failed) is run by the previous release's
 shim, which does not do this; the 0.12 shim is installed by then, and the health timer's next
 `check-probation` (within minutes) finds the live units are not the live slot's and puts them
-back. A slot with no copy keeps the newer units, logged as an error: reinstall the running
-release to put its own units back. Pause and quarantine markers are not restored from the stash: a project you resumed after
+back. The same check runs on every `check-probation` and upgrade, so it also reverts hand edits
+to the `boxmunge-*` unit files in `/etc/systemd/system`: put local changes in drop-ins
+(`sudo systemctl edit boxmunge-<unit>`), which it leaves alone. A slot with no copy keeps the
+newer units, logged as an error: reinstall the running release to put its own units back. A
+copy that lacks `boxmunge-health.timer` is refused as damaged, and the live units are left as
+they are (logged as an error). Pause and quarantine markers are not restored from the stash: a project you resumed after
 the upgrade stays resumed. Nor are the users records: a service you gave to a new user with
 `data chown` after the upgrade keeps running as that user. If either the restore or the re-apply fails, you get a "ROLLBACK
 PARTIAL" alert and the shim exits 2; inspect the box as `supervisor`.

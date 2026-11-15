@@ -8,6 +8,8 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / "bootstrap" / "systemd-units.sh"
 TIMERS = sorted(p.name for p in (REPO / "systemd").glob("*.timer"))
@@ -85,9 +87,34 @@ def test_an_upgrade_records_the_units_the_live_slot_ran_before_replacing_them(tm
 
 
 def test_an_install_by_hand_records_the_bundles_units(tmp_path) -> None:
+    dest = tmp_path / "etc-systemd"
+    dest.mkdir()
+    (dest / "boxmunge-stale.timer").write_text("stale\n")
     record = tmp_path / "env-a" / "boxmunge-systemd"
-    record.mkdir(parents=True)
-    (record / "boxmunge-stale.timer").write_text("stale\n")
-    _run(tmp_path, _bundle(tmp_path), BOXMUNGE_SLOT_UNITS=str(record), FROM_UPGRADE_SHIM="0")
+    bundle = _bundle(tmp_path)
+    _run(tmp_path, bundle, BOXMUNGE_SLOT_UNITS=str(record), FROM_UPGRADE_SHIM="1")
+    assert (record / "boxmunge-stale.timer").exists()
+    _run(tmp_path, bundle, BOXMUNGE_SLOT_UNITS=str(record), FROM_UPGRADE_SHIM="0")
     assert sorted(p.name for p in record.iterdir()) == sorted(
         p.name for p in (REPO / "systemd").iterdir())
+    # Swapped in by rename: one versioned directory left, the record links to it.
+    assert record.is_symlink()
+    assert [p.name for p in record.parent.iterdir() if p.name != "boxmunge-systemd"] == [
+        str(record.readlink())]
+
+
+def test_a_record_cut_short_leaves_the_previous_one(tmp_path) -> None:
+    """The copy fails part-way (cp dies): the record still names the old set."""
+    dest = tmp_path / "etc-systemd"
+    dest.mkdir()
+    (dest / "boxmunge-health.timer").write_text("old\n")
+    record = tmp_path / "env-a" / "boxmunge-systemd"
+    bundle = _bundle(tmp_path)
+    _run(tmp_path, bundle, BOXMUNGE_SLOT_UNITS=str(record), FROM_UPGRADE_SHIM="1")
+    bin_dir = tmp_path / "bin"
+    (bin_dir / "cp").write_text("#!/usr/bin/env bash\nexit 1\n")
+    (bin_dir / "cp").chmod(0o755)
+    with pytest.raises(subprocess.CalledProcessError):
+        _run(tmp_path, bundle, BOXMUNGE_SLOT_UNITS=str(record), FROM_UPGRADE_SHIM="0")
+    assert [p.name for p in record.iterdir()] == ["boxmunge-health.timer"]
+    assert (record / "boxmunge-health.timer").read_text() == "old\n"

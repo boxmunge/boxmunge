@@ -243,7 +243,11 @@ upgrade_to() {
     cp "$tmp_download/boxmunge/on-server/"*.md "$(slot_docs "$standby")/"
     # A bundle without units leaves the slot without a record: a rollback to
     # it says so (restore_slot_units).
-    [[ ! -d "$bundle/systemd" ]] || copy_units "$bundle/systemd" "$(slot_units "$standby")"
+    if [[ -d "$bundle/systemd" ]]; then
+        copy_units "$bundle/systemd" "$(slot_units "$standby")" \
+            || preflight_fail "$version" "$from_version" "preflight_failed: bundle_units" \
+                "Could not record the bundle's systemd units for slot $standby"
+    fi
 
     # 2. PRE-FLIGHT
     log "Running pre-flight checks..."
