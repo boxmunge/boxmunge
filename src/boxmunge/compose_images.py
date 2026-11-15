@@ -75,6 +75,13 @@ def built_image_name(compose_project: str, service: str) -> str:
     return f"{BUILT_IMAGE_HOST}/{compose_project}/{service}"
 
 
+def parse_built_ref(ref: str) -> tuple[str, str, str | None, str | None] | None:
+    """(compose project, service, tag, digest hex) of exactly a built
+    image's reference, by the Docker reference grammar; None for any other."""
+    m = _BUILT_REF_RE.fullmatch(ref)
+    return None if m is None else (m[1], m[2], m[3], m[4])
+
+
 def describe_image(ref: str) -> str:
     """What an operator reads in place of an image reference.
 

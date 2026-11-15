@@ -253,7 +253,7 @@ def generate_compose_override(
     Hardens every service in `user_compose` and the manifest, adds
     boxmunge-proxy network aliases to routable services, env_file
     directives to manifest services, and resource limits where declared.
-    Each of `pins` sets its service's image to `<ref>@<digest>`
+    Each of `pins` sets its service's image to the pin's tag
     (image_pins).
 
     `user_compose`: the parsed user compose.yml dict, the same document
@@ -281,10 +281,10 @@ def _render_override(
     for pin in pins:
         if pin.service not in declared:
             raise ComposeError(
-                f"the image pin of service {pin.service!r} ({pin.image}): compose.yml has "
+                f"the image pin of service {pin.service!r} ({pin.ref}): compose.yml has "
                 f"no such service. A pin belongs to the release it was written for, and "
                 f"the switch to another release clears it")
-        services.setdefault(pin.service, {})["image"] = pin.image
+        services.setdefault(pin.service, {})["image"] = pin.ref
     override: dict[str, Any] = {"networks": {"boxmunge-proxy": {"external": True}}}
     if services:
         override["services"] = services

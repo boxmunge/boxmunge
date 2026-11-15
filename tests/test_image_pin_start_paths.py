@@ -27,6 +27,7 @@ _START_CHECKS = {"compose_up_checked", "start_containers_checked", "check_start"
                  "check_containers_start"}
 
 RENDERS = "renders the overlay, with the pins, before it starts"
+RECORDS = "starts nothing: records the overlay its caller rendered, with the pins, just before"
 RUNS_OVERLAY = "renders nothing: starts from the overlay the last render wrote, pins included"
 CONTAINERS = "starts existing containers, created from the pinned overlay, as they were created"
 SWITCH = "installs a release: rendered without the pins, which the switch clears"
@@ -42,7 +43,7 @@ STARTS = {
     ("commands/recover_cmd.py", "recover_locked"): RENDERS,
     ("commands/resume_cmd.py", "resume_locked"): RENDERS,
     ("commands/upgrade_offline.py", "regenerate_offline"): RENDERS,
-    ("commands/upgrade_steps.py", "_record_bind_sources"): RENDERS,
+    ("commands/upgrade_steps.py", "_record_bind_sources"): RECORDS,
     ("userns/bringup.py", "_project"): RENDERS,
     ("commands/restore.py", "_replace_data"): RUNS_OVERLAY,
     ("commands/restore.py", "_up"): RUNS_OVERLAY,
@@ -91,10 +92,42 @@ def test_every_prod_start_path_reads_the_overlay_pins(paths: BoxPaths) -> None:
             kw.arg == "staging" and ast.unparse(kw.value) == "True" for kw in c.keywords)]
         assert (group == STAGING) == (len(staged) == len(calls)), (rel, fn)
         if group == RENDERS:
-            assert any(_called(n) == "prepare_compose_override"
-                       for n in ast.walk(trees[rel])), (rel, fn)
+            assert _renders(trees[rel], fn), (rel, fn)
+        if group == RECORDS:
+            callers = [f.name for f in _functions(trees[rel]).values()
+                       if fn in _calls_made(f)]
+            assert callers and all(_renders_before(trees[rel], c, fn) for c in callers), \
+                (rel, fn, callers)
     # Every production file list includes the overlay once it exists.
     _assert_file_lists_include_the_overlay(paths)
+
+
+def _functions(tree: ast.Module) -> dict[str, ast.FunctionDef]:
+    return {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+
+def _calls_made(fn: ast.AST) -> list[str]:
+    return [name for n in ast.walk(fn) if (name := _called(n)) is not None]
+
+
+def _renders(tree: ast.Module, fn: str, seen: frozenset[str] = frozenset()) -> bool:
+    """`fn` renders the overlay itself, or through a function of its module
+    it calls (pins and all: no `installing`)."""
+    functions = _functions(tree)
+    for node in ast.walk(functions[fn]):
+        if _called(node) == "prepare_compose_override":
+            if not any(kw.arg == "installing" for kw in node.keywords):
+                return True
+        elif (callee := _called(node)) in functions and callee not in seen | {fn}:
+            if _renders(tree, callee, seen | {fn}):
+                return True
+    return False
+
+
+def _renders_before(tree: ast.Module, caller: str, fn: str) -> bool:
+    """`caller` renders (as _renders) before its call of `fn`."""
+    body = ast.unparse(_functions(tree)[caller])
+    return "prepare_compose_override(" in body[:body.index(f"{fn}(")]
 
 
 def _assert_file_lists_include_the_overlay(paths: BoxPaths) -> None:

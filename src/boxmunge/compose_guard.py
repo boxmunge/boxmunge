@@ -43,6 +43,7 @@ from boxmunge.compose_own_files import container_bind_problems
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.docker import compose_up, start_containers
 from boxmunge.docker_run import DockerError
+from boxmunge.image_pins import pinned_image_problem
 from boxmunge.intake import IntakeError, validate_release_tree
 from boxmunge.log import log_error
 from boxmunge.notify import notify
@@ -341,7 +342,9 @@ def compose_up_checked(
     (or stage) built, pulled and decided users for, or that container-update
     pulled and checked. The image a build service's container runs gets
     back a platform name it lost first (compose_up_steps). A start
-    whose image is missing is refused, naming it. A running container whose
+    whose image is missing is refused, naming it, and so is a production
+    start whose pinned image is not the one its pin records
+    (image_pins.pinned_image_problem). A running container whose
     image the local image store no longer has is recreated
     (compose_up_steps). Raises ComposeRefused, compose_up_steps.ComposeUpFailed once
     the up has run, or DockerError before it."""
@@ -374,6 +377,10 @@ def compose_up_checked(
         raise _refused(paths, project_name, component, up_steps.missing_text(missing)
                        + f": a start runs only images a deploy built or pulled; run {redo}",
                        tampering=False)
+    pinned = None if staging else pinned_image_problem(
+        paths, project_name, overlay, images, switching=deploying or txn is not None)
+    if pinned is not None:
+        raise _refused(paths, project_name, component, pinned, tampering=False)
     try:
         up(force_recreate=force_recreate, services=services)
     except DockerError as e:

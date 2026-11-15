@@ -161,7 +161,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `cve/kev_withdrawals.py` | `_entries` | `kev/withdrawn.json` | `state/` |
 | `cve/kev_source_history.py` | `_entries` | `kev/sources.json` | `state/` |
 | `cve/fix_grace.py` | `load` | `cve/fix_grace/<p>.json`, strict's fix deadlines (`FixGrace.load`) | `state/` |
-| `image_pins.py` | `read_pins` | `image_pins/<p>.json`, the images a project's services are pinned to by digest | `state/` |
+| `image_pins.py` | `read_pins` | `image_pins/<p>.json`, the images autofix pinned a project's services to | `state/` |
 | `cve/quarantine.py` | `read_quarantine_state` | `deploy/<p>.quarantined.json` | `state/` |
 | `cve/scan_state.py` | `scan_problem` | `scans/<p>.json` | `state/` |
 | `bind_sources.py` | `_load_record` | a project's bind-source record | `state/` |
@@ -169,6 +169,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `user_drift.py` | `held_back` | a project's user-drift record | `state/` |
 | `cve/suppressions.py` | `load_suppressions`, `_load_history` | `security/suppressions.yml` and its history | `projects/<p>/` (the host's list is in `config/`) |
 | `release.py` | `_read_meta` | `.releases/live.json`, `previous.json` | `projects/<p>/` |
+| `image_pins.py` | `_overlay_images` | `compose.boxmunge.yml`, the images a start's pins must run (`pinned_image_problem`) | `projects/<p>/` |
 | `release_keep.py` | `_reads_as` | `.releases/previous.json`, compared before it is rewritten | `projects/<p>/` |
 | `release_txn.py` | `load_txn`, `_sha` | `.releases/install.json` | `projects/<p>/` |
 | `staged_release.py` | `load_slot` | the staging slot's `meta.json` | `projects/<p>/` |

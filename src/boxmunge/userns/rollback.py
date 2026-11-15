@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 
 from boxmunge.docker_run import run as _run
+from boxmunge.image_pins import remap_image_pins
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.project_registry import load_registered_projects
@@ -247,6 +248,8 @@ def _reverse(paths: BoxPaths, j: Journal, daemon: DaemonControl, timers: TimerCo
     if not j.reached("rb-rebuilt"):
         _soak_volumes(j, rinv, old_root, new_root, save)
         load_all(rinv.images, j, rb_images, save, prefix="rb-image")
+        remap_image_pins(paths, rinv.projects, {i.id: j.image_map[i.id] for i in rinv.images
+                                                if i.id in j.image_map})
         _leftovers(paths, j, save)
         j.phase = "rb-rebuilt"
         save()

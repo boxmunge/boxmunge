@@ -29,7 +29,6 @@ from boxmunge.deployed_inventory import (
 from boxmunge.docker import compose_pull, caddy_reload, DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.health_checks.smoke import run_smoke
-from boxmunge.image_pins import pinned_services
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.lifecycle import BlockReason, is_blocked, paused_refusal
 from boxmunge.log import log_operation, log_error, log_warning
@@ -43,20 +42,16 @@ from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.release_txn import open_install_reason
-from boxmunge.state import StateError, read_state, write_state
+from boxmunge.state import read_state, write_state
 
 
 def _services_to_pull(project_name: str, paths: BoxPaths) -> dict[str, str]:
     """{service: image} a resume pulls: the services `up` starts from a
-    registry image (deployed_inventory.pulled_services), but those an image
-    pin fixes (image_pins). Raises InventoryError, or StateError for a pins
-    record that cannot be read."""
+    registry image (deployed_inventory.pulled_services). Raises InventoryError."""
     inventory = load_deployed_inventory(
         paths.project_dir(project_name), _compose_files(project_name, paths), project_name,
     )
-    pinned = pinned_services(paths, project_name)
-    return {name: str(svc.image) for name, svc in sorted(pulled_services(inventory).items())
-            if name not in pinned}
+    return {name: str(svc.image) for name, svc in sorted(pulled_services(inventory).items())}
 
 
 def _refuse_unless_resumable(project_name: str, paths: BoxPaths) -> bool:
@@ -122,7 +117,7 @@ def run_resume(
     if not yes:
         try:
             pull_image_services = _services_to_pull(project_name, paths)
-        except (InventoryError, StateError) as e:
+        except InventoryError as e:
             print(f"ERROR: cannot read the project's services: {e}", file=sys.stderr)
             return 1
         print(f"This will resume '{project_name}':")
@@ -219,7 +214,7 @@ def resume_locked(
     try:
         pull_image_services = {} if skip_security_checks else _services_to_pull(
             project_name, paths)
-    except (InventoryError, StateError) as e:
+    except InventoryError as e:
         print(f"ERROR: cannot read the project's services: {e}", file=sys.stderr)
         log_error("resume", f"Inventory failed: {e}", paths, project=project_name)
         return 1, None

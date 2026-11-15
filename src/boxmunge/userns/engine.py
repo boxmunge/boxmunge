@@ -28,6 +28,7 @@ from boxmunge.docker_run import run as _run
 from boxmunge.fileutil import project_lock
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
+from boxmunge.image_pins import remap_image_pins
 from boxmunge.project_registry import load_registered_projects
 from boxmunge.userns import offset as uo
 from boxmunge.userns.bringup import bring_up, quiesce
@@ -178,6 +179,9 @@ def _rebuild(paths: BoxPaths, j: Journal, inv: Inventory, images_dir: Path, save
         j.items["network"] = "created"
         save()
     load_all(inv.images, j, images_dir, save)
+    # The pins name these images by ID; a resume finds them moved already.
+    remap_image_pins(paths, inv.projects,
+                     {i.id: j.image_map[i.id] for i in inv.images if i.id in j.image_map})
     if j.caddyfile_mode is not None and j.items.get("caddyfile") != "0644":
         set_caddyfile_mode(paths, CADDYFILE_MODE)
         j.items["caddyfile"] = "0644"

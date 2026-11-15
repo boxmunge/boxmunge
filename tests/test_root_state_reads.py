@@ -126,6 +126,21 @@ def _alerted(paths: BoxPaths) -> bool:
     return bool(sent)
 
 
+_PIN_REF = f"boxmunge.invalid/{P}/web:autofix-aaaaaaaaaaaa"
+_PINS = {"version": 1, "pins": [{"service": "web", "ref": _PIN_REF,
+                                 "image_id": "sha256:" + "a" * 64, "reason": "autofix"}]}
+
+
+def _pinned_start(paths: BoxPaths) -> Any:
+    """What a production start of web finds wrong with its pinned image."""
+    pins = paths.project_image_pins(P)
+    if os.path.lexists(pins):
+        pins.unlink()  # the inventory leaves a link at every row's name
+    _write(pins, _PINS)
+    return image_pins.pinned_image_problem(paths, P, paths.project_compose_override(P),
+                                           {"web"}, switching=False)
+
+
 READERS = [
     Reader("read_state", lambda p: p.project_deploy_state(P), {"current_ref": "v1"},
            lambda p: read_state(p.project_deploy_state(P))),
@@ -167,10 +182,12 @@ READERS = [
            {"entries": [{"cve_id": "CVE-1", "package": "openssl", "first_seen": ISO,
                          "warned_at": None}]},
            lambda p: fix_grace.FixGrace.load(p, P).first_seen(("CVE-1", "openssl"))),
-    Reader("image_pins", lambda p: p.project_image_pins(P),
-           {"version": 1, "pins": [{"service": "web", "ref": "boxmunge.local/myapp/web:a",
-                                    "digest": "sha256:" + "a" * 64, "reason": "autofix"}]},
+    Reader("image_pins", lambda p: p.project_image_pins(P), _PINS,
            lambda p: image_pins.read_pins(p, P)),
+    # The overlay a pinned start runs; one it cannot read is the refusal.
+    Reader("image_pins overlay", lambda p: p.project_compose_override(P),
+           f"services:\n  web:\n    image: {_PIN_REF}\n", _pinned_start,
+           dangling=lambda o, _p: o[0] == "value" and o[1].startswith("cannot read")),
     Reader("kev_source_history", lambda p: p.kev_sources,
            {"sources": {"https://cisa.example/kev.json":
                         {"released_at": ISO, "disagreed_runs": 0}}},

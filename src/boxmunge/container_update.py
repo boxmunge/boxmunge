@@ -61,12 +61,12 @@ class UpdateError(Exception):
 
 def image_services(target: UpdateTarget) -> dict[str, DeployedService]:
     """The services an update pulls and recreates: those `up` starts from a
-    registry image (deployed_inventory.pulled_services), but those a pin
-    fixes (image_pins). Raises InventoryError when the deployed model or
-    containers cannot be read."""
-    services = pulled_services(
+    registry image (deployed_inventory.pulled_services).
+
+    Raises InventoryError when the deployed model or containers cannot be read.
+    """
+    return pulled_services(
         load_deployed_inventory(target.project_dir, target.compose_files, target.name))
-    return {name: svc for name, svc in services.items() if name not in target.pinned}
 
 
 def _managed(containers: tuple[ProjectContainer, ...] | list[ProjectContainer]) -> list[ProjectContainer]:

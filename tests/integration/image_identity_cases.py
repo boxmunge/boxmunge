@@ -243,6 +243,39 @@ def case_a_pinned_start_names_a_nameless_build_and_runs_it(
     assert nc.compose(paths, project, "exec", "-T", "web", "cat", "/marker") == "deployed\n"
 
 
+def case_a_start_runs_the_pinned_image(paths: BoxPaths, project: str, capsys) -> None:
+    """A patched image pinned under the project's own name (image_pins):
+    the next start runs it, container update leaves it alone, and a tag
+    moved to another image is refused before Compose runs."""
+    from boxmunge.container_update import image_services
+    from boxmunge.container_update_targets import UpdateTarget
+    from boxmunge.image_pins import ImagePin, pin_ref, write_pins
+    rc, out = nc.deploy(paths, project, _bundle(project, "deployed\n"), capsys)
+    assert rc == 0, out
+    deployed = _web(project)["Image"]
+    context = paths.root / "patch"
+    context.mkdir()
+    (context / "Dockerfile").write_text(
+        f"FROM boxmunge.invalid/{project}/web\nRUN echo patched > /marker\n")
+    _docker("build", "-q", "-t", f"{project}-patch", str(context))
+    patched = _docker("image", "inspect", "--format", "{{.Id}}", f"{project}-patch")
+    ref = pin_ref(project, "web", patched)
+    _docker("tag", f"{project}-patch", ref)
+    _docker("image", "rm", f"{project}-patch")
+    write_pins(paths, project, (ImagePin("web", ref, patched, "autofix"),))
+    files = ["compose.yml", "compose.boxmunge.yml"]
+    compose_up_checked(paths, project, component="resume", compose_files=files)
+    assert _web(project)["Image"] == patched != deployed
+    assert nc.compose(paths, project, "exec", "-T", "web", "cat", "/marker") == "patched\n"
+    target = UpdateTarget(name=project, project_dir=paths.project_dir(project),
+                          compose_files=files, strategy="leave_broken", has_backup=False)
+    assert image_services(target) == {}
+    _docker("tag", f"boxmunge.invalid/{project}/web", ref)
+    with pytest.raises(ComposeRefused, match="is not the one autofix built"):
+        compose_up_checked(paths, project, component="resume", compose_files=files)
+    assert _web(project)["Image"] == patched
+
+
 def teardown(paths: BoxPaths, project: str) -> None:
     nc.teardown(paths, project)
     if (paths.project_dir(project) / "compose.yml").exists():

@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any
 
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.fleet import PROJECT_INPUT_ERRORS, report_project_failure
-from boxmunge.image_pins import pinned_services
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.project_inventory import Inventory, classify, damaged_detail
 from boxmunge.fs_nofollow import read_text_nofollow
@@ -33,8 +32,6 @@ class UpdateTarget:
     strategy: str
     has_backup: bool
     is_caddy: bool = False
-    # Services an image pin fixes (image_pins): the update leaves them alone.
-    pinned: frozenset[str] = frozenset()
 
 
 def resolve_strategy(box: dict[str, Any], project: dict[str, Any] | None) -> str:
@@ -85,7 +82,6 @@ def _build_project_target(
         compose_files=compose_files,
         strategy=resolve_strategy(box_cu, proj_cu),
         has_backup=has_backup,
-        pinned=pinned_services(paths, name),
     )
 
 

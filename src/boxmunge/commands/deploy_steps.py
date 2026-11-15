@@ -5,7 +5,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from boxmunge.image_pins import clear_pins
+from boxmunge.image_pins import forget_pins
 from boxmunge.log import log_error, log_warning
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.pause import is_paused
@@ -78,10 +78,10 @@ def record_deploy_state(
 def clear_release_overrides(paths: BoxPaths, project_name: str) -> None:
     """Production runs the release just recorded (a redeploy of the same
     one included), from its own images: what ran on top of the release
-    before goes, its image pins (image_pins.clear_pins). The switch
-    rendered its overlay without them already; clearing renders it again,
-    unchanged."""
-    clear_pins(paths, project_name)
+    before goes, its image pins. The switch rendered its overlay without
+    them already, so only the record goes (image_pins.forget_pins): nothing
+    is rendered and Docker is not asked."""
+    forget_pins(paths, project_name)
 
 
 def snapshot_wanted(manifest: dict) -> bool:

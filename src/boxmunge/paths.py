@@ -254,7 +254,7 @@ class BoxPaths:
         return self.state / "scans" / f"{name}.json"
 
     def project_image_pins(self, name: str) -> Path:
-        """The images a project's services are pinned to by digest (image_pins)."""
+        """The patched images a project's services are pinned to (image_pins)."""
         name = _checked(name)
         return self.state / "image_pins" / f"{name}.json"
 

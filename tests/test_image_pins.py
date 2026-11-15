@@ -1,10 +1,12 @@
 """Per-project image pins (image_pins): the record, the overlay that runs
-them, the release switch that clears them, and the `security.autofix` key.
+them, the start check of the pinned images, the release switch that drops
+them, the user-namespace remap, and the `security.autofix` key.
 
-Real filesystem; `docker compose up` and Pushover are stood in for, and
-the unit tier's literal `docker compose config` (conftest) resolves
-compose.yml alone, so the merged model is the integration tier's
-(tests/integration/test_image_pin_resolve.py).
+Real filesystem; `docker compose up`, the image store and Pushover are
+stood in for, and the unit tier's literal `docker compose config`
+(conftest) resolves compose.yml alone, so the merged model and a real
+daemon are the integration tier's (tests/integration/test_image_pin_resolve.py,
+image_identity_cases.case_a_start_runs_the_pinned_image on both stores).
 """
 from __future__ import annotations
 
@@ -22,16 +24,20 @@ from boxmunge.compose import (
     ComposeError, generate_compose_override, generate_staging_compose_override,
     prepare_compose_override,
 )
-from boxmunge.compose_guard import check_start, compose_up_checked
-from boxmunge.image_pins import ImagePin, clear_pins, pinned_services, read_pins, write_pins
+from boxmunge.compose_guard import ComposeRefused, check_start, compose_up_checked
+from boxmunge.docker_containers import LocalImage
+from boxmunge.docker_run import DockerError
+from boxmunge.image_pins import (
+    ImagePin, clear_pins, forget_pins, pin_ref, read_pins, remap_image_pins,
+    write_pins,
+)
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError
 
 NAME = "shop"
 PROD = ["compose.yml", "compose.boxmunge.yml"]
-DIGEST = "sha256:" + "a" * 64
-PIN = ImagePin(service="web", ref=f"boxmunge.local/{NAME}/web:autofix-aaaaaaaaaaaa",
-               digest=DIGEST, reason="autofix")
+IMAGE_ID = "sha256:" + "a" * 64
+PIN = ImagePin("web", pin_ref(NAME, "web", IMAGE_ID), IMAGE_ID, "autofix")
 MANIFEST = {
     "schema_version": 2, "id": "01HZZZZZZZZZZZZZZZZZZZZZZZ", "project": NAME,
     "source": "bundle", "hosts": [f"{NAME}.example.com"],
@@ -76,8 +82,35 @@ def _record(paths: BoxPaths, record: object) -> None:
 
 
 def _pin_doc(**changes: object) -> dict:
-    pin = {"service": "web", "ref": PIN.ref, "digest": DIGEST, "reason": "autofix", **changes}
+    pin = {"service": "web", "ref": PIN.ref, "image_id": IMAGE_ID, "reason": "autofix",
+           **changes}
     return {"version": 1, "pins": [pin]}
+
+
+# --- the pin --------------------------------------------------------------
+
+
+def test_the_pin_names_the_image_under_the_projects_own_prefix() -> None:
+    assert PIN.ref == f"boxmunge.invalid/{NAME}/web:autofix-aaaaaaaaaaaa"
+    assert PIN.project == NAME
+
+
+@pytest.mark.parametrize("field, value", [
+    ("service", ""), ("service", "api"), ("ref", ""),
+    ("ref", f"{PIN.ref}@{IMAGE_ID}"),
+    ("ref", f"boxmunge.local/{NAME}/web:autofix-aaaaaaaaaaaa"),
+    ("ref", f"boxmunge.invalid/{NAME}/web"),
+    ("ref", f"boxmunge.invalid/{NAME}/web:latest"),
+    ("ref", f"boxmunge.invalid/{NAME}/web:autofix-aaaa"),
+    ("ref", f"boxmunge.invalid/{NAME}/web:autofix-AAAAAAAAAAAA"),
+    ("ref", f"boxmunge.invalid/{NAME}/Web:autofix-aaaaaaaaaaaa"),
+    ("ref", "nginx:1.27"),
+    ("image_id", "sha256:abc"), ("image_id", "a" * 64), ("image_id", 1),
+    ("reason", "manual"),
+])
+def test_a_malformed_pin_is_refused(field, value) -> None:
+    with pytest.raises(ValueError):
+        ImagePin(**{**PIN.__dict__, field: value})
 
 
 # --- the overlay ----------------------------------------------------------
@@ -86,13 +119,13 @@ def _pin_doc(**changes: object) -> dict:
 def test_overlay_emits_pinned_image_for_service() -> None:
     compose = {"services": {"web": {"image": "nginx:1.27"}, "app": {"build": "."},
                             "db": {"image": "postgres:16"}}}
-    app = ImagePin("app", "boxmunge.local/shop/app:autofix-bbbbbbbbbbbb",
-                   "sha256:" + "b" * 64, "autofix")
+    app_id = "sha256:" + "b" * 64
+    app = ImagePin("app", pin_ref(NAME, "app", app_id), app_id, "autofix")
     services = yaml.safe_load(generate_compose_override(
         MANIFEST, user_compose=compose, pins=(PIN, app)))["services"]
-    assert services["web"]["image"] == f"{PIN.ref}@{DIGEST}"
+    assert services["web"]["image"] == PIN.ref
     # A build service's pin replaces the platform name its build carries.
-    assert services["app"]["image"] == f"{app.ref}@{app.digest}"
+    assert services["app"]["image"] == app.ref
     assert "image" not in services["db"]
     # Staging runs the staged release's own images: pins are production's.
     staging = yaml.safe_load(generate_staging_compose_override(MANIFEST, user_compose=compose))
@@ -103,7 +136,7 @@ def test_the_overlay_on_disk_carries_the_recorded_pins(box) -> None:
     paths, *_ = box
     _record(paths, _pin_doc())
     prepare_compose_override(paths, MANIFEST)
-    assert _overlay(paths)["services"]["web"]["image"] == f"{PIN.ref}@{DIGEST}"
+    assert _overlay(paths)["services"]["web"]["image"] == PIN.ref
 
 
 def test_a_release_being_installed_is_rendered_without_the_pins(box) -> None:
@@ -117,7 +150,9 @@ def test_a_release_being_installed_is_rendered_without_the_pins(box) -> None:
 
 def test_a_pin_for_a_service_the_release_lacks_is_refused(box) -> None:
     paths, *_ = box
-    _record(paths, _pin_doc(service="gone"))
+    gone_id = "sha256:" + "c" * 64
+    _record(paths, _pin_doc(service="gone", ref=pin_ref(NAME, "gone", gone_id),
+                            image_id=gone_id))
     with pytest.raises(ComposeError, match="gone.*compose.yml has no such service"):
         prepare_compose_override(paths, MANIFEST)
 
@@ -141,7 +176,7 @@ def test_pin_write_refreshes_control_hash(box) -> None:
     before = _overlay_hash(paths)
     write_pins(paths, NAME, (PIN,))
     assert read_pins(paths, NAME) == (PIN,)
-    assert _overlay(paths)["services"]["web"]["image"] == f"{PIN.ref}@{DIGEST}"
+    assert _overlay(paths)["services"]["web"]["image"] == PIN.ref
     assert _overlay_hash(paths) != before
     recorded = json.loads(paths.project_bind_record(NAME).read_text())["control"]
     assert recorded[bind_sources.OVERLAY] == _overlay_hash(paths)
@@ -178,7 +213,7 @@ def test_writing_no_pins_is_refused(box) -> None:
 
 def test_no_pin_is_written_while_an_install_is_open(box) -> None:
     """The project dir holds the release the install puts in, which the
-    pins are not for; its switch renders and clears them anyway."""
+    pins are not for; its switch drops them anyway."""
     from boxmunge.release_txn import open_txn
     paths, *_ = box
     open_txn(paths, NAME, source="bundle", ref="shop-v2", replaced_ref="shop-v1",
@@ -190,19 +225,109 @@ def test_no_pin_is_written_while_an_install_is_open(box) -> None:
 
 def test_two_pins_for_one_service_are_refused(box) -> None:
     paths, *_ = box
-    other = ImagePin("web", PIN.ref, "sha256:" + "c" * 64, "autofix")
+    other_id = "sha256:" + "c" * 64
+    other = ImagePin("web", pin_ref(NAME, "web", other_id), other_id, "autofix")
     with pytest.raises(ValueError, match="web"):
         write_pins(paths, NAME, (PIN, other))
     assert read_pins(paths, NAME) == ()
 
 
-@pytest.mark.parametrize("field, value", [
-    ("service", ""), ("ref", ""), ("ref", f"{PIN.ref}@{DIGEST}"), ("ref", "a b"),
-    ("digest", "sha256:abc"), ("digest", "a" * 64), ("reason", "manual"),
+def test_a_pin_of_another_project_is_refused(box) -> None:
+    paths, *_ = box
+    with pytest.raises(ValueError, match="not an image of"):
+        write_pins(paths, NAME, (ImagePin("web", pin_ref("blog", "web", IMAGE_ID), IMAGE_ID,
+                                          "autofix"),))
+
+
+# --- the start ------------------------------------------------------------
+
+
+def _restart(paths: BoxPaths, **kwargs) -> None:
+    compose_up_checked(paths, NAME, component="restart", compose_files=PROD, **kwargs)
+
+
+def _store(monkeypatch, image_id: str | None) -> None:
+    monkeypatch.setattr("boxmunge.docker_containers.local_image",
+                        lambda ref: None if image_id is None or ref != PIN.ref
+                        else LocalImage(image_id=image_id, repo_digests=()))
+
+
+def test_a_start_runs_the_pinned_image_it_records(box, monkeypatch) -> None:
+    paths, _, up, sent = box
+    write_pins(paths, NAME, (PIN,))
+    _store(monkeypatch, IMAGE_ID)
+    up.reset_mock()
+    _restart(paths)
+    up.assert_called_once()
+    assert sent == []
+
+
+@pytest.mark.parametrize("found, says", [
+    ("sha256:" + "f" * 64, r"the tag names sha256:ffffffffffff, the pin sha256:aaaaaaaaaaaa"),
+    (None, "the tag names no image"),
 ])
-def test_a_malformed_pin_is_refused(field, value) -> None:
-    with pytest.raises(ValueError):
-        ImagePin(**{**PIN.__dict__, field: value})
+def test_a_retagged_or_missing_pinned_image_is_refused(box, monkeypatch, found, says) -> None:
+    paths, _, up, sent = box
+    write_pins(paths, NAME, (PIN,))
+    _store(monkeypatch, found)
+    up.reset_mock()
+    with pytest.raises(ComposeRefused, match=r"the pinned image for web \(boxmunge.invalid/"
+                       r"shop/web:autofix-aaaaaaaaaaaa\) is not the one autofix built: " + says):
+        _restart(paths)
+    up.assert_not_called()
+    assert "is not the one autofix built" in sent[0]
+
+
+def test_a_start_of_other_services_does_not_check_the_pin(box, monkeypatch) -> None:
+    paths, _, up, _ = box
+    write_pins(paths, NAME, (PIN,))
+    _store(monkeypatch, "sha256:" + "f" * 64)
+    _restart(paths, services=["db"])
+
+
+def test_pins_without_the_overlay_are_refused_saying_it_is_missing(box) -> None:
+    paths, _, up, _ = box
+    write_pins(paths, NAME, (PIN,))
+    paths.project_compose_override(NAME).unlink()
+    bind_sources.refresh_control_hash(paths.project_dir(NAME),
+                                      paths.project_bind_record(NAME), bind_sources.OVERLAY)
+    up.reset_mock()
+    with pytest.raises(ComposeRefused, match="the overlay compose.boxmunge.yml that runs them "
+                                             "is missing"):
+        compose_up_checked(paths, NAME, component="restart", compose_files=["compose.yml"])
+    up.assert_not_called()
+
+
+def test_an_overlay_rendered_without_the_pin_is_refused(box, monkeypatch) -> None:
+    paths, _, up, _ = box
+    write_pins(paths, NAME, (PIN,))
+    prepare_compose_override(paths, MANIFEST, installing=True)
+    _store(monkeypatch, IMAGE_ID)
+    with pytest.raises(ComposeRefused, match="generated without the pin"):
+        _restart(paths)
+
+
+def test_a_switching_start_runs_its_release_whatever_the_pins(box, monkeypatch) -> None:
+    """A deploy's start runs the release it rendered without the pins,
+    before its switch drops them."""
+    paths, _, up, _ = box
+    write_pins(paths, NAME, (PIN,))
+    prepare_compose_override(paths, MANIFEST, installing=True)
+    _store(monkeypatch, None)
+    up.reset_mock()
+    compose_up_checked(paths, NAME, component="deploy", compose_files=PROD, record=True,
+                       deploying=True)
+    up.assert_called_once()
+
+
+def test_a_recreating_start_that_runs_the_pin_still_checks_it(box, monkeypatch) -> None:
+    """resume recreates stale containers as a deploy does (`deploying`), from
+    the overlay it rendered with the pins: those are checked all the same."""
+    paths, _, up, _ = box
+    write_pins(paths, NAME, (PIN,))
+    _store(monkeypatch, "sha256:" + "f" * 64)
+    with pytest.raises(ComposeRefused, match="is not the one autofix built"):
+        _restart(paths, deploying=True)
 
 
 # --- the release switch ---------------------------------------------------
@@ -210,31 +335,32 @@ def test_a_malformed_pin_is_refused(field, value) -> None:
 
 def test_successful_switch_clears_pins_and_record(box) -> None:
     """A deploy, promote or rollback records the release it switched to
-    (record_deploy_state); the pins of the release before go with it, and
-    the overlay is rendered again without them."""
+    (record_deploy_state); the pins of the release before go with it. The
+    switch rendered its overlay without them, so nothing is rendered and
+    Docker is not asked: a failing render cannot escape the switch."""
     from boxmunge.commands.deploy_steps import record_deploy_state
     paths, *_ = box
     record_deploy_state(paths, NAME, "v1", None)
     write_pins(paths, NAME, (PIN,))
-    record_deploy_state(paths, NAME, "v2", None)
+    with patch("boxmunge.compose.prepare_compose_override",
+               side_effect=DockerError("docker down")), \
+            patch("boxmunge.docker_run.run", side_effect=DockerError("docker down")):
+        record_deploy_state(paths, NAME, "v2", None)
     assert not os.path.lexists(paths.project_image_pins(NAME))
-    assert "image" not in _overlay(paths)["services"]["web"]
-    check_start(paths, NAME, component="restart", compose_files=PROD)
+    assert forget_pins(paths, NAME) is False
 
 
-def _pinned_myapp(paths: BoxPaths) -> str:
-    """myapp deployed twice, its web service then pinned. Returns the image
-    the pin runs."""
+def _pinned_myapp(paths: BoxPaths) -> None:
+    """myapp deployed twice, its web service then pinned."""
     from boxmunge.project_registry import add_project
     from tests.test_commands.test_rollback import V1, V2, _deploy
     add_project("myapp", paths)
     _deploy(paths, V1, {"VERSION": "v1\n"})
     _deploy(paths, V2, {"VERSION": "v2\n"})
     with patch("boxmunge.notify.send_notification", lambda *a, **k: True):
-        write_pins(paths, "myapp", (ImagePin("web", "boxmunge.local/myapp/web:autofix-a",
-                                             DIGEST, "autofix"),))
-    web = yaml.safe_load(paths.project_compose_override("myapp").read_text())["services"]["web"]
-    return web["image"]
+        write_pins(paths, "myapp", (ImagePin("web", pin_ref("myapp", "web", IMAGE_ID),
+                                             IMAGE_ID, "autofix"),))
+    assert _myapp_web(paths)["image"] == pin_ref("myapp", "web", IMAGE_ID)
 
 
 def _myapp_web(paths: BoxPaths) -> dict:
@@ -244,7 +370,7 @@ def _myapp_web(paths: BoxPaths) -> dict:
 def test_a_deploy_runs_its_own_images_and_clears_the_pins(paths) -> None:
     from boxmunge.commands.deploy import run_deploy
     from tests.bundle_helpers import manifest_text, place_bundle
-    assert _pinned_myapp(paths).endswith(DIGEST)
+    _pinned_myapp(paths)
     started: list[dict] = []
     place_bundle(paths, timestamp="2026-10-13T110000000000",
                  files={"manifest.yml": manifest_text(), "VERSION": "v3\n"})
@@ -263,7 +389,7 @@ def test_a_rollback_runs_its_own_images_and_clears_the_pins(paths) -> None:
     checks, so the pins of the release it replaces go too."""
     from boxmunge.commands.rollback import run_rollback
     from tests.test_commands.test_rollback import _docker
-    assert _pinned_myapp(paths).endswith(DIGEST)
+    _pinned_myapp(paths)
     with _docker(), patch("boxmunge.notify.send_notification", lambda *a, **k: True):
         assert run_rollback("myapp", paths, yes=True) == 0
     assert (paths.project_dir("myapp") / "VERSION").read_text() == "v1\n"
@@ -306,6 +432,45 @@ def test_only_a_release_install_renders_without_the_pins() -> None:
                           "commands/rollback.py:restore_rolled_back_data"]
 
 
+# --- the user-namespace migration -----------------------------------------
+
+
+def test_the_migration_points_the_pins_at_the_loaded_ids(paths) -> None:
+    new_id = "sha256:" + "d" * 64
+    _record(paths, _pin_doc())
+    remap_image_pins(paths, [NAME, "blog"], {IMAGE_ID: new_id})
+    assert read_pins(paths, NAME) == (ImagePin("web", PIN.ref, new_id, "autofix"),)
+    remap_image_pins(paths, [NAME], {IMAGE_ID: new_id})  # a resume
+    assert read_pins(paths, NAME)[0].image_id == new_id
+
+
+def test_the_rebuild_remaps_the_pins_after_loading_the_images(paths, monkeypatch,
+                                                               tmp_path) -> None:
+    from boxmunge.userns import engine as en
+    from boxmunge.userns.inventory import ImageEntry, Inventory
+    from boxmunge.userns.journal import FORWARD, Journal
+    new_id = "sha256:" + "d" * 64
+    _record(paths, _pin_doc())
+    j = Journal(FORWARD, "switched", 100000, items={"network": "created"})
+
+    def load(images, journal, directory, save):
+        journal.image_map[IMAGE_ID] = new_id
+    monkeypatch.setattr(en, "load_all", load)
+    inv = Inventory("overlay2", "", str(tmp_path / "docker"), "29.9.0", projects=[NAME],
+                    images=[ImageEntry(IMAGE_ID, [PIN.ref], 1, True)])
+    en._rebuild(paths, j, inv, tmp_path / "img", lambda: None)
+    assert read_pins(paths, NAME)[0].image_id == new_id
+
+
+def test_the_rollback_remaps_the_pins_after_loading_the_images() -> None:
+    import ast
+    import inspect
+
+    from boxmunge.userns import rollback
+    body = ast.unparse(ast.parse(inspect.getsource(rollback._reverse)))
+    assert body.index("load_all(rinv.images") < body.index("remap_image_pins(paths, rinv")
+
+
 # --- reading --------------------------------------------------------------
 
 
@@ -318,8 +483,10 @@ def test_only_a_release_install_renders_without_the_pins() -> None:
     {"version": 1, "pins": ["web"]},
     {"version": 1, "pins": [{"service": "web"}]},
     _pin_doc(extra=1),
-    _pin_doc(digest="sha256:abc"),
+    _pin_doc(digest=IMAGE_ID),
+    _pin_doc(image_id="sha256:abc"),
     _pin_doc(reason="manual"),
+    _pin_doc(ref=pin_ref("blog", "web", IMAGE_ID)),
     {"version": 1, "pins": _pin_doc()["pins"] * 2},
 ])
 def test_unreadable_pins_raise_state_error(paths, record) -> None:
@@ -345,39 +512,34 @@ def test_a_linked_record_is_not_read_through(paths, tmp_path) -> None:
 
 def test_no_record_is_no_pins(paths) -> None:
     assert read_pins(paths, NAME) == ()
-    assert pinned_services(paths, NAME) == frozenset()
 
 
-def test_pinned_services(paths) -> None:
-    _record(paths, _pin_doc())
-    assert pinned_services(paths, NAME) == frozenset({"web"})
+# --- pulls ----------------------------------------------------------------
 
 
-# --- container update -----------------------------------------------------
+def _model_runs_the_pin(paths: BoxPaths) -> None:
+    """compose.yml as the merged model reads with the overlay's pin."""
+    project_dir = paths.project_dir(NAME)
+    project_dir.mkdir(parents=True)
+    (project_dir / "compose.yml").write_text(yaml.safe_dump(
+        {"services": {"web": {"image": PIN.ref}, "db": {"image": "postgres:16"}}}))
 
 
 def test_container_update_leaves_a_pinned_service_alone(paths) -> None:
-    """A pinned service runs the image its pin names, whatever its tag
-    names after a pull: container update neither pulls nor compares it."""
+    """A pinned tag is a platform name no registry serves: container update
+    neither pulls nor compares it (deployed_inventory.pulled_services)."""
     from boxmunge.container_update import image_services
-    from boxmunge.container_update_targets import build_targets
-    project_dir = paths.project_dir(NAME)
-    project_dir.mkdir(parents=True)
-    (project_dir / "manifest.yml").write_text(yaml.safe_dump(MANIFEST))
-    (project_dir / "compose.yml").write_text(yaml.safe_dump(COMPOSE))
-    _record(paths, _pin_doc())
-    with patch("boxmunge.container_update_targets.classify"):
-        targets = [t for t in build_targets(paths, {}) if t.name == NAME]
-    assert targets[0].pinned == frozenset({"web"})
-    assert list(image_services(targets[0])) == ["db"]
+    from boxmunge.container_update_targets import UpdateTarget
+    _model_runs_the_pin(paths)
+    target = UpdateTarget(name=NAME, project_dir=paths.project_dir(NAME),
+                          compose_files=["compose.yml"], strategy="leave_broken",
+                          has_backup=False)
+    assert list(image_services(target)) == ["db"]
 
 
 def test_resume_pulls_no_pinned_service(paths) -> None:
     from boxmunge.commands.resume_cmd import _services_to_pull
-    project_dir = paths.project_dir(NAME)
-    project_dir.mkdir(parents=True)
-    (project_dir / "compose.yml").write_text(yaml.safe_dump(COMPOSE))
-    _record(paths, _pin_doc())
+    _model_runs_the_pin(paths)
     assert _services_to_pull(NAME, paths) == {"db": "postgres:16"}
 
 

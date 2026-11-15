@@ -17,7 +17,8 @@ pytestmark = [pytest.mark.integration, skip_no_docker]
                                   ic.case_a_start_missing_an_image_touches_nothing,
                                   ic.case_a_pinned_up_applies_no_pull_policy,
                                   ic.case_regenerating_names_a_stopped_containers_build,
-                                  ic.case_a_pinned_start_names_a_nameless_build_and_runs_it],
+                                  ic.case_a_pinned_start_names_a_nameless_build_and_runs_it,
+                                  ic.case_a_start_runs_the_pinned_image],
                          ids=lambda c: c.__name__)
 def test_case(tmp_path, capsys, case) -> None:
     paths, project = ic.box_paths(tmp_path / "boxmunge"), ic.project_name()
