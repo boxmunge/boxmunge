@@ -63,7 +63,8 @@ def test_undeployed_fix_is_warned_then_quarantined_then_lifted(box) -> None:
     [title] = _titles(pushover, "QUARANTINED")
     assert "fix not deployed" in title
     stored = json.loads(paths.project_scan_state("demo").read_text())
-    assert "quarantine" in json.dumps(stored)
+    [stored_finding] = [f for d in stored["decisions"] for f in d["findings"]]
+    assert stored_finding["disposition"] == Disposition.QUARANTINE.value
 
     paths.found = []                                     # the fix is deployed
     _scan(box, T0 + timedelta(days=7, hours=2))

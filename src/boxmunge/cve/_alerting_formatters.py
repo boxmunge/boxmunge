@@ -214,7 +214,8 @@ def format_fixable_alert(project: str, hits: Sequence[Hit]) -> Alert:
 
 
 def format_fix_deadline_alert(
-    project: str, deadlines: Sequence[tuple[Hit, date]], grace_days: int,
+    project: str, deadlines: Sequence[tuple[Hit, date]], grace_days: int, *,
+    dangerously: bool,
 ) -> Alert:
     """Strict's warning, sent once per finding, that a fix still not deployed
     quarantines the site on its deadline (cve.fix_grace). Priority 0, sent
@@ -223,8 +224,10 @@ def format_fix_deadline_alert(
                                                 hd[0].disposition.finding.package))
     first_hit, first_day = ordered[0]
     head = first_hit.disposition.finding
+    then = ("it runs at risk (quarantine disabled by config)" if dangerously
+            else "the site is quarantined")
     title = (f"[boxmunge:{project}] Fix deadline {first_day.isoformat()} — {head.cve_id} "
-             f"in {head.package or '?'}: deploy the fix or the site is quarantined"
+             f"in {head.package or '?'}: deploy the fix or {then}"
              f"{_more(len(ordered) - 1)}")
     lines = [f"Project: {project} — still running."]
     for hit, day in ordered[:_MAX_LISTED]:
@@ -235,8 +238,8 @@ def format_fix_deadline_alert(
         lines.append(f"... and {len(ordered) - _MAX_LISTED} more")
     lines += [
         "",
-        f"Deploy the fix (rebuild/bump the image) before {first_day.isoformat()} or the",
-        f"site is quarantined. Strict gives an available fix {grace_days} days to be deployed.",
+        f"Deploy the fix (rebuild/bump the image) before {first_day.isoformat()} or {then}.",
+        f"Strict gives an available fix {grace_days} days to be deployed.",
         "A `build:` service is rebuilt on its base image's current digest by its",
         f"next stage and promote, or `prod-deploy {project} --redeploy`. Otherwise",
         "bump the image tag or digest, then redeploy. A reviewed CVE can be",

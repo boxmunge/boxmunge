@@ -93,6 +93,9 @@ def test_quarantine_after_7_days(paths: BoxPaths) -> None:
     assert out[0].quarantine_required
     assert "available since 2026-11-01 but not deployed" in fd.explanation.lower()
     assert not fd.fix_would_quarantine
+    # Still recognisably fixable, for autofix.
+    assert fd.finding.fix_available and fd.finding.fixed_version == "3.0.2"
+    assert fd.fix_meets_patch_gate
 
 
 def test_quarantine_disabled_runs_at_risk(paths: BoxPaths) -> None:
@@ -169,3 +172,42 @@ def test_overdue_quarantine_alert_title_says_the_fix_is_not_deployed(paths: BoxP
     alert = format_quarantine_alert(P, [Hit(out[0].findings[0], "shop:1")])
     assert "QUARANTINED — CVE-2026-0001 (Medium, fix not deployed)" in alert.title
     assert "but not deployed" in alert.body
+
+
+def _write_entry(paths: BoxPaths, first_seen: str, warned_at: str | None) -> None:
+    import json
+    path = paths.project_fix_grace(P)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"entries": [{"cve_id": "CVE-2026-0001", "package": "openssl",
+                                             "first_seen": first_seen, "warned_at": warned_at}]}))
+
+
+def test_future_first_seen_is_refused_not_a_postponed_deadline(paths: BoxPaths) -> None:
+    _write_entry(paths, "9999-01-01T00:00:00+00:00", None)
+    with pytest.raises(StateError, match=str(paths.project_fix_grace(P))):
+        _run(paths, T0, _fixable())
+
+
+def test_first_seen_within_clock_skew_is_accepted(paths: BoxPaths) -> None:
+    _write_entry(paths, (T0 + timedelta(seconds=30)).isoformat(), None)
+    out, _ = _run(paths, T0, _fixable())
+    assert _disp(out) is Disposition.IGNORED_FIXED
+
+
+def test_warned_before_first_seen_is_refused(paths: BoxPaths) -> None:
+    _write_entry(paths, T0.isoformat(), (T0 - timedelta(days=1)).isoformat())
+    with pytest.raises(StateError, match=str(paths.project_fix_grace(P))):
+        FixGrace.load(paths, P)
+
+
+def test_warning_under_quarantine_disabled_says_it_runs_at_risk(paths: BoxPaths) -> None:
+    _run(paths, T0, _fixable(), dangerously=True)
+    _, [alert] = _run(paths, T0 + timedelta(days=6), _fixable(), dangerously=True)
+    assert "quarantined" not in alert.title + alert.body
+    assert "runs at risk" in alert.title and "runs at risk" in alert.body
+
+
+def test_warning_says_the_site_is_quarantined(paths: BoxPaths) -> None:
+    _run(paths, T0, _fixable())
+    _, [alert] = _run(paths, T0 + timedelta(days=6), _fixable())
+    assert "or the site is quarantined" in alert.title and "or the site is quarantined" in alert.body

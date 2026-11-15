@@ -43,6 +43,9 @@ from boxmunge.state import StateError
 
 STRICT_FIX_GRACE = timedelta(days=7)
 STRICT_FIX_WARN_BEFORE = timedelta(hours=48)
+# How far ahead of the scan's clock a recorded first sighting may be before
+# the record is refused: a future one would silently postpone the deadline.
+_CLOCK_SKEW = timedelta(seconds=60)
 
 Key = tuple[str, str]   # (CVE id, package)
 
@@ -72,10 +75,11 @@ def _parse(raw: str) -> dict[Key, GraceEntry]:
         cve, package = item["cve_id"], item["package"]
         if not isinstance(cve, str) or not cve or not isinstance(package, str):
             raise ValueError(f"an entry names no CVE and package: {item!r}")
-        warned = item["warned_at"]
-        entries[(cve, package)] = GraceEntry(
-            first_seen=_aware(item["first_seen"], "first_seen"),
-            warned_at=None if warned is None else _aware(warned, "warned_at"))
+        first_seen = _aware(item["first_seen"], "first_seen")
+        warned = None if item["warned_at"] is None else _aware(item["warned_at"], "warned_at")
+        if warned is not None and warned < first_seen:
+            raise ValueError(f"{cve} in {package} was warned before it was first seen")
+        entries[(cve, package)] = GraceEntry(first_seen=first_seen, warned_at=warned)
     return entries
 
 
@@ -176,6 +180,10 @@ def apply_fix_grace(
             key = _key(fd)
             seen.add(key)
             entry = grace.entry(key) or GraceEntry(first_seen=now)
+            if entry.first_seen > now + _CLOCK_SKEW:
+                raise StateError(
+                    f"the fix grace record {grace.path} says {key[0]} in {key[1]} was first "
+                    f"seen at {entry.first_seen.isoformat()}, after this scan ({now.isoformat()})")
             if now >= entry.deadline:
                 fd = _overdue(fd, entry.first_seen.date(), dangerously)
             elif entry.warned_at is None and now >= entry.deadline - STRICT_FIX_WARN_BEFORE:
@@ -189,7 +197,7 @@ def apply_fix_grace(
     if not warn:
         return out, []
     return out, [format_fix_deadline_alert(decisions[0].project_name, warn,
-                                           STRICT_FIX_GRACE.days)]
+                                           STRICT_FIX_GRACE.days, dangerously=dangerously)]
 
 
 def graced_decisions(
