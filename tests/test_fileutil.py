@@ -9,7 +9,6 @@ import pytest
 
 from boxmunge.fileutil import atomic_write_bytes, atomic_write_text
 import threading
-import time
 
 from boxmunge import fileutil
 from boxmunge.fileutil import (

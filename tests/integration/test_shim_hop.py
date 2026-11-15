@@ -202,6 +202,8 @@ def test_old_shim_hop_leaves_a_working_shim(
     # function that was never defined.
     assert "unbuilt source shim" not in log and "command not found" not in log, log
     assert facts["check-probation_rc"] == "0", log
+    # 0.11.11 had no jobs gate: the new shim made it, deploy's, as install does.
+    assert facts["JOBS_GATE"] == "deploy:deploy:750,deploy:deploy:660", log
     # install.sh, run by the shim, leaves the previous release (the rollback
     # target) alone: nothing installed into it.
     assert facts["ENV_A_PIP_CALLS"] == "0", log

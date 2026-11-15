@@ -83,24 +83,39 @@ def test_a_failing_line_handler_is_raised_after_the_fds_are_restored() -> None:
     assert _fds() == before
 
 
-@pytest.mark.timeout(30)
+BROKEN_JOURNAL_BOUND_SECONDS = 30
+
+
 def test_a_broken_journal_still_drains_and_raises_on_exit() -> None:
     """With the echo target gone, the core must not block on a full pipe:
-    every line still reaches the handler, and the echo failure is raised."""
+    every line still reaches the handler, and the echo failure is raised.
+    The capture runs in a thread joined with a bound, so a regression that
+    blocks fails here instead of hanging the suite."""
     journal_read, journal_write = os.pipe()
     os.close(journal_read)
     real_stdout = os.dup(1)
     os.dup2(journal_write, 1)
     os.close(journal_write)
     lines: list[str] = []
-    try:
-        with pytest.raises(BrokenPipeError):
+    raised: list[BaseException] = []
+
+    def run() -> None:
+        try:
             with capture_output(lines.append):
                 for n in range(2000):
                     print(f"{n:04d}" + "x" * 100)
+        except BaseException as e:  # handed to the test thread below
+            raised.append(e)
+
+    worker = threading.Thread(target=run, daemon=True)
+    try:
+        worker.start()
+        worker.join(BROKEN_JOURNAL_BOUND_SECONDS)
     finally:
         os.dup2(real_stdout, 1)
         os.close(real_stdout)
+    assert not worker.is_alive(), f"capture still blocked after {BROKEN_JOURNAL_BOUND_SECONDS}s"
+    assert len(raised) == 1 and isinstance(raised[0], BrokenPipeError), raised
     assert len(lines) == 2000 and lines[-1].startswith("1999")
 
 
