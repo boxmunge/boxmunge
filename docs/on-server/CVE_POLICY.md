@@ -9,8 +9,8 @@ quarantine, the deploy guard, suppression workflow, and recovery.
 - **`balanced`** (the default) is right for most sites. It takes a site
   down only for a CVE that is known to be exploited, and alerts on the rest.
 - **`relaxed`** suits a demo or a non-production site that holds nothing
-  sensitive. It takes a site down only for a known-exploited CVE that has
-  no fix. Relaxed does not mean stale: the nightly maintenance run keeps
+  sensitive. It takes a site down only for a CVE on CISA's or the EU's
+  list that has no fix (a VulnCheck-only listing never does). Relaxed does not mean stale: the nightly maintenance run keeps
   `image:` services on their tag's current image, and deploys rebuild on
   current base images.
 - **`strict`** is for sites that handle sensitive data and want more
@@ -460,7 +460,8 @@ to finish, at most an hour (the watch service's time limit).
 
 `boxmunge health` has a `kev-watch` check. It warns when the watch has not
 run for 75 minutes, when its timer is installed but it has never run, or
-when a known-exploited source that is turned on is stale.
+when an optional known-exploited source that is turned on (the EU list or
+VulnCheck) is stale. A stale CISA catalog has its own nightly alert.
 
 ## Strict's fix deadline
 
@@ -474,7 +475,8 @@ package, in `state/cve/fix_grace/<project>.json`.
 - The deadline is 7 days after the first scan that found the finding so.
 - 48 hours before it, one alert (normal priority, once per finding):
   `[boxmunge:<project>] Fix deadline <date> — <CVE> in <package>: deploy the
-  fix or the site is quarantined`.
+  fix or the site is quarantined` (with `dangerously_disable_quarantine:
+  true`, `... or it runs at risk (quarantine disabled by config)`).
 - At the deadline, if the fix is still not running, the finding becomes
   `QUARANTINE` and the project is quarantined (`QUARANTINED — <CVE>
   (<severity>, fix not deployed)`). With `dangerously_disable_quarantine:
