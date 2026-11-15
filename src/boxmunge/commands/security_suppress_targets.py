@@ -11,8 +11,13 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from boxmunge.commands.security_scan_inputs import ProjectScanError, load_project_meta
+from boxmunge.cve.exploited import (
+    ENISA_TAGS, ExploitedSource, is_full_kev, read_enisa_cache, read_vulncheck_cache,
+)
 from boxmunge.cve.kev import load_kev
-from boxmunge.cve.policy import Disposition
+from boxmunge.cve.policy import Disposition, Posture
+from boxmunge.cve.policy_types import listing_label
 from boxmunge.cve.scan_state import read_scan_state, stored_enum
 from boxmunge.cve.scanner import Severity
 from boxmunge.project_inventory import Inventory, classify, damaged_detail
@@ -117,37 +122,83 @@ def all_currently_quarantining_cves(paths: BoxPaths) -> tuple[list[str], list[st
     return [f["cve_id"] for f in ordered], left_out
 
 
+def _listings(paths: BoxPaths, cve_ids: list[str]) -> dict[str, frozenset[ExploitedSource]]:
+    """{CVE: the known-exploited lists whose cached copy names it}. Cached
+    IDs decide even when a list is stale (CVE-04): staleness only stops new
+    quarantines, and once the list is fresh again the suppression would not
+    apply. Raises StateError for a cache that cannot be read."""
+    found: dict[str, set[ExploitedSource]] = {c: set() for c in cve_ids}
+    for cve in load_kev(paths).cve_ids & set(cve_ids):
+        found[cve].add(ExploitedSource.CISA)
+    enisa = read_enisa_cache(paths)
+    for cve, tags in (enisa[1] if enisa else {}).items():
+        if cve in found:
+            found[cve].update(ENISA_TAGS[t] for t in tags if t in ENISA_TAGS)
+    vulncheck = read_vulncheck_cache(paths)
+    for cve in (vulncheck[1] if vulncheck else []):
+        if cve in found:
+            found[cve].add(ExploitedSource.VULNCHECK)
+    return {c: frozenset(s) for c, s in found.items()}
+
+
+def _paranoid(paths: BoxPaths, project: str | None) -> bool | None:
+    """Whether the project's posture is paranoid; None when no posture can
+    say (host scope, or a project awaiting its first deploy). Raises
+    ManifestError or ProjectScanError for a manifest that cannot be used."""
+    if project is None or not paths.project_manifest(project).exists():
+        return None
+    return load_project_meta(paths, project).posture is Posture.PARANOID
+
+
 def drop_kev_listed(
     paths: BoxPaths, cve_ids: list[str], *, positional: bool, log_project: str,
+    project: str | None,
 ) -> list[str]:
-    """Remove CVEs on the cached CISA KEV catalog, saying so loudly.
+    """Remove the CVEs a suppression would not apply to, saying so loudly.
 
-    A suppression never hides a KEV-listed CVE (audit B-07), so writing one
-    would record a review that has no effect. A named CVE is refused; a
-    --current batch skips the KEV entries and suppresses the rest. The
-    cached IDs decide even when the catalog is stale (CVE-04): staleness
-    only stops new KEV quarantines, and once the catalog is fresh again the
-    suppression would not apply.
+    A suppression never hides a full-KEV CVE (listed by CISA or the EU,
+    audit B-07), nor, on a paranoid project, one VulnCheck lists, so writing
+    one would record a review that has no effect. A named CVE is refused; a
+    --current batch skips those and suppresses the rest. A VulnCheck-only
+    CVE where no posture can say (``project`` None is host scope) is
+    suppressed with a note that it does not apply to a paranoid project.
+    Returns [] (said) when the lists or the project's manifest cannot be read.
     """
-    kev = load_kev(paths)
-    stale = kev.stale_reason(utc_today())
-    listed = [c for c in cve_ids if c in kev.cve_ids]
-    for cve in listed:
-        print(
-            f"{'ERROR' if positional else 'NOTE'}: {cve} is on the CISA Known "
-            f"Exploited Vulnerabilities catalog"
-            + (f" (the cached catalog is stale: {stale})" if stale else "")
-            + ". Suppressions do not apply to KEV-listed CVEs; fix or rebuild the image "
-              "instead." + ("" if positional else " Skipping it."),
-            file=sys.stderr,
-        )
-        log_error(
-            "cve-suppress",
-            f"Suppression rejected: {cve} is KEV-listed",
-            paths, project=log_project,
-            detail={"cve_id": cve, "reason": "kev_listed"},
-        )
-    remaining = [c for c in cve_ids if c not in listed]
+    try:
+        listings = _listings(paths, cve_ids)
+        paranoid = _paranoid(paths, project)
+    except (*PROJECT_INPUT_ERRORS, ProjectScanError) as e:
+        print(f"ERROR: cannot tell which CVEs a suppression would apply to: {e}. Nothing "
+              f"was suppressed.", file=sys.stderr)
+        return []
+    stale = load_kev(paths).stale_reason(utc_today())
+    refused: list[str] = []
+    for cve, sources in listings.items():
+        if is_full_kev(sources):
+            where = ("on the CISA Known Exploited Vulnerabilities catalog"
+                     + (f" (the cached catalog is stale: {stale})" if stale else "")
+                     if ExploitedSource.CISA in sources else "on the EU's known-exploited list")
+            others = listing_label(sources - {ExploitedSource.CISA})
+            why = (f"{cve} is {where}" + (f" (also listed by {others})" if others and
+                                          ExploitedSource.CISA in sources else "")
+                   + ". Suppressions do not apply to KEV-listed CVEs")
+        elif sources and paranoid:
+            why = (f"{cve} is listed as actively exploited by VulnCheck KEV, and {project} "
+                   f"is paranoid. Under paranoid a suppression does not apply to a CVE "
+                   f"VulnCheck lists")
+        else:
+            if sources:
+                print(f"NOTE: {cve} is listed as actively exploited by VulnCheck KEV: this "
+                      f"suppression will not apply to a paranoid project.", file=sys.stderr)
+            continue
+        refused.append(cve)
+        print(f"{'ERROR' if positional else 'NOTE'}: {why}; fix or rebuild the image "
+              f"instead." + ("" if positional else " Skipping it."), file=sys.stderr)
+        log_error("cve-suppress", f"Suppression rejected: {cve} is KEV-listed "
+                  f"({listing_label(sources)})", paths, project=log_project,
+                  detail={"cve_id": cve, "reason": "kev_listed",
+                          "listed_by": sorted(s.value for s in sources)})
+    remaining = [c for c in cve_ids if c not in refused]
     if not remaining and not positional:
         print(
             "ERROR: every current quarantine-level finding is KEV-listed; "

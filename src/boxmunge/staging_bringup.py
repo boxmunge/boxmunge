@@ -15,7 +15,9 @@ from boxmunge.bind_sources import BindSourceError
 from boxmunge.caddy import generate_staging_caddy_config
 from boxmunge.caddy_journal import write_site
 from boxmunge.compose import ComposeError
-from boxmunge.commands import deploy_checks, deploy_images, deploy_storage
+from boxmunge.commands import (
+    deploy_checks, deploy_images, deploy_storage, security_regression_guard,
+)
 from boxmunge.commands.chown_staging import rechownable
 from boxmunge.compose_guard import compose_up_checked
 from boxmunge.compose_resolve import ComposeResolveError
@@ -68,8 +70,9 @@ def _decide_users(paths: BoxPaths, project: str, manifest: dict[str, Any], *, pu
                   ) -> tuple[Clearance | None, dict[str, ServiceUser], dict[str, Any]]:
     """Build staging's images (`pull`: with --pull), decide and record who
     each service runs as (deploy_images), and write the slot's overlay
-    with those users. A CVE-quarantined project's staging starts only if
-    every image it would start scans clean (quarantine_gate; its clearance
+    with those users. A release carrying a known-exploited CVE is refused
+    (security_regression_guard). A CVE-quarantined project's staging starts
+    only if every image it would start scans clean (quarantine_gate; its clearance
     is returned, to check what the start ran); production stays
     quarantined. Returns the clearance, the users and the release's
     resolved compose.yml, which the overlay was written from."""
@@ -79,6 +82,8 @@ def _decide_users(paths: BoxPaths, project: str, manifest: dict[str, Any], *, pu
         users = deploy_images.prepare_release_users(
             paths, staging_release_target(paths, project), manifest, component="stage",
             pull=pull)
+        security_regression_guard.guard_release(
+            paths, staging_release_target(paths, project), manifest)
         clearance = (clear_release(paths, staging_release_target(paths, project), manifest)
                      if is_quarantined(project, paths) else None)
     except (RunAsError, ComposeResolveError) as e:

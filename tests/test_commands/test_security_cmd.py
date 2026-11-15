@@ -1344,10 +1344,15 @@ def test_scan_no_projects_registered(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
         "boxmunge.commands.security_actions.refresh_db", lambda: None,
     )
+    refreshed = []
+    monkeypatch.setattr("boxmunge.commands.security_actions.refresh_kev_and_alert",
+                        lambda paths_, now: refreshed.append(now))
     rc = cmd_security_scan([], paths)
     out = capsys.readouterr().out
     assert rc == 0
     assert "No projects registered." in out
+    # The deploy guard needs the known-exploited lists before the first deploy.
+    assert len(refreshed) == 1 and "Known-exploited lists refreshed." in out
 
 
 def test_scan_trivy_not_installed_exits_1(monkeypatch, tmp_path, capsys) -> None:

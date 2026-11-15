@@ -54,3 +54,12 @@ def test_the_old_timers_are_gone_and_the_services_have_no_ordering_on_each_other
     assert not (UNITS / "boxmunge-cve-scan.timer").exists()
     assert not (UNITS / "boxmunge-container-update.timer").exists()
     assert "boxmunge-container-update.service" not in _unit("boxmunge-cve-scan.service")["Unit"]["After"]
+
+
+def test_the_kev_watch_tick_is_bounded_so_the_nightly_scan_cannot_wait_long() -> None:
+    """The fleet scan blocks on the fleet lock the watch holds; the service
+    timeout is the bound, and scan plus update must still fit the 4h unit."""
+    service = _unit("boxmunge-kev-watch.service")["Service"]
+    assert service["TimeoutStartSec"] == "1h"
+    timer = _unit("boxmunge-kev-watch.timer")["Timer"]
+    assert (timer["OnCalendar"], timer["RandomizedDelaySec"]) == ("*:00/30", "120")

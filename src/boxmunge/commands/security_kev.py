@@ -18,7 +18,7 @@ from boxmunge.log import log_warning
 from boxmunge.paths import BoxPaths
 
 
-def refresh_kev_and_alert(paths: BoxPaths, now: datetime) -> KevCatalog:
+def refresh_kev_and_alert(paths: BoxPaths, now: datetime, *, nightly: bool = True) -> KevCatalog:
     """Refresh the CISA KEV catalog once per run and load it.
 
     The one catalog is threaded into every project scan so the exploitation
@@ -32,15 +32,27 @@ def refresh_kev_and_alert(paths: BoxPaths, now: datetime) -> KevCatalog:
     later source was cached (priority 1 once that overrides the first
     source, kev_refresh.KEV_OVERRIDE_RUNS), and the priority-1 alert when
     none was.
+
+    ``nightly`` False (the KEV watch) sends only the withdrawal notice
+    (one-shot: only the run that caches the catalog sees it). The
+    disagreement notice (it would repeat every tick) and the degraded-catalog
+    alert stay with the nightly scan, and the watch does not count
+    passed-over runs. It logs a disagreement instead. The `kev-watch` health check
+    shows a stale source during the day.
     """
-    refresh = refresh_kev(paths)
+    refresh = refresh_kev(paths, nightly=nightly)
     kev = load_kev(paths)
     if refresh.withdrawn:
         _send(paths, format_kev_withdrawn_alert(refresh.source, refresh.withdrawn))
-    if refresh.updated and refresh.disagreements:
+    if refresh.updated and refresh.disagreements and not nightly:
+        log_warning("cve-scan", "KEV sources disagree (notice left to the nightly scan): "
+                    + "; ".join(f.line() for f in refresh.disagreements), paths, project=None)
+    elif refresh.updated and refresh.disagreements:
         _send(paths, format_kev_sources_disagree_alert(
             refresh.source, [f.line() for f in refresh.disagreements],
             overridden=[f.source for f in refresh.overridden]))
+    if not nightly:
+        return kev
     stale_reason = kev.stale_reason(now.date())
     if stale_reason is None and not refresh.needs_alert:
         return kev

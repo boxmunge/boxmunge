@@ -11,11 +11,13 @@ the cached KEV catalog, under the release's own manifest and compose
 (its posture and hardening) and the project's suppressions (server-side
 state no release carries). A quarantine-level finding refuses the release,
 and so does any CVE in it that a KEV refresh withdrew (kev_withdrawal):
-the operator accepts that with `security resume`. A production release is
-also judged against the KEV catalog the way `security resume` is
-(cve.lift_rule): on a stale catalog that lists a CVE still in its images,
-or with no usable catalog, it is refused; otherwise the lift alert names
-what could not be checked.
+the operator accepts that with `security resume`. (The deploy guard,
+security_regression_guard, has scanned the same images just before, for
+every project; the gate reads those results from the cache, cve.scan_cache.)
+A production release is also judged against the KEV catalog the way
+`security resume` is (cve.lift_rule): on a stale catalog that lists a CVE
+still in its images, or with no usable catalog, it is refused; otherwise the
+lift alert names what could not be checked.
 
 A production release that clears starts as any deploy does, and once its
 smoke test passes the quarantine is lifted (cve.quarantine.lift_quarantine).
@@ -38,18 +40,19 @@ from boxmunge.caddy_journal import MAX_SITE_BYTES
 from boxmunge.commands.deploy_images import candidate_name
 from boxmunge.commands.kev_acceptance import accept_at_gate, gate_exits
 from boxmunge.commands.kev_withdrawal import gate_hold
+from boxmunge.commands.release_findings import finding_lines, upcoming_lines
 from boxmunge.commands.security_scan_core import ProjectScan, audit_targets
 from boxmunge.commands.security_scan_inputs import (
     ProjectHardening, ProjectMeta, ProjectScanError, ScanTarget, hardening_profile,
     load_all_suppressions, project_meta,
 )
-from boxmunge.compose_images import built_image_name, describe_image
+from boxmunge.compose_images import built_image_name
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
 from boxmunge.cve.exploited import load_exploited
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.lift_rule import ACCEPT_FLAG, KevLiftCheck, check_exploited_for_lift
 from boxmunge.cve.policy_explain import HARDENING_UPCOMING_FIX, hardening_cause
-from boxmunge.cve.policy import Disposition, FindingDisposition
+from boxmunge.cve.policy import Disposition
 from boxmunge.cve.quarantine import (
     QuarantineError, checked_quarantine_record, is_quarantined, lift_quarantine,
     read_quarantine_state, reassert_quarantine, recorded_exploited_by,
@@ -57,12 +60,14 @@ from boxmunge.cve.quarantine import (
 from boxmunge.fs_nofollow import read_text_nofollow
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
-from boxmunge.cve.scanner import TrivyNotInstalledError, refresh_db
+from boxmunge.cve.scan_cache import cached_results, keep_results
+from boxmunge.cve.scanner import ScannerError, refresh_db, trivy_version_key
 from boxmunge.cve.security_policy import relaxations
 from boxmunge.docker_run import DockerError
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
 from boxmunge.pause import is_paused
+from boxmunge.state import StateError
 from boxmunge.paths import BoxPaths
 from boxmunge.release_policies import ReleasePolicyError, release_policies
 from boxmunge.release_target import (
@@ -160,13 +165,17 @@ def _profile(target: ReleaseTarget, meta: ProjectMeta) -> ProjectHardening:
         user_compose=release / "compose.yml"))
 
 
-def _scan(paths: BoxPaths, target: ReleaseTarget, meta: ProjectMeta,
-          starts: dict[str, StartImage], unnamed: dict[str, str], kev: KevCatalog,
-          ) -> tuple[ProjectScan, dict[str, str], list[ScanTarget], ProjectHardening]:
+def scan_release_images(
+    paths: BoxPaths, target: ReleaseTarget, meta: ProjectMeta,
+    starts: dict[str, StartImage], unnamed: dict[str, str], kev: KevCatalog,
+) -> tuple[ProjectScan, dict[str, str], list[ScanTarget], ProjectHardening]:
     """The audit-only scan, {service: image ID} of what it scanned, the
-    scan's targets and the hardening profile it was judged with."""
+    scan's targets and the hardening profile it was judged with. An image
+    scanned before with the same Trivy and DB is not scanned again
+    (cve.scan_cache). Raises ScannerError, StateError or OSError too."""
     project = target.project
     refresh_db()
+    trivy = trivy_version_key()
     supps = load_all_suppressions(paths, project)
     profile = _profile(target, meta)
     targets: list[ScanTarget] = []
@@ -182,49 +191,13 @@ def _scan(paths: BoxPaths, target: ReleaseTarget, meta: ProjectMeta,
         targets.append(ScanTarget(name, image.image_ref))
     # Services sharing an image are scanned once: the budget is the project's.
     once = list({t.image_ref: t for t in targets}.values())
-    scan = audit_targets(
+    digests = {t.image_ref: ids[t.service] for t in once}
+    scan, new = audit_targets(
         paths, project, meta=meta, profile=profile, supps=supps,
         targets=once, unidentified=unidentified, kev=kev,
-        basis=BASIS_STARTUP_IMAGES)
+        basis=BASIS_STARTUP_IMAGES, known=cached_results(paths, project, digests, trivy))
+    keep_results(paths, project, digests, trivy, new)
     return scan, ids, targets, profile
-
-
-def _fix_advice(f: FindingDisposition) -> str:
-    if f.finding.fixed_version:
-        return (f"fixed in {f.finding.fixed_version}: update the package, or rebuild on a "
-                f"base image that has it")
-    return "no fixed version is published yet: remove the package or wait for a fix"
-
-
-def _finding_lines(scan: ProjectScan, services: dict[str, list[str]],
-                   disposition: Disposition) -> list[str]:
-    lines: dict[tuple[str, str, str], str] = {}
-    for decision in scan.decisions:
-        service = ", ".join(services[decision.image_ref])
-        for f in decision.findings:
-            if f.disposition != disposition:
-                continue
-            key = (f.finding.cve_id, f.finding.package, decision.image_ref)
-            kev = f", {f.exploited_label}: actively exploited" if f.exploited_by else ""
-            lines.setdefault(key, (
-                f"{f.finding.cve_id} ({f.effective_severity.value}{kev}) in "
-                f"{f.finding.package} {f.finding.installed_version}, service {service} "
-                f"({describe_image(decision.image_ref)}): {_fix_advice(f)}"))
-    return list(lines.values())
-
-
-def _upcoming_lines(scan: ProjectScan, services: dict[str, list[str]]) -> list[str]:
-    """Findings that meet the gate from 0.12 but not now: warned, never refused."""
-    lines: dict[tuple[str, str, str], str] = {}
-    for decision in scan.decisions:
-        service = ", ".join(services[decision.image_ref])
-        for f in decision.findings:
-            if f.hardening_would_quarantine:
-                lines.setdefault((f.finding.cve_id, f.finding.package, decision.image_ref), (
-                    f"{f.finding.cve_id} ({f.effective_severity.value}) in {f.finding.package} "
-                    f"{f.finding.installed_version}, service {service} "
-                    f"({describe_image(decision.image_ref)})"))
-    return list(lines.values())
 
 
 def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, Any],
@@ -243,11 +216,13 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
         starts, unnamed = start_images(target)
         meta = project_meta(project, manifest, [])
         kev = load_kev(paths)
-        scan, ids, scan_targets, profile = _scan(paths, target, meta, starts, unnamed, kev)
+        scan, ids, scan_targets, profile = scan_release_images(
+            paths, target, meta, starts, unnamed, kev)
         before = record.get("policy")
         if before is None and previous is not None:
             before = project_meta(project, previous, []).policy()
-    except (TrivyNotInstalledError, RuntimeError, ComposeResolveError, DockerError) as e:
+    except (ScannerError, StateError, OSError, RuntimeError, ComposeResolveError,
+            DockerError) as e:
         raise QuarantineRefused([
             f"The scan of the release's images failed: {e}",
             f"The quarantine stays in place and nothing was started in {where}. Fix the "
@@ -261,7 +236,7 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
     services: dict[str, list[str]] = {}
     for target_ in scan_targets:
         services.setdefault(target_.image_ref, []).append(target_.service)
-    blocking = _finding_lines(scan, services, Disposition.QUARANTINE)
+    blocking = finding_lines(scan, services, Disposition.QUARANTINE)
     if blocking:
         raise QuarantineRefused([
             *blocking,
@@ -284,7 +259,7 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
             f"The scan is clear, but {kev_check.refusal}.",
             f"The quarantine stays in place and nothing was started in {where}.",
             *gate_exits(project, kev_check, paths)])
-    upcoming = _upcoming_lines(scan, services)
+    upcoming = upcoming_lines(scan, services)
     if upcoming and profile.upcoming is not None:
         print(f"  WARNING: from 0.12 the stricter hardening penalty lifts {len(upcoming)} "
               f"finding(s) to the posture's gate (paranoid quarantines them; strict "
@@ -297,7 +272,7 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
     return Clearance(
         project, target.compose_project, cve,
         {n: (starts[n].final_ref, ids[n]) for n in starts}, profile, meta.policy(), before,
-        tuple(_finding_lines(scan, services, Disposition.STILL_RUNNING_AT_RISK)),
+        tuple(finding_lines(scan, services, Disposition.STILL_RUNNING_AT_RISK)),
         kev_check.gap, accepted)
 
 

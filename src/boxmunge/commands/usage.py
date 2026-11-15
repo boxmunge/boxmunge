@@ -58,19 +58,29 @@ Usage: boxmunge add-git-project <name> <repo-url> [--ref REF]
 Register a git-backed project.""",
     "stage": """\
 Usage: boxmunge stage <project> [--ref REF] [--no-pull] [--dry-run]
+                     [--allow-security-regression --reason TEXT]
 
 Deploy alongside production on the staging hostname for verification.
 Build services are built on their base images' current registry digests;
---no-pull builds from the base images in this box's local image store.""",
+--no-pull builds from the base images in this box's local image store.
+Every image the release would start is scanned first; a release carrying a
+known-exploited CVE (CISA or EU KEV; under paranoid, VulnCheck's too) is
+refused: fix it in the repo. --allow-security-regression --reason "<why>"
+deploys it anyway; the reason is logged and alerted.""",
     "promote": """\
 Usage: boxmunge promote <project> [--no-pull] [--dry-run]
+                       [--allow-security-regression --reason TEXT]
 
 Promote the staged build to production. Build services are built again on
 their base images' current registry digests: normally the ones the stage
 pulled, so the build is cached. A base image that moved since the stage
 reaches production untested; stage again to test it. --no-pull builds from
 the base images in this box's local image store, which can be older than
-the stage's.""",
+the stage's.
+Every image the release would start is scanned first; a release carrying a
+known-exploited CVE (CISA or EU KEV; under paranoid, VulnCheck's too) is
+refused: fix it in the repo. --allow-security-regression --reason "<why>"
+deploys it anyway; the reason is logged and alerted.""",
     "unstage": """\
 Usage: boxmunge unstage <project> [--dry-run]
 
@@ -78,8 +88,10 @@ Tear down staging.""",
     "prod-deploy": """\
 Usage: boxmunge prod-deploy <project> [--ref REF] [--no-snapshot] [--no-pull] [--dry-run]
                                      [--accept-stale-kev]
+                                     [--allow-security-regression --reason TEXT]
        boxmunge prod-deploy <project> --redeploy [--no-snapshot] [--no-pull] [--dry-run]
                                      [--accept-stale-kev]
+                                     [--allow-security-regression --reason TEXT]
        boxmunge prod-deploy <project> --abandon
 
 Deploy directly to production (skips staging). Build services are built on
@@ -89,9 +101,14 @@ prod-deploy refuses; --redeploy deploys the installed release again (as
 strictly checked as a new deploy).
 --abandon undoes an install that stopped before its pre-deploy hook ran:
 the replaced release's files go back; containers and data are not touched.
---accept-stale-kev lets a CVE-quarantined project's fix through although
-there is no usable CISA KEV catalog; it is logged and alerted. It never
-overrides a stale catalog that lists a CVE still in the release's images.""",
+--accept-stale-kev lets a release through although there is no usable CISA
+KEV catalog (the deploy guard, and a CVE-quarantined project's fix); it is
+logged and alerted. It never overrides a stale catalog that lists a CVE
+still in the release's images.
+Every image the release would start is scanned first; a release carrying a
+known-exploited CVE (CISA or EU KEV; under paranoid, VulnCheck's too) is
+refused: fix it in the repo. --allow-security-regression --reason "<why>"
+deploys it anyway; the reason is logged and alerted.""",
     "install-txn": """\
 Usage: boxmunge install-txn <project> --drop
 
@@ -108,9 +125,13 @@ the upgrade shim before a platform rollback swaps back (an older release
 does not know the staged slot); a failure is alerted with that project's
 manual commands and never blocks the rollback. Operator-only: run as root.""",
     "rollback": """\
-Usage: boxmunge rollback <project> [--yes]
+Usage: boxmunge rollback <project> [--yes] [--allow-security-regression --reason TEXT]
 
-Restore the previous deployment. Does not support --dry-run.""",
+Restore the previous deployment. Does not support --dry-run.
+Every image the release would start is scanned first; a release carrying a
+known-exploited CVE (CISA or EU KEV; under paranoid, VulnCheck's too) is
+refused: fix it in the repo. --allow-security-regression --reason "<why>"
+deploys it anyway; the reason is logged and alerted.""",
     "pause": """\
 Usage: boxmunge pause <project> [--reason TEXT] [--no-snapshot] [--yes]
 
@@ -269,6 +290,7 @@ Usage: boxmunge security [--json]
        boxmunge security <project> [--json]
        boxmunge security scan [project]
        boxmunge security scan --apply-held
+       boxmunge security kev-watch
        boxmunge security suppress <CVE>|--current (--project <name>|--host)
                                   --until <YYYY-MM-DD> --reason <text>
        boxmunge security unsuppress <CVE> (--project <name>|--host)

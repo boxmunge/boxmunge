@@ -184,8 +184,10 @@ def _write_entry(paths: BoxPaths, first_seen: str, warned_at: str | None) -> Non
 
 def test_future_first_seen_is_refused_not_a_postponed_deadline(paths: BoxPaths) -> None:
     _write_entry(paths, "9999-01-01T00:00:00+00:00", None)
-    with pytest.raises(StateError, match=str(paths.project_fix_grace(P))):
+    path = paths.project_fix_grace(P)
+    with pytest.raises(StateError, match=str(path)) as e:
         _run(paths, T0, _fixable())
+    assert f"remove {path} to restart that project's fix deadlines" in str(e.value)
 
 
 def test_first_seen_within_clock_skew_is_accepted(paths: BoxPaths) -> None:
@@ -196,8 +198,10 @@ def test_first_seen_within_clock_skew_is_accepted(paths: BoxPaths) -> None:
 
 def test_warned_before_first_seen_is_refused(paths: BoxPaths) -> None:
     _write_entry(paths, T0.isoformat(), (T0 - timedelta(days=1)).isoformat())
-    with pytest.raises(StateError, match=str(paths.project_fix_grace(P))):
+    path = paths.project_fix_grace(P)
+    with pytest.raises(StateError, match=str(path)) as e:
         FixGrace.load(paths, P)
+    assert f"remove {path} to restart that project's fix deadlines" in str(e.value)
 
 
 def test_warning_under_quarantine_disabled_says_it_runs_at_risk(paths: BoxPaths) -> None:
