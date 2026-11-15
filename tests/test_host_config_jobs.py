@@ -26,7 +26,7 @@ from boxmunge.commands.doctor import run_doctor
 from boxmunge.commands.health_state import update_health_state
 from boxmunge.config import ConfigError, load_config
 from boxmunge.cve.kev import KEV_DEFAULT_SOURCES
-from boxmunge.cve.kev_refresh import kev_sources
+from boxmunge.cve.kev_config import kev_config
 from boxmunge.paths import BoxPaths
 from boxmunge.state import read_state
 from tests.api.fakes import make_invoker
@@ -74,7 +74,7 @@ def _every_job(paths: BoxPaths, system_container) -> None:
     system_container.handler = _ok
     assert _container_update(paths) == (0, True)
     assert run_backup_sync(paths) == 0
-    assert kev_sources(paths) == KEV_DEFAULT_SOURCES
+    assert kev_config(paths).sources == KEV_DEFAULT_SOURCES
     host_config_alert.report_at_start(paths, "upgrade")
     assert check_all._host_config_usable(paths) is True
 
@@ -96,7 +96,7 @@ class TestAJobRunsOverASettingItDoesNotRead:
 
     def test_the_kev_refresh(self, box) -> None:
         paths, *_ = box
-        assert kev_sources(paths) == KEV_DEFAULT_SOURCES
+        assert kev_config(paths).sources == KEV_DEFAULT_SOURCES
 
     def test_check_all_does_not_fail_the_tick(self, box, capsys) -> None:
         paths, *_ = box
@@ -195,7 +195,7 @@ class TestTheOperatorIsToldOnce:
         paths, sent, _ = box
         _write(paths, {**CONFIG, "container_updates": {"enabled": "false"}})
         assert _container_update(paths) == (1, False)
-        assert kev_sources(paths) == KEV_DEFAULT_SOURCES
+        assert kev_config(paths).sources == KEV_DEFAULT_SOURCES
         [body] = _config_alerts(sent)
         assert "'container_updates.enabled'" in body
 
@@ -203,7 +203,7 @@ class TestTheOperatorIsToldOnce:
         paths, sent, delivery = box
         delivery["ok"] = False
         assert _container_update(paths) == (0, True)
-        assert kev_sources(paths) == KEV_DEFAULT_SOURCES
+        assert kev_config(paths).sources == KEV_DEFAULT_SOURCES
         assert len(_config_alerts(sent)) == 1  # tried again hourly, not by each job
         delivery["ok"] = True
         record = paths.state / "start-refused" / "boxmunge.yml.json"

@@ -13,7 +13,9 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from boxmunge.commands.security_enforce import announce_quarantine, enforce, headline_of
+from boxmunge.commands.security_enforce import (
+    announce_quarantine, enforce, headline_of, quarantine_listing,
+)
 from boxmunge.commands.security_scan_core import ProjectScan
 from boxmunge.commands.security_scan_inputs import load_project_meta
 from boxmunge.cve.alerting import format_breaker_held_alert, send_alerts
@@ -47,7 +49,7 @@ def _candidate(decisions: tuple[ProjectDecision, ...]) -> Candidate:
                     if f.disposition == Disposition.QUARANTINE]
     return Candidate(
         cves=frozenset(f.finding.cve_id for f in quarantining),
-        kev=any(f.kev_listed for f in quarantining),
+        kev=any(f.full_kev for f in quarantining),
     )
 
 
@@ -65,7 +67,8 @@ def _apply(paths: BoxPaths, project: str, decisions: tuple[ProjectDecision, ...]
             meta = load_project_meta(paths, project)
             outcome = enforce(
                 paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
-                policy=meta.policy(), headline=headline, defer_new=False,
+                policy=meta.policy(), headline=headline,
+                exploited_by=quarantine_listing(decisions), defer_new=False,
             )
     except LockError:
         return "held by another operation; the next scan quarantines it"

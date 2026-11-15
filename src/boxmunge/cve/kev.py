@@ -89,6 +89,9 @@ class KevCatalog:
     released_at: datetime | None
     source: str | None
     unreadable: str | None = None
+    # The source's validators for this catalog, for a conditional request.
+    etag: str | None = None
+    last_modified: str | None = None
 
     def stale_reason(self, today: date) -> str | None:
         """Why this catalog cannot be trusted on ``today``, or None if fresh."""
@@ -144,6 +147,13 @@ class KevCatalog:
 _EMPTY = KevCatalog(cve_ids=frozenset(), fetched_at=None, released_at=None, source=None)
 
 
+def _optional_text(data: dict[str, Any], key: str) -> str | None:
+    raw = data.get(key)
+    if raw is not None and not isinstance(raw, str):
+        raise ValueError(f"{key} is not a string: {type(raw).__name__}")
+    return raw
+
+
 def _optional_time(data: dict[str, Any], key: str) -> datetime | None:
     raw = data.get(key)
     return _utc(datetime.fromisoformat(raw)) if raw else None
@@ -154,7 +164,10 @@ def load_kev(paths: BoxPaths) -> KevCatalog:
 
     A cache from before source tracking has no ``released_at`` or
     ``source``: it is judged by its fetch time alone until a refresh
-    replaces it (see KevCatalog.stale_reason).
+    replaces it (see KevCatalog.stale_reason). One from before conditional
+    requests has no ``etag`` or ``last_modified``: its source is asked for
+    the whole catalog again, and the answer records them. A validator that
+    is present but not a string is a corrupt document.
     """
     path = paths.kev_catalog
     try:
@@ -175,6 +188,8 @@ def load_kev(paths: BoxPaths) -> KevCatalog:
             fetched_at=_optional_time(data, "fetched_at"),
             released_at=_optional_time(data, "released_at"),
             source=source if isinstance(source, str) else None,
+            etag=_optional_text(data, "etag"),
+            last_modified=_optional_text(data, "last_modified"),
         )
     except (ValueError, TypeError, OSError, AttributeError) as e:
         # A corrupt cache must not wedge the scan; treat as "no catalog",

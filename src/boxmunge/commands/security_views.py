@@ -86,8 +86,9 @@ def _format_findings_block(scan_state: dict[str, Any]) -> list[str]:
     upcoming = [f for f in findings if f.get("hardening_would_quarantine") is True]
     if upcoming:
         lines.append(
-            f"  WARN: {len(upcoming)} finding(s) will quarantine this project from 0.12. "
-            f"Not quarantined now; the cause and the fix are in each WARN line's "
+            f"  WARN: {len(upcoming)} finding(s) meet this project's gate from 0.12 "
+            f"(the stricter hardening penalty). Not acted on now; the cause and the "
+            f"fix are in each WARN line's "
             f"explanation (`boxmunge security <project> --json`).")
     for f in findings:
         tag = "WARN" if f.get("hardening_would_quarantine") is True else f.get("disposition", "").upper()

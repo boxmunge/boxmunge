@@ -45,13 +45,14 @@ from boxmunge.commands.security_scan_inputs import (
 )
 from boxmunge.compose_images import built_image_name, describe_image
 from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_config
+from boxmunge.cve.exploited import load_exploited
 from boxmunge.cve.kev import KevCatalog, load_kev
-from boxmunge.cve.lift_rule import ACCEPT_FLAG, KevLiftCheck, check_kev_for_lift
+from boxmunge.cve.lift_rule import ACCEPT_FLAG, KevLiftCheck, check_exploited_for_lift
 from boxmunge.cve.policy_explain import HARDENING_UPCOMING_FIX, hardening_cause
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.quarantine import (
     QuarantineError, checked_quarantine_record, is_quarantined, lift_quarantine,
-    read_quarantine_state, reassert_quarantine,
+    read_quarantine_state, reassert_quarantine, recorded_exploited_by,
 )
 from boxmunge.fs_nofollow import read_text_nofollow
 from boxmunge.manifest import ManifestError, load_manifest
@@ -204,7 +205,7 @@ def _finding_lines(scan: ProjectScan, services: dict[str, list[str]],
             if f.disposition != disposition:
                 continue
             key = (f.finding.cve_id, f.finding.package, decision.image_ref)
-            kev = ", CISA KEV: actively exploited" if f.kev_listed else ""
+            kev = f", {f.exploited_label}: actively exploited" if f.exploited_by else ""
             lines.setdefault(key, (
                 f"{f.finding.cve_id} ({f.effective_severity.value}{kev}) in "
                 f"{f.finding.package} {f.finding.installed_version}, service {service} "
@@ -213,7 +214,7 @@ def _finding_lines(scan: ProjectScan, services: dict[str, list[str]],
 
 
 def _upcoming_lines(scan: ProjectScan, services: dict[str, list[str]]) -> list[str]:
-    """Findings that quarantine from 0.12 but not now: warned, never refused."""
+    """Findings that meet the gate from 0.12 but not now: warned, never refused."""
     lines: dict[tuple[str, str, str], str] = {}
     for decision in scan.decisions:
         service = ", ".join(services[decision.image_ref])
@@ -273,8 +274,10 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
     held = None if target.staging else gate_hold(paths, project, scan.decisions)
     if held:
         raise QuarantineRefused(held)
-    kev_check = KevLiftCheck() if target.staging else check_kev_for_lift(
-        cve, scan.decisions, kev, datetime.now(timezone.utc).date())
+    today = datetime.now(timezone.utc).date()
+    kev_check = KevLiftCheck() if target.staging else check_exploited_for_lift(
+        cve, scan.decisions, kev, today, listing=recorded_exploited_by(record),
+        stale=load_exploited(paths, today, cisa=kev).stale)
     accepted = None if target.staging else accept_at_gate(project, kev_check, paths)
     if kev_check.refusal is not None and accepted is None:
         raise QuarantineRefused([
@@ -283,8 +286,9 @@ def clear_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
             *gate_exits(project, kev_check, paths)])
     upcoming = _upcoming_lines(scan, services)
     if upcoming and profile.upcoming is not None:
-        print(f"  WARNING: from 0.12 this release would still be quarantined for "
-              f"{len(upcoming)} finding(s); 0.11.0 does not refuse it:")
+        print(f"  WARNING: from 0.12 the stricter hardening penalty lifts {len(upcoming)} "
+              f"finding(s) to the posture's gate (paranoid quarantines them; strict "
+              f"alerts and patches them); this release is not refused for it:")
         for line in upcoming:
             print(f"    {line}")
         print(f"    Cause: {hardening_cause(profile.upcoming.services)}. {HARDENING_UPCOMING_FIX}")

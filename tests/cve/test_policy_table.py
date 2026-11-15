@@ -15,6 +15,7 @@ from datetime import date
 
 import pytest
 
+from boxmunge.cve.exploited import ExploitedSource
 from boxmunge.cve.policy import Disposition, Posture, evaluate_finding
 from boxmunge.cve.scanner import AttackVector as AV
 from boxmunge.cve.scanner import Finding, PkgClass, Severity
@@ -22,6 +23,7 @@ from boxmunge.cve.scanner import VulnStatus as VS
 from boxmunge.cve.suppressions import Suppression
 
 _TODAY = date(2026, 10, 13)
+_CISA = frozenset({ExploitedSource.CISA})
 _SUP = (Suppression("CVE-2026-0001", date(2027, 1, 1), "reviewed", "ops", date(2026, 1, 1)),)
 
 R, B, S, P = Posture.RELAXED, Posture.BALANCED, Posture.STRICT, Posture.PARANOID
@@ -54,7 +56,11 @@ _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
     # except at the lowered posture (relaxed), which alerts every scan.
     ("fix-available+kev", _f(fix="2"), {"kev": True}, {R: X, B: Q, S: Q, P: Q}),
     ("unfixable+kev", _f(), {"kev": True}, {R: Q, B: Q, S: Q, P: Q}),
-    ("fix-available-high", _f(fix="2"), {}, {R: X, B: X, S: X, P: X}),
+    # Paranoid takes the downtime for a fixable finding at its gate (0.12):
+    # quarantined while it is patched, not left for the nightly window.
+    ("fix-available-high", _f(fix="2"), {}, {R: X, B: X, S: X, P: Q}),
+    ("fix-available-high+ddq", _f(fix="2"), {"ddq": True}, {R: X, B: X, S: X, P: SR}),
+    ("fix-available-low", _f(sev=Severity.LOW, fix="2"), {}, {R: X, B: X, S: X, P: X}),
     ("suppressed", _f(), {"sup": _SUP}, {R: SU, B: SU, S: SU, P: SU}),
     ("suppressed+kev", _f(), {"kev": True, "sup": _SUP}, {R: Q, B: Q, S: Q, P: Q}),
     ("kev-low-avl-will-not-fix",
@@ -68,11 +74,12 @@ _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
     # KEV never depends on severity: an unrated KEV CVE quarantines everywhere.
     ("unknown-severity+kev", _f(sev=Severity.UNKNOWN, vendor={}), {"kev": True},
      {R: Q, B: Q, S: Q, P: Q}),
-    # Balanced quarantines only on KEV: an unfixable distro-High AV:N finding
-    # is alerted (AWAITING_FIX); strict's >= Medium gate takes it down.
-    ("high-avn-affected", _f(), {}, {R: I, B: AF, S: Q, P: Q}),
-    ("critical-avn-affected", _f(sev=Severity.CRITICAL), {}, {R: I, B: AF, S: Q, P: Q}),
-    ("medium-avn-affected", _f(sev=Severity.MEDIUM), {}, {R: I, B: I, S: Q, P: Q}),
+    # Balanced and strict quarantine a finding with no fix only on KEV: an
+    # unfixable distro-High AV:N finding is alerted (AWAITING_FIX); strict's
+    # gate is >= Medium, and only paranoid's takes it down (0.12).
+    ("high-avn-affected", _f(), {}, {R: I, B: AF, S: AF, P: Q}),
+    ("critical-avn-affected", _f(sev=Severity.CRITICAL), {}, {R: I, B: AF, S: AF, P: Q}),
+    ("medium-avn-affected", _f(sev=Severity.MEDIUM), {}, {R: I, B: I, S: AF, P: Q}),
     ("low-avn-affected", _f(sev=Severity.LOW), {}, {R: I, B: I, S: I, P: I}),
     ("high-avl-affected", _f(av=AV.LOCAL), {}, {R: I, B: I, S: I, P: Q}),
     ("high-av-unknown", _f(av=None), {}, {R: I, B: I, S: I, P: Q}),
@@ -80,10 +87,10 @@ _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
      {R: I, B: I, S: I, P: Q}),
     ("high-under-investigation", _f(status=VS.UNDER_INVESTIGATION), {},
      {R: I, B: I, S: I, P: Q}),
-    ("high-end-of-life", _f(status=VS.END_OF_LIFE), {}, {R: I, B: AF, S: Q, P: Q}),
+    ("high-end-of-life", _f(status=VS.END_OF_LIFE), {}, {R: I, B: AF, S: AF, P: Q}),
     # A missing/unknown distro Status is not a distro de-prioritisation, so
     # it falls through to the threshold (fail-closed). CVE_POLICY.md step 11.
-    ("high-status-unknown", _f(status=VS.UNKNOWN), {}, {R: I, B: AF, S: Q, P: Q}),
+    ("high-status-unknown", _f(status=VS.UNKNOWN), {}, {R: I, B: AF, S: AF, P: Q}),
     ("nvd-high-no-distro-verdict", _f(vendor={"nvd": Severity.HIGH}), {},
      {R: I, B: I, S: I, P: Q}),
     ("nvd-critical-debian-low",
@@ -103,17 +110,17 @@ _ROWS: list[tuple[str, Finding, dict, dict[Posture, Disposition]]] = [
     # A lower NVD rating does not make paranoid laxer than strict.
     ("debian-medium-nvd-low",
      _f(sev=Severity.MEDIUM, vendor={"debian": Severity.MEDIUM, "nvd": Severity.LOW}),
-     {}, {R: I, B: I, S: Q, P: Q}),
+     {}, {R: I, B: I, S: AF, P: Q}),
     ("all-sources-low", _f(sev=Severity.LOW, vendor={"debian": Severity.LOW, "nvd": Severity.LOW}),
      {}, {R: I, B: I, S: I, P: I}),
-    ("medium-penalty-1", _f(sev=Severity.MEDIUM), {"pen": 1}, {R: I, B: AF, S: Q, P: Q}),
+    ("medium-penalty-1", _f(sev=Severity.MEDIUM), {"pen": 1}, {R: I, B: AF, S: AF, P: Q}),
     ("perl-base-python-project", _f(pkg="perl-base"), {}, {R: I, B: I, S: I, P: Q}),
     ("perl-base-kev", _f(pkg="perl-base"), {"kev": True}, {R: Q, B: Q, S: Q, P: Q}),
     ("python3-empty-inferred-runtimes", _f(pkg="python3.11"),
      {"runtimes": frozenset()}, {R: I, B: I, S: I, P: Q}),
-    ("libperl-stays-relevant", _f(pkg="libperl5.36"), {}, {R: I, B: AF, S: Q, P: Q}),
-    # Balanced has no severity quarantine to opt out of.
-    ("high-ddq", _f(), {"ddq": True}, {R: I, B: AF, S: SR, P: SR}),
+    ("libperl-stays-relevant", _f(pkg="libperl5.36"), {}, {R: I, B: AF, S: AF, P: Q}),
+    # Balanced and strict have no severity quarantine to opt out of.
+    ("high-ddq", _f(), {"ddq": True}, {R: I, B: AF, S: AF, P: SR}),
     ("medium-avl-affected", _f(sev=Severity.MEDIUM, av=AV.LOCAL), {},
      {R: I, B: I, S: I, P: Q}),
     ("medium-will-not-fix", _f(sev=Severity.MEDIUM, status=VS.FIX_DEFERRED), {},
@@ -132,7 +139,7 @@ def _evaluate(finding: Finding, posture: Posture, *, kev: bool = False,
     return evaluate_finding(
         finding, posture=posture, hardening_penalty=pen,
         dangerously_disable_quarantine=ddq, suppressions=sup, today=_TODAY,
-        kev_lookup=lambda _cve: kev, runtimes=runtimes,
+        exploited_lookup=lambda _cve: _CISA if kev else frozenset(), runtimes=runtimes,
     ).disposition
 
 
@@ -153,15 +160,17 @@ def test_table_covers_every_posture_for_every_row() -> None:
     assert all(set(expected) == set(Posture) for _, _, _, expected in _ROWS)
 
 
-def test_balanced_quarantines_on_exactly_the_kev_rows() -> None:
-    """Balanced accepts downtime only for an actively exploited CVE."""
+@pytest.mark.parametrize("posture", [B, S])
+def test_balanced_and_strict_quarantine_on_exactly_the_kev_rows(posture) -> None:
+    """Balanced accepts downtime only for an actively exploited CVE; so does
+    strict at scan time (its only other downtime is the fix deadline)."""
     quarantining = {row_id for row_id, _, kwargs, expected in _ROWS
-                    if expected[B] is Q}
+                    if expected[posture] is Q}
     kev_rows = {row_id for row_id, _, kwargs, _ in _ROWS
                 if kwargs.get("kev") and not kwargs.get("ddq")}
     assert quarantining == kev_rows
     for row_id, finding, kwargs, _ in _ROWS:
-        got = _evaluate(finding, B, **kwargs)
+        got = _evaluate(finding, posture, **kwargs)
         assert (got is Q) == (row_id in kev_rows), row_id
 
 

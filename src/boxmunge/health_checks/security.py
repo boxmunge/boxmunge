@@ -9,8 +9,8 @@ is `off`, so the operator sees the un-hardened surface during routine
 scan did not cover every image: a project the nightly scan keeps missing
 is not protected by quarantine (audit B-11).
 
-`cve-hardening` warns about findings the 0.12 hardening penalty will
-quarantine, on the postures where severity can quarantine at all.
+`cve-hardening` warns about findings the 0.12 hardening penalty lifts to
+the posture's gate, on the postures where that can decide downtime.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from boxmunge.commands.health_cmd import HealthCheck
-from boxmunge.cve.policy import PolicyError, parse_posture, severity_gate_quarantines
+from boxmunge.cve.policy import PolicyError, parse_posture, penalty_can_decide_downtime
 from boxmunge.cve.scan_state import SCAN_MAX_AGE, read_scan_state, scan_problem
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.project_inventory import Inventory, classify, damaged_among, damaged_detail
@@ -121,23 +121,25 @@ def check_cve_scan_freshness(paths: BoxPaths, *, now: datetime | None = None) ->
 
 
 
-def _severity_quarantines(paths: BoxPaths, name: str) -> bool:
-    """Whether the project's posture quarantines on severity (strict,
-    paranoid): only there can the hardening penalty decide a quarantine.
-    Raises ManifestError / PolicyError when the posture cannot be read."""
+def _penalty_decides_downtime(paths: BoxPaths, name: str) -> bool:
+    """Whether the project's posture lets the hardening penalty decide
+    downtime (strict, paranoid). Raises ManifestError / PolicyError when the
+    posture cannot be read."""
     sec = load_manifest(paths.project_manifest(name)).get("security") or {}
-    return severity_gate_quarantines(parse_posture(sec.get("posture")))
+    return penalty_can_decide_downtime(parse_posture(sec.get("posture")))
 
 
 def check_cve_hardening_upcoming(paths: BoxPaths) -> HealthCheck:
-    """Warn when a project has findings that quarantine from 0.12, not now.
+    """Warn when a project has findings that meet its gate from 0.12, not now.
 
     The hardening penalty counts a compose-only service without
     `read_only: true` (and a manifest `cap_add` / `no_new_privileges: false`);
     0.11 only warns. These findings are not quarantined, so they are not
     safe either: the fix is named in `boxmunge security <project>`.
 
-    Only strict and paranoid quarantine on severity. A project on balanced
+    Only under strict and paranoid can the penalty decide downtime: paranoid
+    quarantines at its gate; strict alerts and patches there, and a fix not
+    deployed in time quarantines. A project on balanced
     or relaxed is never warned, even when a scan recorded before it moved
     there (or before 0.11.2, when balanced still did) carries the flag.
     """
@@ -145,7 +147,7 @@ def check_cve_hardening_upcoming(paths: BoxPaths) -> HealthCheck:
     flagged: list[str] = []
     for name in deployed_among(registry.names, paths):
         try:
-            if not _severity_quarantines(paths, name):
+            if not _penalty_decides_downtime(paths, name):
                 continue
         except (ManifestError, PolicyError) as e:
             flagged.append(f"{name}: posture unreadable ({e})")
@@ -166,8 +168,11 @@ def check_cve_hardening_upcoming(paths: BoxPaths) -> HealthCheck:
     if flagged:
         return HealthCheck(
             name="cve-hardening", status="warn",
-            detail="will quarantine from 0.12 under posture strict or paranoid (not "
-                   "quarantined now); add `read_only: true` in compose.yml, declare the "
+            detail="from 0.12 the stricter hardening penalty lifts these findings to the "
+                   "gate under posture strict or paranoid (paranoid quarantines them; "
+                   "strict alerts and patches them, and a fix not deployed can start the "
+                   "fix deadline; nothing is acted on now); add `read_only: true` in "
+                   "compose.yml, declare the "
                    "service in the manifest, or accept the risk (suppress the CVE after "
                    "review, or choose `security.posture: balanced`, which quarantines only "
                    "on actively exploited CVEs); see `boxmunge security <project>` -- "

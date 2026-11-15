@@ -35,6 +35,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from boxmunge.cve.exploited import ExploitedSource
 from boxmunge.cve.policy import FindingDisposition
 from boxmunge.cve.security_policy import policy_problem
 from boxmunge import restart_hold
@@ -67,6 +68,23 @@ QUARANTINE_TEXT_FIELDS = (
 )
 
 
+def _listing_problem(stored: Any) -> bool:
+    values = {s.value for s in ExploitedSource}
+    return not (isinstance(stored, dict) and all(
+        isinstance(srcs, list) and all(v in values for v in srcs)
+        for srcs in stored.values()))
+
+
+def recorded_exploited_by(record: Mapping[str, Any]) -> dict[str, frozenset[ExploitedSource]]:
+    """The sources that listed each CVE of the quarantine (a checked record's).
+
+    A record without the field predates 0.12, when CISA was the only source,
+    and the CISA rule (lift_rule.check_kev_for_lift) already judges that: so
+    it reads as listing nothing here."""
+    return {cve: frozenset(ExploitedSource(v) for v in srcs)
+            for cve, srcs in record.get("exploited_by", {}).items()}
+
+
 def checked_quarantine_record(state: dict[str, Any] | None, path: Path) -> dict[str, Any]:
     """*state* if it holds what write_quarantine_state writes; otherwise
     QuarantineError naming the file. action_complete may be absent: records
@@ -79,6 +97,9 @@ def checked_quarantine_record(state: dict[str, Any] | None, path: Path) -> dict[
     # Absent from records written before it was kept; then the policy at the time is unknown.
     if "policy" in state and policy_problem(state["policy"]):
         bad.append("policy")
+    # Absent from records written before sources were kept: CISA was the only one.
+    if "exploited_by" in state and _listing_problem(state["exploited_by"]):
+        bad.append("exploited_by")
     if bad:
         raise QuarantineError(
             f"Quarantine state {path} is corrupt ({', '.join(bad)} missing or of the wrong "
@@ -129,13 +150,15 @@ def write_quarantine_state(
     paths: BoxPaths,
     *,
     headline: FindingDisposition,
+    exploited_by: Mapping[str, frozenset[ExploitedSource]],
     image_ref: str,
     policy: dict[str, Any],
 ) -> dict[str, Any]:
     """Record quarantine state with ``action_complete: false``; return it.
 
     `headline` is the most-severe FindingDisposition that triggered the
-    quarantine; `policy` the security policy it was judged under
+    quarantine; `exploited_by` the known-exploited sources that list each
+    quarantine-level CVE, kept so a lift can judge a source that is stale; `policy` the security policy it was judged under
     (cve.security_policy), kept so a later release that lifts the quarantine
     can be shown to have relaxed it. Overwrites existing state with the new headline if called
     again; the action is then incomplete until re-asserted.
@@ -147,6 +170,8 @@ def write_quarantine_state(
         "effective_severity": headline.effective_severity.value,
         "explanation": headline.explanation,
         "image_ref": image_ref,
+        "exploited_by": {cve: sorted(s.value for s in srcs)
+                         for cve, srcs in sorted(exploited_by.items())},
         "policy": policy,
         "action_complete": False,
     }
@@ -205,6 +230,7 @@ def quarantine_project(
     hosts: list[str],
     compose_files: list[str],
     headline: FindingDisposition,
+    exploited_by: Mapping[str, frozenset[ExploitedSource]],
     image_ref: str,
     policy: dict[str, Any],
 ) -> None:
@@ -252,6 +278,7 @@ def quarantine_project(
     state = write_quarantine_state(
         project_name, paths,
         headline=headline,
+        exploited_by=exploited_by,
         image_ref=image_ref,
         policy=policy,
     )

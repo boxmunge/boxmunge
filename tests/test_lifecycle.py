@@ -43,7 +43,7 @@ def _quarantine(
     """Write a real quarantine state via the production helper."""
     write_quarantine_state(
         project, paths,
-        headline=_disposition(cve_id=cve_id),
+        exploited_by={}, headline=_disposition(cve_id=cve_id),
         image_ref="myimage:latest",
         policy={"posture": "balanced", "dangerously_disable_quarantine": False, "runtimes": None},
     )

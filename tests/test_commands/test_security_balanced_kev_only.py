@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import json
+
 import pytest
 import yaml
 
@@ -78,7 +80,7 @@ def test_unfixable_critical_stays_up_and_alerts_once(box) -> None:
     assert AWAITING_TITLE in title and priority == 0
     for words in ("no fix exists yet", "not known to be exploited", "nothing needs doing now",
                   "when a fix lands", "listed as actively exploited",
-                  "`security.posture: strict` takes such findings down", _CVE):
+                  "`security.posture: paranoid` takes such findings down", _CVE):
         assert words in body
     for _ in range(2):  # daily scans: silent while nothing changes
         pushover.clear()
@@ -107,14 +109,22 @@ def test_a_kev_listing_quarantines_it(box) -> None:
     _scan(paths)
     pushover.clear()
     fd = _scan(paths, _kev(_CVE)).decisions[0].findings[0]
-    assert fd.disposition is Disposition.QUARANTINE and fd.kev_listed
+    assert fd.disposition is Disposition.QUARANTINE and fd.full_kev
     assert is_quarantined("demo", paths)
     [(title, _, priority)] = [m for m in pushover.sent if "QUARANTINED" in m[0]]
     assert priority == 1 and "CISA KEV" in title
 
 
-def test_strict_takes_the_same_finding_down(box) -> None:
+def test_strict_alerts_on_the_same_finding_and_stays_up(box) -> None:
+    """0.12: with no fix, strict quarantines only on KEV, like balanced."""
     paths, pushover = box("strict")
+    assert _scan(paths).decisions[0].findings[0].disposition is Disposition.AWAITING_FIX
+    assert not is_quarantined("demo", paths)
+    assert _titles(pushover, AWAITING_TITLE) and not _titles(pushover, "QUARANTINED")
+
+
+def test_paranoid_takes_the_same_finding_down(box) -> None:
+    paths, pushover = box("paranoid")
     assert _scan(paths).decisions[0].findings[0].disposition is Disposition.QUARANTINE
     assert is_quarantined("demo", paths)
     assert _titles(pushover, "QUARANTINED") and not _titles(pushover, AWAITING_TITLE)
@@ -137,6 +147,20 @@ def test_a_quarantine_the_old_rule_took_lifts_at_the_next_scan(box) -> None:
     pushover.clear()
     _scan(paths)
     assert not _titles(pushover, LIFTED_TITLE) and not is_quarantined("demo", paths)
+
+
+def test_a_strict_quarantine_the_0_11_rule_took_lifts_at_the_next_scan(box) -> None:
+    """0.12: strict no longer quarantines an unexploited finding with no fix."""
+    paths, pushover = box("strict")
+    seed_quarantine(paths)
+    fd = _scan(paths).decisions[0].findings[0]
+    assert fd.disposition is Disposition.AWAITING_FIX
+    assert not is_quarantined("demo", paths)
+    [(title, body, priority)] = [m for m in pushover.sent if LIFTED_TITLE in m[0]]
+    assert "back online" in title and _CVE in title and priority == 0
+    assert "The posture rules changed in boxmunge 0.12.0" in body
+    assert "strict no longer takes a site down for an unexploited finding with no fix" in body
+    assert "0.11.2" not in body and "balanced quarantines only" not in body
 
 
 def test_a_failed_smoke_test_after_the_lift_is_priority_1(box) -> None:
@@ -178,6 +202,35 @@ def test_a_stale_kev_catalog_never_lifts(box) -> None:
     assert not _titles(pushover, LIFTED_TITLE)
 
 
+def test_a_quarantine_an_eu_listing_caused_is_not_lifted_while_the_eu_list_is_stale(
+        box) -> None:
+    """A stale list reads as "nothing exploited": it cannot lift what it caused."""
+    paths, pushover = box()
+    seed_quarantine(paths, exploited_by={_CVE: ["eu_kev"]})
+    scan = _scan(paths)  # CISA fresh and clear; the EU cache was never fetched
+    assert is_quarantined("demo", paths) and "compose_up" not in paths.docker.calls
+    assert scan.kept is not None and "EU KEV list is stale" in scan.kept
+    assert not _titles(pushover, LIFTED_TITLE)
+
+
+def test_a_quarantine_caused_by_cisa_lifts_while_only_the_eu_list_is_stale(box) -> None:
+    paths, pushover = box()
+    seed_quarantine(paths, exploited_by={_CVE: ["cisa_kev"]})
+    _scan(paths)
+    assert not is_quarantined("demo", paths)
+
+
+def test_a_fresh_eu_list_lets_an_eu_caused_quarantine_lift(box) -> None:
+    paths, pushover = box()
+    seed_quarantine(paths, exploited_by={_CVE: ["eu_kev"]})
+    now = datetime.now(timezone.utc).isoformat()
+    paths.kev_enisa.parent.mkdir(parents=True, exist_ok=True)
+    paths.kev_enisa.write_text(json.dumps({"fetched_at": now, "etag": None,
+                                           "last_modified": None, "entries": {}}))
+    _scan(paths)
+    assert not is_quarantined("demo", paths)
+
+
 def test_an_incomplete_scan_never_lifts(box, monkeypatch) -> None:
     paths, pushover = box()
     seed_quarantine(paths)
@@ -188,14 +241,6 @@ def test_an_incomplete_scan_never_lifts(box, monkeypatch) -> None:
     monkeypatch.setattr(security_scan_core, "scan_image", flaky)
     with pytest.raises(RuntimeError, match="All images failed to scan"):
         _scan(paths)
-    assert is_quarantined("demo", paths)
-    assert not _titles(pushover, LIFTED_TITLE)
-
-
-def test_strict_keeps_the_quarantine(box) -> None:
-    paths, pushover = box("strict")
-    seed_quarantine(paths)
-    _scan(paths)
     assert is_quarantined("demo", paths)
     assert not _titles(pushover, LIFTED_TITLE)
 
@@ -249,12 +294,12 @@ def test_relaxed_keeps_a_kev_quarantine_whose_fix_is_published_not_deployed(box)
     seed_quarantine(paths)
     paths.found = [finding(fix="3.0.15-1")]
     fd = _scan(paths, _kev(_CVE)).decisions[0].findings[0]
-    assert fd.disposition is Disposition.IGNORED_FIXED and fd.kev_listed
+    assert fd.disposition is Disposition.IGNORED_FIXED and fd.full_kev
     assert is_quarantined("demo", paths) and "compose_up" not in paths.docker.calls
     assert not _titles(pushover, LIFTED_TITLE)
 
 
-@pytest.mark.parametrize("posture", ["relaxed", "strict", "paranoid"])
+@pytest.mark.parametrize("posture", ["relaxed", "paranoid"])
 def test_other_postures_never_lift_on_their_own(box, posture) -> None:
     """A distro re-triage (here: nothing found any more) is not evidence the
     running images are safe under a posture whose rules did not change."""
@@ -275,7 +320,7 @@ def test_balanced_with_any_kev_finding_keeps_the_quarantine(box, tmp_path) -> No
     paths.project_manifest("demo").write_text(yaml.safe_dump(data))
     seed_quarantine(paths)
     fd = _scan(paths, _kev(_CVE)).decisions[0].findings[0]
-    assert fd.disposition is Disposition.STILL_RUNNING_AT_RISK and fd.kev_listed
+    assert fd.disposition is Disposition.STILL_RUNNING_AT_RISK and fd.full_kev
     assert is_quarantined("demo", paths)
     assert not _titles(pushover, LIFTED_TITLE)
 

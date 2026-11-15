@@ -91,7 +91,7 @@ class TestStateManagement:
         paths = _setup_paths(tmp_path)
         write_quarantine_state(
             "myapp", paths,
-            headline=_disposition(),
+            exploited_by={}, headline=_disposition(),
             image_ref="myapp:1.2.3",
             policy=POLICY,
         )
@@ -113,7 +113,7 @@ class TestStateManagement:
         )
         write_quarantine_state(
             "myapp", paths,
-            headline=headline,
+            exploited_by={}, headline=headline,
             image_ref="myapp:1.2.3",
             policy=POLICY,
         )
@@ -135,13 +135,13 @@ class TestStateManagement:
         paths = _setup_paths(tmp_path)
         write_quarantine_state(
             "myapp", paths,
-            headline=_disposition(cve_id="CVE-2026-0001"),
+            exploited_by={}, headline=_disposition(cve_id="CVE-2026-0001"),
             image_ref="myapp:1.2.3",
             policy=POLICY,
         )
         write_quarantine_state(
             "myapp", paths,
-            headline=_disposition(cve_id="CVE-2026-9999"),
+            exploited_by={}, headline=_disposition(cve_id="CVE-2026-9999"),
             image_ref="myapp:1.2.4",
             policy=POLICY,
         )
@@ -162,7 +162,7 @@ class TestStateManagement:
         paths = _setup_paths(tmp_path)
         write_quarantine_state(
             "myapp", paths,
-            headline=_disposition(),
+            exploited_by={}, headline=_disposition(),
             image_ref="myapp:1.2.3",
             policy=POLICY,
         )
@@ -177,7 +177,7 @@ class TestStateManagement:
         paths = _setup_paths(tmp_path)
         write_quarantine_state(
             "myapp", paths,
-            headline=_disposition(cve_id="CVE-2026-0001"),
+            exploited_by={}, headline=_disposition(cve_id="CVE-2026-0001"),
             image_ref="myapp:1.2.3",
             policy=POLICY,
         )
@@ -223,7 +223,7 @@ class TestQuarantineProjectHappyPath:
                 project_dir=project_dir,
                 hosts=["a.example.com"],
                 compose_files=["compose.yml"],
-                headline=_disposition(),
+                exploited_by={}, headline=_disposition(),
                 image_ref="myapp:1.2.3",
                 policy=POLICY,
             )
@@ -262,7 +262,7 @@ class TestQuarantineProjectHappyPath:
                 project_dir=project_dir,
                 hosts=["a.example.com"],
                 compose_files=["compose.yml"],
-                headline=_disposition(),
+                exploited_by={}, headline=_disposition(),
                 image_ref="myapp:1.2.3",
                 policy=POLICY,
             )
@@ -288,7 +288,7 @@ class TestQuarantineProjectHappyPath:
                 project_dir=project_dir,
                 hosts=["a.example.com"],
                 compose_files=["compose.yml"],
-                headline=_disposition(
+                exploited_by={}, headline=_disposition(
                     cve_id="CVE-2026-1234",
                     base=Severity.CRITICAL,
                     effective=Severity.CRITICAL,
@@ -329,7 +329,7 @@ class TestQuarantineProjectFailures:
                     project_dir=project_dir,
                     hosts=["a.example.com"],
                     compose_files=["compose.yml"],
-                    headline=_disposition(),
+                    exploited_by={}, headline=_disposition(),
                     image_ref="myapp:1.2.3",
                     policy=POLICY,
                 )
@@ -353,7 +353,7 @@ class TestQuarantineProjectFailures:
                     project_dir=project_dir,
                     hosts=["a.example.com"],
                     compose_files=["compose.yml"],
-                    headline=_disposition(),
+                    exploited_by={}, headline=_disposition(),
                     image_ref="myapp:1.2.3",
                     policy=POLICY,
                 )
@@ -377,7 +377,7 @@ class TestQuarantineProjectFailures:
                 project_dir=project_dir,
                 hosts=["a.example.com"],
                 compose_files=["compose.yml"],
-                headline=_disposition(cve_id="CVE-2026-0001"),
+                exploited_by={}, headline=_disposition(cve_id="CVE-2026-0001"),
                 image_ref="myapp:1.2.3",
                 policy=POLICY,
             )
@@ -387,7 +387,7 @@ class TestQuarantineProjectFailures:
                 project_dir=project_dir,
                 hosts=["a.example.com"],
                 compose_files=["compose.yml"],
-                headline=_disposition(cve_id="CVE-2026-9999"),
+                exploited_by={}, headline=_disposition(cve_id="CVE-2026-9999"),
                 image_ref="myapp:1.2.4",
                 policy=POLICY,
             )
@@ -413,7 +413,7 @@ class TestLiftQuarantineHappyPath:
         # Pre-quarantine the project.
         write_quarantine_state(
             "myapp", paths,
-            headline=_disposition(),
+            exploited_by={}, headline=_disposition(),
             image_ref="myapp:1.2.3",
             policy=POLICY,
         )
@@ -457,7 +457,7 @@ class TestLiftQuarantineHappyPath:
 
         write_quarantine_state(
             "myapp", paths,
-            headline=_disposition(),
+            exploited_by={}, headline=_disposition(),
             image_ref="myapp:1.2.3",
             policy=POLICY,
         )
@@ -498,7 +498,7 @@ class TestLiftQuarantineFailures:
 
         write_quarantine_state(
             "myapp", paths,
-            headline=_disposition(),
+            exploited_by={}, headline=_disposition(),
             image_ref="myapp:1.2.3",
             policy=POLICY,
         )
@@ -520,7 +520,7 @@ class TestLiftQuarantineFailures:
 
     def test_a_failed_check_after_the_start_keeps_state(self, tmp_path: Path) -> None:
         paths = _setup_paths(tmp_path)
-        write_quarantine_state("myapp", paths, headline=_disposition(),
+        write_quarantine_state("myapp", paths, exploited_by={}, headline=_disposition(),
                                image_ref="myapp:1.2.3", policy=POLICY)
 
         def check() -> None:
@@ -591,7 +591,7 @@ class TestStructuredLogging:
                     project_dir=project_dir,
                     hosts=["a.example.com"],
                     compose_files=["compose.yml"],
-                    headline=_disposition(cve_id="CVE-2026-7777"),
+                    exploited_by={}, headline=_disposition(cve_id="CVE-2026-7777"),
                     image_ref="myapp:1.2.3",
                     policy=POLICY,
                 )
@@ -628,7 +628,7 @@ class TestStructuredLogging:
         project_dir.mkdir(parents=True)
         write_quarantine_state(
             "myapp", paths,
-            headline=_disposition(),
+            exploited_by={}, headline=_disposition(),
             image_ref="myapp:1.2.3",
             policy=POLICY,
         )

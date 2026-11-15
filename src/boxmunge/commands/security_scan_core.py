@@ -9,10 +9,12 @@ security_actions.py.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
 from boxmunge.commands.security_scan_relevance import (
+    check_declared_runtimes,
     gate_exempted_packages,
     log_relevance_gaps,
 )
@@ -33,10 +35,13 @@ from boxmunge.commands.security_enforce import (
     clears_quarantine,
     enforce,
     headline_of,
+    quarantine_listing,
     raise_enforcement_error,
 )
 from boxmunge.compose_images import image_phrase
 from boxmunge.cve.alerting import Alert, emit_scan_alerts
+from boxmunge.cve.exploited import ExploitedIndex, ExploitedSource, load_exploited
+from boxmunge.cve.fix_grace import graced_decisions
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import (
     FindingDisposition,
@@ -147,6 +152,10 @@ def _today() -> date:
     return datetime.now(timezone.utc).date()
 
 
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
 def scan_one_project(
     paths: BoxPaths, project: str, *,
     audit_only: bool = False,
@@ -253,31 +262,15 @@ def _scan_targets(
     return results, failed, skipped, warnings
 
 
-def _check_declared_runtimes(project: str, meta: ProjectMeta) -> None:
-    """`declared` is loop-invariant (one manifest, many images), so it is
-    validated once before any Trivy scan runs: a malformed
-    security.runtimes then fails in milliseconds, and no early return can
-    skip validation (load_manifest does not validate the security: block)."""
-    if meta.declared_runtimes is None:
-        return
-    try:
-        effective_runtimes((), declared=meta.declared_runtimes)
-    except (ValueError, TypeError) as e:
-        raise RuntimeError(
-            f"project {project!r}: invalid security.runtimes in manifest: {e}"
-        ) from e
-
-
 def _evaluate(
     paths: BoxPaths, project: str, meta: ProjectMeta, profile: ProjectHardening,
     supps: tuple[Suppression, ...], results: list[ScanResult],
-    kev_ids: frozenset[str] | None, today: date,
+    exploited: ExploitedIndex, today: date, *, complete: bool, alerts: list[Alert] | None,
 ) -> list[ProjectDecision]:
-    """One decision per scanned image, under the project's policy.
-    ``kev_ids`` is KevCatalog.fresh_ids: None (stale) lists nothing."""
+    """One decision per scanned image, under the project's policy and strict's fix
+    deadlines (cve.fix_grace). ``exploited``: the fresh sources (cve.exploited)."""
     posture, dangerously, declared = meta.posture, meta.dangerously, meta.declared_runtimes
     decisions: list[ProjectDecision] = []
-    kev_lookup = (kev_ids or frozenset()).__contains__
 
     # Collected across every image but logged at most once per project scan.
     dropped_lang_types: set[str] = set()
@@ -297,7 +290,7 @@ def _evaluate(
             dangerously_disable_quarantine=dangerously,
             suppressions=supps,
             today=today,
-            kev_lookup=kev_lookup,
+            exploited_lookup=exploited.lookup,
             runtimes=runtimes,
         )
         decisions.append(decision)
@@ -306,11 +299,12 @@ def _evaluate(
         ):
             empty_runtime_exempted |= gate_exempted_packages(
                 decision, posture=posture, dangerously=dangerously,
-                suppressions=supps, today=today, kev_lookup=kev_lookup,
+                suppressions=supps, today=today, exploited_lookup=exploited.lookup,
             )
 
     log_relevance_gaps(paths, project, dropped_lang_types, empty_runtime_exempted)
-    return decisions
+    return graced_decisions(paths, project, decisions, posture=posture, dangerously=dangerously,
+                            now=_now(), complete=complete, alerts=alerts)
 
 
 def audit_targets(
@@ -322,11 +316,11 @@ def audit_targets(
     nothing is written, alerted or enforced. A release not yet deployed is
     judged by its own manifest and compose, with the project's suppressions
     (quarantine_gate)."""
-    _check_declared_runtimes(project, meta)
+    check_declared_runtimes(project, meta.declared_runtimes)
     results, failed, skipped, warnings = _scan_targets(paths, project, targets)
     today = _today()
     decisions = _evaluate(paths, project, meta, profile, supps, results,
-                          kev.fresh_ids(today), today)
+                          load_exploited(paths, today, cisa=kev), today, complete=True, alerts=None)
     return ProjectScan(
         project=project, posture=meta.posture.value, dangerously=meta.dangerously,
         decisions=tuple(decisions),
@@ -350,7 +344,7 @@ def scan_one_project_locked(
         raise ValueError("scan_one_project needs an `alerts` list unless audit_only")
     meta = load_project_meta(paths, project)
     dangerously = meta.dangerously
-    _check_declared_runtimes(project, meta)
+    check_declared_runtimes(project, meta.declared_runtimes)
     profile = hardening_profile(meta, load_user_model(paths, project))
     # Host-scoped suppressions are for reviewed, accepted-risk findings; the
     # relevance gate handles "base-image package the project never invokes".
@@ -373,7 +367,7 @@ def scan_one_project_locked(
         # Audit-only (resume re-scan, audit A-3) leaves the prior alone.
         record_error = None
         if not audit_only:
-            outcome = _enforce(paths, project, meta, None, defer_new=defer_new)
+            outcome = _enforce(paths, project, meta, None, {}, defer_new=defer_new)
             record_error = _record(
                 scan_state_path, decisions=(),
                 unscanned=tuple(_unscanned(unidentified=unidentified)), **basis,
@@ -390,8 +384,10 @@ def scan_one_project_locked(
         paths, project, targets, scanned)
     warnings.extend(scan_warnings)
     today = _today()
-    kev_ids = kev.fresh_ids(today)
-    decisions = _evaluate(paths, project, meta, profile, supps, results, kev_ids, today)
+    exploited = load_exploited(paths, today, cisa=kev)
+    complete = not (failed or skipped or unidentified)
+    decisions = _evaluate(paths, project, meta, profile, supps, results, exploited, today,
+                          complete=complete, alerts=None if audit_only else alerts)
 
     headline = headline_of(decisions)
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow
@@ -401,11 +397,12 @@ def scan_one_project_locked(
     outcome = Enforcement()
     if not audit_only:
         cleared = clears_quarantine(
-            meta.posture, decisions, complete=not (failed or skipped or unidentified),
-            kev_fresh=kev_ids is not None)
+            meta.posture, decisions, complete=complete,
+            kev_fresh=ExploitedSource.CISA not in exploited.stale)
         outcome = _enforce(
-            paths, project, meta, headline, defer_new=defer_new,
-            cleared=tuple(decisions) if cleared else None,
+            paths, project, meta, headline, quarantine_listing(decisions),
+            defer_new=defer_new, cleared=tuple(decisions) if cleared else None,
+            stale_sources=exploited.stale,
         )
 
     if failed and not decisions:
@@ -465,11 +462,14 @@ def _record(path, **kwargs) -> str | None:
 def _enforce(
     paths: BoxPaths, project: str, meta: ProjectMeta,
     headline: tuple[ProjectDecision, FindingDisposition] | None,
+    exploited_by: Mapping[str, frozenset[ExploitedSource]],
     *, defer_new: bool, cleared: tuple[ProjectDecision, ...] | None = None,
+    stale_sources: Mapping[ExploitedSource, str] | None = None,
 ) -> Enforcement:
     return enforce(
         paths, project, hosts=meta.hosts, compose_files=meta.compose_files,
-        policy=meta.policy(), headline=headline, defer_new=defer_new, cleared=cleared,
+        policy=meta.policy(), headline=headline, exploited_by=exploited_by,
+        defer_new=defer_new, cleared=cleared, stale_sources=stale_sources,
     )
 
 

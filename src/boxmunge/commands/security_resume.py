@@ -21,12 +21,14 @@ from datetime import datetime, timezone
 
 from boxmunge.commands.quarantine_lift import restore_from_quarantine
 from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project_locked
+from boxmunge.cve.exploited import load_exploited
 from boxmunge.cve.lift_rule import (
-    ACCEPT_FLAG, KevLiftCheck, check_kev_for_lift, fresh_data_advice, resume_exits,
+    ACCEPT_FLAG, KevLiftCheck, check_exploited_for_lift, fresh_data_advice, resume_exits,
 )
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.quarantine import (
     QuarantineError, checked_quarantine_record, is_quarantined, read_quarantine_state,
+    recorded_exploited_by,
 )
 from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
 from boxmunge.cve.kev import load_kev
@@ -162,8 +164,11 @@ def security_resume_locked(paths: BoxPaths, project: str, *,
     except QuarantineError as e:
         _err(f"ERROR: {e}")
         return 1
-    check = check_kev_for_lift(record["cve_id"], scan.decisions, kev,
-                               datetime.now(timezone.utc).date())
+    today = datetime.now(timezone.utc).date()
+    check = check_exploited_for_lift(
+        record["cve_id"], scan.decisions, kev, today,
+        listing=recorded_exploited_by(record),
+        stale=load_exploited(paths, today, cisa=kev).stale)
     if check.refusal is not None and not (accept_stale_kev and check.acceptable):
         _err(f"ERROR: Cannot resume '{project}' — the re-scan is clear, but "
              f"{check.refusal}. The quarantine stays in place.")
@@ -173,8 +178,8 @@ def security_resume_locked(paths: BoxPaths, project: str, *,
     if accept_stale_kev and check.refusal is not None:
         print(f"  {ACCEPT_FLAG}: lifting although {check.refusal}. A CVE that is actively "
               f"exploited may come back online.")
-        log_warning("security-resume", f"{ACCEPT_FLAG}: lift accepted with no usable KEV "
-                    f"catalog", paths, project=project,
+        log_warning("security-resume", f"{ACCEPT_FLAG}: lift accepted without a usable KEV "
+                    f"source", paths, project=project,
                     detail={"reason": check.refusal, "kev_stale": check.stale})
     elif accept_stale_kev:
         print(f"  {ACCEPT_FLAG}: nothing to accept: "

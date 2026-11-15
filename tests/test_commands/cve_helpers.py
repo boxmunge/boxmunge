@@ -30,7 +30,8 @@ def finding(
     pkg: str = "openssl", fix: str | None = None,
 ) -> Finding:
     """A distro-acknowledged, network-reachable finding (quarantines ≥ Medium
-    under strict; under balanced only a KEV listing quarantines)."""
+    under paranoid; under balanced and strict only a KEV listing quarantines
+    one with no fix)."""
     return Finding(
         cve_id=cve, severity=sev, package=pkg, installed_version="1",
         fixed_version=fix, title="", primary_url=None,
@@ -41,9 +42,9 @@ def finding(
 
 CRIT = finding()
 
-# Strict: a non-KEV finding ≥ Medium quarantines. Balanced quarantines only
-# on CISA KEV; tests of balanced pass {"posture": "balanced"}.
-STRICT = {"posture": "strict"}
+# Paranoid: a non-KEV finding ≥ Medium quarantines. Balanced and strict
+# quarantine one with no fix only on KEV; their tests pass the posture.
+PARANOID = {"posture": "paranoid"}
 
 
 def fresh_kev(monkeypatch, *cves: str):
@@ -69,12 +70,12 @@ def write_project(
     ``images`` maps service → compose image; a service missing from it is
     build-only. Default: every service declares ``<name>-<svc>:1``.
 
-    ``security`` defaults to STRICT: these tests drive the quarantine
-    machinery with plain (non-KEV) findings, which balanced only alerts on.
-    Strict requires a read-only root, so each service declares one.
+    ``security`` defaults to PARANOID: these tests drive the quarantine
+    machinery with plain (non-KEV) findings, which balanced and strict only
+    alert on. Paranoid requires a read-only root, so each service declares one.
     """
     if security is None:
-        security = STRICT
+        security = PARANOID
     images = images if images is not None else {s: f"{name}-{s}:1" for s in services}
     proj = paths.projects / name
     proj.mkdir(parents=True)

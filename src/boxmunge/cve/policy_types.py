@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+from boxmunge.cve.exploited import ExploitedSource, is_full_kev
 from boxmunge.cve.scanner import SEVERITY_ORDER, Finding, Severity
 from boxmunge.cve.suppressions import Suppression
 
@@ -41,26 +42,38 @@ class Disposition(Enum):
 
 # Posture → the severity gate: the minimum effective (distro, below paranoid)
 # severity that meets it, and what meeting it does. At-or-above meets it.
-# Relaxed has no severity gate (KEV only). Balanced's gate never takes a site
-# down: only an actively exploited (KEV) finding does, so a finding there is
-# alerted as AWAITING_FIX. PARANOID matches STRICT's Medium threshold but also
-# bypasses the distro trust and Attack Vector filter (see evaluate_finding).
+# Relaxed has no severity gate (KEV only). Balanced's and strict's gates never
+# take a site down at scan time: only an actively exploited (KEV) finding
+# does, so a finding with no fix there is alerted as AWAITING_FIX (a fixable
+# one is patched; strict also has the fix deadline). PARANOID matches STRICT's
+# Medium threshold, quarantines on it, and bypasses the distro trust and
+# Attack Vector filter (see evaluate_finding).
 _SEVERITY_GATES: dict[Posture, tuple[Severity, Disposition]] = {
     Posture.BALANCED: (Severity.HIGH, Disposition.AWAITING_FIX),
-    Posture.STRICT: (Severity.MEDIUM, Disposition.QUARANTINE),
+    Posture.STRICT: (Severity.MEDIUM, Disposition.AWAITING_FIX),
     Posture.PARANOID: (Severity.MEDIUM, Disposition.QUARANTINE),
 }
+
+# What a finding judged as if it had no fix must come to for it to meet the
+# posture's gate (quarantine, run at risk, or be alerted as awaiting a fix).
+GATE_MET: frozenset[Disposition] = frozenset({
+    Disposition.QUARANTINE, Disposition.STILL_RUNNING_AT_RISK, Disposition.AWAITING_FIX,
+})
 
 # The release from which balanced quarantines only on KEV: named when a
 # quarantine taken under the earlier rule is lifted.
 BALANCED_KEV_ONLY_SINCE = "0.11.2"
+# The release from which strict no longer quarantines a finding with no fix
+# that is not known exploited (it alerts instead).
+STRICT_ALERTS_ONLY_SINCE = "0.12.0"
 
 
-def severity_gate_quarantines(posture: Posture) -> bool:
-    """True iff a non-KEV finding can quarantine under ``posture`` — the
-    hardening penalty, which raises severity, can then decide a quarantine."""
-    gate = _SEVERITY_GATES.get(posture)
-    return gate is not None and gate[1] is Disposition.QUARANTINE
+def penalty_can_decide_downtime(posture: Posture) -> bool:
+    """True iff the hardening penalty, which raises severity, can decide
+    downtime for a non-KEV finding under ``posture``: paranoid's gate
+    quarantines; strict's alerts and patches, and a fix not deployed in time
+    quarantines. Under relaxed and balanced only KEV takes a site down."""
+    return posture in (Posture.STRICT, Posture.PARANOID)
 
 
 # Human label for posture in explanation strings — lowercase for prose flow.
@@ -81,6 +94,18 @@ class PolicyError(ValueError):
     """Policy input is invalid (typically a bad posture string)."""
 
 
+_SOURCE_LABEL = {
+    ExploitedSource.CISA: "CISA KEV",
+    ExploitedSource.EU: "EU KEV",
+    ExploitedSource.VULNCHECK: "VulnCheck KEV",
+}
+
+
+def listing_label(sources: frozenset[ExploitedSource]) -> str:
+    """The lists that name a CVE, as an operator reads them: "CISA KEV, EU KEV"."""
+    return ", ".join(_SOURCE_LABEL[s] for s in ExploitedSource if s in sources)
+
+
 # ---------- value types ----------
 
 
@@ -95,16 +120,34 @@ class FindingDisposition:
     disposition: Disposition
     suppression: Suppression | None
     explanation: str
-    # The CVE was on a fresh CISA KEV catalog when this finding was judged.
-    kev_listed: bool = False
+    # The fresh known-exploited sources that listed the CVE when this finding
+    # was judged (CISA, EU, VulnCheck); empty when none did.
+    exploited_by: frozenset[ExploitedSource] = frozenset()
     # IGNORED_FIXED only: without the (not yet running) fix, this finding
-    # would meet the posture's gate: quarantine, run at risk, or (balanced)
-    # be alerted as AWAITING_FIX. The name predates balanced's alert-only gate.
+    # would meet the posture's gate: run at risk, or (balanced, strict) be
+    # alerted as AWAITING_FIX. The name predates the alert-only gates.
     fix_would_quarantine: bool = False
+    # Fix available, and the finding meets the gate autofix patches at:
+    # without the fix it would meet the posture's own gate (balanced's under
+    # relaxed), or, listed by VulnCheck only, no suppression applies to it.
+    # Set only by the policy's non-KEV fix branch.
+    fix_meets_patch_gate: bool = False
     # Not quarantine-level under the penalty applied today, but it is under
     # the stricter hardening rule that takes full effect in 0.12: a warning
     # in 0.11.0, never a quarantine.
     hardening_would_quarantine: bool = False
+    # The KEV override decided this disposition (not persisted: it only
+    # shapes the alert of the scan that made the decision).
+    kev_override: bool = False
+
+    @property
+    def full_kev(self) -> bool:
+        """Listed by CISA or the EU: the KEV override applies."""
+        return is_full_kev(self.exploited_by)
+
+    @property
+    def exploited_label(self) -> str:
+        return listing_label(self.exploited_by)
 
 
 @dataclass(frozen=True)

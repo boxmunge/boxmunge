@@ -16,10 +16,11 @@ import yaml
 from boxmunge import http_read
 from boxmunge.commands import security_actions, security_kev, security_scan_core
 from boxmunge.config import ConfigError, load_config
-from boxmunge.cve import kev_refresh
+from boxmunge.cve import kev_http
 from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, load_kev
+from boxmunge.cve.kev_config import kev_config
 from boxmunge.cve.kev_refresh import (
-    CONFIG, REJECTED, UNREACHABLE, kev_sources, refresh_from, refresh_kev,
+    CONFIG, REJECTED, UNREACHABLE, refresh_from, refresh_kev,
 )
 from boxmunge.paths import BoxPaths
 from tests.test_commands.cve_helpers import Docker, Pushover, make_box, scan_result
@@ -29,8 +30,8 @@ RECENT = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
 
 
 class _Resp:
-    def __init__(self, body: bytes) -> None:
-        self._body = body
+    def __init__(self, body: bytes, headers: dict | None = None) -> None:
+        self._body, self.headers = body, headers or {}
 
     def __enter__(self):
         return self
@@ -67,7 +68,7 @@ def _serve(monkeypatch, answers: dict) -> list[str]:
             raise answer
         return _Resp(answer)
 
-    monkeypatch.setattr(kev_refresh, "_open", open_)
+    monkeypatch.setattr(kev_http, "_open", open_)
     return calls
 
 
@@ -152,12 +153,12 @@ def test_a_source_that_trickles_is_cut_off_at_the_deadline(tmp_path, monkeypatch
             now[0] += 29
             return b"{"
 
-    monkeypatch.setattr(kev_refresh, "_open", lambda req: Trickle(b""))
+    monkeypatch.setattr(kev_http, "_open", lambda req: Trickle(b""))
     result = refresh_from(paths, (CISA,))
     assert result.failures[0].kind == "unreachable"
     assert result.failures[0].error == (
-        f"the response did not finish within {kev_refresh.KEV_FETCH_DEADLINE}s")
-    assert now[0] <= kev_refresh.KEV_FETCH_DEADLINE + 29
+        f"the response did not finish within {kev_http.KEV_FETCH_DEADLINE}s")
+    assert now[0] <= kev_http.KEV_FETCH_DEADLINE + 29
 
 
 # ---------- configuration ----------
@@ -173,7 +174,7 @@ def _config(paths: BoxPaths, **extra) -> None:
 def test_default_sources_are_cisa_then_its_github_mirror(tmp_path):
     paths = BoxPaths(root=tmp_path)
     _config(paths)
-    assert kev_sources(paths) == KEV_DEFAULT_SOURCES
+    assert kev_config(paths).sources == KEV_DEFAULT_SOURCES
     assert CISA.startswith("https://www.cisa.gov/")
     assert MIRROR.startswith("https://raw.githubusercontent.com/cisagov/kev-data/")
 
@@ -199,7 +200,7 @@ def test_bad_kev_config_fails_only_the_kev_refresh(tmp_path, block, match):
     _config(paths, kev=block)
     load_config(paths)  # every other config reader is unaffected
     with pytest.raises(ConfigError, match=match):
-        kev_sources(paths)
+        kev_config(paths).sources
     failure = refresh_kev(paths).failures[0]
     assert failure.kind == CONFIG and failure.source == "boxmunge.yml"
 
@@ -364,3 +365,80 @@ def test_stale_with_every_source_lagging_says_they_answered(tmp_path, monkeypatc
     assert "every source answered this run, but with a catalog older than the cached one" \
         in alert.body
     assert "no KEV source has answered" not in alert.body
+
+
+# ---------- conditional requests ----------
+
+def _serve_headers(monkeypatch, steps: list):
+    """Each step is (bytes, headers) or an exception; records the requests."""
+    seen = []
+
+    def open_(req):
+        seen.append(req)
+        step = steps.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return _Resp(step[0], step[1])
+
+    monkeypatch.setattr(kev_http, "_open", open_)
+    return seen
+
+
+def _not_modified(url: str) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(url, 304, "Not Modified", None, None)
+
+
+def test_the_validators_are_cached_and_sent_next_time(tmp_path, monkeypatch):
+    paths = BoxPaths(root=tmp_path)
+    seen = _serve_headers(monkeypatch, [
+        (_feed(), {"ETag": '"abc"', "Last-Modified": "Sat, 14 Nov 2026 01:00:00 GMT"}),
+        _not_modified(CISA)])
+    assert refresh_from(paths, (CISA,)).source == CISA
+    cat = load_kev(paths)
+    assert cat.etag == '"abc"' and cat.last_modified == "Sat, 14 Nov 2026 01:00:00 GMT"
+    assert not seen[0].has_header("If-none-match")
+    fetched = cat.fetched_at
+
+    assert refresh_from(paths, (CISA,)).source == CISA  # 304: the cache is confirmed current
+    assert seen[1].get_header("If-none-match") == '"abc"'
+    assert seen[1].get_header("If-modified-since") == "Sat, 14 Nov 2026 01:00:00 GMT"
+    again = load_kev(paths)
+    assert again.cve_ids == cat.cve_ids and again.released_at == cat.released_at
+    assert again.etag == '"abc"' and again.fetched_at > fetched
+
+
+def test_validators_are_sent_only_to_the_source_that_served_the_cache(tmp_path, monkeypatch):
+    paths = BoxPaths(root=tmp_path)
+    _seed(paths, 1400)
+    doc = json.loads(paths.kev_catalog.read_text())
+    paths.kev_catalog.write_text(json.dumps({**doc, "etag": '"x"', "last_modified": None}))
+    seen = _serve_headers(monkeypatch, [(_feed(), {})])
+    refresh_from(paths, (MIRROR,))  # the cache came from CISA
+    assert not seen[0].has_header("If-none-match")
+
+
+def test_a_removed_cache_is_fetched_in_full_not_confirmed(tmp_path, monkeypatch):
+    paths = BoxPaths(root=tmp_path)
+    seen = _serve_headers(monkeypatch, [(_feed(), {"ETag": '"abc"'}), (_feed(), {"ETag": '"abc"'})])
+    refresh_from(paths, (CISA,))
+    paths.kev_catalog.unlink()  # the operator's recovery from a rejected catalog
+    refresh_from(paths, (CISA,))
+    assert not seen[1].has_header("If-none-match")
+    assert load_kev(paths).cve_ids
+
+
+def test_a_cache_from_before_validators_is_fetched_in_full(tmp_path, monkeypatch):
+    paths = BoxPaths(root=tmp_path)
+    _seed(paths, 1400)  # no etag/last_modified keys
+    seen = _serve_headers(monkeypatch, [(_feed(), {"ETag": '"abc"'})])
+    refresh_from(paths, (CISA,))
+    assert not seen[0].has_header("If-none-match")
+    assert load_kev(paths).etag == '"abc"'
+
+
+def test_a_validator_that_is_not_text_makes_the_cache_unreadable(tmp_path):
+    paths = BoxPaths(root=tmp_path)
+    _seed(paths, 1400)
+    doc = json.loads(paths.kev_catalog.read_text())
+    paths.kev_catalog.write_text(json.dumps({**doc, "etag": 7}))
+    assert "etag is not a string" in load_kev(paths).unreadable

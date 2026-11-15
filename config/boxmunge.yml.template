@@ -76,6 +76,10 @@ version_check:
 #   sources:
 #     - https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json
 #     - https://raw.githubusercontent.com/cisagov/kev-data/main/known_exploited_vulnerabilities.json
+#   # ENISA's EU list of known-exploited CVEs is fetched too, as a second
+#   # source beside CISA's. Set enabled: false to leave it out.
+#   enisa:
+#     enabled: true
 
 # Optional webhooks: a JSON POST (event, project, timestamp, hostname,
 # details) to each url whose events list the event. Events: deploy, stage,

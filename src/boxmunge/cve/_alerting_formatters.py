@@ -14,11 +14,12 @@ live in ``_alerting_fleet``; consumers import from ``boxmunge.cve.alerting``.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import date
 
 from boxmunge.compose_images import describe_image
 from boxmunge.cve._alerting_types import Alert, Hit
 from boxmunge.cve.policy import Disposition, FindingDisposition
-from boxmunge.cve.policy_types import BALANCED_KEV_ONLY_SINCE
+from boxmunge.cve.policy_types import BALANCED_KEV_ONLY_SINCE, STRICT_ALERTS_ONLY_SINCE, Posture
 from boxmunge.cve.suppressions import Suppression
 
 # Lines listed in an aggregated alert body before "... and N more".
@@ -44,7 +45,7 @@ def _lines(hit: Hit) -> list[str]:
     """The finding, naming its image as an operator reads it; a built
     image's raw reference follows on its own line, where it can be copied."""
     fd = hit.disposition
-    kev = ", CISA KEV" if fd.kev_listed else ""
+    kev = f", known exploited ({fd.exploited_label})" if fd.exploited_by else ""
     image = describe_image(hit.image_ref)
     lines = [f"- {fd.finding.cve_id} ({_sev(fd)}{kev}) in "
              f"{fd.finding.package or '?'} — {image}"]
@@ -73,8 +74,12 @@ def format_quarantine_alert(project: str, hits: Sequence[Hit]) -> Alert:
     hits = _ordered(hits)
     head = hits[0].disposition
     cve = head.finding.cve_id
-    why = ("actively exploited — CISA KEV" if head.kev_listed
-           else head.effective_severity.value)
+    if head.kev_override:
+        why = f"actively exploited — {head.exploited_label}"
+    elif head.finding.fix_available and not head.exploited_by:
+        why = f"{head.effective_severity.value}, fix not deployed"
+    else:
+        why = head.effective_severity.value
     title = (f"[boxmunge:{project}] QUARANTINED — {cve} ({why})"
              f"{_more(_cve_count(hits) - 1)}")
     body = "\n".join([
@@ -124,7 +129,7 @@ def format_kev_fix_pending_alert(project: str, hits: Sequence[Hit]) -> Alert:
     hits = _ordered(hits)
     head = hits[0].disposition
     title = (f"[boxmunge:{project}] ACTIVELY EXPLOITED — {head.finding.cve_id} "
-             f"fix available but not running (CISA KEV){_more(_cve_count(hits) - 1)}")
+             f"fix available but not running ({head.exploited_label}){_more(_cve_count(hits) - 1)}")
     body = "\n".join([
         f"Project: {project} — still running",
         *_listing(hits),
@@ -137,13 +142,37 @@ def format_kev_fix_pending_alert(project: str, hits: Sequence[Hit]) -> Alert:
     return Alert(kind="kev_fix_pending", title=title, body=body, priority=1)
 
 
+def format_exploited_listed_alert(project: str, hits: Sequence[Hit]) -> Alert:
+    """A CVE only a weaker list (VulnCheck) names as exploited, on a project
+    that stays up. Urgent (priority 1, never the digest), sent when the
+    finding is new, gains a listing source or changes disposition."""
+    hits = _ordered(hits)
+    head = hits[0].disposition
+    title = (f"[boxmunge:{project}] KNOWN EXPLOITED — {head.finding.cve_id} "
+             f"({head.exploited_label}), still running{_more(_cve_count(hits) - 1)}")
+    body = "\n".join([
+        f"Project: {project} — still running",
+        *_listing(hits),
+        "",
+        head.explanation,
+        "",
+        "Only VulnCheck lists it as exploited, so this posture does not take the",
+        "project down for it. Patch or rebuild when a fix is available. This alert",
+        "is not repeated while nothing changes; once reviewed, a suppression",
+        "records that:",
+        f"  boxmunge security suppress {head.finding.cve_id} --project {project} \\",
+        "      --until <date> --reason <text>",
+    ])
+    return Alert(kind="exploited_listed", title=title, body=body, priority=1)
+
+
 def format_kev_at_risk_alert(project: str, hits: Sequence[Hit]) -> Alert:
     """An actively exploited CVE on a project that opted out of quarantine.
     Priority 1, every scan, naming the CVE and the opt-out."""
     hits = _ordered(hits)
     head = hits[0].disposition
     title = (f"[boxmunge:{project}] [STILL RUNNING — quarantine disabled by config] "
-             f"ACTIVELY EXPLOITED {head.finding.cve_id} (CISA KEV)"
+             f"ACTIVELY EXPLOITED {head.finding.cve_id} ({head.exploited_label})"
              f"{_more(_cve_count(hits) - 1)}")
     body = "\n".join([
         f"Project: {project} — dangerously_disable_quarantine: true",
@@ -184,6 +213,43 @@ def format_fixable_alert(project: str, hits: Sequence[Hit]) -> Alert:
                  project=project, hits=tuple(hits))
 
 
+def format_fix_deadline_alert(
+    project: str, deadlines: Sequence[tuple[Hit, date]], grace_days: int, *,
+    dangerously: bool,
+) -> Alert:
+    """Strict's warning, sent once per finding, that a fix still not deployed
+    quarantines the site on its deadline (cve.fix_grace). Priority 0, sent
+    on its own (never the digest): there is still time to act."""
+    ordered = sorted(deadlines, key=lambda hd: (hd[1], hd[0].disposition.finding.cve_id,
+                                                hd[0].disposition.finding.package))
+    first_hit, first_day = ordered[0]
+    head = first_hit.disposition.finding
+    then = ("it runs at risk (quarantine disabled by config)" if dangerously
+            else "the site is quarantined")
+    title = (f"[boxmunge:{project}] Fix deadline {first_day.isoformat()} — {head.cve_id} "
+             f"in {head.package or '?'}: deploy the fix or {then}"
+             f"{_more(len(ordered) - 1)}")
+    lines = [f"Project: {project} — still running."]
+    for hit, day in ordered[:_MAX_LISTED]:
+        lines += _lines(hit)
+        lines.append(f"  fixed in {hit.disposition.finding.fixed_version}; "
+                     f"deadline {day.isoformat()}")
+    if len(ordered) > _MAX_LISTED:
+        lines.append(f"... and {len(ordered) - _MAX_LISTED} more")
+    lines += [
+        "",
+        f"Deploy the fix (rebuild/bump the image) before {first_day.isoformat()} or {then}.",
+        f"Strict gives an available fix {grace_days} days to be deployed.",
+        "A `build:` service is rebuilt on its base image's current digest by its",
+        f"next stage and promote, or `prod-deploy {project} --redeploy`. Otherwise",
+        "bump the image tag or digest, then redeploy. A reviewed CVE can be",
+        "suppressed instead:",
+        f"  boxmunge security suppress {head.cve_id} --project {project} \\",
+        "      --until <date> --reason <text>",
+    ]
+    return Alert(kind="fix_deadline", title=title, body="\n".join(lines), priority=0)
+
+
 def format_awaiting_fix_alert(project: str, hits: Sequence[Hit]) -> Alert:
     """Findings at balanced's alert-only gate: no fix yet, not known to be
     exploited. The site stays up. Alerted once per finding; priority 0, since
@@ -206,12 +272,13 @@ def format_awaiting_fix_alert(project: str, hits: Sequence[Hit]) -> Alert:
 
 
 def format_hardening_upcoming_alert(project: str, hits: Sequence[Hit]) -> Alert:
-    """Findings that quarantine from 0.12 but not now. Warned once per finding;
-    not quarantined. Priority 0."""
+    """Findings that meet the posture's gate from 0.12 but not now. Warned once
+    per finding; nothing is acted on. Priority 0."""
     hits = _ordered(hits)
     n = len(hits)
-    title = (f"[boxmunge:{project}] {n} CVE finding{'s' if n != 1 else ''} will "
-             f"quarantine from 0.12 (warning only)")
+    title = (f"[boxmunge:{project}] {n} CVE finding{'s' if n != 1 else ''} "
+             f"meet{'s' if n == 1 else ''} the gate under the 0.12 hardening rule "
+             f"(warning only)")
     body = "\n".join([
         f"Project: {project} — still running; nothing is quarantined for this in 0.11.",
         *_listing(hits),
@@ -263,16 +330,27 @@ def format_suppression_expired_alert(
     return Alert(kind="suppression_expired", title=title, body="\n".join(lines), priority=1)
 
 
-def lift_reason(cve_id: str, hits: Sequence[Hit]) -> str:
-    """Why the quarantine ``cve_id`` took no longer holds, from this scan's
-    hits for it (any package)."""
+# Posture → (release, what changed) for a quarantine an earlier rule took
+# that the posture now only alerts on (AWAITING_FIX).
+_ALERT_ONLY_SINCE = {
+    Posture.BALANCED: (BALANCED_KEV_ONLY_SINCE,
+                       "balanced quarantines only on actively exploited (CISA KEV) findings"),
+    Posture.STRICT: (STRICT_ALERTS_ONLY_SINCE,
+                     "strict no longer takes a site down for an unexploited finding with "
+                     "no fix; it alerts instead"),
+}
+
+
+def lift_reason(cve_id: str, hits: Sequence[Hit], posture: Posture) -> str:
+    """Why the quarantine ``cve_id`` took no longer holds under ``posture``,
+    from this scan's hits for it (any package)."""
     if not hits:
         return f"{cve_id} is no longer found in the project's images."
     fd = _ordered(hits)[0].disposition
     if fd.disposition is Disposition.AWAITING_FIX:
-        return (f"The posture rules changed in boxmunge {BALANCED_KEV_ONLY_SINCE}: "
-                f"balanced quarantines only on actively exploited (CISA KEV) "
-                f"findings, and {cve_id} is not on the KEV catalog. {fd.explanation}")
+        since, rule = _ALERT_ONLY_SINCE[posture]
+        return (f"The posture rules changed in boxmunge {since}: {rule}, and "
+                f"{cve_id} is not on the KEV catalog. {fd.explanation}")
     if fd.disposition is Disposition.SUPPRESSED:
         return f"{cve_id} is suppressed. {fd.explanation}"
     return f"{cve_id} no longer quarantines. {fd.explanation}"

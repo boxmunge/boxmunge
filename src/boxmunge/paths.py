@@ -146,6 +146,10 @@ class BoxPaths:
         self.kev_withdrawn = self.state / "kev" / "withdrawn.json"
         # What each KEV source last served (cve.kev_source_history).
         self.kev_sources = self.state / "kev" / "sources.json"
+        # The optional known-exploited sources beside CISA's (cve.exploited):
+        # ENISA's EU KEV and, when the operator opts in, VulnCheck's.
+        self.kev_enisa = self.state / "kev" / "enisa.json"
+        self.kev_vulncheck = self.state / "kev" / "vulncheck.json"
         # Last auto-update discovery that installed nothing: any security or
         # break-fix release it could not install, and the alert sent for it.
         self.platform_update_state = self.state / "platform-updates.json"
@@ -248,6 +252,11 @@ class BoxPaths:
     def project_scan_state(self, name: str) -> Path:
         name = _checked(name)
         return self.state / "scans" / f"{name}.json"
+
+    def project_fix_grace(self, name: str) -> Path:
+        """Strict's fix deadlines for a project (cve.fix_grace)."""
+        name = _checked(name)
+        return self.state / "cve" / "fix_grace" / f"{name}.json"
 
     def project_backup_state(self, name: str) -> Path:
         """A project's newest good snapshot and off-site copy (backup_evidence)."""

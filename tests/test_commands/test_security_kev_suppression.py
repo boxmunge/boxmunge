@@ -12,6 +12,7 @@ from tests.test_commands.cve_helpers import scan_and_send
 from boxmunge.commands.security_suppress import cmd_security_suppress
 from boxmunge.commands.security_suppress_targets import utc_today
 from boxmunge.cve import kev as kev_module
+from boxmunge.cve.exploited import ExploitedSource
 from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.policy import Disposition
 from boxmunge.cve.quarantine import is_quarantined
@@ -60,7 +61,7 @@ def test_kev_listing_after_suppression_reactivates_with_priority_1_alert(
     scan = scan_and_send(box, "demo", kev=_kev(_CVE))
     fd = scan.decisions[0].findings[0]
     assert fd.disposition is Disposition.QUARANTINE
-    assert fd.kev_listed is True
+    assert fd.full_kev is True
     assert "does not apply" in fd.explanation
     assert is_quarantined("demo", box)
     assert docker.calls == ["caddy_reload", "compose_stop"]
@@ -74,7 +75,7 @@ def test_kev_listed_flag_round_trips_through_scan_state(box, monkeypatch):
     scan_and_send(box, "demo", kev=_kev(_CVE))
     state = read_scan_state(box.project_scan_state("demo"))
     prior = decisions_from_scan_state(state, project_name="demo")
-    assert prior[0].findings[0].kev_listed is True
+    assert prior[0].findings[0].full_kev
 
 
 def _seed_kev_cache(paths, *ids: str, age_days: int = 0) -> None:
@@ -122,10 +123,10 @@ def test_suppress_current_skips_kev_listed_and_suppresses_the_rest(
     other = finding("CVE-2026-0002")
     decision = evaluate_project(
         "demo", scan_result("demo-web:1", [CRIT, other]),
-        posture=Posture.STRICT,
+        posture=Posture.PARANOID,
         hardening_profile=HardeningProfile(True, True, False, False),
         dangerously_disable_quarantine=False, suppressions=(),
-        today=utc_today(), kev_lookup=lambda c: c == _CVE,
+        today=utc_today(), exploited_lookup=lambda c: frozenset({ExploitedSource.CISA}) if c == _CVE else frozenset(),
     )
     write_scan_state(box.project_scan_state("demo"), decisions=(decision,))
     _seed_kev_cache(box, _CVE)
@@ -155,7 +156,7 @@ def test_kev_on_opted_out_project_keeps_running_and_alerts_every_scan(
         pushover.clear()
         scan = scan_and_send(paths, "demo", kev=_kev(_CVE))
         fd = scan.decisions[0].findings[0]
-        assert fd.disposition is Disposition.STILL_RUNNING_AT_RISK and fd.kev_listed
+        assert fd.disposition is Disposition.STILL_RUNNING_AT_RISK and fd.full_kev
         assert not is_quarantined("demo", paths) and docker.calls == []
         [(title, body, priority)] = pushover.sent
         assert priority == 1
@@ -173,8 +174,8 @@ def test_fleet_view_lists_at_risk_only_with_findings(tmp_path, monkeypatch, caps
     from boxmunge.commands.security_cmd import cmd_security
     from tests.test_commands.cve_helpers import write_project
 
-    # Strict: a non-KEV finding quarantines there, so opting out leaves it at risk.
-    opted_out = {"posture": "strict", "dangerously_disable_quarantine": True}
+    # Paranoid: a non-KEV finding quarantines there, so opting out leaves it at risk.
+    opted_out = {"posture": "paranoid", "dangerously_disable_quarantine": True}
     paths = make_box(tmp_path, projects=("exposed",), security=opted_out)
     write_project(paths, "quiet", security=opted_out)
     (paths.state / "projects.txt").write_text("exposed\nquiet\n")

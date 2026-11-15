@@ -87,6 +87,8 @@ def _stored(**overrides):
         "package": "p", "primary_url": None, "title": "t",
         "installed_version": "1", "attack_vector": None,
         "status": "affected", "pkg_class": "os-pkgs", "pkg_type": "debian",
+        "cvss_score": None, "vendor_severities": {}, "severity_source": None,
+        "exploited_by": [], "fix_meets_patch_gate": False,
     }
     finding.update(overrides)
     for key in [k for k, v in overrides.items() if v is _MISSING]:
@@ -150,3 +152,41 @@ def test_unreadable_scan_state_names_the_file(tmp_path, content):
     path.write_text(content)
     with pytest.raises(StateError, match=str(path)):
         read_scan_state(path)
+
+
+def test_scan_state_round_trips_cvss_and_vendor_severities(tmp_path):
+    from dataclasses import replace
+    from boxmunge.cve.scan_state import (
+        decisions_from_scan_state, read_scan_state, write_scan_state,
+    )
+    decision = _make_decision()
+    fd = decision.findings[0]
+    finding = replace(
+        fd.finding, cvss_score=9.8, severity_source="debian",
+        vendor_severities={"debian": Severity.LOW, "nvd": Severity.CRITICAL})
+    decision = replace(decision, findings=(replace(fd, finding=finding),))
+    path = tmp_path / "state.json"
+    write_scan_state(path, decisions=(decision,))
+    state = read_scan_state(path)
+    [restored] = decisions_from_scan_state(state, project_name="p")
+    got = restored.findings[0].finding
+    assert got.cvss_score == 9.8
+    assert got.severity_source == "debian"
+    assert got.vendor_severities == finding.vendor_severities
+
+
+@pytest.mark.parametrize(
+    "key", ["cvss_score", "vendor_severities", "severity_source", "fix_meets_patch_gate"])
+def test_a_stored_finding_missing_a_new_key_says_to_rescan(key):
+    from boxmunge.cve.scan_state import decisions_from_scan_state
+    from boxmunge.state import StateError
+    with pytest.raises(StateError, match=rf"{key}.*boxmunge security scan"):
+        decisions_from_scan_state(_stored(**{key: _MISSING}), project_name="p")
+
+
+@pytest.mark.parametrize("value", [None, 1, "true"])
+def test_a_stored_patch_gate_that_is_not_a_boolean_is_refused(value):
+    from boxmunge.cve.scan_state import decisions_from_scan_state
+    from boxmunge.state import StateError
+    with pytest.raises(StateError, match="fix_meets_patch_gate"):
+        decisions_from_scan_state(_stored(fix_meets_patch_gate=value), project_name="p")

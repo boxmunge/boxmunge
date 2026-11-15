@@ -22,6 +22,9 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
     def warn(name: str, detail: str = "") -> None:
         results.append({"name": name, "status": "WARN", "detail": detail})
 
+    def info(name: str, detail: str = "") -> None:
+        results.append({"name": name, "status": "INFO", "detail": detail})
+
     # Directory structure
     for subdir in ["bin", "config", "caddy/sites", "projects", "state/health",
                    "state/deploy", "templates/project", "docs", "logs"]:
@@ -98,6 +101,12 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
         from boxmunge.version_check_optout import NOT_CHOSEN, version_check_unchosen
         if version_check_unchosen(paths):
             warn("Version check choice", NOT_CHOSEN)
+
+    # The third known-exploited source is opt-in, so it being off is not a fault.
+    kev = config.get("kev") if config else None
+    if config and not (isinstance(kev, dict) and "vulncheck" in kev):
+        info("VulnCheck KEV", "Off: known-exploited CVEs come from CISA and ENISA. A free "
+             "VulnCheck community token under kev.vulncheck.token in boxmunge.yml adds theirs")
 
     # Backup remote
     if config:
@@ -247,7 +256,7 @@ def run_doctor(paths: BoxPaths, as_json: bool = False) -> int:
         print(json.dumps(results, indent=2))
     else:
         for r in results:
-            icon = {"PASS": "PASS", "FAIL": "FAIL", "WARN": "WARN"}[r["status"]]
+            icon = {"PASS": "PASS", "FAIL": "FAIL", "WARN": "WARN", "INFO": "INFO"}[r["status"]]
             line = f"  {icon:<6} {r['name']}"
             if r["detail"]:
                 line += f" — {r['detail']}"

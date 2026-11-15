@@ -23,6 +23,7 @@ from boxmunge.commands.security_cmd import (
 from boxmunge.commands.security_views import project_cve_status
 from boxmunge.api.timefmt import NULLABLE_TIMESTAMP, utc_timestamp
 from boxmunge.cve.breaker import BreakerError, read_held
+from boxmunge.cve.exploited import ExploitedSource
 from boxmunge.cve.policy import Disposition
 from boxmunge.cve.scan_state import stored_enum, stored_severities
 from boxmunge.cve.scanner import AttackVector, PkgClass, VulnStatus
@@ -66,7 +67,8 @@ _OPTIONAL_FINDING_KEYS: dict[str, dict[str, Any]] = {
     "primary_url": NULLABLE_STRING, "attack_vector": nullable(machine_enum(AttackVector)),
     "status": nullable(machine_enum(VulnStatus)), "pkg_class": nullable(machine_enum(PkgClass)),
     "pkg_type": NULLABLE_STRING,
-    "fix_available": NULLABLE_BOOLEAN, "kev_listed": NULLABLE_BOOLEAN,
+    "fix_available": NULLABLE_BOOLEAN,
+    "exploited_by": nullable(arr(enum(*(s.value for s in ExploitedSource)))),
     "fix_would_quarantine": NULLABLE_BOOLEAN, "hardening_would_quarantine": NULLABLE_BOOLEAN, "hardening_penalty": NULLABLE_INTEGER,
 }
 

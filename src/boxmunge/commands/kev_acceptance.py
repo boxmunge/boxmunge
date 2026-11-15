@@ -80,7 +80,7 @@ def accept_at_gate(project: str, check: KevLiftCheck, paths: BoxPaths) -> str | 
         return None
     print(f"  {ACCEPT_FLAG}: deploying although {check.refusal}. A CVE that is actively "
           f"exploited may go live with this release.")
-    log_warning("deploy", f"{ACCEPT_FLAG}: release cleared with no usable KEV catalog",
+    log_warning("deploy", f"{ACCEPT_FLAG}: release cleared without a usable KEV source",
                 paths, project=project,
                 detail={"reason": check.refusal, "kev_stale": check.stale})
     return check.refusal

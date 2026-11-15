@@ -7,38 +7,56 @@ label strings (not the Posture enum) so it imports nothing from policy.py.
 """
 from __future__ import annotations
 
+from datetime import date
+
 from boxmunge.cve.scanner import AttackVector, Severity, VulnStatus
 
 
-def explain_relaxed_kev_only() -> str:
-    """Explanation for a non-KEV finding held informational under relaxed."""
-    return (
-        "relaxed posture: only actively-exploited (CISA KEV) findings "
-        "quarantine; everything else is informational regardless of distro "
-        "severity. Raise the posture to strict for distro-severity-based "
-        "quarantine."
+def explain_relaxed_kev_only(listed_by: str) -> str:
+    """Explanation for a non-KEV finding held informational under relaxed.
+    ``listed_by`` names a weaker listing (VulnCheck) the finding has, or is ""."""
+    text = (
+        "relaxed posture: only a finding on the CISA or EU KEV list "
+        "quarantines; everything else is informational regardless of distro "
+        "severity. Raise the posture to balanced or strict to be alerted on "
+        "distro severity, or paranoid to quarantine on it."
     )
+    if listed_by:
+        text += (f" It is listed as exploited by {listed_by} only, which does "
+                 "not quarantine under relaxed; it is alerted urgently.")
+    return text
 
 
 def explain_awaiting_fix(
     base: Severity, effective: Severity, penalty: int,
-    posture_label: str, threshold_label: str,
+    posture_label: str, threshold_label: str, listed_by: str,
 ) -> str:
-    """Explanation for a finding at balanced's alert-only severity gate."""
+    """Explanation for a finding at an alert-only severity gate (balanced, strict).
+    ``listed_by`` names a weaker listing (VulnCheck) the finding has, or is ""."""
     rated = base.value if base == effective else (
         f"{base.value} → effective {effective.value} (hardening penalty: +{penalty})")
+    if listed_by:
+        exploited = (
+            f"It is listed as exploited by {listed_by} only, which does not "
+            f"quarantine under {posture_label} posture (gate: {threshold_label}): "
+            "the site stays up and you are alerted urgently. You will also be "
+            "alerted when a fix lands (then rebuild and redeploy) or if CISA or "
+            "the EU lists it (then it quarantines).")
+    else:
+        exploited = (
+            "It is not known to be exploited (not on the CISA or EU KEV lists), "
+            f"so under {posture_label} posture (gate: {threshold_label}) the site "
+            "stays up and nothing needs doing now. You will be alerted when a fix "
+            "lands (then rebuild and redeploy) or if it is listed as actively "
+            "exploited (then it quarantines).")
     return (
-        f"{rated}, network-reachable, and no fix exists yet. It is not known to "
-        f"be exploited (not on the CISA KEV catalog), so under {posture_label} "
-        f"posture (gate: {threshold_label}) the site stays up and nothing needs "
-        "doing now. You will be alerted when a fix lands (then rebuild and "
-        "redeploy) or if it is listed as actively exploited (then it "
-        "quarantines). `security.posture: strict` takes such findings down."
+        f"{rated}, network-reachable, and no fix exists yet. {exploited} "
+        "`security.posture: paranoid` takes such findings down."
     )
 
 
 def explain_kev_quarantine(
-    cve_id: str, overridden_until: str | None = None, fixed_version: str | None = None,
+    cve_id: str, listed_by: str, overridden_until: str | None = None, fixed_version: str | None = None,
 ) -> str:
     """Explanation for a KEV-override quarantine (actively exploited).
 
@@ -47,8 +65,8 @@ def explain_kev_quarantine(
     ``fixed_version`` is set when a fix exists that the image is not running.
     """
     text = (
-        f"{cve_id} is on the CISA Known Exploited Vulnerabilities (KEV) "
-        "catalog — actively exploited in the wild; quarantined regardless "
+        f"{cve_id} is known exploited ({listed_by}) — "
+        "actively exploited in the wild; quarantined regardless "
         "of posture, distro status, attack vector, or severity threshold."
     )
     if fixed_version is not None:
@@ -66,11 +84,11 @@ def explain_kev_quarantine(
     return text
 
 
-def explain_kev_opted_out(cve_id: str, fixed_version: str | None) -> str:
+def explain_kev_opted_out(cve_id: str, fixed_version: str | None, listed_by: str) -> str:
     """Explanation for a KEV finding on a project with quarantine disabled."""
     text = (
-        f"{cve_id} is on the CISA Known Exploited Vulnerabilities (KEV) "
-        "catalog — actively exploited in the wild — but this project sets "
+        f"{cve_id} is known exploited ({listed_by}) — "
+        "actively exploited in the wild — but this project sets "
         "dangerously_disable_quarantine: true, so it keeps running."
     )
     if fixed_version is not None:
@@ -81,43 +99,76 @@ def explain_kev_opted_out(cve_id: str, fixed_version: str | None) -> str:
     return text + " Alerted on every scan while the finding is live."
 
 
-def explain_kev_fix_not_running(cve_id: str, fixed_version: str | None) -> str:
+def explain_kev_fix_not_running(
+    cve_id: str, fixed_version: str | None, listed_by: str,
+) -> str:
     """Explanation for a fixable KEV finding under relaxed posture."""
     return (
-        f"{cve_id} is on the CISA Known Exploited Vulnerabilities (KEV) "
-        f"catalog — actively exploited in the wild — and a fix is available "
+        f"{cve_id} is known exploited ({listed_by}) — "
+        f"actively exploited in the wild — and a fix is available "
         f"({fixed_version}) that this image is not running. Under relaxed "
         "posture a fixable KEV finding does not quarantine; rebuild the image "
         "and redeploy now. Alerted on every scan until the fix is running."
     )
 
 
+_REBUILD_ADVICE = (
+    "A `build:` service is rebuilt on its base image's current digest by its "
+    "next stage and promote, or prod-deploy (--redeploy when nothing new was "
+    "uploaded); otherwise bump the image tag or digest, or, for a package the "
+    "Dockerfile installs, set compose `build: {no_cache: true}`, then redeploy "
+    "(CVE_POLICY.md, \"Base images and the build cache\"); boxmunge does not "
+    "rebuild images for you."
+)
+
+
 def explain_fix_available(
-    fixed_version: str | None, *, meets_gate: bool, gate_quarantines: bool,
-    posture_label: str,
+    fixed_version: str | None, *, meets_gate: bool, posture_label: str,
 ) -> str:
     """Explanation for a non-KEV finding with an upstream fix."""
     text = (
         f"Fix available upstream ({fixed_version}) but not running in this "
-        "image. A `build:` service is rebuilt on its base image's current "
-        "digest by its next stage and promote, or prod-deploy (--redeploy "
-        "when nothing new was uploaded); otherwise bump the image tag or "
-        "digest, or, for a package the Dockerfile installs, set compose "
-        "`build: {no_cache: true}`, then redeploy (CVE_POLICY.md, \"Base "
-        "images and the build cache\"); boxmunge does not rebuild images for "
-        "you."
+        f"image. {_REBUILD_ADVICE}"
     )
-    if meets_gate and gate_quarantines:
-        text += (
-            f" Without the fix this finding meets the {posture_label} "
-            "quarantine gate."
-        )
-    elif meets_gate:
+    if meets_gate:
         text += (
             f" It meets the {posture_label} alert gate: not known to be "
             "exploited, so the site stays up, but apply the fix."
         )
     return text
+
+
+def explain_fix_quarantine(fixed_version: str | None, *, dangerously_disabled: bool) -> str:
+    """Explanation for a fixable finding at paranoid's gate: it takes the
+    downtime until the fix runs."""
+    if dangerously_disabled:
+        held = ("it would be quarantined until the fix runs, but "
+                "dangerously_disable_quarantine: true, so it keeps running")
+    else:
+        held = "it is quarantined until the fixed image runs"
+    return (
+        f"Fix available upstream ({fixed_version}) but not running in this "
+        f"image. It meets the paranoid quarantine gate, so {held}. "
+        f"{_REBUILD_ADVICE}"
+    )
+
+
+def explain_fix_overdue(
+    fixed_version: str | None, since: date, grace_days: int, *, dangerously_disabled: bool,
+) -> str:
+    """Explanation for a fixable finding at strict's gate whose fix was not
+    deployed within the grace (cve.fix_grace)."""
+    if dangerously_disabled:
+        held = ("it would be quarantined, but dangerously_disable_quarantine: true, "
+                "so it keeps running")
+    else:
+        held = "it is quarantined until the fixed image runs"
+    return (
+        f"Fix available since {since.isoformat()} but not deployed (fixed in "
+        f"{fixed_version}). "
+        f"Strict gives an available fix {grace_days} days to be deployed, so {held}. "
+        f"{_REBUILD_ADVICE}"
+    )
 
 
 def explain_distro_deprioritized(
@@ -245,16 +296,24 @@ def hardening_cause(services: tuple[str, ...]) -> str:
 
 
 def explain_hardening_upcoming(
-    services: tuple[str, ...], penalty: int, threshold_detail: str,
+    services: tuple[str, ...], penalty: int, threshold_detail: str, *, quarantines: bool,
 ) -> str:
-    """Why a finding that does not quarantine today will from 0.12, and the fix.
+    """Why a finding below the posture's gate today meets it from 0.12, and the fix.
 
     ``threshold_detail`` is the explanation the finding gets under the 0.12
-    penalty. 0.11 only warns, and only strict and paranoid are judged under
-    it (the postures whose severity gate quarantines)."""
+    penalty; ``quarantines`` says whether that is a quarantine (paranoid) or
+    the alert and patch gate (strict). 0.11 only warns, and only strict and
+    paranoid are judged under it (the postures where the penalty can decide
+    downtime)."""
+    if quarantines:
+        head = ("WARNING, not quarantined yet: the stricter hardening penalty would "
+                "quarantine this finding. From 0.12 that penalty applies.")
+    else:
+        head = ("WARNING, not acted on yet: the stricter hardening penalty lifts this "
+                "finding to the posture's gate. From 0.12 that penalty applies: it "
+                "raises the threshold at which a finding is alerted and patched, and "
+                "a fix that is not deployed can start the fix deadline.")
     return (
-        f"WARNING, not quarantined yet: the stricter hardening penalty would "
-        f"quarantine this finding. From 0.12 that penalty applies. "
-        f"{threshold_detail} The extra penalty (+{penalty}) comes from "
+        f"{head} {threshold_detail} The extra penalty (+{penalty}) comes from "
         f"{hardening_cause(services)}. {HARDENING_UPCOMING_FIX}"
     )

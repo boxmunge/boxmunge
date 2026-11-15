@@ -31,12 +31,14 @@ gate judges the catalog only for production (quarantine_gate).
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 
+from boxmunge.cve.exploited import ExploitedSource
 from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.policy import ProjectDecision
+from boxmunge.cve.policy_types import listing_label
 from boxmunge.redeploy_hint import redeploy_either
 
 ACCEPT_FLAG = "--accept-stale-kev"
@@ -54,6 +56,8 @@ class KevLiftCheck:
     refusal: str | None = None
     acceptable: bool = False
     gap: str | None = None
+    # The non-CISA sources (EU, VulnCheck) that are stale and listed the quarantine.
+    stale_sources: tuple[ExploitedSource, ...] = ()
 
 
 def fresh_data_advice() -> str:
@@ -78,6 +82,52 @@ def resume_exits(project: str, check: KevLiftCheck) -> list[str]:
                      f"scanned first). {ACCEPT_FLAG} does not apply: a fresh catalog would "
                      f"refuse this lift too.")
     return exits
+
+
+def stale_listers(listing: Mapping[str, frozenset[ExploitedSource]],
+                  stale: Mapping[ExploitedSource, str]) -> tuple[ExploitedSource, ...]:
+    """The non-CISA sources (CISA is judged by ``check_kev_for_lift``) that
+    listed some CVE of a quarantine (``listing``, from its record) and are
+    stale now."""
+    return tuple(s for s in ExploitedSource
+                 if s is not ExploitedSource.CISA and s in stale
+                 and any(s in srcs for srcs in listing.values()))
+
+
+def _stale_named(sources: Sequence[ExploitedSource], stale: Mapping[ExploitedSource, str]) -> str:
+    return "; ".join(f"the {listing_label(frozenset({s}))} list is stale ({stale[s]})"
+                     for s in sources)
+
+
+def check_exploited_for_lift(
+    quarantined_cve: str, decisions: Sequence[ProjectDecision], kev: KevCatalog,
+    today: date, *, listing: Mapping[str, frozenset[ExploitedSource]],
+    stale: Mapping[ExploitedSource, str],
+) -> KevLiftCheck:
+    """``check_kev_for_lift``, then the same judgement for every other source
+    that listed a CVE of the quarantine (``listing``): a stale source refuses
+    the lift only when a CVE it listed is still in the images
+    (`--accept-stale-kev` accepts that); otherwise the lift goes ahead and
+    names the gap."""
+    check = check_kev_for_lift(quarantined_cve, decisions, kev, today)
+    if check.refusal is not None:
+        return check
+    stale_by = stale_listers(listing, stale)
+    if not stale_by:
+        return check
+    named = _stale_named(stale_by, stale)
+    in_images = {f.finding.cve_id for d in decisions for f in d.findings}
+    held = sorted(cve for cve, srcs in listing.items()
+                  if cve in in_images and not srcs.isdisjoint(stale_by))
+    if held:
+        return KevLiftCheck(check.stale or named, acceptable=True, gap=check.gap,
+                            stale_sources=stale_by, refusal=(
+            f"{named}, and it listed {', '.join(held)}, still in the images, as actively "
+            f"exploited; a stale list cannot show that has changed"))
+    gap = (f"{named}. It listed no CVE still in the images, but CVEs it added since "
+           f"it was last fetched could not be checked")
+    return KevLiftCheck(check.stale or named, stale_sources=stale_by,
+                        gap=gap if check.gap is None else f"{check.gap}; {gap}")
 
 
 def check_kev_for_lift(quarantined_cve: str, decisions: Sequence[ProjectDecision],

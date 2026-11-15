@@ -150,14 +150,14 @@ def test_quarantine_alert_includes_explanation() -> None:
     from boxmunge.cve.policy import Disposition
     from boxmunge.cve.policy_explain import explain_kev_quarantine
 
-    kev_expl = explain_kev_quarantine("CVE-2026-9999")
+    kev_expl = explain_kev_quarantine("CVE-2026-9999", "CISA KEV")
     fd = _make_fd(
         cve_id="CVE-2026-9999",
         disposition=Disposition.QUARANTINE,
         explanation=kev_expl,
     )
     alert = format_quarantine_alert("demo", [Hit(fd, "myapp:1.0")])
-    assert "Known Exploited" in alert.body
+    assert "known exploited" in alert.body
     assert kev_expl in alert.body
 
 
@@ -172,7 +172,7 @@ def test_quarantine_alert_kev_unknown_severity_reads_sensibly() -> None:
     from boxmunge.cve.policy_explain import explain_kev_quarantine
     from boxmunge.cve.scanner import Severity
 
-    kev_expl = explain_kev_quarantine("CVE-2026-KUNK")
+    kev_expl = explain_kev_quarantine("CVE-2026-KUNK", "CISA KEV")
     fd = _make_fd(
         cve_id="CVE-2026-KUNK",
         base=Severity.UNKNOWN,
@@ -184,7 +184,7 @@ def test_quarantine_alert_kev_unknown_severity_reads_sensibly() -> None:
     # Title carries (Unknown) — that's OK
     assert "Unknown" in alert.title
     # Body must name KEV so the operator understands the quarantine rationale
-    assert "Known Exploited" in alert.body
+    assert "known exploited" in alert.body
     # Standard quarantine action guidance must still be present
     assert "Service stopped" in alert.body
     assert "boxmunge security resume" in alert.body

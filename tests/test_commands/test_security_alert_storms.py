@@ -10,7 +10,7 @@ import yaml
 from boxmunge.commands import security_actions, security_scan_core
 from boxmunge.commands.security_actions import cmd_security_scan
 from tests.test_commands.cve_helpers import scan_and_send
-from boxmunge.cve.policy import ProjectDecision
+from boxmunge.cve.policy import Disposition, ProjectDecision
 from boxmunge.cve.scan_state import write_scan_state
 from boxmunge.cve.scanner import Severity
 from tests.test_commands.cve_helpers import (
@@ -48,15 +48,17 @@ def _scan_returns(monkeypatch, findings) -> None:
 
 
 def test_mixed_dispositions_alert_once_across_daily_scans(tmp_path, monkeypatch, stubs):
-    """Audit B-13: libperl relevant (QUARANTINE), perl-base gated
-    (INFORMATIONAL) for the same CVE. Day 1 alerts; days 2 and 3 do not."""
+    """Audit B-13: libperl relevant (AWAITING_FIX at strict's gate), perl-base
+    gated (INFORMATIONAL) for the same CVE. Day 1 alerts; days 2 and 3 do not."""
     paths = make_box(tmp_path, security={"posture": "strict", "runtimes": ["python"]})
     pushover = Pushover(monkeypatch, paths)
     _scan_returns(monkeypatch, [finding("CVE-2026-57433", pkg="libperl5.36"),
                                 finding("CVE-2026-57433", pkg="perl-base")])
-    scan_and_send(paths, "demo")
-    day1 = [p for _, _, p in pushover.sent]
-    assert day1.count(1) == 1
+    scan = scan_and_send(paths, "demo")
+    assert {fd.finding.package: fd.disposition for fd in scan.decisions[0].findings} == {
+        "libperl5.36": Disposition.AWAITING_FIX, "perl-base": Disposition.INFORMATIONAL}
+    day1 = pushover.titles()
+    assert sum("no fix yet" in t for t in day1) == 1
     for _ in range(2):
         pushover.clear()
         scan_and_send(paths, "demo")
