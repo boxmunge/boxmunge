@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from boxmunge import compose_inventory
 from boxmunge.config import read_config, ConfigError
+from boxmunge.cve.autofix_record import read_autofixing, read_records
 from boxmunge.docker_run import DockerError, docker_env
 from boxmunge.manifest import load_manifest, ManifestError
 from boxmunge.paths import BoxPaths
@@ -26,6 +27,10 @@ class ProjectStatus:
     deployed_at: str
     current_ref: str
     failure_reason: str
+    # Autofix patched the images it runs (they differ from the release);
+    # autofix is patching it now.
+    patched: bool = False
+    autofixing: bool = False
 
 
 @dataclass
@@ -100,6 +105,8 @@ def load_all_project_status(paths: BoxPaths) -> list[ProjectStatus]:
         try:
             health = read_state(paths.project_health_state(name))
             deploy = read_state(paths.project_deploy_state(name))
+            patched = bool(read_records(paths, name))
+            autofixing = read_autofixing(paths, name) is not None
         except StateError as e:
             # Show the broken project as an error row rather than letting
             # one corrupt file take down the whole console.
@@ -116,6 +123,8 @@ def load_all_project_status(paths: BoxPaths) -> list[ProjectStatus]:
             deployed_at=deploy.get("deployed_at", ""),
             current_ref=deploy.get("current_ref", ""),
             failure_reason=health.get("failure_reason", ""),
+            patched=patched,
+            autofixing=autofixing,
         ))
 
     return results

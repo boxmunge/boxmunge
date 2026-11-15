@@ -7,7 +7,7 @@
 - **Pin it by digest** (`FROM image:tag@sha256:...`).
 - Use a **multi-stage build**: compilers, package-manager caches, and build headers stay in the
   builder stage.
-- When a CVE alert arrives, **first ask whether the package needs to be in the image at all**.
+- When a CVE alert arrives, **first ask whether the package belongs in the image at all**.
   Slimming the image beats suppressing the finding.
 
 ## Why it matters on boxmunge
@@ -35,8 +35,7 @@ they are heuristics. The reliable fix is not shipping the package.
 | Java / JVM | a JRE image, not a JDK | Build with the JDK in a builder stage. |
 | Static site | a small web-server image | Or serve it from a project that already runs one. |
 
-Check the publisher's current tags when you write the Dockerfile; do not copy tags from old
-examples.
+Check the publisher's current tags when you write the Dockerfile; never copy old examples' tags.
 
 ## Debian-based or Alpine?
 
@@ -68,12 +67,12 @@ USER app
 CMD ["/venv/bin/python", "-m", "app"]
 ```
 
-The runtime stage contains the interpreter, your dependencies, and your code. There is no
-compiler, no pip cache, and no build headers.
+The runtime stage contains the interpreter, your dependencies, and your code: no compiler,
+pip cache or build headers.
 
 ## Pinning and refreshing
 
-Pin by digest so a rebuild cannot silently change what ships. To get the current digest:
+Pin by digest so a rebuild cannot silently change what ships. The current digest:
 
 ```bash
 docker buildx imagetools inspect python:3.13-slim
@@ -94,7 +93,10 @@ cache".
 ## Also remember
 
 - The root filesystem is read-only. Declare writable paths in the manifest (`agent-help
-  writable`); do not write into the image at runtime.
+  writable`); never write into the image at runtime.
 - Run as a non-root user.
+- Autofix may run a patched image (`boxmunge.invalid/<project>/<service>:autofix-<id>`) until
+  a deploy (or, for pulled images with updates on, upstream) has the fix. `status` shows
+  `patched`: fix the repo.
 - If your smoke script needs a tool (`curl`, `wget`), it must exist in the runtime image, or use
   the language runtime instead (`agent-help conventions`).

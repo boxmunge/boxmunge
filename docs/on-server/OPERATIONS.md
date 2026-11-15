@@ -534,6 +534,12 @@ Get the same dashboard as machine-parseable JSON:
 status --json
 ```
 
+Below the table, `status` lists the projects autofix touched: `autofixing: patching <CVEs>`
+while a patch runs, and `patched: running image differs from the release (N packages upgraded
+for <CVEs>, since <date>)` once one runs, with the next step (bring the fix into the repo, then
+deploy). `--json` has `patched` and `autofixing` on every row, null when they do not apply. See
+"CVE Policy" below.
+
 Health checks also run automatically every 5 minutes via a systemd timer. Failures trigger Pushover alerts after the configured threshold.
 
 A project whose manifest or state files cannot be read does not stop the others being checked.
@@ -1660,6 +1666,7 @@ unless `health` also ran past its budget before the upgrade.
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
 | `kev-watch` | the KEV watch has not run for 75 minutes (or its timer is installed and it has never run), its record cannot be read, or a known-exploited source that is turned on (the EU list, VulnCheck) is stale or was never fetched | the supervisor user runs `systemctl status boxmunge-kev-watch.timer`; for a source, `log --component cve-scan` names its error. See `agent-help cve`, "Known-exploited sources" |
 | `cve-hardening` | under posture `strict` or `paranoid`, a finding will quarantine from 0.12 because a compose-only service lacks `read_only: true` (or the manifest adds `cap_add` / `no_new_privileges: false`); not quarantined now | add `read_only: true` in compose.yml, or declare the service in the manifest; to accept the risk instead, suppress the CVE after review or choose `security.posture: balanced` (KEV-only quarantine); `security <project>` names it |
+| `autofix-queue` | an urgent autofix has waited 2 hours since it was found without starting (the autofix unit does not start, or another operation keeps holding the project), or a queue entry cannot be read | the supervisor user runs `journalctl -u boxmunge-autofix` and `systemctl start boxmunge-autofix.service`; `log --component autofix` says why. The scans have stopped holding the quarantine back |
 | `ufw`, `crowdsec`, `aide`, `auditd`, `sysctl` | a host hardening component is off or misconfigured | `doctor`, then the supervisor user |
 | `auto-updates` | OS security updates are not being fetched or installed | see [OS security updates](#os-security-updates) |
 | `timers` | any boxmunge timer (health, backup, backup-sync, auto-update, maintenance, kev-watch) is inactive | the supervisor user runs `systemctl enable --now <timer>` |
@@ -2161,7 +2168,20 @@ rollback, and the older release ignores what is left.
 
 A rollback swaps the venvs back, restores the stash the upgrade made (never just the newest in
 `stashes/`), and re-runs `upgrade --apply` with the previous release, so its overlays and Caddy sites are regenerated and projects restarted on
-them. Pause and quarantine markers are not restored from the stash: a project you resumed after
+them. It also puts back the previous release's systemd units: each venv slot keeps a copy of
+its release's units (`env-<slot>/boxmunge-systemd`), so the units the newer release added (in
+0.12, `boxmunge-maintenance.timer`, `boxmunge-kev-watch.timer` and `boxmunge-autofix.service`)
+are disabled and removed, and the ones it retired come back enabled. The next upgrade then runs
+the new release's `install.sh` again. A rollback during the upgrade to 0.12 itself (its dry run
+passed but `upgrade --apply` or the first health check failed) is run by the previous release's
+shim, which does not do this; the 0.12 shim is installed by then, and the health timer's next
+`check-probation` (within minutes) finds the live units are not the live slot's and puts them
+back. The same check runs on every `check-probation` and upgrade, so it also reverts hand edits
+to the `boxmunge-*` unit files in `/etc/systemd/system`: put local changes in drop-ins
+(`sudo systemctl edit boxmunge-<unit>`), which it leaves alone. A slot with no copy keeps the
+newer units, logged as an error: reinstall the running release to put its own units back. A
+copy that lacks `boxmunge-health.timer` is refused as damaged, and the live units are left as
+they are (logged as an error). Pause and quarantine markers are not restored from the stash: a project you resumed after
 the upgrade stays resumed. Nor are the users records: a service you gave to a new user with
 `data chown` after the upgrade keeps running as that user. If either the restore or the re-apply fails, you get a "ROLLBACK
 PARTIAL" alert and the shim exits 2; inspect the box as `supervisor`.
@@ -2455,9 +2475,46 @@ Inspect state:
 
 ```
 boxmunge security                    # fleet summary (incl. KEV catalog source and freshness)
-boxmunge security myapp              # per-project view
+boxmunge security myapp              # per-project view, with every autofix patch in full
 boxmunge security --json             # machine-readable
 ```
+
+Autofix (`agent-help cve`, "Autofix") patches fixable OS-package CVEs on the box; opt a project
+out with `security.autofix: false`. It runs in two places:
+
+- **Urgent patches** (known-exploited findings, `paranoid`'s gate, `strict`'s passed fix
+  deadline) run in `boxmunge-autofix.service`,
+  which has no timer. The nightly scan, a KEV watch tick and a root `security scan <project>`
+  queue the patch (`state/autofix/queue/<project>.json`) and start the unit without waiting. It
+  runs `security autofix-queue` as root with a 6-hour limit, takes each project's own lock and
+  never the CVE fleet lock, and leaves a project another operation holds for its next start. A
+  deploy-shell `security scan <project>` runs its own project's patch itself. To run the queue
+  by hand, the supervisor user runs `systemctl start boxmunge-autofix.service`; `journalctl -u
+  boxmunge-autofix` shows the runs.
+- **Nightly patches** run inside the maintenance unit's `container-update`, after each
+  project's own update, within 3 hours of its start. Container updates being off for a project
+  does not stop them. One quiet digest per night (`Nightly autofix: ...`) has one line per
+  project: `patched`, `fixed by tonight's update`, `could not patch: <step>: <reason>`,
+  `skipped: <why>`, `deferred to the next maintenance window`, `switched to upstream`,
+  `re-patched on new upstream`, `could not catch up with upstream`.
+
+A patch queued 2 hours ago that has not started (the unit does not start, or the project stays
+busy) is alerted `Urgent autofix could not start` once a day, the `autofix-queue` health check
+warns, and the scans no longer hold its quarantine back. A patch that failed is remembered in
+`state/autofix/<project>.failed` and not tried again until its image, its fixed versions or its
+CVEs change, or, for a failure that may pass next time (the time limit, a mirror or Docker
+error), until 20 hours after its last try (so the next night retries it); the nightly digest lists it as `still unpatched since
+<date>`, and a retry that fails the same way is not alerted again.
+
+While a patch runs, `state/autofix/<project>.active` marks it (`status` shows `autofixing`).
+Just before it swaps images in, it writes `state/autofix/<project>.journal`, and removes it once
+the patched images are healthy and recorded, or rolled back. A journal left behind means the run
+was killed: the next autofix run undoes it exactly (pins, patch records and built images; only
+the built images when the project was deployed since) and alerts `Autofix run interrupted —
+rolled back`; the KEV watch starts that run within half an
+hour. The patches themselves are recorded in `state/autofix/<project>.json` and the image pins in
+`state/image_pins/<project>.json`; a deploy, promote or rollback drops both. `log --component
+autofix` has every run, its outcome and the step that failed.
 
 Suppress a CVE that has been reviewed:
 

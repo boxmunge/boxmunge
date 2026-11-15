@@ -297,6 +297,12 @@ without `build:` may run this project's own built image by that name, for
 example a worker sharing the web service's image; `container-update` and
 `resume` never try to pull such a service, since no registry serves it.
 
+Autofix's patched images live under the same prefix, tagged
+`boxmunge.invalid/<project>/<service>:autofix-<first 12 hex of the image ID>`, so they
+inherit the same guarantees: no other project can name one, nothing pulls one, and a
+project's start refuses a pinned tag that no longer names the image autofix built
+(see CVE_POLICY.md, "Patched images").
+
 What is guaranteed: no build is tagged with any other name, and no
 `image:`, `type: image` mount or `docker-image://` additional context can
 name another project's built image or any image by ID. What is best effort:
@@ -391,7 +397,7 @@ See `agent-help architecture` and the on-server `TRUST_MODEL.md` for adjacent co
 
 ## CVE policy
 
-Container hardening is one half of the protection model — the other is responding when a CVE is published against an image you're running. boxmunge v0.6.0+ scans deployed images daily via Trivy and automatically quarantines a project for what its posture accepts downtime for: under the default `balanced`, only a CVE on CISA's Known Exploited Vulnerabilities catalog; under `strict` and `paranoid`, also an unfixed CVE over the posture's severity threshold. Everything else is alerted, and a `balanced` quarantine with nothing exploited left is lifted by the next scan.
+Container hardening is one half of the protection model — the other is responding when a CVE is published against an image you're running. boxmunge v0.6.0+ scans deployed images daily via Trivy and automatically quarantines a project for what its posture accepts downtime for: under the default `balanced`, only a CVE on CISA's Known Exploited Vulnerabilities catalog; under `strict` and `paranoid`, also an unfixed CVE over the posture's severity threshold. Everything else is alerted, and a `balanced` quarantine with nothing exploited left is lifted by the next scan. Autofix (on by default, `security.autofix: false` to opt out) patches a fixable OS-package CVE on the box, from the image's own distro repositories, so the fix runs before the image is rebuilt; a patched project runs images that differ from its release until the fix is in the repo.
 
 See [CVE_POLICY.md](CVE_POLICY.md) for posture tiers, the suppression workflow, and the recovery flow after a quarantine.
 

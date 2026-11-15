@@ -13,25 +13,30 @@ The steps, each a `failed_step` of the outcome when it fails:
   project's containers recreated through the start checks;
 - health: every service the project runs must come back healthy
   (container_recreate.wait_healthy);
-- budget: the `deadline` passed. It is checked between steps; a step that
-  is running when it passes finishes, then the run rolls back.
+- budget: the `deadline` passed. It is checked between the steps up to the
+  swap; a step that is running when it passes finishes, then the run rolls
+  back. Once the patched images are swapped in, the health check and the
+  records always finish: a patch that is in place is not undone for time.
 
 The patch records are written only once the services are healthy.
 
 Just before the swap the run writes its journal (cve.autofix_record: the
-pins and patch records it found, the images it built). Once the patched
+release it patched, the pins and patch records it found, the images it
+built, the services production ran). Once the patched
 images are healthy and their records written, it removes it, and only then
 the images they replace; when that removal fails, the replaced images are
 kept (logged), so the journal's pins still name images that exist. A failed run removes it once rolled back. A journal left behind
 means the run was killed; recover_interrupted undoes it the way a rollback
-would, records included.
+would, records included, unless a deploy has switched the project to
+another release since: that release's pins, records and containers stand,
+and only the images the run built are removed.
 
 On any failure the run rolls back, whatever the project's container-update
 `strategy` (a patch that failed is never left running): once the swap has
 begun, the pins the project had are restored exactly (or cleared when it
 had none) and its containers recreated and waited for; then every image
 this run built is removed, by the name it was given. A rollback failure
-is added to the outcome's reason and logged; it never replaces the step
+is the outcome's `rollback_problems` and logged; it never replaces the step
 that failed. An exception no step expects rolls back the same way and is
 raised, with the rollback's failures as notes on it.
 
@@ -46,7 +51,7 @@ and the reason.
 """
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
@@ -57,7 +62,8 @@ from boxmunge.container_update import one_shot_services
 from boxmunge.commands.security_scan_inputs import load_project_meta
 from boxmunge.cve import autofix_plan
 from boxmunge.cve.autofix_build import (
-    NotPatchable, Patchable, PatchBuildError, PatchedImage, build_patched, check_versions,
+    NotPatchable, Patchable, PatchBuildError, PatchedImage, PatchNotFixed, build_patched,
+    check_versions,
     probe, remove_patched,
 )
 from boxmunge.cve.autofix_plan import PROD, ServicePlan, Step, StepFailed
@@ -69,11 +75,11 @@ from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import LockError, project_lock
 from boxmunge.image_pins import ImagePin, clear_pins, read_pins, write_pins
 from boxmunge.log import log_error, log_operation
-from boxmunge.state import StateError
+from boxmunge.state import StateError, read_state
 
 if TYPE_CHECKING:
     from boxmunge.cve.policy_types import FindingDisposition
-    from boxmunge.deployed_inventory import DeployedService
+    from boxmunge.docker_containers import LocalImage
     from boxmunge.paths import BoxPaths
 
 _COMPONENT = "autofix"
@@ -82,11 +88,14 @@ _COMPONENT = "autofix"
 @dataclass(frozen=True)
 class AutofixOutcome:
     """`rollback_problems`: what a failed run's rollback could not undo, one
-    line each (also in `reason`); empty when it was undone cleanly. When it
+    line each (not repeated in `reason`); empty when it was undone cleanly. When it
     is not empty the project may be left mixed (pins restored, containers
     still on a patched image): the flows alert it. `detected_at` and
     `started_at`: when the findings were found and the attempt began, set
-    by the flow that queued them (None from the runner itself)."""
+    by the flow that queued them (None from the runner itself).
+    `nothing_to_patch`: the run failed because no running image carries the
+    CVEs any more (autofix_plan.NothingToPatch). `deterministic`: the step
+    that failed would fail the same way again (StepFailed.deterministic)."""
     ok: bool
     failed_step: Step | None
     reason: str
@@ -94,6 +103,8 @@ class AutofixOutcome:
     rollback_problems: tuple[str, ...] = ()
     detected_at: datetime | None = None
     started_at: datetime | None = None
+    nothing_to_patch: bool = False
+    deterministic: bool = False
 
 
 @dataclass
@@ -101,9 +112,11 @@ class _Run:
     """What this run changed, for the rollback."""
     project: str
     pins_before: tuple[ImagePin, ...]
-    # The services being patched, and every service production runs.
+    # The services being patched, and every service production runs (the
+    # one-shot ones among them: container_update.one_shot_services).
     patching: list[str] = field(default_factory=list)
-    deployed: dict[str, DeployedService] = field(default_factory=dict)
+    services: list[str] = field(default_factory=list)
+    one_shots: frozenset[str] = frozenset()
     built: list[tuple[str, PatchedImage]] = field(default_factory=list)
     swapped: bool = False
     # The CVEs of the patch the caller quarantined the project for; () when
@@ -112,7 +125,7 @@ class _Run:
     records_before: tuple[PatchRecord, ...] = ()
 
 
-def _require_lock_held(paths: BoxPaths, project: str) -> None:
+def require_lock_held(paths: BoxPaths, project: str) -> None:
     """The caller holds the project lock: taking it here must fail."""
     try:
         with project_lock(project, paths):
@@ -144,24 +157,55 @@ def autofix_project_locked(paths: BoxPaths, project: str,
     dark patch), the quarantine is for one of the patch's CVEs, and it is
     all that keeps the project down. Returns the
     outcome; a failed one has been rolled back."""
+    return _autofix(paths, project, findings, trigger, deadline,
+                    quarantined_for_patch=quarantined_for_patch, upstream={})
+
+
+def repatch_on_upstream_locked(paths: BoxPaths, project: str,
+                               findings: Sequence[FindingDisposition], *,
+                               upstream: Mapping[str, LocalImage],
+                               deadline: datetime) -> AutofixOutcome:
+    """The nightly autofix of `findings`, as autofix_project_locked, with
+    each pinned service of `upstream` patched from its new upstream image
+    ({service: the image its release's tag now names}) instead of the image
+    its current patch was built from: upstream shipped a new image that
+    still needs patching (commands.autofix_upstream). The new patch replaces
+    the old; a failed run keeps the old. Raises ValueError for no services,
+    or one that is not pinned."""
+    require_lock_held(paths, project)
+    pinned = {p.service for p in read_pins(paths, project)}
+    if not upstream or not set(upstream) <= pinned:
+        raise ValueError(f"autofix from a new upstream image is for pinned services; "
+                         f"{', '.join(sorted(set(upstream) - pinned)) or 'none given'} "
+                         f"of {project}: not pinned")
+    return _autofix(paths, project, findings, "nightly", deadline,
+                    quarantined_for_patch=False, upstream=upstream)
+
+
+def _autofix(paths: BoxPaths, project: str, findings: Sequence[FindingDisposition],
+             trigger: Trigger, deadline: datetime, *, quarantined_for_patch: bool,
+             upstream: Mapping[str, LocalImage]) -> AutofixOutcome:
     if deadline.tzinfo is None:
         raise ValueError(f"deadline {deadline.isoformat()} has no timezone")
     cves = tuple(sorted({fd.finding.cve_id for fd in findings}))
     if not cves:
         raise ValueError("autofix needs at least one finding to fix")
-    _require_lock_held(paths, project)
+    require_lock_held(paths, project)
     run = _Run(project, read_pins(paths, project),
                patch_cves=cves if quarantined_for_patch else ())
     log_operation(_COMPONENT, f"Autofix of {project} started for {', '.join(cves)}", paths,
                   project=project, detail={"cves": list(cves), "trigger": trigger,
                                            "deadline": deadline.isoformat()})
     try:
-        records = _steps(paths, run, cves, trigger, deadline)
+        records = _steps(paths, run, cves, trigger, deadline, upstream)
     except StepFailed as e:
         problems = tuple(_rollback(paths, run))
         _finish(paths, project)
-        reason = "; ".join([str(e), *problems])
-        return _outcome(paths, run, cves, AutofixOutcome(False, e.step, reason, (), problems))
+        # The rollback's problems have their own field (and the oplog's detail).
+        return _outcome(paths, run, cves, AutofixOutcome(
+            False, e.step, str(e), (), problems,
+            nothing_to_patch=isinstance(e, autofix_plan.NothingToPatch),
+            deterministic=e.deterministic))
     except BaseException as e:
         problems = _rollback(paths, run)
         _finish(paths, project)
@@ -188,46 +232,85 @@ def _finish(paths: BoxPaths, project: str) -> bool:
     return True
 
 
+def current_release(paths: BoxPaths, project: str) -> str:
+    """The release production runs (the deploy state's current_ref).
+    Raises StateError when none is recorded."""
+    ref = read_state(paths.project_deploy_state(project)).get("current_ref")
+    if not isinstance(ref, str) or not ref:
+        raise StateError(f"{project} has no recorded release (current_ref) in "
+                         f"{paths.project_deploy_state(project)}")
+    return ref
+
+
+@dataclass(frozen=True)
+class Recovered:
+    """What recover_interrupted did: what it could not undo, one line each;
+    `superseded`, the release the run patched when a deploy has replaced it
+    since (only the images it built were removed)."""
+    problems: tuple[str, ...]
+    superseded: str | None = None
+
+
 def recover_interrupted(paths: BoxPaths, project: str, *,
-                        patch_cves: Collection[str]) -> tuple[str, ...] | None:
+                        patch_cves: Collection[str]) -> Recovered | None:
     """Undo an autofix run that was killed before it finished, from its
-    journal: restore the pins it found, recreate the containers, remove the
-    images it built (`patch_cves`: the CVEs of the queued patch the project
-    was quarantined for, else empty).
-    None when there is no journal; else what could not be undone, one line
-    each. The caller holds the project lock. Raises
-    StateError for a journal it cannot read."""
-    _require_lock_held(paths, project)
+    journal: restore the pins it found, recreate the containers and wait
+    for the services it recorded, restore the records, remove the images it
+    built (`patch_cves`: the CVEs of the queued patch the project was
+    quarantined for, else empty). When the project runs another release
+    than the one the run patched (a deploy since), the pins, records and
+    containers are that release's: only the images it built are removed.
+    None when there is no journal. The caller holds the project lock.
+    Raises StateError for a journal (or a deploy state) it cannot read."""
+    require_lock_held(paths, project)
     journal = read_journal(paths, project)
     if journal is None:
         return None
-    run = _Run(project, journal.pins_before, swapped=True,
-               patch_cves=tuple(patch_cves),
-               built=[(p.service, PatchedImage(p.ref, p.image_id, {})) for p in journal.built])
-    problems = _rollback(paths, run)
+    built = [(p.service, PatchedImage(p.ref, p.image_id, {})) for p in journal.built]
+    release = current_release(paths, project)
+    superseded = journal.release_ref if release != journal.release_ref else None
+    if superseded is not None:
+        run = _Run(project, read_pins(paths, project), built=built)
+        problems = _rollback(paths, run)
+        what = (f"was interrupted, and {project} has been deployed since ({superseded} "
+                f"replaced by {release}): only the images it built were removed")
+    else:
+        run = _Run(project, journal.pins_before, swapped=True, patch_cves=tuple(patch_cves),
+                   built=built, services=list(journal.services),
+                   one_shots=frozenset(journal.one_shots))
+        problems = _rollback(paths, run)
+        try:
+            write_records(paths, project, journal.records_before)
+        except StateError as e:
+            problems.append(f"rollback could not restore the patch records: {e}")
+            log_error(_COMPONENT, f"Autofix of {project}: {problems[-1]}", paths,
+                      project=project)
+        what = "was interrupted and has been rolled back"
     try:
-        write_records(paths, project, journal.records_before)
+        remove_journal(paths, project)
     except StateError as e:
-        problems.append(f"rollback could not restore the patch records: {e}")
-        log_error(_COMPONENT, f"Autofix of {project}: {problems[-1]}", paths, project=project)
-    remove_journal(paths, project)
-    problems = tuple(problems)
-    log_error(_COMPONENT, f"Autofix of {project} started {journal.started_at.isoformat()} was "
-              f"interrupted and has been rolled back"
-              + (f"; {'; '.join(problems)}" if problems else ""), paths, project=project,
-              detail={"rollback": list(problems)})
-    return problems
+        problems.append(f"the rollback finished, but its journal could not be removed ({e}); "
+                        f"the next autofix run of {project} undoes it again")
+    log_error(_COMPONENT, f"Autofix of {project} started {journal.started_at.isoformat()} "
+              f"{what}" + (f"; {'; '.join(problems)}" if problems else ""), paths,
+              project=project, detail={"rollback": problems, "superseded": superseded})
+    return Recovered(tuple(problems), superseded)
 
 
 def _steps(paths: BoxPaths, run: _Run, cves: tuple[str, ...], trigger: Trigger,
-           deadline: datetime) -> tuple[PatchRecord, ...]:
+           deadline: datetime, upstream: Mapping[str, LocalImage]) -> tuple[PatchRecord, ...]:
     project = run.project
     _check_deadline(deadline)
     meta = load_project_meta(paths, project)
     now = autofix_plan.running(paths, project, meta)
-    run.deployed = now.services
+    run.services, run.one_shots = list(now.services), one_shot_services(now.services)
     run.records_before = read_records(paths, project)
-    plans = autofix_plan.plan(now, cves, run.pins_before, run.records_before)
+    if upstream:
+        now = autofix_plan.on_upstream(now, upstream, autofix_plan.scan_images(
+            paths, project, meta, {svc: img.image_id for svc, img in upstream.items()},
+            "the new upstream images"))
+    plans = autofix_plan.plan(now, cves, run.pins_before, run.records_before,
+                              rebased=upstream.keys())
     run.patching = [p.service for p in plans]
     for p in plans:
         _check_deadline(deadline)
@@ -242,9 +325,8 @@ def _steps(paths: BoxPaths, run: _Run, cves: tuple[str, ...], trigger: Trigger,
     autofix_plan.judge_patched(plans, now.decisions, after)
     _check_deadline(deadline)
     _swap(paths, run, patched)
-    _check_deadline(deadline)
-    _health(project, now.services, "the patched images")
-    _check_deadline(deadline)
+    # Swapped: the health check and the records finish whatever the time.
+    _health(run, "the patched images")
     records = _record(paths, project, plans, patched, trigger)
     # Recorded: a recovery from here would restore the pins and records alike.
     if _finish(paths, project):
@@ -261,7 +343,8 @@ def _probe(p: ServicePlan) -> Patchable:
     except DockerError as e:
         raise StepFailed("probe", f"probing {p.service}'s image failed: {e}") from e
     if isinstance(found, NotPatchable):
-        raise StepFailed("probe", f"{p.service}'s image cannot be patched: {found.reason}")
+        raise StepFailed("probe", f"{p.service}'s image cannot be patched: {found.reason}",
+                         deterministic=True)
     return found
 
 
@@ -273,6 +356,9 @@ def _build(run: _Run, p: ServicePlan, patchability: Patchable) -> None:
         run.built.append((p.service, image))
         for floors in p.check_floors():
             check_versions(image.image_id, patchability, floors)
+    except PatchNotFixed as e:
+        raise StepFailed("build", f"building {p.service}'s patched image failed: {e}",
+                         deterministic=True) from e
     except (PatchBuildError, DockerError) as e:
         raise StepFailed("build", f"building {p.service}'s patched image failed: {e}") from e
 
@@ -300,8 +386,9 @@ def _swap(paths: BoxPaths, run: _Run, patched: dict[str, PatchedImage]) -> None:
         raise StepFailed("swap", f"the patched images were not swapped in: {refusal}")
     try:
         write_journal(paths, run.project, AutofixJournal(
-            _now(), run.pins_before, run.records_before,
-            tuple(ImagePin(svc, img.ref, img.image_id, "autofix") for svc, img in run.built)))
+            _now(), current_release(paths, run.project), run.pins_before, run.records_before,
+            tuple(ImagePin(svc, img.ref, img.image_id, "autofix") for svc, img in run.built),
+            tuple(run.services), tuple(sorted(run.one_shots))))
     except StateError as e:
         raise StepFailed("swap", f"the autofix journal could not be written: {e}") from e
     run.swapped = True   # from here the rollback restores the pins and recreates
@@ -313,14 +400,15 @@ def _swap(paths: BoxPaths, run: _Run, patched: dict[str, PatchedImage]) -> None:
         raise StepFailed("swap", f"swapping the patched images in failed: {e}") from e
 
 
-def _health(project: str, services: dict[str, DeployedService], images: str) -> None:
+def _health(run: _Run, images: str) -> None:
     try:
-        healthy, unhealthy = wait_healthy(project, list(services), one_shot_services(services))
+        healthy, unhealthy = wait_healthy(run.project, list(run.services), run.one_shots)
     except DockerError as e:
         raise StepFailed("health", f"the health check could not read the containers: "
                          f"{e}") from e
     if not healthy:
-        raise StepFailed("health", f"not healthy on {images}: {', '.join(unhealthy)}")
+        raise StepFailed("health", f"not healthy on {images}: {', '.join(unhealthy)}",
+                         deterministic=True)
 
 
 def _record(paths: BoxPaths, project: str, plans: Sequence[ServicePlan],
@@ -361,7 +449,7 @@ def _rollback(paths: BoxPaths, run: _Run) -> list[str]:
                 lambda: recreate_project(paths, project, PROD, component=_COMPONENT,
                                          patch_cves=run.patch_cves)):
             attempt("see the previous containers healthy",
-                    lambda: _health(project, run.deployed, "the previous images"))
+                    lambda: _health(run, "the previous images"))
     keep = {pin.ref for pin in run.pins_before}
     for service, image in run.built:
         if image.ref not in keep:
@@ -381,6 +469,9 @@ def _outcome(paths: BoxPaths, run: _Run, cves: tuple[str, ...],
     if outcome.ok:
         log_operation(_COMPONENT, f"Autofix of {project} patched {', '.join(services)} for "
                       f"{', '.join(cves)}", paths, project=project, detail=detail)
+    elif outcome.nothing_to_patch and not outcome.rollback_problems:
+        log_operation(_COMPONENT, f"Autofix of {project}: nothing to patch: {outcome.reason}",
+                      paths, project=project, detail=detail)
     else:
         log_error(_COMPONENT, f"Autofix of {project} failed at {outcome.failed_step}, rolled "
                   f"back: {outcome.reason}", paths, project=project, detail=detail)

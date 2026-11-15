@@ -19,24 +19,37 @@ patch, the autofix_started notice otherwise (the site stays up, or it was
 quarantined already). The patch runs once the scan is over
 (commands.autofix_queue_cmd, commands.autofix_urgent).
 
+A scan that finds the findings queued already keeps the entry's detection
+time, adding any new finding to it. An entry still waiting
+AUTOFIX_QUEUE_MAX_WAIT after its detection is stuck (the autofix unit does
+not start, or another operation keeps holding the project): the scan stops
+holding the quarantine back (table B: the project is quarantined when the
+policy takes it down, and the patch, still queued, then runs dark), and
+alerts it at most once a day; the `autofix-queue` health check warns.
+
 Nothing is queued when autofix cannot help: it is off, the project is down
 on purpose (paused, stopped by the health monitor), something else keeps it
-down, or the image cannot be patched (cve.autofix_build.probe). Today's
-disposition then stands, and the reason is added to the alerts that name
-the findings (the QUARANTINED alert included), not sent as one more alert.
+down, the image cannot be patched (cve.autofix_build.probe), or the same
+patch failed before and nothing it depends on has changed
+(cve.autofix_failed). Today's disposition then stands, and the reason is
+added to the alerts that name the findings (the QUARANTINED alert
+included), not sent as one more alert.
 """
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 
 from boxmunge.commands.quarantine_lift import start_hold
 from boxmunge.commands.security_scan_inputs import ProjectMeta
 from boxmunge.compose_images import image_phrase
 from boxmunge.cve.alerting import Alert, format_autofix_started_alert
 from boxmunge.cve.autofix_build import NotPatchable, probe
-from boxmunge.cve.autofix_policy import AutofixUrgency, downtime_while_patching, urgency
+from boxmunge.cve.autofix_failed import forget, is_retry, still_failing, unpatched
+from boxmunge.cve.autofix_policy import (
+    AUTOFIX_QUEUE_MAX_WAIT, AutofixUrgency, downtime_while_patching, urgency,
+)
 from boxmunge.cve.autofix_record import (
     QueuedFinding, QueueEntry, clear_autofixing, mark_autofixing, read_queue_entry,
     remove_queue_entry, write_queue_entry,
@@ -47,6 +60,7 @@ from boxmunge.cve.quarantine import QuarantineError, is_quarantined, read_quaran
 from boxmunge.docker_run import DockerError
 from boxmunge.log import log_operation, log_warning
 from boxmunge.paths import BoxPaths
+from boxmunge.project_alerts import alert_once
 from boxmunge.state import StateError
 
 _COMPONENT = "autofix"
@@ -104,6 +118,7 @@ def prepare_urgent(paths: BoxPaths, project: str, meta: ProjectMeta,
     urgent = [(d, fd) for d in decisions for fd in d.findings
               if urgency(fd, meta.posture) is AutofixUrgency.URGENT]
     if not urgent:
+        forget(paths, project, "urgent")
         return NOTHING_URGENT
     cves = tuple(sorted({fd.finding.cve_id for _, fd in urgent}))
     try:
@@ -113,12 +128,22 @@ def prepare_urgent(paths: BoxPaths, project: str, meta: ProjectMeta,
     except (StateError, QuarantineError, BreakerError) as e:
         blocker = f"what it may patch cannot be read ({e})"
         existing, downtime = None, None
+    if blocker is None and existing is None:
+        failed = still_failing(paths, project, "urgent", urgent, now)
+        if failed is not None:
+            blocker = (f"the same patch failed and nothing it depends on has changed, "
+                       f"{unpatched(failed)}; it is tried again when the image or the fix "
+                       f"changes")
     if blocker is not None:
         log_warning(_COMPONENT, f"{project}: autofix cannot help with {', '.join(cves)}: "
                     f"{blocker}", paths, project=project, detail={"cves": list(cves)})
         _forget(paths, project)
         return UrgentPlan(cves, note=f"Autofix cannot help: {blocker}.")
     assert downtime is not None
+    if existing is not None and now - existing.detected_at >= AUTOFIX_QUEUE_MAX_WAIT:
+        stuck(paths, project, existing, reason=None)
+        downtime = downtime or any(fd.disposition is Disposition.QUARANTINE
+                                   for _, fd in urgent)
     keys = {_key(d, fd) for d, fd in urgent}
     if existing is not None and keys <= set(existing.findings):
         if existing.downtime is not downtime:
@@ -130,13 +155,14 @@ def prepare_urgent(paths: BoxPaths, project: str, meta: ProjectMeta,
         return UrgentPlan(existing.cves, queued=True, downtime=downtime)
     quarantined = is_quarantined(project, paths)
     try:
-        queue_urgent(paths, project, [fd for _, fd in urgent], downtime=downtime, now=now,
-                     keys=sorted(keys, key=lambda k: (k.cve_id, k.package, k.image_ref)))
+        queue_urgent(paths, project, downtime=downtime, now=now, keys=keys, existing=existing)
     except StateError as e:
         log_warning(_COMPONENT, f"{project}: autofix of {', '.join(cves)} not queued: {e}",
                     paths, project=project)
         return UrgentPlan(cves, note=f"Autofix cannot help: it could not be queued ({e}).")
-    if not downtime or quarantined:   # else the QUARANTINED alert says it (quarantine_note)
+    # Else the QUARANTINED alert says it (quarantine_note); a retry of a
+    # remembered failure is not announced again.
+    if (not downtime or quarantined) and not is_retry(paths, project, "urgent", urgent):
         alerts.append(format_autofix_started_alert(project, cves, downtime=downtime))
     return UrgentPlan(cves, queued=True, downtime=downtime)
 
@@ -181,16 +207,38 @@ def held_for_patch(paths: BoxPaths, held: Collection[str]) -> list[Alert]:
     return notices
 
 
-def queue_urgent(paths: BoxPaths, project: str, findings: Sequence[FindingDisposition], *,
-                 downtime: bool, now: datetime, keys: Sequence[QueuedFinding]) -> None:
-    """Mark the project autofixing and queue ``keys`` (the findings, by image),
-    detected ``now``. Raises StateError."""
-    cves = sorted({fd.finding.cve_id for fd in findings})
+def queue_urgent(paths: BoxPaths, project: str, *, downtime: bool, now: datetime,
+                 keys: Collection[QueuedFinding], existing: QueueEntry | None) -> None:
+    """Mark the project autofixing and queue ``keys`` (the findings, by
+    image), detected ``now``, with those of the ``existing`` entry and its
+    detection time when there is one. Raises StateError."""
+    merged = sorted({*keys, *(existing.findings if existing else ())},
+                    key=lambda k: (k.cve_id, k.package, k.image_ref))
+    entry = QueueEntry(existing.detected_at if existing else now, now, tuple(merged), downtime)
+    cves = list(entry.cves)
     mark_autofixing(paths, project, cves, downtime=downtime)
-    write_queue_entry(paths, project, QueueEntry(now, tuple(keys), downtime))
+    write_queue_entry(paths, project, entry)
     log_operation(_COMPONENT, f"{project}: {', '.join(cves)} queued for urgent autofix, "
                   f"{'site down' if downtime else 'site up'} while patching", paths,
                   project=project, detail={"cves": cves, "downtime": downtime})
+
+
+def stuck(paths: BoxPaths, project: str, entry: QueueEntry, *, reason: str | None) -> None:
+    """The entry has waited AUTOFIX_QUEUE_MAX_WAIT: logged, alerted at most
+    once a day (``reason``: why, when the caller knows)."""
+    hours = AUTOFIX_QUEUE_MAX_WAIT.total_seconds() / 3600
+    why = reason or ("the autofix unit has not run it; see `journalctl -u boxmunge-autofix` "
+                     "and `boxmunge log --component autofix`")
+    day = datetime.now(timezone.utc).date().isoformat()
+    alert_once(paths, project, "autofix-stuck", {"day": day},
+               title=f"[boxmunge:{project}] Urgent autofix could not start", priority=1,
+               component=_COMPONENT, message="\n".join([
+                   f"Autofix could not start for {hours:g}h: {why}.",
+                   f"The patch of {', '.join(entry.cves)} (found "
+                   f"{entry.detected_at:%Y-%m-%d %H:%M} UTC) stays queued. The scans no longer",
+                   "hold its quarantine back: the project is quarantined where the posture",
+                   "takes it down for these findings. Alerted once a day while it lasts.",
+               ]))
 
 
 def _key(decision: ProjectDecision, fd: FindingDisposition) -> QueuedFinding:

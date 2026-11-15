@@ -188,3 +188,15 @@ def test_summary_without_a_kev_cache_says_so(paths) -> None:
     kev = _call(paths, "security.summary")["kev"]
     assert kev == {"source": None, "released_at": None, "fetched_at": None, "entries": 0,
                    "stale_reason": "no KEV catalog has been fetched yet"}
+
+
+def test_security_project_carries_the_patch_records(fixture_paths) -> None:
+    from tests.autofix_helpers import mark_patching, write_patches
+    write_patches(fixture_paths, "shop")
+    mark_patching(fixture_paths, "shop", downtime=False)
+    shop = _call(fixture_paths, "security.project", {"project": "shop"})
+    [patch] = shop["patches"]
+    assert patch["patched_ref"] == "boxmunge.invalid/shop/web:autofix-aaaaaaaaaaaa"
+    assert patch["created_at"] == "2026-11-14T03:10:00Z"
+    assert shop["autofixing"]["downtime"] is False
+    assert _call(fixture_paths, "security.project", {"project": "wiki"})["patches"] == []

@@ -358,6 +358,7 @@ cmd_check_probation() {
     acquire_lock skip  # an upgrade is in progress; retry on the next health-timer fire
     resume_rollback
     recover_interrupted_upgrade
+    heal_slot_units
 
     local inactive
     inactive="$(standby_slot)"

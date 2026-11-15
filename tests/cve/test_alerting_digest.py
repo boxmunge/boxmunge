@@ -77,3 +77,100 @@ def test_digest_refuses_urgent_alerts() -> None:
         format_scan_digest([format_quarantine_alert("demo", [hit])])
     with pytest.raises(ValueError):
         format_scan_digest([])
+
+
+# ---------- the nightly autofix digest ----------
+
+
+def _patched(project: str, n: int = 1) -> Alert:
+    from datetime import datetime, timezone
+
+    from boxmunge.cve.alerting import format_nightly_patched_line
+    from boxmunge.cve.autofix_record import PackageChange, PatchRecord
+    record = PatchRecord(
+        project=project, service="web", base_ref="web:1", base_digest="sha256:" + "b" * 64,
+        patched_ref=f"boxmunge.invalid/{project}/web:autofix-" + "a" * 12, patched_image_id="sha256:" + "a" * 64,
+        packages=tuple(PackageChange(f"p{i}", "1", "2") for i in range(n)),
+        cves=("CVE-2026-0001",), created_at=datetime.now(timezone.utc), trigger="nightly")
+    return format_nightly_patched_line(project, ("CVE-2026-0001",), (record,))
+
+
+def test_autofix_digest_lists_patched_then_failed() -> None:
+    from boxmunge.cve.alerting import format_autofix_digest, format_nightly_failed_line
+    digest = format_autofix_digest([
+        format_nightly_failed_line("blog", step="build", reason="apt-get exited 100"),
+        _patched("shop", 2), _patched("api"),
+    ])
+    assert digest.priority == -1 and digest.kind == "autofix_digest"
+    assert digest.title == "Nightly autofix: 2 projects patched, 1 could not be patched"
+    assert digest.body.splitlines()[:3] == [
+        "patched: api: CVE-2026-0001 (1 package)",
+        "patched: shop: CVE-2026-0001 (2 packages)",
+        "could not patch: blog: build: apt-get exited 100",
+    ]
+
+
+def test_autofix_digest_of_failures_only() -> None:
+    from boxmunge.cve.alerting import format_autofix_digest, format_nightly_failed_line
+    digest = format_autofix_digest([
+        format_nightly_failed_line("blog", step=None, reason="RuntimeError: boom"),
+        format_nightly_failed_line("shop", step="scan", reason="x")])
+    assert digest.title == "Nightly autofix: 2 projects could not be patched"
+    assert "could not patch: blog: unexpected error: RuntimeError: boom" in digest.body
+
+
+def test_autofix_digest_refuses_urgent_and_scan_alerts() -> None:
+    from boxmunge.cve.alerting import format_autofix_digest, format_autofix_failed_alert
+    loud = format_autofix_failed_alert("demo", ("CVE-2026-0001",), step="health",
+                                       reason="x", site="y", timing="z")
+    with pytest.raises(ValueError):
+        format_autofix_digest([loud])
+    with pytest.raises(ValueError):
+        format_autofix_digest([])
+    assert not is_low_urgency(_patched("demo"))   # never in the scan's own digest
+
+
+def test_autofix_digest_orders_every_group() -> None:
+    from boxmunge.cve.alerting import (
+        format_autofix_digest, format_nightly_deferred_line, format_nightly_failed_line,
+        format_nightly_gone_line, format_nightly_skipped_line,
+    )
+    digest = format_autofix_digest([
+        format_nightly_deferred_line("zed"),
+        format_nightly_skipped_line("web", "container update failed: unhealthy: app"),
+        format_nightly_failed_line("blog", step="build", reason="x"),
+        format_nightly_gone_line("docs", ("CVE-2026-0002",), updated=True),
+        format_nightly_gone_line("api", ("CVE-2026-0003",), updated=False),
+        _patched("shop"),
+    ])
+    assert digest.title == ("Nightly autofix: 1 project patched, 2 already fixed, "
+                            "1 could not be patched, 1 skipped, 1 deferred")
+    assert digest.body.splitlines()[:6] == [
+        "patched: shop: CVE-2026-0001 (1 package)",
+        "no longer in the running images: api: CVE-2026-0003",
+        "fixed by tonight's update: docs: CVE-2026-0002",
+        "could not patch: blog: build: x",
+        "skipped: web: container update failed: unhealthy: app",
+        "deferred to the next maintenance window: zed",
+    ]
+
+
+def test_a_mixed_project_alert_names_a_command_that_takes_the_project() -> None:
+    """`status` takes no project; `security <project>` shows the patches."""
+    from boxmunge.cve.alerting import (
+        format_autofix_failed_alert, format_autofix_interrupted_alert,
+    )
+    failed = format_autofix_failed_alert("demo", ("CVE-2026-0001",), step="health",
+                                         reason="unhealthy", site="up", timing="t",
+                                         rollback_problems=("recreate failed",))
+    interrupted = format_autofix_interrupted_alert("demo", ("recreate failed",), site="up")
+    for alert in (failed, interrupted):
+        assert "`boxmunge security demo`" in alert.body
+        assert "boxmunge status demo" not in alert.body
+
+
+def test_the_started_alert_does_not_promise_a_time_the_queue_cannot_keep() -> None:
+    from boxmunge.cve.alerting import format_autofix_started_alert
+    body = format_autofix_started_alert("demo", ("CVE-2026-0001",), downtime=False).body
+    assert "once its turn in the queue runs (up to 30 minutes each)" in body
+    assert "within 30 minutes" not in body

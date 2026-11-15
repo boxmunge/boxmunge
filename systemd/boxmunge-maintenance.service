@@ -12,4 +12,6 @@ ExecStart=-/opt/boxmunge/bin/boxmunge security scan
 ExecStart=-/opt/boxmunge/bin/boxmunge container-update
 StandardOutput=journal
 StandardError=journal
-TimeoutStartSec=4h
+# Scan (with up to 1h waiting on a KEV watch tick), then container-update,
+# whose nightly autofix window is 3h.
+TimeoutStartSec=5h

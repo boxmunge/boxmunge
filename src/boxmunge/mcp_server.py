@@ -280,7 +280,8 @@ _TOOL_DEFS: list[dict[str, Any]] = [
     },
     {
         "name": "status",
-        "description": "Show dashboard status of all projects.",
+        "description": "Show dashboard status of all projects, with any running an "
+                       "autofix-patched image (fix it in the repo) or being patched.",
         "inputSchema": {
             "type": "object",
             "properties": {},

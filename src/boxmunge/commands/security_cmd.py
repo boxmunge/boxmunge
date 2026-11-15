@@ -29,6 +29,9 @@ from boxmunge.commands.security_views import (
     format_project_json,
     format_project_text,
 )
+from boxmunge.cve.autofix_record import (
+    AutofixingMarker, PatchRecord, read_autofixing, read_records,
+)
 from boxmunge.cve.breaker import BreakerError, read_held
 from boxmunge.cve.policy import Disposition
 from boxmunge.cve.kev import kev_status
@@ -103,12 +106,14 @@ class ProjectSecurity:
     scan_state: dict | None
     active_suppressions: tuple
     users: dict
+    patches: tuple[PatchRecord, ...]
+    autofixing: AutofixingMarker | None
 
 
 def load_project_security(project: str, paths: BoxPaths) -> ProjectSecurity:
     """Read a project's security state. Raises SecurityViewError, with the
     message the CLI prints, when the manifest, quarantine record, scan
-    state or suppressions are unusable."""
+    state, suppressions or autofix records are unusable."""
     try:
         manifest = load_manifest(paths.project_manifest(project))
     except ManifestError as e:
@@ -121,6 +126,8 @@ def load_project_security(project: str, paths: BoxPaths) -> ProjectSecurity:
             read_quarantine_state(project, paths), paths.project_quarantine_state(project),
         ) if quarantined else None
         scan_state = read_scan_state(paths.project_scan_state(project))
+        patches = read_records(paths, project)
+        autofixing = read_autofixing(paths, project)
     except (QuarantineError, StateError) as e:
         raise SecurityViewError(str(e)) from e
     try:
@@ -142,6 +149,8 @@ def load_project_security(project: str, paths: BoxPaths) -> ProjectSecurity:
         scan_state=scan_state,
         active_suppressions=active_suppressions(supps, today=today),
         users=users,
+        patches=patches,
+        autofixing=autofixing,
     )
 
 
@@ -161,6 +170,8 @@ def _per_project_view(project: str, as_json: bool, paths: BoxPaths) -> int:
         scan_state=view.scan_state,
         active_suppressions=view.active_suppressions,
         users=view.users,
+        patches=view.patches,
+        autofixing=view.autofixing,
     ))
     return 0
 

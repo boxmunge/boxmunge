@@ -130,7 +130,7 @@ die_logged() {
 SHIM_LIB_DIR="$(dirname "$SHIM_PATH")/boxmunge-upgrade.d"
 [[ -d "$SHIM_LIB_DIR" ]] \
     || die "This is the unbuilt source shim and $SHIM_LIB_DIR is missing; install a release bundle, whose shim is built"
-for lib in state slots probation health release system userns readiness check gate; do
+for lib in state slots probation health release system units userns readiness check gate; do
     # shellcheck source=/dev/null
     source "$SHIM_LIB_DIR/$lib.sh"
 done
@@ -180,6 +180,8 @@ upgrade_to() {
     [[ "$mode" != "force" ]] || userns_guard_target "$version"
     cmd_install_sudoers
     seed_slot_docs "$ACTIVE_SLOT"
+    heal_slot_units
+    seed_slot_units "$ACTIVE_SLOT"
 
     local prev_slot from_version standby
     prev_slot="$ACTIVE_SLOT"
@@ -239,6 +241,13 @@ upgrade_to() {
             "Bundle has no on-server/*.md docs"
     mkdir -p "$(slot_docs "$standby")"
     cp "$tmp_download/boxmunge/on-server/"*.md "$(slot_docs "$standby")/"
+    # A bundle without units leaves the slot without a record: a rollback to
+    # it says so (restore_slot_units).
+    if [[ -d "$bundle/systemd" ]]; then
+        copy_units "$bundle/systemd" "$(slot_units "$standby")" \
+            || preflight_fail "$version" "$from_version" "preflight_failed: bundle_units" \
+                "Could not record the bundle's systemd units for slot $standby"
+    fi
 
     # 2. PRE-FLIGHT
     log "Running pre-flight checks..."

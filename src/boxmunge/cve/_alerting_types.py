@@ -37,6 +37,10 @@ AlertKind = Literal[
     "autofix_started",
     "autofix_patched",
     "autofix_failed",
+    "autofix_digest",
+    "autofix_gone",
+    "autofix_skipped",
+    "autofix_deferred",
 ]
 
 

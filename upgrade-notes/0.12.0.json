@@ -84,7 +84,7 @@
    "when": "before",
    "kind": "recommended",
    "title": "Deploys refuse a release that carries a known-exploited CVE",
-   "change": "stage, prod-deploy, promote and rollback now scan every image the release would start and refuse one that carries a CVE on CISA's or the EU's KEV list (under paranoid, VulnCheck's too), whether or not the project is quarantined. The refusal names each CVE, package and fixed version; fix it in the repo. --allow-security-regression --reason \"<why>\" deploys anyway, logged and alerted.\nA project that runs such a CVE today (relaxed with a fixable KEV finding, or dangerously_disable_quarantine: true) has its next deploy refused, rollback included, until the release is rebuilt with the fix: plan that rebuild.\nOn a box that has never fetched the CISA catalog, every deploy is refused until 'security scan' has run once; prod-deploy --accept-stale-kev is the audited exit when no source can be reached.",
+   "change": "stage, prod-deploy, promote and rollback now scan every image the release would start and refuse one that carries a CVE on CISA's or the EU's KEV list (under paranoid, VulnCheck's too), whether or not the project is quarantined, and one that brings back a CVE autofix patched in the running release. The refusal names each CVE, package and fixed version; fix it in the repo. --allow-security-regression --reason \"<why>\" deploys anyway, logged and alerted.\nA project that runs such a CVE today (relaxed with a fixable KEV finding, or dangerously_disable_quarantine: true) has its next deploy refused, rollback included, until the release is rebuilt with the fix: plan that rebuild.\nOn a box that has never fetched the CISA catalog, every deploy is refused until 'security scan' has run once; prod-deploy --accept-stale-kev is the audited exit when no source can be reached.",
    "verify": "'stage <project>' (or prod-deploy) prints 'Deploy guard: no known-exploited CVE in the release's images.' and goes ahead.",
    "files": [
     "compose.yml",
@@ -106,6 +106,33 @@
    "refs": [
     "#235"
    ]
+  },
+  {
+   "id": "0.12.0-autofix-on-by-default",
+   "scope": "project",
+   "when": "before",
+   "kind": "recommended",
+   "title": "Autofix patches fixable OS-package CVEs on the box, on by default",
+   "change": "Autofix is on by default; set security.autofix: false in a project's manifest to opt out. It patches a fixable OS-package CVE in the running image from the image's own distro repositories (apk or apt images only): a known-exploited one as soon as the scan that found it is over, others that meet the posture's gate in the nightly maintenance run. Each patch is scanned, swapped in and health-checked within 30 minutes, or rolled back. Where the posture takes the site down for the CVE, it may be down while it is patched (agent-help cve, \"Autofix\", table A).\nA patched project runs images that differ from its release, and 'status' shows it as patched. Bring the fix into the repo (bump the base image, or upgrade the packages 'security <project>' lists): the deploy guard refuses a release, rollback included, that brings a patched CVE back. Container updates being off does not stop autofix; only security.autofix: false does.",
+   "verify": "After the first nightly run, 'status' shows no project as patched that you did not expect, and 'security <project>' lists the patch records of any that is.",
+   "files": [
+    "manifest.yml",
+    "Dockerfile"
+   ],
+   "superseded_by": null,
+   "refs": []
+  },
+  {
+   "id": "0.12.0-autofix-unit",
+   "scope": "box",
+   "when": "after",
+   "kind": "fact",
+   "title": "A new unit, boxmunge-autofix.service, runs the urgent patches",
+   "change": "boxmunge-autofix.service runs 'security autofix-queue' as root with a 6-hour limit. It has no timer: the nightly scan, the KEV watch and a root 'security scan <project>' start it when they queue a patch, so a long patch never holds up the scans or the container update. It takes each project's own lock only. A run that is killed leaves a journal (state/autofix/<project>.journal), which the next run undoes exactly and alerts; the KEV watch starts that run within half an hour. The nightly patches run inside container-update and send one quiet digest, 'Nightly autofix: ...', one line per project.",
+   "verify": "As root, 'systemctl cat boxmunge-autofix.service' shows the unit, and 'systemctl list-timers boxmunge-*' lists no autofix timer.",
+   "files": [],
+   "superseded_by": null,
+   "refs": []
   }
  ]
 }

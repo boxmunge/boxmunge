@@ -15,7 +15,8 @@ MANIFEST = {"project": "shop", "schema_version": 3, "services": {
     "web": {"port": 8080}, "db": {"internal": True,
                                   "security": {"user": "image", "reason": "drops to postgres"}}}}
 VIEW = dict(posture="balanced", dangerously_disable_quarantine=False, quarantined=False,
-            quarantine_state=None, scan_state=None, active_suppressions=())
+            quarantine_state=None, scan_state=None, active_suppressions=(), patches=(),
+            autofixing=None)
 
 
 def test_view_shows_the_decision_and_the_reason() -> None:

@@ -137,7 +137,7 @@ boxmunge agent orientation
 
 You are operating a boxmunge-managed VPS through a restricted deploy shell.
 Only boxmunge commands exist here. 'help <command>' shows usage and never
-runs it. It is short: read all of it.
+runs it. Read all of it.
 
 Rules that prevent outages (building or changing a project):
   1. Base image: the smallest official image for your stack (-slim or
@@ -145,7 +145,7 @@ Rules that prevent outages (building or changing a project):
      every OS package is CVE surface, and a CVE in a package your app never
      uses still alerts, and can quarantine the site. -> agent-help images
   2. Multi-stage builds: compilers, pip/npm caches and build headers stay in
-     the builder stage, never in the runtime image.
+     the builder stage.
   3. Root filesystems are read-only. Declare every path the app writes in
      the manifest's writable: block.              -> agent-help writable
      Services run non-root: a registry image without a non-root USER needs
@@ -160,7 +160,8 @@ Rules that prevent outages (building or changing a project):
      suppressing it. Suppress only with evidence. -> agent-help cve-incident
 
 Operating safely:
-  - Check 'status' before and after changes.
+  - Check 'status' before and after changes. 'patched': put the fix in
+    the repo.
   - Unknown flags are errors (exit 2) and nothing runs. --dry-run works on
     prod-deploy, stage, promote, unstage and upgrade; other commands
     refuse it.
@@ -184,7 +185,7 @@ Git-based projects are supported but being reworked; prefer bundles.
 Secrets:  secrets set <project> DB_URL="postgres://..."
           secrets list <project>
 
-Maintenance:  pause <project>   (visitors see a maintenance page)
+Maintenance:  pause <project>   (serves a maintenance page)
               resume <project>  (pulls latest images first)
 
 First moves:  status, doctor, inbox, log --tail 50

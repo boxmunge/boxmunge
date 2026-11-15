@@ -98,6 +98,11 @@ class PatchBuildError(Exception):
     """The patched image could not be built, or is not what it must be."""
 
 
+class PatchNotFixed(PatchBuildError):
+    """The patched image's packages are below a fixed version (or cannot be
+    compared with it): the same build would fail the same way."""
+
+
 @dataclass(frozen=True)
 class Patchable:
     """The image can be patched with `manager`; `user` is its Config.User
@@ -288,7 +293,7 @@ def check_versions(image: str, patchability: Patchable,
                                 f"{packages[name]}")
         versions[name] = found[name][0][0]
     if problems:
-        raise PatchBuildError(f"the patched image is not fixed: {'; '.join(problems)}")
+        raise PatchNotFixed(f"the patched image is not fixed: {'; '.join(problems)}")
     return versions
 
 

@@ -13,6 +13,9 @@ A service that already runs a patched image is patched again from the
 image its patch was built from (the record's base), with the packages of
 both patches, so the new patch keeps the old one's fixes; a patch is
 never built on another patch (cve.autofix_build).
+When upstream ships a new image for a pinned service that still needs
+the patch, that image stands in for the patched one (on_upstream), and
+the service is patched from it alone (commands.autofix_upstream).
 
 The patched images are then scanned the same way. A patch fails when a
 CVE it was for is still in its image, or a finding that is quarantine-level
@@ -21,7 +24,7 @@ image it replaces.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
 from boxmunge.commands.quarantine_gate import StartImage, scan_release_images
@@ -42,7 +45,7 @@ if TYPE_CHECKING:
     from boxmunge.commands.security_scan_inputs import ProjectMeta
     from boxmunge.cve.autofix_record import PatchRecord
     from boxmunge.cve.policy_types import ProjectDecision
-    from boxmunge.docker_containers import ProjectContainer
+    from boxmunge.docker_containers import LocalImage, ProjectContainer
     from boxmunge.image_pins import ImagePin
     from boxmunge.paths import BoxPaths
 
@@ -51,11 +54,24 @@ PROD = ["compose.yml", "compose.boxmunge.yml"]
 
 
 class StepFailed(Exception):
-    """An autofix step failed; `step` is the one, the message why."""
+    """An autofix step failed; `step` is the one, the message why.
+    `deterministic`: trying again on the same images and fixes fails the
+    same way (the image cannot be patched, the patch does not fix it, the
+    patched images are not healthy); else it may pass (cve.autofix_failed)."""
 
-    def __init__(self, step: Step, reason: str) -> None:
+    def __init__(self, step: Step, reason: str, *, deterministic: bool = False) -> None:
         super().__init__(reason)
         self.step: Step = step
+        self.deterministic = deterministic
+
+
+class NothingToPatch(StepFailed):
+    """No image production runs carries the CVEs any more (a container
+    update or a deploy since the scan replaced it): a failure of the run,
+    but not of the patch."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("scan", reason)
 
 
 @dataclass(frozen=True)
@@ -144,19 +160,36 @@ def _fixes(decision: ProjectDecision, cves: Collection[str],
             why = ("no fixed version is published" if f.fixed_version is None
                    else f"{f.package} is not an OS package ({f.pkg_class.value})")
             raise StepFailed("probe", f"{f.cve_id} in service {service} cannot be patched: "
-                             f"{why}")
+                             f"{why}", deterministic=True)
         found.add(f.cve_id)
         fixed.setdefault(f.package, set()).add(f.fixed_version)
         before[f.package] = f.installed_version
     return fixed, before, found
 
 
+def on_upstream(now: Running, upstream: Mapping[str, LocalImage],
+                decisions: Mapping[str, ProjectDecision]) -> Running:
+    """`now` with each service of `upstream` standing on its new upstream
+    image (and that image's scan, `decisions`) in place of the patched
+    image it runs: its patch is built from that image (upstream catch-up,
+    commands.autofix_upstream)."""
+    containers = dict(now.containers)
+    for service, image in upstream.items():
+        containers[service] = replace(containers[service], image_id=image.image_id,
+                                      repo_digests=image.repo_digests)
+    return Running(containers, now.services, {**now.decisions, **decisions})
+
+
 def plan(now: Running, cves: Collection[str], pins: Collection[ImagePin],
-         records: Collection[PatchRecord]) -> tuple[ServicePlan, ...]:
-    """The services to patch, by name. Raises StepFailed: "scan" when no
-    running image carries any of `cves`, "probe" for one that cannot be
-    patched or a pinned service with no patch record."""
-    pinned = {p.service for p in pins}
+         records: Collection[PatchRecord], *,
+         rebased: Collection[str]) -> tuple[ServicePlan, ...]:
+    """The services to patch, by name. A pinned service is patched from its
+    record's base, with its patch's packages too, unless it is `rebased`
+    onto a new upstream image (on_upstream): then from that image alone.
+    Raises StepFailed: "scan" when no running image carries any of `cves`
+    (NothingToPatch), "probe" for one that cannot be patched or a pinned
+    service with no patch record."""
+    pinned = {p.service for p in pins} - set(rebased)
     recorded = {r.service: r for r in records}
     plans = []
     for service in sorted(now.decisions):
@@ -169,7 +202,7 @@ def plan(now: Running, cves: Collection[str], pins: Collection[ImagePin],
             if prior is None:
                 raise StepFailed("probe", f"service {service} runs a pinned patched image "
                                  f"with no patch record, so the image it was built from is "
-                                 f"unknown")
+                                 f"unknown", deterministic=True)
             base_ref, base = prior.base_ref, prior.base_digest
             for change in prior.packages:
                 packages.setdefault(change.name, set()).add(change.after)
@@ -179,8 +212,8 @@ def plan(now: Running, cves: Collection[str], pins: Collection[ImagePin],
                                  {n: tuple(sorted(v)) for n, v in packages.items()}, before,
                                  tuple(sorted(found))))
     if not plans:
-        raise StepFailed("scan", f"no image production runs carries {', '.join(sorted(cves))} "
-                         f"any more, so there is nothing to patch")
+        raise NothingToPatch(f"no image production runs carries {', '.join(sorted(cves))} "
+                             f"any more, so there is nothing to patch")
     return tuple(plans)
 
 
@@ -202,4 +235,5 @@ def judge_patched(plans: Collection[ServicePlan], before: Mapping[str, ProjectDe
                                 f"{fd.finding.installed_version} into service {p.service}, "
                                 f"quarantine-level under the project's posture")
     if problems:
-        raise StepFailed("scan", "the patched image is not fixed: " + "; ".join(problems))
+        raise StepFailed("scan", "the patched image is not fixed: " + "; ".join(problems),
+                         deterministic=True)

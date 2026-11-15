@@ -293,6 +293,9 @@ class TestUpdateTarget:
         assert result["reason"] == "unhealthy: caddy"
         assert result["rollback_attempted"] is False
         assert caddy.ups == 1
+        # Left broken on the new image: no nightly autofix on top of it.
+        from boxmunge.commands.autofix_nightly import on_previous_images
+        assert result["recreated"] is True and not on_previous_images(result)
 
     def test_rollback_retags_the_previous_image_id_and_recreates(self, paths, caddy):
         """Review finding 08: the previous image is restored by its image ID.
@@ -307,6 +310,8 @@ class TestUpdateTarget:
         assert result["rollback_succeeded"] is True
         assert caddy.tagged == [(_OLD, "caddy:2-alpine")]
         assert caddy.ups == 2
+        from boxmunge.commands.autofix_nightly import on_previous_images
+        assert result["recreated"] is True and on_previous_images(result)
         assert [c.image_id for c in caddy.containers("caddy")] == [_OLD]
 
     def test_unhealthy_wait_reads_containers_by_label(self, paths, caddy, fake_containers):

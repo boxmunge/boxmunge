@@ -16,17 +16,27 @@ While a patch is being built and started, `state/autofix/<project>.active`
 holds {started_at, cves, downtime} (downtime: the project is down for it).
 
 A finding the urgent flow patches waits in `state/autofix/queue/<project>.json`,
-{detected_at, findings: [{cve_id, package, image_ref}], downtime}, until the
-end of the scan or KEV watch run that found it (commands.autofix_urgent).
+{detected_at, queued_at, findings: [{cve_id, package, image_ref}], downtime},
+until the end of the scan or KEV watch run that found it
+(commands.autofix_urgent). `queued_at` is when a scan last wrote its
+findings: the stored scan the patch runs from must be at least as new.
 
 From just before an autofix swaps its images in until it has finished
 (its patched images healthy and recorded, or rolled back), `state/autofix/<project>.journal`
-holds {started_at, pins_before, records_before, built}: the project's pins and
-patch records exactly as they were, and the images the run built, as pins.
+holds {started_at, release_ref, pins_before, records_before, built, services,
+one_shots}: the release it patched, the project's pins and patch records
+exactly as they were, the images the run built, as pins, and the services
+production ran.
 A journal left behind means the run was killed; the next run undoes it
 first (cve.autofix_run.recover_interrupted).
 
-All four are deploy-writable state that root reads: through fs_nofollow,
+The last patch of each trigger that failed is remembered in
+`state/autofix/<project>.failed`, {"urgent"|"nightly": {at, last_tried,
+cves, images, fixes, failed_step, kind, reason}}, so the same patch is not retried (and
+alerted) every run while nothing it depends on changed
+(cve.autofix_failed).
+
+All five are deploy-writable state that root reads: through fs_nofollow,
 times timezone-aware UTC and not in the future, and anything unusable
 raises StateError naming the file.
 """
@@ -270,9 +280,10 @@ class QueuedFinding:
 
 @dataclass(frozen=True)
 class QueueEntry:
-    """A project's urgent patch, waiting to run: what was found, when, and
-    whether the project was taken down for it."""
+    """A project's urgent patch, waiting to run: what was found, when first,
+    when a scan last wrote it, and whether the project was taken down for it."""
     detected_at: datetime
+    queued_at: datetime
     findings: tuple[QueuedFinding, ...]
     downtime: bool
 
@@ -285,7 +296,8 @@ def write_queue_entry(paths: BoxPaths, project: str, entry: QueueEntry) -> None:
     if not entry.findings:
         raise StateError(f"refusing to queue an autofix of {project} with no findings")
     _write_doc(paths.project_autofix_queue(project), {
-        "detected_at": entry.detected_at.isoformat(), "downtime": entry.downtime,
+        "detected_at": entry.detected_at.isoformat(), "queued_at": entry.queued_at.isoformat(),
+        "downtime": entry.downtime,
         "findings": [{"cve_id": f.cve_id, "package": f.package, "image_ref": f.image_ref}
                      for f in entry.findings]}, "autofix queue entry")
 
@@ -297,8 +309,9 @@ def read_queue_entry(paths: BoxPaths, project: str) -> QueueEntry | None:
     if doc is None:
         return None
     try:
-        if not isinstance(doc, dict) or set(doc) != {"detected_at", "findings", "downtime"}:
-            raise ValueError("expected {detected_at, findings, downtime}")
+        keys = {"detected_at", "queued_at", "findings", "downtime"}
+        if not isinstance(doc, dict) or set(doc) != keys:
+            raise ValueError("expected {detected_at, queued_at, findings, downtime}")
         if not isinstance(doc["downtime"], bool):
             raise ValueError(f"downtime is {doc['downtime']!r}, not a boolean")
         rows = doc["findings"]
@@ -306,7 +319,8 @@ def read_queue_entry(paths: BoxPaths, project: str) -> QueueEntry | None:
             raise ValueError("findings must be a non-empty list")
         findings = tuple(QueuedFinding(_text(r["cve_id"], "cve_id"), _text(r["package"], "package"),
                                        _text(r["image_ref"], "image_ref")) for r in rows)
-        return QueueEntry(_time(doc["detected_at"], "detected_at"), findings, doc["downtime"])
+        return QueueEntry(_time(doc["detected_at"], "detected_at"),
+                          _time(doc["queued_at"], "queued_at"), findings, doc["downtime"])
     except (ValueError, KeyError, TypeError) as e:
         raise StateError(f"{path} is not an autofix queue entry: {e!r}") from e
 
@@ -334,11 +348,17 @@ def _names(directory: Path, suffix: str) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class AutofixJournal:
-    """What an autofix run that was killed left to undo."""
+    """What an autofix run that was killed left to undo: the release it
+    patched (the deploy state's current_ref), the pins and records as they
+    were, the images it built, and the services production ran (with the
+    one-shot ones among them), whose health the undo waits for."""
     started_at: datetime
+    release_ref: str
     pins_before: tuple[ImagePin, ...]
     records_before: tuple[PatchRecord, ...]
     built: tuple[ImagePin, ...]
+    services: tuple[str, ...]
+    one_shots: tuple[str, ...]
 
 
 def _pin_rows(pins: Sequence[ImagePin]) -> list[dict[str, str]]:
@@ -352,12 +372,19 @@ def _pins(rows: Any, field: str) -> tuple[ImagePin, ...]:
     return tuple(ImagePin(r["service"], r["ref"], r["image_id"], r["reason"]) for r in rows)
 
 
+_JOURNAL_KEYS = frozenset({"started_at", "release_ref", "pins_before", "records_before",
+                           "built", "services", "one_shots"})
+
+
 def write_journal(paths: BoxPaths, project: str, journal: AutofixJournal) -> None:
     _write_doc(paths.project_autofix_journal(project), {
         "started_at": journal.started_at.isoformat(),
+        "release_ref": journal.release_ref,
         "pins_before": _pin_rows(journal.pins_before),
         "records_before": _record_rows(journal.records_before),
         "built": _pin_rows(journal.built),
+        "services": list(journal.services),
+        "one_shots": list(journal.one_shots),
     }, "autofix journal")
 
 
@@ -368,17 +395,19 @@ def read_journal(paths: BoxPaths, project: str) -> AutofixJournal | None:
     if doc is None:
         return None
     try:
-        keys = {"started_at", "pins_before", "records_before", "built"}
-        if not isinstance(doc, dict) or set(doc) != keys:
-            raise ValueError("expected {started_at, pins_before, records_before, built}")
+        if not isinstance(doc, dict) or set(doc) != _JOURNAL_KEYS:
+            raise ValueError(f"expected {{{', '.join(sorted(_JOURNAL_KEYS))}}}")
         rows = doc["records_before"]
         if not isinstance(rows, list):
             raise ValueError("records_before is not a list")
         records = tuple(_record(item, project) for item in rows)
         _unique_services(records)
         return AutofixJournal(_time(doc["started_at"], "started_at"),
+                              _text(doc["release_ref"], "release_ref"),
                               _pins(doc["pins_before"], "pins_before"), records,
-                              _pins(doc["built"], "built"))
+                              _pins(doc["built"], "built"),
+                              _strings(doc["services"], "services"),
+                              _strings(doc["one_shots"], "one_shots"))
     except (ValueError, KeyError, TypeError) as e:
         raise StateError(f"{path} is not an autofix journal: {e!r}") from e
 
@@ -391,3 +420,69 @@ def journaled_projects(paths: BoxPaths) -> tuple[str, ...]:
     """The names with a journal (`<name>.journal`), sorted; the caller
     validates each as a project name. Raises StateError."""
     return _names(paths.state / "autofix", ".journal")
+
+
+@dataclass(frozen=True)
+class FailedPatch:
+    """A patch that failed: when first (`at`) and last (`last_tried`), what
+    it was for (the CVEs, the exact images that carried them, each fix as
+    "<cve> <package> <fixed version>"), the step, whether it would fail the
+    same way again (`kind`) and why."""
+    at: datetime
+    last_tried: datetime
+    cves: tuple[str, ...]
+    images: tuple[str, ...]
+    fixes: tuple[str, ...]
+    failed_step: str | None
+    kind: FailureKind
+    reason: str
+
+
+FailureKind = Literal["deterministic", "transient"]
+_KINDS = ("deterministic", "transient")
+_FAILED_KEYS = frozenset({"at", "last_tried", "cves", "images", "fixes", "failed_step", "kind",
+                          "reason"})
+
+
+def read_failed(paths: BoxPaths, project: str) -> dict[Trigger, FailedPatch]:
+    """The last failed patch of each trigger; {} when none. Raises StateError."""
+    path = paths.project_autofix_failed(project)
+    doc = _read_doc(path, "autofix failure record")
+    if doc is None:
+        return {}
+    try:
+        if not isinstance(doc, dict) or not doc or not set(doc) <= set(_TRIGGERS):
+            raise ValueError(f"expected an object keyed by {', '.join(_TRIGGERS)}")
+        failed: dict[Trigger, FailedPatch] = {}
+        for trigger, row in doc.items():
+            if not isinstance(row, dict) or set(row) != _FAILED_KEYS:
+                raise ValueError(f"{trigger}: expected {{{', '.join(sorted(_FAILED_KEYS))}}}")
+            step = row["failed_step"]
+            if step is not None:
+                _text(step, "failed_step")
+            if row["kind"] not in _KINDS:
+                raise ValueError(f"{trigger}: kind {row['kind']!r} is not one of {_KINDS}")
+            failed[trigger] = FailedPatch(
+                _time(row["at"], "at"), _time(row["last_tried"], "last_tried"),
+                _strings(row["cves"], "cves"), _strings(row["images"], "images"),
+                _strings(row["fixes"], "fixes"), step, row["kind"],
+                _text(row["reason"], "reason"))
+        return failed
+    except (ValueError, KeyError, TypeError) as e:
+        raise StateError(f"{path} is not an autofix failure record: {e!r}") from e
+
+
+def write_failed(paths: BoxPaths, project: str, failed: dict[Trigger, FailedPatch]) -> None:
+    """Replace the record (none: remove the file). Raises StateError."""
+    if not failed:
+        clear_failed(paths, project)
+        return
+    _write_doc(paths.project_autofix_failed(project), {
+        trigger: {"at": f.at.isoformat(), "last_tried": f.last_tried.isoformat(),
+                  "cves": list(f.cves), "images": list(f.images), "fixes": list(f.fixes),
+                  "failed_step": f.failed_step, "kind": f.kind, "reason": f.reason}
+        for trigger, f in sorted(failed.items())}, "autofix failure record")
+
+
+def clear_failed(paths: BoxPaths, project: str) -> None:
+    _unlink(paths.project_autofix_failed(project), "autofix failure record")

@@ -338,3 +338,86 @@ def test_a_refusal_whose_candidates_cannot_be_removed_keeps_its_text(
         assert e.value.reasons[-1].startswith("Removing its candidate images failed too")
     else:
         assert "CVE-2026-1234" in text
+
+
+PATCHED_CVE = "CVE-2026-5555"
+
+
+def _patched(box, *cves_by_service: tuple[str, tuple[str, ...]]) -> None:
+    """Autofix patched these CVEs in the running release, one record per service."""
+    from boxmunge.cve.autofix_record import PackageChange, PatchRecord, write_records
+    from boxmunge.image_pins import pin_ref
+    records = []
+    for n, (service, cves) in enumerate(cves_by_service):
+        image = "sha256:" + f"{n}" * 64
+        records.append(PatchRecord(
+            "demo", service, f"example/{service}:1", "sha256:" + "9" * 64,
+            pin_ref("demo", service, image), image, (PackageChange("zlib", "1", "2"),),
+            cves, datetime.now(timezone.utc), "nightly"))
+    write_records(box.paths, "demo", records)
+
+
+def test_patched_cves_is_the_union_of_the_records(box) -> None:
+    assert guard.patched_cves(box.paths, "demo") == frozenset()
+    _patched(box, ("web", (PATCHED_CVE,)), ("cache", ("CVE-2026-6666", PATCHED_CVE)))
+    assert guard.patched_cves(box.paths, "demo") == {PATCHED_CVE, "CVE-2026-6666"}
+
+
+def test_release_bringing_back_a_patched_cve_refused(box) -> None:
+    """Not exploited anywhere, but autofix patched it in the running release."""
+    _patched(box, ("cache", (PATCHED_CVE,)))
+    box.findings[CACHE_IMAGE] = (finding(PATCHED_CVE, fix="2", pkg="zlib"),)
+    with pytest.raises(guard.SecurityRegressionRefused) as e:
+        _guard(box)
+    problems = e.value.problems
+    assert problems[0] == ("This release brings back a CVE autofix patched; nothing was "
+                           "started in production:")
+    assert (f"{PATCHED_CVE} in zlib 1 (fixed in 2), service cache ({CACHE_IMAGE}): autofix "
+            f"patched {PATCHED_CVE} in the running release; this release brings it back"
+            ) in problems[1]
+    assert problems[-1] == CLOSING
+
+
+def test_a_release_without_the_patched_cve_passes(box) -> None:
+    _patched(box, ("cache", (PATCHED_CVE,)))
+    box.findings[CACHE_IMAGE] = (finding("CVE-2026-1234"),)
+    _guard(box)
+
+
+def test_rollback_to_a_release_with_a_patched_cve_refused(box) -> None:
+    """A rollback routes through the same guard, before the switch clears
+    the records that say what was patched."""
+    _patched(box, ("cache", (PATCHED_CVE,)))
+    box.findings[CACHE_IMAGE] = (finding(PATCHED_CVE, fix="2", pkg="zlib"),)
+    with pytest.raises(guard.SecurityRegressionRefused) as e:
+        _decide_production(box, "rollback", True)
+    assert "this release brings it back" in str(e.value)
+    assert guard.patched_cves(box.paths, "demo") == {PATCHED_CVE}   # still there
+
+
+def test_unreadable_patch_records_refuse_the_release(box) -> None:
+    path = box.paths.project_autofix_records("demo")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("not json")
+    with pytest.raises(guard.SecurityRegressionRefused) as e:
+        _guard(box)
+    text = str(e.value)
+    assert "could not clear this release" in text and "patch records" in text
+    assert e.value.problems[-1] == 'To deploy anyway: --allow-security-regression --reason "<why>"'
+
+
+@pytest.mark.parametrize("route", [
+    pytest.param(lambda b: _decide_staging(b), id="stage"),
+    pytest.param(lambda b: _decide_production(b, "deploy"), id="prod-deploy"),
+    pytest.param(lambda b: _decide_production(b, "promote"), id="promote"),
+    pytest.param(lambda b: _decide_production(b, "rollback", True), id="rollback"),
+])
+def test_bringing_back_a_patched_cve_refused_on_every_route(box, route) -> None:
+    """Every route decides its release (and so reads the patch records)
+    before the switch would forget them."""
+    _patched(box, ("cache", (PATCHED_CVE,)))
+    box.findings[CACHE_IMAGE] = (finding(PATCHED_CVE, fix="2", pkg="zlib"),)
+    with pytest.raises(guard.SecurityRegressionRefused) as e:
+        route(box)
+    assert "this release brings it back" in str(e.value)
+    assert guard.patched_cves(box.paths, "demo") == {PATCHED_CVE}

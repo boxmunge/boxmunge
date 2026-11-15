@@ -195,6 +195,9 @@ def _new_result(target: UpdateTarget) -> dict[str, Any]:
         "reason": None,
         # Image references an aborted update could not point back (_abort).
         "tags_not_restored": [],
+        # Whether the update recreated containers (a rollback's recreate
+        # included): False means the project still runs what it ran before.
+        "recreated": False,
     }
 
 
@@ -303,10 +306,12 @@ def _update_locked(
         return done
 
     # Step 5: Recreate
+    result["recreated"] = True
     try:
         _recreate(paths, target)
     except ComposeRefused as e:
         # Nothing was recreated, so there is nothing to roll back.
+        result["recreated"] = False
         return _abort(paths, target, result, f"refused: {e}", services, running)
     except DockerError as e:
         result["status"] = "failed"

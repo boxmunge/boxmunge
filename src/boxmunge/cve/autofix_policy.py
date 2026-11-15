@@ -20,6 +20,16 @@ from boxmunge.cve.scanner import PkgClass
 # An urgent patch attempt has this long from its own start (not from the
 # detection: a project waiting its turn in the queue keeps its current state).
 AUTOFIX_URGENT_BUDGET = timedelta(minutes=30)
+# An urgent patch that has not started this long after its detection is
+# stuck (the autofix unit does not start, or the project stays busy): the
+# scan stops holding its quarantine back, alerts, and health warns.
+AUTOFIX_QUEUE_MAX_WAIT = timedelta(hours=2)
+# A nightly patch attempt (commands.autofix_nightly) has as long, from its
+# own start: projects are patched one after another in the window.
+AUTOFIX_NIGHTLY_BUDGET = timedelta(minutes=30)
+# No nightly patch starts later in container-update's run than this, less
+# its budget and a margin: the maintenance unit's limit covers the scan too.
+NIGHTLY_AUTOFIX_WINDOW = timedelta(hours=3)
 
 # A finding the policy takes down (or, opted out, runs at risk) for: a
 # not-listed one with these and its patch gate is strict's overdue fix

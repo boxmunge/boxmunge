@@ -154,3 +154,22 @@ def test_a_registered_project_with_no_directory_yet_is_registered(fixture_paths)
     assert fresh["lifecycle"] == "registered"
     assert fresh["deploy"] == {"current_ref": None, "deployed_at": None, "history": []}
     assert fresh["paused"] is None and fresh["quarantine"] is None
+
+
+def test_project_view_includes_patch_records(fixture_paths) -> None:
+    from tests.autofix_helpers import mark_patching, patch_record, write_patches
+    write_patches(fixture_paths, "shop", patch_record("shop", "web"),
+                  patch_record("shop", "worker", cves=("CVE-2026-3",)))
+    mark_patching(fixture_paths, "shop", ("CVE-2026-4",), downtime=False)
+    shop = _call(fixture_paths, "project.get", {"project": "shop"})
+    web, worker = shop["patches"]
+    assert web == {
+        "service": "web", "base_ref": "nginx:1.27", "base_digest": "sha256:" + "b" * 64,
+        "patched_ref": "boxmunge.invalid/shop/web:autofix-aaaaaaaaaaaa",
+        "patched_image_id": "sha256:" + "a" * 64,
+        "packages": [{"name": "openssl", "before": "3.0.1-1", "after": "3.0.2-1"}],
+        "cves": ["CVE-2026-1"], "created_at": "2026-11-14T03:10:00Z", "trigger": "urgent"}
+    assert worker["service"] == "worker" and worker["cves"] == ["CVE-2026-3"]
+    assert shop["autofixing"]["cves"] == ["CVE-2026-4"]
+    blog = _call(fixture_paths, "project.get", {"project": "blog"})
+    assert blog["patches"] == [] and blog["autofixing"] is None

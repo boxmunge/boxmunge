@@ -11,7 +11,7 @@ The deploy shell is a **restricted shell** that dispatches commands directly -- 
 Run these commands in order:
 
 1. `help` -- see all available commands (`help <command>` shows one command's usage; it never runs the command)
-2. `status` -- check the current state of all projects
+2. `status` -- check the current state of all projects (a project shown `patched` needs its fix brought into the repo: see "Autofix" below)
 3. `agent-help <topic>` -- read documentation (images, conventions, writable, rules, operations, security, cve, cve-incident, upgrade, architecture)
 
 **Before you write or change a Dockerfile, read `agent-help images`.** Use the smallest official
@@ -182,7 +182,7 @@ If a task requires any of the above, it requires the **supervisor** user. Note t
 - Run `validate <project>` before deploying -- it catches config errors early
 - Run `doctor` if anything seems wrong or unexpected
 - Read error messages carefully -- boxmunge gives clear, actionable errors; do not skip them
-- Check `status` before and after making changes
+- Check `status` before and after making changes, and always before deploying: a project it shows as `patched` runs images autofix patched on the box, and its next deploy is refused until the fix is in the repo (see "Autofix" below)
 - Do not retry a failed operation blindly -- understand why it failed first
 - Never force a platform upgrade past a failing check. Upgrade only when `upgrade-check` says PASS; otherwise report its result to the person, per project (`agent-help upgrade`)
 - If a deploy says its install was left open, take one of the ways out it prints: run it again, `prod-deploy <project> --abandon` (before its pre-deploy hook ran), `rollback <project>` (after), or deploy a fix. Nothing else starts the project until then
@@ -191,6 +191,27 @@ If a task requires any of the above, it requires the **supervisor** user. Note t
 - If `stage`, `prod-deploy`, `promote` or `rollback` is refused by the deploy guard (`This release carries a known-exploited CVE` or `The deploy guard could not clear this release`), fix it in the repo: bump the base image or upgrade the named package, rebundle, deploy again. If the scan failed or was incomplete, fix that cause and retry. When the refusal says only that there is no usable KEV catalog, run `security scan` and retry; `prod-deploy <project> --accept-stale-kev` is the narrower exit when no source can be reached. Never add `--allow-security-regression --reason "<why>"` on your own: it ships a known-exploited CVE, is logged and alerted, and is the operator's decision (`agent-help cve-incident`, section 6)
 - If a fix-deadline alert arrives (`strict`: `Fix deadline <date> — <CVE> ...`), the site is quarantined on that date unless the fix is deployed: hand off the rebuild now, with the date
 - If a CVE alert arrives (Pushover or otherwise), or you see `QUARANTINED` / `STILL_RUNNING_AT_RISK` / expired-suppression in `security` output, follow `agent-help cve-incident` end to end. Don't suppress without a concrete exploitability reason; don't resume a project without first re-scanning to confirm no quarantine-level findings remain.
+
+---
+
+## Autofix
+
+The box patches a fixable OS-package CVE itself (`agent-help cve`, "Autofix"): it builds a patched copy of the running image, scans it, swaps it in and health-checks it, or rolls it back. A patched project runs images that differ from its release. `status` shows `patched: running image differs from the release (...)`; `security <project>` lists each patch: the service, each package's version before and after, and the CVEs.
+
+**A patched project means: bring this fix into the repo.** Bump the base image (a new tag or digest) or upgrade the listed packages in the Dockerfile, rebundle, then deploy. Until then the deploy guard refuses any release, a rollback included, that brings a patched CVE back (`This release brings back a CVE autofix patched`). Never deploy past it with `--allow-security-regression`: that is the operator's decision.
+
+What each autofix alert means, and the one step for it:
+
+| Alert | Meaning | Your step |
+|---|---|---|
+| `<CVEs> found on <project>, patching (site up)` or `(site down while patching)` | An urgent finding is being patched now | Nothing yet: the outcome follows once its turn in the queue runs (up to 30 minutes each); `status` shows `autofixing` until then |
+| `Autofix patched <CVEs>` | The patched images run (and a quarantine taken for the patch is lifted) | Bring the fix into the repo, as above. If the alert is priority 1 (a smoke test failed, or the quarantine could not be lifted), run `check <project>` and `security <project>` first |
+| `Autofix FAILED at the <step> step — <CVEs>` | The patch was rolled back and the posture's own rule applies (the body says whether the site is down) | Fix it in the repo and deploy: rebuild from a base with the fixed packages. If the body says the rollback did not finish, the project may be left mixed: tell the operator; deploying the fixed release puts every service back on the release's images |
+| `Autofix run interrupted — rolled back` | A killed run was undone from its journal | Run `security <project>`; if the body lists problems, hand them to the operator |
+| `Urgent autofix could not start` | A queued patch has not started for 2 hours, or the autofix unit cannot be started; the project is now quarantined where its posture takes it down | Tell the operator: the unit needs a look (`journalctl -u boxmunge-autofix`) |
+| `Nightly autofix: ...` (quiet digest) | The nightly patches: patched, fixed by tonight's update, could not patch, skipped, deferred, switched to upstream | `patched`, `re-patched` or `could not catch up with upstream` lines: bring the fix into the repo. `could not patch`: rebuild with the fix. Nothing for the others |
+
+`security.autofix: false` in the manifest opts a project out (`agent-help conventions`); the scans then alert and quarantine as they would without it.
 
 ---
 

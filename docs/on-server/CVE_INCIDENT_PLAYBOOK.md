@@ -37,6 +37,12 @@ which the per-project titles below show after it:
 | `[boxmunge:<p>] Quarantine kept — CISA KEV withdrew <CVE>` | The KEV catalog from one source no longer lists a CVE that is still in the project's images (the quarantine's own CVE, or another). Scans keep the quarantine, and deploys that still ship the CVE are refused, until it is accepted. Escalate: check CISA's KEV page. If the withdrawal is real, the operator runs `security resume <p>`. A release without the CVE lifts it as usual. |
 | `[<hostname>] <p>: quarantine lifted by deploying <ref>` | A deploy cleared the quarantine. Priority 1 when it did so by relaxing the security policy, not by a fix: check what it relaxed. |
 | `[<hostname>] <p>: deploying past the deploy guard` | Someone deployed a release the deploy guard refused, with `--allow-security-regression`. The body has the reason given and what was overridden. Check that the operator meant it, and that a fix is on its way. |
+| `[boxmunge:<p>] <CVEs> found on <p>, patching (site up)` / `(site down while patching)` | Autofix is patching an urgent finding now. Nothing to do yet: the outcome follows once its turn in the queue runs (up to 30 minutes each); `status` shows `autofixing` until then. See section 8. |
+| `[boxmunge:<p>] Autofix patched <CVEs>` | The patched images run; a quarantine taken for the patch is lifted. The project now runs images that differ from its release: bring the fix into the repo (section 8). Priority 1 means the smoke test failed or the quarantine could not be lifted: check the project first. |
+| `[boxmunge:<p>] Autofix FAILED at the <step> step — <CVEs>` | The patch was rolled back and the posture's own rule now applies (the body says whether the site is down). Rebuild with the fix and deploy (section 1). |
+| `[boxmunge:<p>] Autofix run interrupted — rolled back` | A killed autofix run was undone from its journal. Run `security <p>`; escalate any problems the body lists. |
+| `[boxmunge:<p>] Urgent autofix could not start` | A queued patch has not started for 2 hours, or the autofix unit cannot be started; the project is quarantined where its posture takes it down. As supervisor, check `journalctl -u boxmunge-autofix` and start `boxmunge-autofix.service`. |
+| `[<hostname>] Nightly autofix: ...` | Quiet digest of the nightly patches, one line per project. `patched`, `re-patched on new upstream` and `could not catch up with upstream`: bring the fix into the repo (section 8). `could not patch`: rebuild with the fix. The rest need nothing. |
 
 If you got an alert, run these two commands first — they tell you everything.
 
@@ -59,6 +65,9 @@ What to read in `security <project>`:
 - The `explanation` per finding — tells you base severity, effective
   severity, posture, why this disposition was reached.
 - `Active suppressions:` — what's already been signed off.
+- `autofixing:` and `Patched by autofix (N services)` — a patch in progress,
+  and every patch running now: the service, each package's version before
+  and after, the CVEs, the image it was built from and the image that runs.
 
 ---
 
@@ -231,6 +240,31 @@ it runs at risk instead).
   exploitability review (section 4) takes it off the deadline; moving the
   project off `strict` is the operator's call, and coming back to `strict`
   starts every deadline afresh.
+
+### 8. A patched project, or an autofix alert
+
+Autofix (`agent-help cve`, "Autofix") patches fixable OS-package CVEs on the
+box. A patch is a stopgap: the project then runs images that differ from
+its release, and the repo still builds the vulnerable image.
+
+1. **`status` shows the project `patched`.** Bring the fix into the repo:
+   `security <project>` lists each patched service, its packages and
+   versions. Bump the base image (a new tag or digest), or upgrade those
+   packages in the Dockerfile, rebundle and deploy. The deploy drops the
+   patch and runs the release's own images.
+2. **A deploy is refused with `This release brings back a CVE autofix
+   patched`.** The release still carries the CVE: fix it as in step 1. Do
+   not reach for `--allow-security-regression`; it would undo the patch.
+3. **`autofixing` in `status`, or the `patching` alert.** Wait for the
+   outcome before deploying; the patch holds the project's lock.
+4. **`Autofix FAILED`.** Treat it as the original CVE alert (sections 1 and
+   2): the posture's rule applies as if autofix had not run. The body names
+   the step and the reason; a base image autofix cannot patch (distroless,
+   or no package manager) needs a rebuild in any case.
+5. **A known-exploited CVE was patched.** The patch replaced the vulnerable
+   code; it does not clean persistent data or prove nothing was planted
+   before it ran. Escalate so the operator can decide whether the data
+   needs checking.
 
 ---
 

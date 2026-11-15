@@ -415,7 +415,8 @@ def test_every_switch_records_through_record_deploy_state() -> None:
 
 def test_only_a_release_install_renders_without_the_pins() -> None:
     """Every other render (resume, recover, quarantine lift, upgrade, data
-    chown, the user-namespace switch) keeps the pins in the overlay."""
+    chown, the user-namespace switch) keeps the pins in the overlay, the
+    one written to disk."""
     import ast
 
     import boxmunge
@@ -427,7 +428,12 @@ def test_only_a_release_install_renders_without_the_pins() -> None:
                         for kw in n.keywords if kw.arg == "installing"
                         and fn.name not in ("prepare_compose_override",
                                             "render_compose_override"))
-    assert installing == ["commands/release_config.py:decide_release_users",
+    # autofix_upstream renders the release without its pins only into a
+    # scratch file, to read which image each service names and pull it there;
+    # it never writes the project's compose.boxmunge.yml nor starts anything
+    # from that render (production is recreated from the real overlay).
+    assert installing == ["commands/autofix_upstream.py:_release_images",
+                          "commands/release_config.py:decide_release_users",
                           "commands/release_config.py:generate_release_config",
                           "commands/rollback.py:restore_rolled_back_data"]
 

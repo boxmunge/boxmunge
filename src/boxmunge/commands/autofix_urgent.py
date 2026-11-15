@@ -10,8 +10,9 @@ and never holds the fleet lock. For each queued project, under its project
 lock (held by someone else: left for the next run, logged):
 
 - a journal left by a run that was killed (cve.autofix_run) is undone
-  first, alerted once, and table B applied for what it was patching; then
-  the queued patch carries on as below;
+  first (only its built images removed when a deploy has replaced the
+  release it patched), alerted once, and table B applied for what it was
+  patching; then the queued patch carries on as below;
 - the findings are read again from the project's stored scan, by the keys
   the queue holds: a queue entry is never trusted on its own. Gone (a later
   scan no longer finds them, or they stopped being urgent): the entry and
@@ -33,8 +34,17 @@ containers), one it leaves up or at risk stays so; then one urgent alert
 names the step. The lift or the fallback comes first, then the entry and
 the marker are cleared (both kept when the lift or the fallback failed, so
 the next run retries), then the one alert, which says what of that
-failed. Upgrade probation does not hold this back; only the nightly flow
-waits for it.
+failed. A failure is remembered (cve.autofix_failed), so the scans do not
+queue the same patch again until what it depends on changes. A patch that
+finds no running image still carrying its CVEs (a deploy or an upstream
+update fixed them since the scan) is no failure: no fallback, the entry
+and the marker go, one quiet note. Upgrade probation does not hold this
+back; only the nightly flow waits for it.
+
+An entry the stored scan is older than (the scan that queued it could not
+record its results) is kept, not read as gone. A project another
+operation holds is left for the next run, and alerted as stuck once its
+entry has waited AUTOFIX_QUEUE_MAX_WAIT (commands.autofix_urgent_scan).
 
 A queue entry that cannot be read is logged on every run, alerted at most
 once a day per project, and skipped; the rest of the queue still runs.
@@ -47,17 +57,20 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
-from boxmunge.commands.autofix_urgent_scan import with_note
+from boxmunge.commands.autofix_urgent_scan import stuck, with_note
 from boxmunge.commands.quarantine_lift import Restored, restore_from_quarantine
 from boxmunge.commands.security_enforce import quarantine_listing
 from boxmunge.commands.security_scan_inputs import (
     ProjectMeta, ProjectScanError, load_project_meta,
 )
 from boxmunge.cve.alerting import (
-    Alert, format_autofix_failed_alert, format_autofix_interrupted_alert,
-    format_autofix_patched_alert, send_alerts,
+    Alert, format_autofix_failed_alert, format_autofix_gone_alert,
+    format_autofix_interrupted_alert, format_autofix_patched_alert, send_alerts,
 )
-from boxmunge.cve.autofix_policy import AUTOFIX_URGENT_BUDGET, AutofixUrgency, urgency
+from boxmunge.cve.autofix_failed import forget, remember
+from boxmunge.cve.autofix_policy import (
+    AUTOFIX_QUEUE_MAX_WAIT, AUTOFIX_URGENT_BUDGET, AutofixUrgency, urgency,
+)
 from boxmunge.cve.autofix_record import (
     QueueEntry, clear_autofixing, journaled_projects, queued_projects, read_queue_entry,
     remove_queue_entry,
@@ -107,6 +120,7 @@ def run_urgent_queue(paths: BoxPaths, now: datetime, *,
         except LockError:
             log_operation(_COMPONENT, f"{project}: queued autofix left for the next run: the "
                           f"project is held by another operation", paths, project=project)
+            _stuck_if_late(paths, project, "another operation has held the project")
             continue
         except InvalidProjectName as e:
             _problem(paths, None, f"the autofix queue holds {project!r}, not a project "
@@ -117,6 +131,17 @@ def run_urgent_queue(paths: BoxPaths, now: datetime, *,
                   f"FAILED at {outcome.failed_step or 'an unexpected error'}: {outcome.reason}"))
             outcomes.append(outcome)
     return outcomes
+
+
+def _stuck_if_late(paths: BoxPaths, project: str, reason: str) -> None:
+    """A queued patch left again AUTOFIX_QUEUE_MAX_WAIT after its detection
+    is alerted as stuck (once a day); the scans stop holding it back."""
+    try:
+        entry = read_queue_entry(paths, project)
+    except (StateError, InvalidProjectName):
+        return   # a run that can take the lock alerts the entry itself
+    if entry is not None and _now() - entry.detected_at >= AUTOFIX_QUEUE_MAX_WAIT:
+        stuck(paths, project, entry, reason=reason)
 
 
 def _problem(paths: BoxPaths, project: str | None, problem: str) -> None:
@@ -165,6 +190,12 @@ def _read(paths: BoxPaths, project: str) -> _Job | None:
     if state is None:
         raise StateError(f"{project} has an autofix queued but no stored scan")
     decisions = decisions_from_scan_state(state, project_name=project)
+    scanned = datetime.fromisoformat(state["scanned_at"])
+    if (scanned if scanned.tzinfo else scanned.replace(tzinfo=timezone.utc)) < entry.queued_at:
+        # Read as gone, the patch would be dropped with its quarantine held back.
+        raise StateError(f"{project}'s stored scan ({scanned.isoformat()}) is older than its "
+                         f"queued patch ({entry.queued_at.isoformat()}): the scan that queued "
+                         f"it could not record its results, so the patch is kept queued")
     return _Job(entry, meta, decisions, _current(decisions, entry, meta))
 
 
@@ -201,7 +232,8 @@ def _process(paths: BoxPaths, project: str, now: datetime) -> AutofixOutcome | N
         interrupted = recover_interrupted(
             paths, project, patch_cves=_dark(paths, project))
     except StateError as e:
-        _problem(paths, project, f"its autofix journal cannot be used: {e}")
+        _problem(paths, project, f"its autofix journal (or the release it names) cannot be "
+                 f"read, so the interrupted run was not undone: {e}")
         return None
     unreadable = None
     try:
@@ -218,7 +250,8 @@ def _process(paths: BoxPaths, project: str, now: datetime) -> AutofixOutcome | N
             site = "Nothing it was patching is queued any more."
         else:
             site = _fallback(paths, project, job)[0]
-        _send(paths, format_autofix_interrupted_alert(project, interrupted, site=site))
+        _send(paths, format_autofix_interrupted_alert(
+            project, interrupted.problems, site=site, superseded=interrupted.superseded))
     if job is None:
         return None
     if not job.findings:
@@ -259,11 +292,20 @@ def _conclude(paths: BoxPaths, project: str, job: _Job, outcome: AutofixOutcome)
                   paths, project=project, detail={
                       "ok": outcome.ok, "detected_at": job.entry.detected_at.isoformat(),
                       "started_at": (outcome.started_at or _now()).isoformat()})
+    if outcome.nothing_to_patch and not outcome.rollback_problems:
+        _nothing_to_patch(paths, project, cves, outcome.reason)
+        return
+    repeat = None
     if outcome.ok:
+        forget(paths, project, "urgent")
         site, settled, urgent = _succeeded(paths, project, job)
         alert = format_autofix_patched_alert(project, cves, outcome.records, site=site,
                                              urgent=urgent, timing=timing)
     else:
+        if job.meta.autofix:   # held back from the next scans (cve.autofix_failed)
+            repeat = remember(paths, project, "urgent", [
+                (d, fd) for d in job.decisions for fd in d.findings if fd in job.findings],
+                outcome, _now())
         site, settled = _fallback(paths, project, job)
         alert = format_autofix_failed_alert(
             project, cves, step=outcome.failed_step, reason=outcome.reason, site=site,
@@ -277,7 +319,28 @@ def _conclude(paths: BoxPaths, project: str, job: _Job, outcome: AutofixOutcome)
         except StateError as e:
             log_error(_COMPONENT, f"{project}: {e}", paths, project=project)
             note = f"Clearing the queue entry or the autofixing marker failed: {e}"
+    if repeat is not None and settled and note is None and not outcome.rollback_problems:
+        log_operation(_COMPONENT, f"{project}: the retried urgent autofix failed again at "
+                      f"{outcome.failed_step or 'an unexpected error'}, as it did first on "
+                      f"{repeat.at.date().isoformat()}; not alerted again", paths,
+                      project=project)
+        return
     _send(paths, with_note(alert, note))
+
+
+def _nothing_to_patch(paths: BoxPaths, project: str, cves: Sequence[str], reason: str) -> None:
+    """No image production runs carries the CVEs any more (a deploy or an
+    upstream update since the scan): as when the stored scan no longer has
+    them, no fallback; the entry and the marker go, a quarantine taken for
+    the patch follows the scan's lift rules, and one quiet note says so."""
+    try:
+        _done(paths, project)
+    except StateError as e:   # kept: the next run finds nothing to patch again
+        log_error(_COMPONENT, f"{project}: dropping its queued autofix failed: {e}", paths,
+                  project=project)
+        return
+    forget(paths, project, "urgent")
+    _send(paths, format_autofix_gone_alert(project, cves, reason))
 
 
 def _timing(found: datetime, started: datetime, ended: datetime, verb: str) -> str:

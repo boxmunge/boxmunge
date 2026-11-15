@@ -235,6 +235,7 @@ state="${state%.service}"
 case "$1" in
     show) if [[ -f "$state" ]]; then printf 'LoadState=loaded\nResult=%s\n' "$(cat "$state")"; else printf 'LoadState=not-found\nResult=success\n'; fi ;;
     reset-failed) [[ -f "$state" ]] || { echo "Unit ${*: -1} not loaded." >&2; exit 1; }; rm -f "$state" ;;
+    daemon-reload|enable|disable|restart) ;;   # the units a rollback restores (units.sh)
     *) echo "systemctl stand-in: unexpected $*" >&2; exit 64 ;;
 esac
 EOF
@@ -275,6 +276,8 @@ new_root() {
         "$BOXMUNGE_ROOT/config" "$BOXMUNGE_ROOT/sudoers.d"
     echo "0.5.0+abc1234" > "$BOXMUNGE_ROOT/config/version"
     export BOXMUNGE_SUDOERS_FILE="$BOXMUNGE_ROOT/sudoers.d/boxmunge-deploy"
+    export BOXMUNGE_SYSTEMD_DIR="$BOXMUNGE_ROOT/etc-systemd"
+    mkdir -p "$BOXMUNGE_SYSTEMD_DIR"
     for s in a b; do
         mkdir -p "$BOXMUNGE_ROOT/env-$s/bin"
         mock_server "$s" 'exit 0'

@@ -2,7 +2,7 @@
 
 How boxmunge handles CVEs published against deployed images: nightly
 scanning, the known-exploited lists, the trust ladder, posture-based
-quarantine, the deploy guard, suppression workflow, and recovery.
+quarantine, autofix, the deploy guard, suppression workflow, and recovery.
 
 ## Which posture should I pick?
 
@@ -10,9 +10,10 @@ quarantine, the deploy guard, suppression workflow, and recovery.
   down only for a CVE that is known to be exploited, and alerts on the rest.
 - **`relaxed`** suits a demo or a non-production site that holds nothing
   sensitive. It takes a site down only for a CVE on CISA's or the EU's
-  list that has no fix (a VulnCheck-only listing never does). Relaxed does not mean stale: the nightly maintenance run keeps
-  `image:` services on their tag's current image, and deploys rebuild on
-  current base images.
+  list that has no fix (a VulnCheck-only listing never does). Relaxed does not mean stale: autofix keeps its
+  images patched (at `balanced`'s threshold, see "Autofix"), the nightly
+  maintenance run keeps `image:` services on their tag's current image, and
+  deploys rebuild on current base images.
 - **`strict`** is for sites that handle sensitive data and want more
   protection, at the price of some risk of downtime. It alerts from Medium
   severity, and an available fix that is not deployed within 7 days takes
@@ -46,6 +47,14 @@ Set it in the manifest under `security.posture` (see "Configuring posture").
   deadline"). `paranoid` takes a site down for any listing, VulnCheck's
   included, and for any Medium-or-worse finding from any source, fixable
   or not, with no distro trust.
+- **Autofix (on by default).** A fixable OS-package CVE is patched on the
+  box: a known-exploited one at once (site down while it is patched only
+  where table A says so), any other that meets the posture's gate in the
+  nightly run (`paranoid` patches those at once too, site down). Each patch is built from the running image, scanned, swapped in and
+  health-checked within 30 minutes, or rolled back. `status` then shows the
+  project as `patched`: bring the fix into the repo before the next deploy,
+  which the deploy guard otherwise refuses. Opt out with `security.autofix:
+  false` (see "Autofix").
 - **Trust the distro.** Below `paranoid`, the engine treats the distro's own
   triage as authoritative. A CVE the distro marked `will_not_fix`,
   `fix_deferred`, `not_affected`, or `under_investigation` is informational
@@ -501,6 +510,709 @@ runs (a `build:` service is rebuilt on its base image's current digest by
 its next `stage` and `promote`, or `prod-deploy <project> --redeploy`; an
 `image:` service needs the fixed tag or digest), then deploy it before the
 date.
+
+## Autofix
+
+Autofix patches a vulnerable image on the box, so a fix the distro already
+ships is running before anyone has rebuilt the image. It is on by default.
+
+It patches OS packages only, from the image's own distro repositories, and
+only in an image it can patch: one with a shell and `apk` or `apt`/`dpkg`,
+and a user it can switch back to after the upgrade. A distroless or
+`scratch` image has no package manager, and a language package (pip, npm,
+gems, Go modules) is never patched; for those the scans alert as before
+and the fix is a rebuild.
+
+Opt a project out with `security.autofix: false` in its manifest (project
+level only, see "Configuring posture"). That is the only switch: container
+updates being off for the project, or for the box, does not stop autofix.
+
+Terms used below:
+
+- **Full KEV**: listed by CISA's KEV catalog or ENISA's EU KEV list.
+- **VulnCheck only**: listed by VulnCheck's KEV list (an opt-in source) and
+  by neither of the others.
+- **Patchable**: a fixed version of the OS package exists in the image's
+  distro, the image can be patched (above), `security.autofix` is on, and
+  nothing else keeps the site down. Nothing else means: the project is not
+  paused or stopped by the health monitor, not quarantined for a CVE
+  autofix is not patching, and has no other quarantine-level finding that
+  autofix cannot patch.
+- **Dark**: the project is quarantined (maintenance page, containers
+  stopped). **Up**: the site keeps serving.
+
+### What a patch does
+
+Every patch, urgent or nightly, runs the same steps under the project's
+lock:
+
+1. **Scan.** The images production runs are scanned, against fresh
+   known-exploited lists, to find each service that carries the CVEs and
+   every OS package each CVE is in.
+2. **Build.** For each such service a patched image is built `FROM` the
+   exact image the service runs, by digest, with only those packages
+   upgraded, and checked: it must be built on that image, and every package
+   must be at least its fixed version by the distro's own version
+   ordering. The build copies nothing in and uses no layer cache. A
+   service that already runs a patched image is patched again from the
+   image its patch was built from, keeping the earlier patch's packages:
+   a patch is never built on a patch.
+3. **Scan the patched images.** The patch fails if a CVE it was for is
+   still there, or if it brings a finding that is quarantine-level under
+   the project's posture and was not in the image it replaces.
+4. **Swap.** Every patched service of the project is switched at once (an
+   image pin, below), and the containers are recreated through the usual
+   start checks.
+5. **Health.** Every service the project runs must come back healthy.
+
+Each attempt has 30 minutes from its own start, not from the detection: a
+project waiting its turn behind others (many projects on one base image)
+stays as the scan left it and does not lose its patch to the wait. A step
+still running when the time is up finishes, then the patch is rolled back.
+Once the patched images are swapped in, the time limit no longer applies:
+the health check and the patch record always finish, so a patch that works
+is not undone for running late.
+
+Any failure rolls back, whatever the project's container-update `strategy`:
+the pins the project had are restored exactly, its containers recreated
+and waited for, and every image the attempt built removed. A patch that
+failed is never left running. The patch is recorded only once its services
+are healthy.
+
+**An interrupted run.** Just before the swap, the run writes a journal,
+`state/autofix/<project>.journal`: the release it patched, the pins and
+patch records the project had, the images the run built and the services
+production ran. A run that finishes removes it. One left behind means the
+run was killed (a reboot, the service's time limit); the autofix unit undoes
+it on its next run exactly as a rollback would, patch records included, and
+waits for those services to be healthy. When the project has been deployed
+since, the new release's pins, records and containers are left alone and
+only the images the run built are removed. Either way it alerts once
+(`Autofix run interrupted — rolled back`, saying which), then applies the
+fallback (table B) for what it was patching. The
+KEV watch starts the unit on its next tick when a journal is left, so the
+undo comes within half an hour.
+
+### Urgent and nightly patches
+
+**Urgent** findings are patched as soon as the scan is over:
+
+- a full-KEV finding;
+- a VulnCheck-only finding the policy does not suppress;
+- under `paranoid`, any listed finding, and any finding at its gate that
+  has a fix;
+- under `strict`, a finding its fix deadline took down.
+
+The scan that finds one (the nightly scan, a KEV watch tick, or `security
+scan`) either quarantines the project, when table A says it is dark while
+patched, or holds back the quarantine the finding would take and leaves the
+site up. Either way it marks the project as autofixing and queues the
+patch. The queue runs in its own unit, `boxmunge-autofix.service` (`security
+autofix-queue`, as root, with a 6-hour limit), which the scan starts
+without waiting, so a long patch never holds up the scans or the container
+update. It takes each project's own lock and no other; a project another
+operation holds is left for the next run. A `security scan <project>` run
+from the deploy shell runs its own project's patch itself, at once. Upgrade
+probation does not hold an urgent patch back.
+
+When the patch passes, the patched image runs and a quarantine taken for
+the patch is lifted (one notice says so). When it fails, the fallback in
+table B applies and one priority-1 alert names the step that failed. When
+it finds no running image that still carries the CVEs (a deploy or an
+upstream update fixed them first), nothing is patched and no fallback
+applies: one quiet note says so, and a quarantine taken for the patch is
+lifted by the next scan under its usual rules. A release switch drops a
+queued patch with the release's pins.
+
+A later scan that finds the patch still queued keeps its detection time
+and adds any new finding to it. A patch that has not started 2 hours after
+it was found is stuck (the unit does not start, or another operation keeps
+holding the project): the scans stop holding the quarantine back, so the
+project is quarantined where table B takes it down (the patch, still
+queued, then runs with the site down), `Urgent autofix could not start` is
+alerted once a day, and the `autofix-queue` health check warns. A unit that
+cannot be started is alerted the same way.
+
+**A patch that fails every time.** A failed patch is remembered,
+`state/autofix/<project>.failed`, with the CVEs, the images that carried
+them and their fixed versions, the step and whether the failure would happen
+again the same way. A failure that would (the image cannot be patched, the
+patch does not fix it, the patched images are not healthy) holds the patch
+until one of those changes. Any other (the time limit, a mirror or Docker
+error, a scan or swap failure) holds it for 20 hours after its last try,
+then the patch is tried again. While it is held, the scans do not queue that
+urgent patch and the nightly run does not try that nightly patch: the
+posture's own rule stands and the nightly digest lists it as `still
+unpatched since <date>: <reason>`. A retry that fails again at the same
+step, the same way, is not alerted again (the fallback still applies); one
+that fails differently is. A
+new base image, a new fixed version or another CVE is a change, and the
+patch is tried again. A patch that passes, one with nothing left to patch,
+a release switch and a project delete forget it.
+
+**Nightly** findings are patched in the nightly maintenance run: a fixable
+finding that is not on any known-exploited list and that, without its fix,
+would meet the posture's gate (`relaxed` uses `balanced`'s gate), not
+suppressed. They are patched with the site up, inside `container-update`,
+after the project's own container update and under the same lock, one
+project after another. Every deployed project with `security.autofix` on is
+visited, whether or not its container updates are on. The window is 3
+hours from the start of `container-update`; no patch starts in its last 40
+minutes, and the projects not reached are deferred to the next night.
+
+Nothing is patched nightly during upgrade probation, or for a project that
+is quarantined, paused, migrating or stopped by the health monitor, or that
+has an urgent patch queued or an interrupted run's journal left (the
+autofix unit handles those). A failed container update holds the patch back
+only when it may have left the project on other images (a recreate that
+was not rolled back healthy, a tag not pointed back). When tonight's update
+already brought an upstream image without the CVE, nothing is patched and
+the digest says so.
+
+A night with anything to report sends one quiet digest (`Nightly autofix:
+...`), one line per project: `patched`, `fixed by tonight's update`, `could not patch`,
+`skipped` (and why), `deferred to the next maintenance window`, and the
+upstream lines below. A failed nightly patch whose rollback did not finish
+may have left the project mixed: that is the priority-1 failure alert, at
+once, not a digest line.
+
+### Patched images
+
+A patched image is tagged
+`boxmunge.invalid/<project>/<service>:autofix-<first 12 hex of its image ID>`,
+under the project's own platform prefix (see SECURITY.md, "Built image
+names"): no other project can name it, no pull ever asks a registry for it,
+and `project-delete` removes it. `state/image_pins/<project>.json` pins the
+service to it, and production's overlay runs it. Before every production
+start (a restart, `resume`, `recover`, `restore`, the health monitor's
+restart, a quarantine lift, an upgrade, a container update) the start
+checks that the tag still names the pinned image ID, and refuses noisily if
+not. What was patched is recorded in `state/autofix/<project>.json`: the
+service, the image the patch was built from and its digest, the patched
+image, each package's version before and after, the CVEs, when, and whether
+an urgent or a nightly patch made it.
+
+A patch belongs to the release it was made for. A `prod-deploy`, `promote`
+or `rollback` drops the project's pins and patch records when it switches
+release, and the release's own images run. The deploy guard refuses a
+release whose images carry a CVE autofix patched in the running release,
+a rollback included, so the fix must be in the repo first (see "The deploy
+guard").
+
+**Seeing it.** `status` lists each patched project with
+`patched: running image differs from the release (N packages upgraded for
+<CVEs>, since <date>)`, and each project being patched with `autofixing:
+...` and whether the site is down for it. `status --json` has `patched`
+(`since`, `cves`, `packages`) and `autofixing` (`started_at`, `cves`,
+`downtime`) on every row, null when they do not apply; the TUI dashboard
+adds `(patched)` or `(autofixing)` to the status. `security <project>`
+lists every patch record in full (`patches` and `autofixing` in `--json`).
+
+**Bring the fix into the repo.** A patched project is safe for now, but its
+repo still builds the vulnerable image, and the next deploy is refused
+until it does not. Bump the base image (a new tag or digest) or upgrade the
+packages `security <project>` lists in the Dockerfile, then deploy.
+
+### Switching back to upstream
+
+`container-update` leaves a service that runs a patched image alone (no
+registry serves it). Instead, the nightly run catches each pinned image
+service up with its upstream before patching. It does so for a project
+whose container update ran to the end tonight, under the same lock and
+inside the same window:
+
+- The image the release names for the service is pulled. If it is still
+  the image the patch was built from, the patch stays and nothing is said.
+  A new image that changes the user the service runs as is held back, as
+  container update holds it.
+- A new image is scanned the way the deploy guard scans a release. The
+  pre-update backup is taken first when the project declares backups; if
+  it fails, nothing changes.
+- Clean of every CVE the patch fixed, and with no quarantine-level finding
+  the patched image does not have: the pin and the patch record go, the
+  service runs the upstream image, and the project must come back healthy.
+  If it does not, the patch is put back. The switch is journalled like a
+  patch, so one that is killed is undone by the autofix unit.
+- Still carrying a CVE the patch fixed: it is patched again from the new
+  image, never from the old patched one.
+
+The digest lists `switched to upstream`, `re-patched on new upstream` and
+`could not catch up with upstream`. Two cases are never caught up:
+
+- A `build:` service. The base of its patch is an image this box built, and
+  only a deploy brings a new build.
+- A project whose container updates are off. It keeps its patch until its
+  next deploy.
+
+### What autofix does not do
+
+- It does not clean persistent data or prove that nothing was planted
+  before the patch. It replaces vulnerable code only. For a known-exploited
+  CVE, check the project's data as well (`agent-help cve-incident`).
+- It never runs inside a deploy. When someone stages, deploys, promotes or
+  rolls back, the deploy guard tells them to fix the CVE in the repo
+  instead (chart 3).
+- It does not override `dangerously_disable_quarantine: true`. With that
+  set, a patch table A would run dark runs with the site up, and every
+  dark fallback in table B becomes running at risk, alerted.
+
+### At a glance, by posture
+
+Each chart is the whole flow for one posture. Charts 1 to 4 after them show
+the same rules arranged by situation. Under every posture, the deploy guard
+(chart 3), switching back to upstream (chart 4) and
+`dangerously_disable_quarantine` work the same way. A project with
+`security.autofix: false` is never patchable.
+
+"Patched" always means the steps in "What a patch does": built from the
+running image, scanned against fresh known-exploited lists, swapped in and
+health-checked within 30 minutes of the attempt's start, and rolled back
+if any step fails. "The nightly run" is the maintenance run that starts
+between 02:30 and 03:00.
+
+#### relaxed
+
+Down only for a full-KEV CVE that has no fix.
+
+```mermaid
+flowchart TD
+  F["Finding"] --> L{"Known exploited?<br/>CISA, EU or VulnCheck"}
+  L -->|no| G{"Meets balanced's gate,<br/>fix available, patchable,<br/>not suppressed?"}
+  G -->|no| I["Informational<br/>not alerted"]
+  G -->|yes| N["Stays up<br/>patched in the nightly run<br/>result in the quiet digest"]
+  L -->|yes| P{"Patchable?"}
+  P -->|yes| W["Stays up while patched"]
+  W -->|passes| OK["Patched image runs<br/>one notice"]
+  W -->|fails| WF["Stays up<br/>urgent alert names the failed step"]
+  P -->|no| NF{"Full KEV with no fix?"}
+  NF -->|yes| D["Quarantined<br/>urgent alert"]
+  NF -->|no| U["Stays up<br/>urgent alert, a full-KEV one every scan"]
+```
+
+```text
+RELAXED   down only for a full-KEV CVE that has no fix
+
+Finding
+ |
+ +-- known exploited (CISA, EU or VulnCheck)
+ |    +-- patchable .............. UP while patched
+ |    |     pass: patched image runs, one notice
+ |    |     fail: UP, urgent alert names the failed step
+ |    +-- not patchable
+ |          +-- full KEV, no fix .. DOWN, urgent alert
+ |          +-- otherwise ......... UP, urgent alert (a full-KEV one every scan)
+ |
+ +-- not listed
+      +-- balanced's gate, fix, patchable
+      |                         ... UP, patched in the nightly run
+      +-- anything else ....... informational: not alerted
+```
+
+#### balanced (default)
+
+Down for a full-KEV CVE. Everything else stays up.
+
+```mermaid
+flowchart TD
+  F["Finding"] --> L{"Known exploited?"}
+  L -->|"CISA or EU KEV"| KP{"Patchable?"}
+  KP -->|no| KD["Quarantined<br/>urgent alert says why"]
+  KP -->|yes| CV{"CVSS 9+ or unrated?"}
+  CV -->|yes| KDW["Quarantined while patched"]
+  CV -->|no| KUW["Stays up while patched"]
+  KDW --> KR{"Patch passes?"}
+  KUW --> KR
+  KR -->|yes| KOK["Patched image runs<br/>quarantine lifted, one notice"]
+  KR -->|no| KF["Quarantined<br/>urgent alert names the failed step"]
+  L -->|"VulnCheck only"| VP{"Patchable?"}
+  VP -->|yes| VW["Stays up while patched"]
+  VW -->|passes| VOK["Patched image runs<br/>one notice"]
+  VW -->|fails| VF["Stays up<br/>urgent alert"]
+  VP -->|no| VF
+  L -->|"not listed"| G{"Meets balanced's gate?<br/>distro High+, network-reachable,<br/>not suppressed"}
+  G -->|no| I["Informational"]
+  G -->|yes| FX{"Fix available?"}
+  FX -->|no| AW["Stays up<br/>alerted once: awaiting fix"]
+  FX -->|yes| NP{"Patchable?"}
+  NP -->|yes| N["Stays up<br/>patched in the nightly run<br/>result in the quiet digest"]
+  NP -->|no| RA["Stays up<br/>alert with rebuild advice"]
+```
+
+```text
+BALANCED (default)   down for a full-KEV CVE; everything else stays up
+
+Finding
+ |
+ +-- CISA or EU KEV
+ |    +-- patchable
+ |    |    +-- CVSS 9+ or unrated .... DOWN while patched
+ |    |    +-- CVSS below 9 .......... UP while patched
+ |    |          pass: patched image runs, quarantine lifted, one notice
+ |    |          fail: DOWN, urgent alert names the failed step
+ |    +-- not patchable .............. DOWN, urgent alert says why
+ |
+ +-- VulnCheck only
+ |    +-- patchable .................. UP while patched
+ |    |     pass: one notice     fail: UP, urgent alert
+ |    +-- not patchable .............. UP, urgent alert
+ |
+ +-- not listed
+      +-- below the gate, or suppressed ... informational
+      +-- distro High+, network-reachable
+           +-- no fix ..................... UP, alerted once (awaiting fix)
+           +-- fix, patchable ............. UP, patched in the nightly run
+           +-- fix, not patchable ......... UP, alert with rebuild advice
+```
+
+CVSS is the highest score any source gives.
+
+#### strict
+
+Down for any full-KEV CVE, and for an available fix not deployed within 7
+days. A flaw with no fix stays up and is alerted.
+
+```mermaid
+flowchart TD
+  F["Finding"] --> L{"Known exploited?"}
+  L -->|"CISA or EU KEV"| KP{"Patchable?"}
+  KP -->|no| KD["Quarantined<br/>urgent alert says why"]
+  KP -->|yes| KDW["Quarantined while patched"]
+  KDW -->|passes| KOK["Back up on the patched image<br/>one notice"]
+  KDW -->|fails| KF["Stays quarantined<br/>urgent alert names the failed step"]
+  L -->|"VulnCheck only"| VP{"Patchable?"}
+  VP -->|yes| VW["Stays up while patched"]
+  VW -->|passes| VOK["Patched image runs<br/>one notice"]
+  VW -->|fails| VF["Urgent alert<br/>then judged as not listed"]
+  VP -->|no| VF
+  VF --> G
+  L -->|"not listed"| G{"Meets strict's gate?<br/>distro Medium+, network-reachable,<br/>not suppressed"}
+  G -->|no| I["Informational"]
+  G -->|yes| FX{"Fix available?"}
+  FX -->|no| QD["Stays up<br/>alerted once: awaiting fix"]
+  FX -->|yes| NP{"Patchable?"}
+  NP -->|yes| N["Stays up<br/>patched in the nightly run<br/>result in the quiet digest"]
+  NP -->|no| RA["Stays up, alert with rebuild advice<br/>re-alerted 48 h before the deadline<br/>quarantined after 7 days if the fix is not running"]
+```
+
+```text
+STRICT   down for any full-KEV CVE, and for an available fix not deployed in 7 days
+
+Finding
+ |
+ +-- CISA or EU KEV
+ |    +-- patchable .................. DOWN while patched
+ |    |     pass: back UP on the patched image, one notice
+ |    |     fail: stays DOWN, urgent alert names the failed step
+ |    +-- not patchable .............. DOWN, urgent alert says why
+ |
+ +-- VulnCheck only
+ |    +-- patchable .................. UP while patched
+ |    |     pass: one notice
+ |    |     fail: urgent alert, then judged as "not listed" below
+ |    +-- not patchable .............. urgent alert, then judged as "not listed"
+ |
+ +-- not listed
+      +-- below the gate, or suppressed ... informational
+      +-- distro Medium+, network-reachable
+           +-- no fix ..................... UP, alerted once (awaiting fix)
+           +-- fix, patchable ............. UP, patched in the nightly run
+           +-- fix, not patchable ......... UP, alert with rebuild advice;
+                                            re-alert 48h before the deadline;
+                                            DOWN after 7 days if not deployed
+```
+
+A fixable finding the nightly run could not patch by its deadline (every
+attempt failed, say) is quarantined at the deadline like any other, and is
+then patched at once, dark.
+
+#### paranoid
+
+Down for anything known exploited, and for any Medium-or-worse finding
+until it is fixed. A fixable one is quarantined and patched at once, not
+left for the nightly run.
+
+```mermaid
+flowchart TD
+  F["Finding"] --> L{"Known exploited?<br/>CISA, EU or VulnCheck"}
+  L -->|yes| KP{"Patchable?"}
+  KP -->|no| KD["Quarantined<br/>urgent alert says why"]
+  KP -->|yes| KDW["Quarantined while patched"]
+  KDW -->|passes| KOK["Back up on the patched image<br/>one notice"]
+  KDW -->|fails| KF["Stays quarantined<br/>urgent alert names the failed step"]
+  L -->|no| G{"Medium+ from any source,<br/>not suppressed?"}
+  G -->|no| I["Informational"]
+  G -->|yes| FX{"Fix available?"}
+  FX -->|no| QD["Quarantined"]
+  FX -->|yes| NP{"Patchable?"}
+  NP -->|yes| PQ["Quarantined while patched<br/>now, not in the nightly run"]
+  PQ -->|passes| POK["Back up on the patched image<br/>one notice"]
+  PQ -->|fails| PF["Stays quarantined<br/>urgent alert names the failed step"]
+  NP -->|no| RA["Quarantined<br/>alert with rebuild advice"]
+```
+
+```text
+PARANOID   down for anything known exploited, and any Medium+ finding until fixed
+
+Finding
+ |
+ +-- known exploited (CISA, EU or VulnCheck)
+ |    +-- patchable .................. DOWN while patched
+ |    |     pass: back UP on the patched image, one notice
+ |    |     fail: stays DOWN, urgent alert names the failed step
+ |    +-- not patchable .............. DOWN, urgent alert says why
+ |
+ +-- not listed
+      +-- below Medium, or suppressed ..... informational
+      +-- Medium+ from any source
+           +-- no fix ..................... DOWN
+           +-- fix, patchable ............. DOWN while patched, now
+           |     pass: back UP on the patched image   fail: stays DOWN
+           +-- fix, not patchable ......... DOWN, alert with rebuild advice
+```
+
+### Chart 1: a known-exploited finding
+
+```mermaid
+flowchart TD
+  F["Finding on a project<br/>nightly scan, KEV watch (every 30 min)<br/>or security scan"] --> L{"On a known-exploited list?"}
+  L -->|"CISA or EU KEV"| P{"Patchable?"}
+  L -->|"VulnCheck only"| P
+  L -->|"not listed"| N["Chart 2"]
+  P -->|no| FB["Fallback rule, table B<br/>urgent alert says why autofix could not help"]
+  P -->|yes| D{"Downtime while patching?<br/>table A"}
+  D -->|dark| Q["Quarantine now"]
+  D -->|up| U["Site stays up<br/>status shows autofixing"]
+  Q --> B["boxmunge-autofix.service:<br/>build patched image from the running image<br/>scan it against fresh KEV lists<br/>swap it in, health check<br/>budget: 30 min from the attempt's start"]
+  U --> B
+  B -->|passes| OK["Patched image runs<br/>quarantine lifted if there was one<br/>one notice"]
+  B -->|"fails or times out"| RB["Swap rolled back<br/>fallback rule, table B<br/>urgent alert names the step that failed"]
+```
+
+```text
+        +-----------------------------------------------+
+        | Finding on a project (nightly scan, KEV watch |
+        | every 30 min, or security scan)               |
+        +-----------------------------------------------+
+                               |
+                               v
+                < On a known-exploited list? >
+               /               |               \
+     CISA or EU KEV      VulnCheck only       not listed
+               \               /                   |
+                v             v                    v
+                < Patchable? >                 [chart 2]
+                 |           |
+                yes          no
+                 |           v
+                 |    +----------------------------------+
+                 |    | Fallback rule (table B), plus an |
+                 |    | urgent alert saying why autofix  |
+                 |    | could not help                   |
+                 |    +----------------------------------+
+                 v
+      < Downtime while patching? >  (table A)
+           |                  |
+          dark                up
+           v                  v
+  +----------------+  +------------------------+
+  | Quarantine now |  | Site stays up; status  |
+  |                |  | shows "autofixing"     |
+  +----------------+  +------------------------+
+           \                  /
+            v                v
+  +-------------------------------------------------+
+  | boxmunge-autofix.service: build a patched image |
+  | from the running image, scan it against fresh   |
+  | KEV lists, swap it in, health check.  Budget:   |
+  | 30 min from the attempt's start.                |
+  +-------------------------------------------------+
+           |                           |
+         passes                 fails or times out
+           v                           v
+  +---------------------+  +--------------------------------+
+  | Patched image runs. |  | Swap rolled back. Fallback     |
+  | Quarantine lifted.  |  | rule (table B). Urgent alert   |
+  | One notice.         |  | names the step that failed.    |
+  +---------------------+  +--------------------------------+
+```
+
+A VulnCheck-only finding the policy suppresses is not patched, and under
+`paranoid` "known exploited" includes a VulnCheck-only listing (no
+suppression applies there).
+
+#### Table A: downtime while patching
+
+| Posture | Full KEV, CVSS < 9 | Full KEV, CVSS ≥ 9 or unrated | VulnCheck only |
+|---|---|---|---|
+| relaxed | up | up | up |
+| balanced | up | **dark** | up |
+| strict | **dark** | **dark** | up |
+| paranoid | **dark** | **dark** | **dark** |
+
+CVSS is the highest score any source gives. `strict` stays up for a
+VulnCheck-only finding on this path: strict's own gate quarantines only a
+finding with no fix, and a patchable one has a fix. A project that is
+quarantined already is patched dark whatever the table says; one with
+`dangerously_disable_quarantine: true` is patched up. When the fleet
+circuit breaker holds a project's quarantine, its patch runs up too (the
+breaker never holds one for a full-KEV CVE).
+
+```text
+              CVSS<9   CVSS>=9   VulnCheck
+              KEV      KEV       only
+  relaxed     up       up        up
+  balanced    up       DARK      up
+  strict      DARK     DARK      up
+  paranoid    DARK     DARK      DARK
+```
+
+#### Table B: when autofix cannot help (not patchable, or the patch failed)
+
+| Posture | Full KEV | VulnCheck only |
+|---|---|---|
+| relaxed | no fix: **dark**. Has a fix: up, alerted every scan | up, urgent alert |
+| balanced | **dark** | up, urgent alert |
+| strict | **dark** | up, urgent alert, then judged as not listed (strict never quarantines a no-fix finding that is not full KEV) |
+| paranoid | **dark** | **dark** |
+
+This is the posture's own rule for the finding, as it was before autofix:
+a failed patch never makes a site's outcome worse than not patching.
+`dangerously_disable_quarantine: true` turns every **dark** into running at
+risk, alerted.
+
+```text
+              Full KEV                      VulnCheck only
+  relaxed     no fix: DARK                  up + urgent alert
+              has fix: up, alert each scan
+  balanced    DARK                          up + urgent alert
+  strict      DARK                          up + urgent alert, then judged
+                                            as not listed
+  paranoid    DARK                          DARK
+  (dangerously_disable_quarantine: DARK becomes "running at risk")
+```
+
+### Chart 2: a finding on no known-exploited list
+
+```mermaid
+flowchart TD
+  N["Finding on no known-exploited list"] --> G{"Meets the posture's gate, not suppressed?<br/>relaxed uses balanced's gate for patching"}
+  G -->|no| AL["Informational"]
+  G -->|yes| FX{"Fix available?"}
+  FX -->|no| NF["relaxed: informational<br/>balanced: alerted once, awaiting fix<br/>strict: alerted once, awaiting fix<br/>paranoid: quarantined now"]
+  FX -->|yes| PP{"Patchable?"}
+  PP -->|yes| PT["relaxed, balanced, strict: stays up, patched in the nightly run<br/>paranoid: quarantined and patched now"]
+  PP -->|no| RB["relaxed: informational<br/>balanced: stays up, alert with rebuild advice<br/>strict: the same, re-alerted 48 h before, quarantined after 7 days if not deployed<br/>paranoid: quarantined, alert with rebuild advice"]
+```
+
+```text
+Finding on no known-exploited list
+ |
+ +-- below the posture's gate, or suppressed ... informational
+ |     (relaxed uses balanced's gate: distro High+, network-reachable)
+ |
+ +-- meets the gate
+      +-- no fix
+      |    relaxed ....... informational
+      |    balanced ...... UP, alerted once (awaiting fix)
+      |    strict ........ UP, alerted once (awaiting fix)
+      |    paranoid ...... DOWN now
+      +-- fix, patchable
+      |    relaxed, balanced, strict ... UP, patched in the nightly run
+      |    paranoid ...................... DOWN while patched, now
+      +-- fix, not patchable
+           relaxed ..................... informational
+           balanced .................... UP, alert with rebuild advice
+           strict ...................... the same; re-alert 48h before the
+                                         deadline; DOWN after 7 days if the
+                                         fix is not deployed
+           paranoid .................... DOWN, alert with rebuild advice
+```
+
+### Chart 3: deploying, when someone is working on the project
+
+Autofix never runs inside a deploy. Someone who deploys is working on the
+project, so the deploy guard refuses a release that carries a
+known-exploited CVE, or one autofix patched, and sends them to fix it in
+the repo.
+
+```mermaid
+flowchart TD
+  S["stage, prod-deploy, promote or rollback"] --> SC["Scan the release's images against fresh known-exploited lists<br/>unchanged images reuse their scan"]
+  SC --> R{"A full-KEV CVE (paranoid: any listing),<br/>or a CVE autofix patched in the running release?"}
+  R -->|no| GO["Continue<br/>a quarantined project's own gate still applies"]
+  R -->|yes| O{"--allow-security-regression<br/>with --reason?"}
+  O -->|no| X["Refused<br/>names each CVE, package and fixed version<br/>and what to change in the repo"]
+  O -->|yes| Y["Continue<br/>override logged and alerted"]
+```
+
+```text
+        stage / prod-deploy / promote / rollback
+                          |
+                          v
+        Scan the release's images against fresh known-
+        exploited lists (unchanged images reuse their scan)
+                          |
+                          v
+     < A full-KEV CVE (paranoid: any listing), or a
+       CVE autofix patched in the running release? >
+          |                              |
+          no                            yes
+          v                              v
+   +-------------------+     < --allow-security-regression
+   | Continue (a       |       --reason "..." given? >
+   | quarantined       |           |               |
+   | project's own     |           no              yes
+   | gate still        |           v               v
+   | applies)          |   +----------------+  +----------------+
+   +-------------------+   | REFUSED: names |  | Continue;      |
+                           | each CVE,      |  | override       |
+                           | package, fixed |  | logged and     |
+                           | version, and   |  | alerted        |
+                           | the repo fix   |  |                |
+                           +----------------+  +----------------+
+```
+
+The guard also refuses when the scan failed or did not cover every image,
+and when there is no usable CISA catalog (see "The deploy guard").
+
+### Chart 4: when upstream catches up
+
+```mermaid
+flowchart TD
+  C["Nightly run: an image service on a patched image<br/>its container update ran to the end"] --> NU{"Upstream has a new image?"}
+  NU -->|no| K["Keep the patched image"]
+  NU -->|yes| BK["Pre-update backup, when the project declares one<br/>scan the new image"]
+  BK --> CL{"Clean of the patched CVEs,<br/>no new quarantine-level finding?"}
+  CL -->|yes| RP["Switch to upstream, health check<br/>patch record cleared<br/>unhealthy: the patch is put back"]
+  CL -->|no| PP["Patch the new upstream image in the same run<br/>a patch is never built on a patch"]
+```
+
+```text
+     Nightly run: an image service on a patched image,
+     its container update ran to the end
+                          |
+                          v
+             < Upstream has a new image? >
+               |                       |
+               no                     yes
+               v                       v
+       Keep the patched     Pre-update backup (when the project
+       image                declares one); scan the new image
+                                       |
+                                       v
+                       < Clean of the patched CVEs, and no
+                         new quarantine-level finding? >
+                               |               |
+                              yes              no
+                               v               v
+                    Switch to upstream,   Patch the new upstream
+                    health check; record  image in the same run
+                    cleared (unhealthy:   (never patch a patch)
+                    the patch goes back)
+```
+
+A `build:` service, and any service of a project whose container updates
+are off, keeps its patch until the project's next deploy.
 
 ## CISA KEV feed
 
@@ -997,8 +1709,13 @@ omit it unless you have a specific reason to override inference.
 security:
   posture: balanced                       # default: downtime only for actively exploited (KEV) CVEs
   dangerously_disable_quarantine: false   # default if absent
+  autofix: true                           # default if absent; false opts out of autofix
   # runtimes: [python]                    # optional; overrides inference
 ```
+
+`autofix` is project level only, like `posture`, and must be `true` or
+`false`. With `false`, nothing is patched for the project: the scans alert
+and quarantine exactly as they would without autofix (see "Autofix").
 
 The compose validator rejects:
 
@@ -1222,6 +1939,9 @@ of the two the last scan checked.
   If a KEV watch tick is running, the scan waits for it (see "KEV watch").
 - **Every 30 minutes, for new listings:** the KEV watch rescans only the
   projects a newly listed known-exploited CVE affects.
+- **Patches:** an urgent patch runs in `boxmunge-autofix.service` as soon
+  as the scan that found it is over; the nightly patches run inside the
+  container update that follows the scan (see "Autofix").
 - **At deploy time, for known-exploited CVEs:** `stage`, `prod-deploy`,
   `promote` and `rollback` scan every image the release would start and
   refuse one that carries a known-exploited CVE (see "The deploy guard").
@@ -1388,6 +2108,13 @@ several findings are involved the title names the worst and adds
 | `[<hostname>] <project>: quarantine lifted by deploying <ref>` | normal; priority-1 when the release relaxed the policy or the policy at quarantine time is unknown |
 | `[<hostname>] <project>: deploying past the deploy guard` (`--allow-security-regression`; names the reason given) | normal |
 | `[<hostname>] <project>: deploying without a usable KEV catalog` (`prod-deploy --accept-stale-kev` on a project that is not quarantined) | normal |
+| `[boxmunge:<project>] <CVEs> found on <project>, patching (site up)` or `(site down while patching)` (urgent autofix started; when the scan quarantines the project for the patch, the `QUARANTINED` alert says so instead) | normal |
+| `[boxmunge:<project>] Autofix patched <CVEs>` (the patched images run; the body lists each package change and what it meant for the site) | normal; priority-1 when the quarantine could not be lifted or the smoke test failed |
+| `[boxmunge:<project>] Autofix FAILED at the <step> step — <CVEs>` (rolled back; the body names the fallback now in force, and says so if the rollback did not finish) | priority-1 |
+| `[boxmunge:<project>] Autofix run interrupted — rolled back` (a killed run, undone from its journal) | priority-1 |
+| `[boxmunge:<project>] <CVEs> no longer in <project>'s running images: nothing to patch` (a deploy or an upstream update fixed it before the queued patch ran) | quiet (no sound) |
+| `[boxmunge:<project>] Urgent autofix could not start` (a queued patch has not started for 2 hours, or `boxmunge-autofix.service` cannot be started; once a day while it lasts) | priority-1 |
+| `[<hostname>] Nightly autofix: <N> projects patched, ...` (one line per project: patched, fixed by tonight's update, could not patch, still unpatched since, skipped, deferred, switched to upstream, re-patched on new upstream, could not catch up with upstream) | quiet (no sound) |
 
 Alerting is best-effort. The durable record is the on-disk scan state
 under `state/scans/<project>.json`. If Pushover isn't configured, or
@@ -1408,6 +2135,7 @@ boxmunge security scan                                  Scan all projects
 boxmunge security scan <project>                        Scan one project
 boxmunge security scan --apply-held                     Apply breaker-held quarantines (operator only)
 boxmunge security kev-watch                             One KEV watch tick (the timer runs it every 30 min)
+boxmunge security autofix-queue                         Run the queued urgent patches (root; boxmunge-autofix.service)
 boxmunge security suppress <CVE> --project <name> --until <YYYY-MM-DD> --reason <text>
 boxmunge security unsuppress <CVE> --project <name>
 boxmunge security resume <project>                      Lift CVE quarantine
@@ -1424,8 +2152,10 @@ findings), active suppression counts, quarantines held by the circuit
 breaker, and whether the KEV catalog is fresh.
 
 The per-project view shows posture, quarantine state (with the triggering
-CVE if applicable), the latest scan disposition per finding, and the
-project's active suppressions.
+CVE if applicable), the latest scan disposition per finding, a patch in
+progress and every patch autofix applied (service, package versions before
+and after, CVEs, the image it was built from and the image that runs), and
+the project's active suppressions.
 
 ## The deploy guard
 
@@ -1444,6 +2174,9 @@ The guard refuses a release when:
 
 - an image carries a full-KEV CVE (CISA or EU), under any posture;
 - under `paranoid`, an image carries a VulnCheck-only CVE;
+- an image carries a CVE autofix patched in the running release: the
+  release would bring it back (the header reads `This release brings back
+  a CVE autofix patched`);
 - the scan failed, or did not cover every image the release would start:
   nothing then shows the release is free of them;
 - the CISA catalog is stale and its cached copy lists a CVE in the images;

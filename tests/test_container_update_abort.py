@@ -8,6 +8,7 @@ import pytest
 
 from boxmunge import container_update as cu
 from boxmunge import container_update_tags, user_drift
+from boxmunge.commands.autofix_nightly import on_previous_images
 from boxmunge.commands.container_update_cmd import _dry_run_target, update_project
 from boxmunge.compose_guard import ComposeRefused
 from boxmunge.container_update_targets import UpdateTarget
@@ -130,6 +131,8 @@ def test_abort_after_pull_puts_the_tags_back(
     assert docker.ups == 0
     assert docker.tags == {"nginx:1.25": _OLD, "postgres:17": _OLD}
     assert _restart(docker) == _ALL_OLD
+    # Nothing recreated: tonight's nightly autofix still patches it.
+    assert result["recreated"] is False and on_previous_images(result)
 
 
 def test_a_tag_that_cannot_be_put_back_is_reported(paths, monkeypatch, fake_containers) -> None:
@@ -149,6 +152,7 @@ def test_a_tag_that_cannot_be_put_back_is_reported(paths, monkeypatch, fake_cont
     assert len(logged) == 1 and "postgres:17" in logged[0]
     # The report is true: the restart it warns about runs the pulled image.
     assert _restart(docker) == {"web": _OLD, "db": _NEW}
+    assert not on_previous_images(result)   # a restart would run the pulled image
 
 
 def test_restore_moves_a_shared_tag_for_every_project(paths, monkeypatch, fake_containers) -> None:

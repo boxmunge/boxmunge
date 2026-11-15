@@ -32,7 +32,7 @@ from boxmunge.cve.kev_watch_state import WatchState, write_watch
 from boxmunge.cve.quarantine import QuarantineError, is_quarantined
 from boxmunge.fileutil import project_lock
 from boxmunge.image_pins import ImagePin, pin_ref
-from boxmunge.state import StateError
+from boxmunge.state import StateError, write_state
 from tests.test_commands.cve_helpers import (
     Docker, Pushover, finding, make_box, render_site, scan_and_send, scan_result,
     seed_quarantine,
@@ -56,7 +56,7 @@ class Runner:
         self.dark: list[bool] = []
 
     def __call__(self, paths, project, findings, *, trigger, deadline, quarantined_for_patch):
-        autofix_run._require_lock_held(paths, project)
+        autofix_run.require_lock_held(paths, project)
         self.dark.append(quarantined_for_patch)
         self.calls.append((project, tuple(fd.finding.cve_id for fd in findings), trigger,
                            deadline))
@@ -76,6 +76,8 @@ class Box:
     def __init__(self, tmp_path, monkeypatch, security: dict, *, listed=CISA,
                  cvss: float | None = 9.8, projects=("demo",)) -> None:
         self.paths = make_box(tmp_path, projects=projects, security=security)
+        for project in projects:
+            write_state(self.paths.project_deploy_state(project), {"current_ref": "v1"})
         self.found = [replace(finding(CVE, fix="2"), cvss_score=cvss)]
         self.listed = listed
         self.monkeypatch = monkeypatch
@@ -183,6 +185,28 @@ def test_failure_applies_table_b_and_alerts_step(tmp_path, monkeypatch) -> None:
     assert read_autofixing(box.paths, "demo") is None
 
 
+@pytest.mark.parametrize("cvss", [7.5, 9.8], ids=["site-up", "dark"])
+def test_urgent_nothing_to_patch_drops_the_patch_without_the_fallback(tmp_path, monkeypatch,
+                                                                     cvss) -> None:
+    """A deploy or an upstream update fixed the CVE before the queued patch
+    ran: no table B (a clean site is not quarantined), the entry and the
+    marker go, a quarantine taken for the patch is the scan's to lift, and
+    one quiet note says so."""
+    box = _box(tmp_path, monkeypatch, "balanced", cvss=cvss)
+    box.scan()
+    dark = is_quarantined("demo", box.paths)
+    assert dark is (cvss >= 9)
+    box.runner.outcome = AutofixOutcome(False, "scan", "no image production runs carries it",
+                                        (), nothing_to_patch=True)
+    box.run()
+    assert box.sent("Autofix FAILED") == []
+    [note] = box.sent("nothing to patch")
+    assert note[2] == -1 and "no image production runs carries it" in note[1]
+    assert is_quarantined("demo", box.paths) is dark   # left to the scan's lift rules
+    assert read_queue_entry(box.paths, "demo") is None
+    assert read_autofixing(box.paths, "demo") is None
+
+
 @pytest.mark.parametrize(("posture", "listed", "expect"), [
     pytest.param("balanced", VULNCHECK, "stays up", id="balanced-vulncheck-stays-up"),
     pytest.param("relaxed", CISA, "stays up", id="relaxed-kev-with-fix-stays-up"),
@@ -225,7 +249,7 @@ def test_an_incomplete_rollback_says_the_project_may_be_mixed(tmp_path, monkeypa
     box.run()
     [failed] = box.sent("Autofix FAILED")
     assert "may be left mixed" in failed[1] and "DockerError: boom" in failed[1]
-    assert "boxmunge status demo" in failed[1]
+    assert "boxmunge security demo" in failed[1]
     assert is_quarantined("demo", box.paths)   # quarantined regardless
 
 
@@ -674,11 +698,11 @@ def test_a_killed_run_is_rolled_back_then_the_patch_carries_on(tmp_path, monkeyp
     box.scan()
     patched = "sha256:" + "e" * 64
     built = ImagePin("web", pin_ref("demo", "web", patched), patched, "autofix")
-    write_journal(box.paths, "demo", AutofixJournal(_now(), (), (), (built,)))
+    write_journal(box.paths, "demo", AutofixJournal(_now(), "v1", (), (), (built,), ("web",), ()))
     undone: list = []   # the runner's own Docker seams (tests/cve/test_autofix_run.py)
     monkeypatch.setattr(autofix_run, "clear_pins", lambda p, project: undone.append("pins"))
     monkeypatch.setattr(autofix_run, "recreate_project",
-                        lambda p, project, files, component, patch_cves:
+                        lambda p, project, files, *, component, patch_cves=():
                         undone.append("recreate"))
     monkeypatch.setattr(autofix_run, "wait_healthy", lambda *a, **k: (True, []))
     monkeypatch.setattr(autofix_run, "remove_patched", lambda pin: undone.append(pin.ref))
@@ -689,6 +713,24 @@ def test_a_killed_run_is_rolled_back_then_the_patch_carries_on(tmp_path, monkeyp
     assert interrupted[2] == 1 and "has been rolled back" in interrupted[1]
     assert "quarantined now" in interrupted[1]        # table B for the queued finding
     assert outcome.ok and not is_quarantined("demo", box.paths)   # then patched, lifted
+
+
+def test_a_killed_run_of_a_release_deployed_over_leaves_the_new_release(tmp_path,
+                                                                       monkeypatch) -> None:
+    """A deploy between the kill and the recovery: the new release's pins and
+    containers stand, only the built image goes, and the alert says why."""
+    box = _box(tmp_path, monkeypatch, "balanced", cvss=7.5)
+    patched = "sha256:" + "e" * 64
+    built = ImagePin("web", pin_ref("demo", "web", patched), patched, "autofix")
+    write_journal(box.paths, "demo", AutofixJournal(_now(), "v0", (), (), (built,), ("web",), ()))
+    undone: list = []
+    for name in ("clear_pins", "write_pins", "recreate_project", "wait_healthy"):
+        monkeypatch.setattr(autofix_run, name, lambda *a, n=name, **k: undone.append(n))
+    monkeypatch.setattr(autofix_run, "remove_patched", lambda pin: undone.append(pin.ref))
+    assert box.run() == []
+    assert undone == [built.ref] and read_journal(box.paths, "demo") is None
+    [interrupted] = box.sent("interrupted")
+    assert interrupted[2] == 1 and "release v0, which a deploy has replaced" in interrupted[1]
 
 
 def test_the_real_probe_decides_queueing(tmp_path, monkeypatch) -> None:
@@ -734,9 +776,10 @@ def test_an_interrupted_run_with_an_unreadable_entry_says_so(tmp_path, monkeypat
     box.paths.project_autofix_queue("demo").write_text("{not json")
     patched = "sha256:" + "e" * 64
     built = ImagePin("web", pin_ref("demo", "web", patched), patched, "autofix")
-    write_journal(box.paths, "demo", AutofixJournal(_now(), (), (), (built,)))
+    write_journal(box.paths, "demo", AutofixJournal(_now(), "v1", (), (), (built,), ("web",), ()))
     for name, fake in [("clear_pins", lambda p, project: None),
-                       ("recreate_project", lambda p, project, files, component: None),
+                       ("recreate_project",
+                        lambda p, project, files, *, component, patch_cves=(): None),
                        ("wait_healthy", lambda *a, **k: (True, [])),
                        ("remove_patched", lambda pin: None)]:
         monkeypatch.setattr(autofix_run, name, fake)

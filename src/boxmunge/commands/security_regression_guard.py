@@ -47,6 +47,7 @@ from boxmunge.commands.security_scan_core import ProjectScan
 from boxmunge.commands.security_scan_inputs import ProjectMeta, ScanTarget, project_meta
 from boxmunge.compose_images import describe_image
 from boxmunge.compose_resolve import ComposeResolveError
+from boxmunge.cve.autofix_record import read_records
 from boxmunge.cve.exploited import ExploitedSource, is_full_kev
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.lift_rule import KevLiftCheck, fresh_data_advice
@@ -128,10 +129,11 @@ def regression_override(paths: BoxPaths, project: str, reason: str | None) -> It
 
 
 def patched_cves(paths: BoxPaths, project: str) -> frozenset[str]:
-    """The CVEs autofix patched in the running release: a release that
-    brings one back is refused. Autofix patching arrives with part 2 of the
-    0.12 autofix work; until then nothing is patched."""
-    return frozenset()
+    """The CVEs autofix patched in the running release (every patch record
+    of the project): a release that brings one back is refused. Read before
+    the release is switched, which forgets the records
+    (deploy_steps.clear_release_overrides). Raises StateError."""
+    return frozenset(cve for r in read_records(paths, project) for cve in r.cves)
 
 
 def _line(f: FindingDisposition, image_ref: str, service: str, listed: str) -> str:
@@ -142,39 +144,47 @@ def _line(f: FindingDisposition, image_ref: str, service: str, listed: str) -> s
 
 
 def _listed(f: FindingDisposition, *, paranoid: bool, patched: frozenset[str],
-            stale_listed: frozenset[str], stale: str | None) -> str | None:
-    """Why the guard refuses this finding, or None."""
+            stale_listed: frozenset[str], stale: str | None) -> tuple[str, bool] | None:
+    """(why the guard refuses this finding, whether it is for its being
+    exploited rather than only for autofix having patched it), or None."""
     sources = f.exploited_by
     if is_full_kev(sources):
-        return f"listed as actively exploited by {listing_label(sources)}"
+        return f"listed as actively exploited by {listing_label(sources)}", True
     if f.finding.cve_id in stale_listed:
         return (f"listed as actively exploited by the cached CISA KEV catalog, which is "
-                f"stale ({stale}); a stale catalog cannot show that has changed")
+                f"stale ({stale}); a stale catalog cannot show that has changed"), True
     if paranoid and ExploitedSource.VULNCHECK in sources:  # no suppression applies there
-        return f"listed as actively exploited by {listing_label(sources)} (paranoid refuses it)"
+        return (f"listed as actively exploited by {listing_label(sources)} (paranoid "
+                f"refuses it)"), True
     if f.finding.cve_id in patched:
-        return "autofix patched it in the running release; this release brings it back"
+        return (f"autofix patched {f.finding.cve_id} in the running release; this release "
+                f"brings it back"), False
     return None
 
 
-def _cve_lines(paths: BoxPaths, project: str, meta: ProjectMeta, scan: ProjectScan,
-               targets: list[ScanTarget], kev: KevCatalog, stale: str | None) -> list[str]:
+def _cve_lines(meta: ProjectMeta, scan: ProjectScan, targets: list[ScanTarget],
+               kev: KevCatalog, stale: str | None,
+               patched: frozenset[str]) -> tuple[list[str], bool]:
+    """(a line per CVE the guard refuses, whether any is refused for more
+    than autofix having patched it)."""
     services: dict[str, list[str]] = {}
     for t in targets:
         services.setdefault(t.image_ref, []).append(t.service)
     # A stale catalog is not in the known-exploited index; its cached copy still counts.
     stale_listed = kev.cve_ids if stale is not None else frozenset()
-    patched = patched_cves(paths, project)
     lines: dict[tuple[str, str, str], str] = {}
+    exploited = False
     for decision in scan.decisions:
         for f in decision.findings:
             listed = _listed(f, paranoid=meta.posture is Posture.PARANOID, patched=patched,
                              stale_listed=stale_listed, stale=stale)
             if listed is not None:
+                why, for_exploited = listed
+                exploited |= for_exploited
                 lines.setdefault((f.finding.cve_id, f.finding.package, decision.image_ref),
                                  _line(f, decision.image_ref,
-                                       ", ".join(services[decision.image_ref]), listed))
-    return list(lines.values())
+                                       ", ".join(services[decision.image_ref]), why))
+    return list(lines.values()), exploited
 
 
 def _catalog_lines(paths: BoxPaths, project: str, kev: KevCatalog, stale: str) -> list[str]:
@@ -196,9 +206,16 @@ def _catalog_lines(paths: BoxPaths, project: str, kev: KevCatalog, stale: str) -
 
 
 def _problems(paths: BoxPaths, target: ReleaseTarget,
-              manifest: dict[str, Any]) -> tuple[list[str], bool]:
-    """(what refuses the release, whether any of it is a CVE in its images)."""
+              manifest: dict[str, Any]) -> tuple[list[str], str | None]:
+    """(what refuses the release, the refusal's header when any of it is a
+    CVE in its images)."""
     project = target.project
+    try:
+        patched = patched_cves(paths, project)
+    except StateError as e:
+        return [f"Autofix's patch records cannot be read: {e}",
+                "boxmunge cannot show the release does not bring back a CVE autofix "
+                "patched. Fix the cause and deploy again."], None
     try:
         meta = project_meta(project, manifest, [])
         starts, unnamed = start_images(target)
@@ -209,9 +226,9 @@ def _problems(paths: BoxPaths, target: ReleaseTarget,
             DockerError) as e:
         return [f"The scan of the release's images failed: {e}",
                 "boxmunge cannot show the release carries no known-exploited CVE. Fix the "
-                "cause and deploy again."], False
+                "cause and deploy again."], None
     stale = kev.stale_reason(datetime.now(timezone.utc).date())
-    cves = _cve_lines(paths, project, meta, scan, targets, kev, stale)
+    cves, exploited = _cve_lines(meta, scan, targets, kev, stale, patched)
     problems = list(cves)
     if not scan.complete:
         problems += [*scan.incomplete_reasons(),
@@ -219,7 +236,10 @@ def _problems(paths: BoxPaths, target: ReleaseTarget,
                      "boxmunge cannot show it carries no known-exploited CVE."]
     if stale is not None:
         problems += _catalog_lines(paths, project, kev, stale)
-    return problems, bool(cves)
+    header = None if not cves else (
+        "This release carries a known-exploited CVE" if exploited
+        else "This release brings back a CVE autofix patched")
+    return problems, header
 
 
 def _let_through(paths: BoxPaths, override: _Override, project: str, where: str,
@@ -253,7 +273,7 @@ def guard_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
     where = "staging" if target.staging else "production"
     component = "stage" if target.staging else "deploy"
     print("  Deploy guard: scanning the release's images for known-exploited CVEs...")
-    problems, carries_cve = _problems(paths, target, manifest)
+    problems, header = _problems(paths, target, manifest)
     override = _CURRENT.get()
     if override is not None:
         if override.project != project:
@@ -264,9 +284,8 @@ def guard_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
         print("  Deploy guard: no known-exploited CVE in the release's images.")
         return
     if override is None or override.reason is None:
-        header = ("This release carries a known-exploited CVE" if carries_cve
-                  else "The deploy guard could not clear this release")
-        raise SecurityRegressionRefused([f"{header}; nothing was started in {where}:",
-                                         *problems],
-                                        FIX_IN_REPO if carries_cve else DEPLOY_ANYWAY)
+        raise SecurityRegressionRefused(
+            [f"{header or 'The deploy guard could not clear this release'}; nothing was "
+             f"started in {where}:", *problems],
+            FIX_IN_REPO if header else DEPLOY_ANYWAY)
     _let_through(paths, override, project, where, component, problems)

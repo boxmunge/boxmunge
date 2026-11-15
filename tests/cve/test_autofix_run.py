@@ -29,9 +29,11 @@ from boxmunge.docker_containers import ProjectContainer
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import project_lock
 from boxmunge.image_pins import ImagePin, pin_ref
+from boxmunge.state import StateError, write_state
 from tests.test_commands.cve_helpers import finding
 
 NAME = "shop"
+RELEASE = "v1"
 CVE = "CVE-2026-1111"
 WEB, DB = "sha256:" + "a" * 64, "sha256:" + "d" * 64
 
@@ -66,13 +68,14 @@ class Box:
         self.check_error: Exception | None = None
         self.scan_error: Exception | None = None
         self.log: list[tuple[str, str, dict]] = []
+        self.waited: list[tuple[list[str], list[str]]] = []
         self._ids = itertools.count(1)
         for name, fake in [("load_deployed_inventory", self._inventory),
                            ("scan_release_images", self._scan),
                            ("load_kev", lambda paths: None)]:
             monkeypatch.setattr(autofix_plan, name, fake)
         for name, fake in [("load_project_meta", lambda paths, project: object()),
-                           ("probe", lambda ref: self.probe_result),
+                           ("probe", self._probe),
                            ("build_patched", self._build),
                            ("check_versions", self._check_versions),
                            ("remove_patched", lambda pin: self.removed.append(pin.ref)),
@@ -95,6 +98,9 @@ class Box:
             svc, f"example/{svc}:1", False, True, (ProjectContainer(
                 f"{project}-{svc}-1", svc, img, (), True, "healthy", False, None, "always"),))
             for svc, (_cid, img) in self.containers.items()})
+
+    def _probe(self, image_ref):
+        return self.probe_result
 
     def _check_versions(self, image, patchability, packages):
         self.checked.append(dict(packages))
@@ -140,7 +146,8 @@ class Box:
             if want != img:
                 self.containers[svc] = (f"c-{svc}-{next(self._ids)}", want)
 
-    def _wait_healthy(self, project, services, one_shots=frozenset()):
+    def _wait_healthy(self, project, services, one_shots=frozenset(), timeout_sec=0):
+        self.waited.append((sorted(services), sorted(one_shots)))
         if self.on_health is not None:
             self.on_health()
         bad = [svc for svc, (_c, img) in self.containers.items()
@@ -152,7 +159,8 @@ class Box:
 
 
 @pytest.fixture
-def box(monkeypatch) -> Box:
+def box(paths, monkeypatch) -> Box:
+    write_state(paths.project_deploy_state(NAME), {"current_ref": RELEASE})
     return Box(monkeypatch)
 
 
@@ -230,20 +238,40 @@ def test_health_failure_rolls_back_even_with_leave_broken(paths, box) -> None:
     assert [r.service for r in read_records(paths, NAME)] == ["db"]
 
 
-def test_budget_exceeded_rolls_back_with_step_budget(paths, box, monkeypatch) -> None:
-    """The deadline passes while the health wait runs: the wait finishes,
-    then the run rolls back."""
+def test_budget_exceeded_before_the_swap_rolls_back_with_step_budget(paths, box,
+                                                                    monkeypatch) -> None:
+    """The deadline passes while the build runs: the build finishes, then
+    the run rolls back, nothing swapped."""
     clock = [datetime.now(timezone.utc)]
     monkeypatch.setattr(autofix_run, "_now", lambda: clock[0])
     deadline = clock[0] + timedelta(minutes=30)
+    real_build = box._build
+
+    def late(*args):
+        clock[0] = deadline + timedelta(seconds=1)
+        return real_build(*args)
+    monkeypatch.setattr(autofix_run, "build_patched", late)
+    outcome = _run(paths, deadline=deadline)
+    assert (outcome.ok, outcome.failed_step) == (False, "budget")
+    assert box.pins == () and box.running() == {"web": WEB, "db": DB}
+    assert len(box.removed) == 1 and read_records(paths, NAME) == ()
+    assert box.recreates == 0
+
+
+def test_a_swapped_patch_finishes_whatever_the_time(paths, box, monkeypatch) -> None:
+    """The deadline passes while the health wait runs: once swapped, the
+    health check and the records finish and the patch stands."""
+    clock = [datetime.now(timezone.utc)]
+    monkeypatch.setattr(autofix_run, "_now", lambda: clock[0])
+    deadline = clock[0] + timedelta(seconds=1)   # records must not be in the future
 
     def late() -> None:
         clock[0] = deadline + timedelta(seconds=1)
     box.on_health = late
     outcome = _run(paths, deadline=deadline)
-    assert (outcome.ok, outcome.failed_step) == (False, "budget")
-    assert box.pins == () and box.running() == {"web": WEB, "db": DB}
-    assert len(box.removed) == 1 and read_records(paths, NAME) == ()
+    assert outcome.ok
+    assert [p.service for p in box.pins] == ["web"] and read_records(paths, NAME) == \
+        outcome.records
 
 
 def test_scan_still_finding_cve_fails_at_scan(paths, box) -> None:
@@ -302,7 +330,8 @@ def test_unexpected_error_rolls_back_and_raises(paths, box, monkeypatch) -> None
     assert len(box.removed) == 1
 
 
-def test_rollback_failure_is_added_to_the_reason(paths, box, monkeypatch) -> None:
+def test_rollback_failure_is_reported_apart_from_the_reason(paths, box,
+                                                            monkeypatch) -> None:
     box.unhealthy_on_patched = True
 
     def refuses(pin):
@@ -310,7 +339,9 @@ def test_rollback_failure_is_added_to_the_reason(paths, box, monkeypatch) -> Non
     monkeypatch.setattr(autofix_run, "remove_patched", refuses)
     outcome = _run(paths)
     assert outcome.failed_step == "health"
-    assert "rollback could not remove the patched image" in outcome.reason
+    assert outcome.reason == "not healthy on the patched images: web"   # not folded in
+    [problem] = outcome.rollback_problems
+    assert "rollback could not remove the patched image" in problem
 
 
 def test_refuses_without_the_project_lock(paths, box) -> None:
@@ -396,18 +427,67 @@ def test_a_rolled_back_run_removes_its_journal(paths, box) -> None:
     assert read_journal(paths, NAME) is None
 
 
-def test_a_killed_run_is_rolled_back_from_its_journal(paths, box) -> None:
-    from boxmunge.cve.autofix_record import AutofixJournal, read_journal, write_journal
+def _killed(paths, box, *, release: str = RELEASE, records=()) -> ImagePin:
+    """A run killed mid-swap: its journal, web on the image it built."""
+    from boxmunge.cve.autofix_record import AutofixJournal, write_journal
     patched = "sha256:" + "e" * 64
     built = ImagePin("web", pin_ref(NAME, "web", patched), patched, "autofix")
-    write_journal(paths, NAME, AutofixJournal(datetime.now(timezone.utc), (), (), (built,)))
+    write_journal(paths, NAME, AutofixJournal(datetime.now(timezone.utc), release, (),
+                                              tuple(records), (built,), ("db", "web"), ()))
     box.pins, box.containers["web"] = (built,), ("c-web-9", patched)
+    return built
+
+
+def test_a_killed_run_is_rolled_back_from_its_journal(paths, box) -> None:
+    from boxmunge.cve.autofix_record import read_journal
+    built = _killed(paths, box)
     with project_lock(NAME, paths):
-        assert autofix_run.recover_interrupted(paths, NAME, patch_cves=()) == ()
+        recovered = autofix_run.recover_interrupted(paths, NAME, patch_cves=())
+        assert recovered == autofix_run.Recovered(())
         assert autofix_run.recover_interrupted(paths, NAME, patch_cves=()) is None   # nothing left to undo
     assert box.pins == () and box.running()["web"] == WEB
     assert box.removed == [built.ref] and read_journal(paths, NAME) is None
+    assert box.waited == [(["db", "web"], [])]   # the journal's services, waited for
     assert any(level == "error" and "interrupted" in msg for level, msg, _ in box.log)
+
+
+def test_a_killed_run_after_a_deploy_only_removes_what_it_built(paths, box) -> None:
+    """A deploy replaced the release the run patched before the recovery:
+    the new release's pins, records and containers stand."""
+    from boxmunge.cve.autofix_record import read_journal
+    built = _killed(paths, box, release="v0", records=[_old_record()])
+    box.pins, box.containers["web"] = (), ("c-web-5", WEB)   # the deploy's own images
+    new = _old_record(service="db")
+    write_records(paths, NAME, [new])
+    with project_lock(NAME, paths):
+        recovered = autofix_run.recover_interrupted(paths, NAME, patch_cves=())
+    assert recovered == autofix_run.Recovered((), superseded="v0")
+    assert box.recreates == 0 and box.waited == [] and box.running()["web"] == WEB
+    assert read_records(paths, NAME) == (new,)
+    assert box.removed == [built.ref] and read_journal(paths, NAME) is None
+    assert any("deployed since" in msg for level, msg, _ in box.log if level == "error")
+
+
+def test_a_journal_that_cannot_be_removed_says_the_rollback_finished(paths, box,
+                                                                     monkeypatch) -> None:
+    _killed(paths, box)
+
+    def stuck(p, project):
+        raise StateError("cannot remove the autofix journal: read-only file system")
+    monkeypatch.setattr(autofix_run, "remove_journal", stuck)
+    with project_lock(NAME, paths):
+        recovered = autofix_run.recover_interrupted(paths, NAME, patch_cves=())
+    [problem] = recovered.problems
+    assert problem.startswith("the rollback finished, but its journal could not be removed")
+    assert box.pins == () and box.running()["web"] == WEB
+
+
+def _old_record(service: str = "web") -> PatchRecord:
+    image = "sha256:" + "b" * 64
+    return PatchRecord(NAME, service, f"example/{service}:1", WEB,
+                       pin_ref(NAME, service, image), image,
+                       (PackageChange("zlib", "1.2", "1.3"),), ("CVE-2026-0002",),
+                       datetime.now(timezone.utc), "nightly")
 
 
 def _repatch_setup(paths, box) -> tuple[ImagePin, PatchRecord]:
@@ -469,10 +549,29 @@ def test_a_journal_left_after_a_patch_keeps_what_recovery_restores(paths, box,
     assert read_records(paths, NAME) == outcome.records
     monkeypatch.setattr(autofix_run, "remove_journal", real_remove)
     with project_lock(NAME, paths):
-        assert autofix_run.recover_interrupted(paths, NAME, patch_cves=()) == ()
+        assert autofix_run.recover_interrupted(paths, NAME, patch_cves=()).problems == ()
     assert box.pins == (pin,) and box.running()["web"] == pin.image_id
     assert read_records(paths, NAME) == (record,)     # no record claims the undone patch
     assert pin.ref not in box.removed and read_journal(paths, NAME) is None
+
+
+def test_cve_gone_from_the_running_images_is_nothing_to_patch(paths, box) -> None:
+    box.findings[WEB] = []   # e.g. a container update moved it onto a fixed upstream
+    outcome = _run(paths)
+    assert (outcome.ok, outcome.failed_step, outcome.nothing_to_patch) == (False, "scan", True)
+    assert box.built == [] and box.recreates == 0
+
+
+def test_other_scan_failures_are_not_nothing_to_patch(paths, box) -> None:
+    box.patched_findings["web"] = [_fd(disposition=Disposition.IGNORED_FIXED)]
+    assert _run(paths).nothing_to_patch is False
+
+
+def test_nothing_to_patch_is_logged_as_an_operation(paths, box) -> None:
+    box.findings[WEB] = []
+    _run(paths)
+    assert not [m for level, m, _ in box.log if level == "error"]
+    assert any("nothing to patch" in m for level, m, _ in box.log if level == "op")
 
 
 def test_paused_project_is_refused_at_swap_nothing_started(paths, box) -> None:
@@ -507,3 +606,79 @@ def test_dark_patch_refused_when_quarantined_for_another_cve(paths, box) -> None
     assert (outcome.ok, outcome.failed_step) == (False, "swap")
     assert "CVE-2026-0404" in outcome.reason and "does not fix" in outcome.reason
     assert box.containers == before and box.recreates == 0 and box.pins == ()
+
+
+UP = "sha256:" + "f" * 64
+
+
+def _run_on_upstream(paths, findings=None, upstream=None):
+    from boxmunge.docker_containers import LocalImage
+    with project_lock(NAME, paths):
+        return autofix_run.repatch_on_upstream_locked(
+            paths, NAME, findings if findings is not None else [_fd()],
+            upstream=upstream or {"web": LocalImage(UP, ("example/web@sha256:" + "f" * 64,))},
+            deadline=datetime.now(timezone.utc) + timedelta(minutes=30))
+
+
+def test_repatch_on_upstream_builds_from_the_new_upstream_not_the_old_base(paths,
+                                                                          box) -> None:
+    """web runs a patch of WEB; upstream shipped UP, which still carries the
+    CVE: the new patch is built FROM UP, with UP's own packages, and the
+    record names UP as its base."""
+    pin, record = _repatch_setup(paths, box)
+    box.findings[pin.image_id] = []          # the running patch is clean
+    box.findings[UP] = [_fd()]
+    outcome = _run_on_upstream(paths)
+    assert outcome.ok, outcome.reason
+    [(svc, base, packages)] = box.built
+    assert (svc, base, packages) == ("web", UP, {"openssl": "3.0.9"})   # not zlib, not WEB
+    [new] = outcome.records
+    assert (new.base_digest, new.base_ref) == (UP, "example/web@sha256:" + "f" * 64)
+    assert new.cves == (CVE,) and new.trigger == "nightly"
+    assert read_records(paths, NAME) == (new,)
+    assert box.removed == [pin.ref]          # the old patch went
+
+
+def test_repatch_on_upstream_failure_keeps_the_old_patch(paths, box) -> None:
+    pin, record = _repatch_setup(paths, box)
+    box.findings[pin.image_id] = []
+    box.findings[UP] = [_fd()]
+    box.unhealthy_on_patched = True
+    outcome = _run_on_upstream(paths)
+    assert (outcome.ok, outcome.failed_step) == (False, "health")
+    assert box.pins == (pin,) and box.running()["web"] == pin.image_id
+    assert read_records(paths, NAME) == (record,)
+
+
+def test_repatch_on_upstream_names_a_service_that_is_not_pinned(paths, box) -> None:
+    with pytest.raises(ValueError, match="not pinned"):
+        _run_on_upstream(paths)
+
+
+# ---------- whether a failure would happen again (cve.autofix_failed) ----------
+
+
+def test_what_would_fail_the_same_way_again_is_deterministic(paths, box) -> None:
+    from boxmunge.cve.autofix_build import PatchBuildError, PatchNotFixed
+    box.probe_result = NotPatchable("no package manager")
+    assert _run(paths).deterministic                                  # not patchable
+    box.probe_result = Patchable("apk", "")
+    box.check_error = PatchNotFixed("openssl 3.0.9 is below the fixed 3.0.10")
+    box.findings[WEB] = [_fd(fix="3.0.10"), _fd("CVE-2026-2222", fix="3.0.9")]
+    assert _run(paths, [_fd(), _fd("CVE-2026-2222")]).deterministic  # not fixed
+    box.check_error = PatchBuildError("unexpected version check output")
+    assert not _run(paths, [_fd(), _fd("CVE-2026-2222")]).deterministic
+    box.check_error = None
+    box.findings[WEB] = [_fd()]
+    box.unhealthy_on_patched = True
+    outcome = _run(paths)
+    assert outcome.failed_step == "health" and outcome.deterministic
+    box.unhealthy_on_patched = False
+    box.build_error = DockerError("temporary error (try again later)")
+    assert not _run(paths).deterministic                              # a mirror outage
+    box.build_error = None
+    box.patched_findings["web"] = [_fd()]
+    outcome = _run(paths)
+    assert outcome.failed_step == "scan" and outcome.deterministic    # still vulnerable
+    box.scan_error = DockerError("trivy timed out")
+    assert not _run(paths).deterministic
