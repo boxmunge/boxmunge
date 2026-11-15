@@ -183,17 +183,26 @@ def test_failure_applies_table_b_and_alerts_step(tmp_path, monkeypatch) -> None:
     assert read_autofixing(box.paths, "demo") is None
 
 
-def test_urgent_nothing_to_patch_still_alerts_as_a_failure(tmp_path, monkeypatch) -> None:
-    """Only the nightly digest lists a CVE gone from the images as fixed: the
-    urgent flow alerts it as the failure it is there (table B applies)."""
-    box = _box(tmp_path, monkeypatch, "balanced", cvss=7.5)
+@pytest.mark.parametrize("cvss", [7.5, 9.8], ids=["site-up", "dark"])
+def test_urgent_nothing_to_patch_drops_the_patch_without_the_fallback(tmp_path, monkeypatch,
+                                                                     cvss) -> None:
+    """A deploy or an upstream update fixed the CVE before the queued patch
+    ran: no table B (a clean site is not quarantined), the entry and the
+    marker go, a quarantine taken for the patch is the scan's to lift, and
+    one quiet note says so."""
+    box = _box(tmp_path, monkeypatch, "balanced", cvss=cvss)
     box.scan()
+    dark = is_quarantined("demo", box.paths)
+    assert dark is (cvss >= 9)
     box.runner.outcome = AutofixOutcome(False, "scan", "no image production runs carries it",
                                         (), nothing_to_patch=True)
     box.run()
-    [failed] = box.sent("Autofix FAILED")
-    assert failed[2] == 1 and "at the scan step" in failed[0]
-    assert is_quarantined("demo", box.paths)
+    assert box.sent("Autofix FAILED") == []
+    [note] = box.sent("nothing to patch")
+    assert note[2] == -1 and "no image production runs carries it" in note[1]
+    assert is_quarantined("demo", box.paths) is dark   # left to the scan's lift rules
+    assert read_queue_entry(box.paths, "demo") is None
+    assert read_autofixing(box.paths, "demo") is None
 
 
 @pytest.mark.parametrize(("posture", "listed", "expect"), [

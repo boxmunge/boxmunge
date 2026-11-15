@@ -120,6 +120,21 @@ def format_autofix_interrupted_alert(project: str, problems: Sequence[str], *,
                  ]), priority=1)
 
 
+def format_autofix_gone_alert(project: str, cves: Sequence[str], reason: str) -> Alert:
+    """A queued urgent patch found no running image that still carries its
+    CVEs (a deploy or an upstream update replaced it): nothing was patched
+    and nothing changed. Quiet."""
+    line = f"{_cves(cves)} no longer in {project}'s running images: nothing to patch"
+    return Alert(kind="autofix_gone", title=f"[boxmunge:{project}] {line}", body="\n".join([
+        line,
+        "",
+        reason,
+        "Nothing was patched or changed. A quarantine taken for the patch is lifted",
+        "by the next scan, under its usual rules.",
+        f"Details: boxmunge security {project}",
+    ]), priority=DIGEST_PRIORITY)
+
+
 def format_nightly_patched_line(project: str, cves: Sequence[str],
                                 records: Sequence[PatchRecord]) -> Alert:
     """A nightly patch that runs: one digest line, its title."""

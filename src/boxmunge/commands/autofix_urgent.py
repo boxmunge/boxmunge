@@ -54,8 +54,8 @@ from boxmunge.commands.security_scan_inputs import (
     ProjectMeta, ProjectScanError, load_project_meta,
 )
 from boxmunge.cve.alerting import (
-    Alert, format_autofix_failed_alert, format_autofix_interrupted_alert,
-    format_autofix_patched_alert, send_alerts,
+    Alert, format_autofix_failed_alert, format_autofix_gone_alert,
+    format_autofix_interrupted_alert, format_autofix_patched_alert, send_alerts,
 )
 from boxmunge.cve.autofix_policy import AUTOFIX_URGENT_BUDGET, AutofixUrgency, urgency
 from boxmunge.cve.autofix_record import (
@@ -259,6 +259,9 @@ def _conclude(paths: BoxPaths, project: str, job: _Job, outcome: AutofixOutcome)
                   paths, project=project, detail={
                       "ok": outcome.ok, "detected_at": job.entry.detected_at.isoformat(),
                       "started_at": (outcome.started_at or _now()).isoformat()})
+    if outcome.nothing_to_patch and not outcome.rollback_problems:
+        _nothing_to_patch(paths, project, cves, outcome.reason)
+        return
     if outcome.ok:
         site, settled, urgent = _succeeded(paths, project, job)
         alert = format_autofix_patched_alert(project, cves, outcome.records, site=site,
@@ -278,6 +281,20 @@ def _conclude(paths: BoxPaths, project: str, job: _Job, outcome: AutofixOutcome)
             log_error(_COMPONENT, f"{project}: {e}", paths, project=project)
             note = f"Clearing the queue entry or the autofixing marker failed: {e}"
     _send(paths, with_note(alert, note))
+
+
+def _nothing_to_patch(paths: BoxPaths, project: str, cves: Sequence[str], reason: str) -> None:
+    """No image production runs carries the CVEs any more (a deploy or an
+    upstream update since the scan): as when the stored scan no longer has
+    them, no fallback; the entry and the marker go, a quarantine taken for
+    the patch follows the scan's lift rules, and one quiet note says so."""
+    try:
+        _done(paths, project)
+    except StateError as e:   # kept: the next run finds nothing to patch again
+        log_error(_COMPONENT, f"{project}: dropping its queued autofix failed: {e}", paths,
+                  project=project)
+        return
+    _send(paths, format_autofix_gone_alert(project, cves, reason))
 
 
 def _timing(found: datetime, started: datetime, ended: datetime, verb: str) -> str:
