@@ -395,8 +395,8 @@ echo "========================================================"
 echo "  Installing systemd units"
 echo "========================================================"
 
-BOXMUNGE_SLOT_UNITS="${BOXMUNGE_ROOT}/env-active/boxmunge-systemd" FROM_UPGRADE_SHIM="${FROM_UPGRADE_SHIM}" \
-    bash "${SCRIPT_DIR}/bootstrap/systemd-units.sh" "${SCRIPT_DIR}"
+BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" BOXMUNGE_SLOT_UNITS="${BOXMUNGE_ROOT}/env-active/boxmunge-systemd" \
+    FROM_UPGRADE_SHIM="${FROM_UPGRADE_SHIM}" bash "${SCRIPT_DIR}/bootstrap/systemd-units.sh" "${SCRIPT_DIR}"
 
 # ---------------------------------------------------------------------------
 # Sudoers: deploy may run exactly `boxmunge-upgrade auto`, `target <version>`

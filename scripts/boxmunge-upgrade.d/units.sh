@@ -14,17 +14,20 @@
 # upgrade copies the bundle's there for the standby; the release's own
 # bootstrap/systemd-units.sh records the units the live slot ran before it
 # replaces them; a slot with no copy yet records the live units as its own
-# (seed_slot_units). A rollback installs the slot's units, disables and removes
-# every boxmunge unit the slot does not ship, and enables its timers and path
+# (seed_slot_units). A rollback installs the slot's units, disables (timers,
+# path units) or stops (services) and removes every boxmunge unit the slot
+# does not ship, and enables its timers and path
 # units (restore_slot_units). A shim from before 0.11.11 does not, so 0.12
 # installs only over 0.11.11 or later (src/boxmunge/upgrade_floor.py): the upgrade that
 # adds 0.12's units is run by a shim that can take them away again. Every
 # check-probation and upgrade, holding the upgrade lock with nothing in
 # flight, also puts the live slot's units back where they differ
 # (heal_slot_units), which reverts hand edits to the unit files too. A
-# rollback to 0.11.11 is run by its own shim, whose restore knows only
-# .service and .timer units and so leaves boxmunge-jobs.path behind; the heal
-# of the next check-probation removes it.
+# rollback run by 0.11.11's shim, whose restore knows only .service and
+# .timer units, leaves boxmunge-jobs.path behind; the heal of the 0.12
+# shim's next check-probation removes it. A downgrade (upgrade target
+# 0.11.11) leaves it for good, inert (nothing on 0.11.11 writes the queue);
+# docs/on-server/ARCHITECTURE.md says how to tidy it.
 
 SYSTEMD_UNIT_DIR="${BOXMUNGE_SYSTEMD_DIR:-/etc/systemd/system}"
 
@@ -113,12 +116,15 @@ units_match() {
 
 # heal_slot_units: the live slot has a record of its units and the live
 # units are not those, so a rollback left the newer release's: put them back.
-# The caller holds the upgrade lock and nothing is in flight.
+# The caller holds the upgrade lock and nothing is in flight. The jobs gate is
+# taken before anything changes (an upgrade already holds it; check-probation
+# skips its run while jobs hold it).
 heal_slot_units() {
     local src
     src="$(slot_units "$ACTIVE_SLOT")"
     compgen -G "$src/boxmunge-*.timer" >/dev/null || return 0
     units_match "$src" && return 0
+    take_jobs_gate skip
     log "The live systemd units are not those of the release on slot $ACTIVE_SLOT (a rollback left them); restoring them"
     bm_log warn upgrade "systemd units differ from the live slot's; restoring" "{\"slot\": \"$ACTIVE_SLOT\"}"
     restore_slot_units "$ACTIVE_SLOT" || true   # a refusal is logged; the check goes on
@@ -143,15 +149,28 @@ restore_slot_units() {
         bm_log error upgrade "systemd units record refused" "{\"slot\": \"$1\"}"
         return 1
     fi
+    # The units the slot does not ship: timers and path units are disabled
+    # first, so none starts a service again, then the services are stopped
+    # (one still running, the job runner say, would go on running the code
+    # of the release rolled back from), then all are removed.
+    local removed=()
     while IFS= read -r unit; do
-        name="${unit##*/}"
-        [[ ! -e "$src/$name" ]] || continue
-        if [[ "$name" != *.service ]]; then
-            systemctl disable --now "$name" || { ok=0; log "ERROR: could not disable $name"; }
-        fi
-        rm -f "$unit"
-        log "Removed $name: the release on slot $1 does not ship it"
+        [[ -e "$src/${unit##*/}" ]] || removed+=("$unit")
     done < <(units_in "$SYSTEMD_UNIT_DIR")
+    for unit in "${removed[@]+"${removed[@]}"}"; do
+        name="${unit##*/}"
+        [[ "$name" != *.service ]] || continue
+        systemctl disable --now "$name" || { ok=0; log "ERROR: could not disable $name"; }
+    done
+    for unit in "${removed[@]+"${removed[@]}"}"; do
+        name="${unit##*/}"
+        [[ "$name" == *.service ]] || continue
+        systemctl stop "$name" || { ok=0; log "ERROR: could not stop $name"; }
+    done
+    for unit in "${removed[@]+"${removed[@]}"}"; do
+        rm -f "$unit"
+        log "Removed ${unit##*/}: the release on slot $1 does not ship it"
+    done
     # Timers and path units are enabled; a running one keeps the schedule or
     # watch it loaded, so each whose file changes is restarted.
     while IFS= read -r unit; do

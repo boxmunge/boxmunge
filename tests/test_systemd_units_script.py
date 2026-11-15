@@ -27,6 +27,13 @@ def _run(tmp_path: Path, bundle: Path, **env: str) -> list[str]:
     log.write_text("")
     dest = tmp_path / "etc-systemd"
     dest.mkdir(exist_ok=True)
+    if env.get("FROM_UPGRADE_SHIM") == "1" and "BOXMUNGE_ROOT" not in env:
+        # As the shim runs it: env-a live, this release in env-b.
+        for slot in ("env-a", "env-b"):
+            (tmp_path / slot).mkdir(exist_ok=True)
+        if not (tmp_path / "env-active").is_symlink():
+            (tmp_path / "env-active").symlink_to(tmp_path / "env-a")
+        env["BOXMUNGE_ROOT"] = str(tmp_path)
     subprocess.run(["bash", str(SCRIPT), str(bundle)], check=True, capture_output=True,
                    env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
                         "BOXMUNGE_SYSTEMD_DIR": str(dest), **env})
@@ -176,3 +183,39 @@ def test_a_record_cut_short_leaves_the_previous_one(tmp_path) -> None:
         _run(tmp_path, bundle, BOXMUNGE_SLOT_UNITS=str(record), FROM_UPGRADE_SHIM="0")
     assert [p.name for p in record.iterdir()] == ["boxmunge-health.timer"]
     assert (record / "boxmunge-health.timer").read_text() == "old\n"
+
+
+def test_under_the_shim_the_standby_slot_records_this_bundles_units(tmp_path) -> None:
+    """The record an older shim wrote for the standby lacks the path unit
+    (0.11.11's copies only .service and .timer units): it is written again
+    from this bundle, so the 0.12 heal does not remove the job runner's
+    trigger. The live slot's record is still the units it ran."""
+    dest = tmp_path / "etc-systemd"
+    dest.mkdir()
+    (dest / "boxmunge-health.timer").write_text("old boxmunge-health.timer\n")
+    stale = tmp_path / "env-b" / "boxmunge-systemd"
+    (tmp_path / "env-b" / ".boxmunge-systemd.OLD").mkdir(parents=True)  # the shim's scheme
+    stale.symlink_to(".boxmunge-systemd.OLD")
+    (stale / "boxmunge-health.timer").write_text("partial\n")
+    live = tmp_path / "env-a" / "boxmunge-systemd"
+    _run(tmp_path, _bundle(tmp_path), BOXMUNGE_SLOT_UNITS=str(tmp_path / "env-active" /
+                                                             "boxmunge-systemd"),
+         FROM_UPGRADE_SHIM="1")
+    assert sorted(p.name for p in stale.iterdir()) == sorted(
+        p.name for p in (REPO / "systemd").iterdir())
+    assert "boxmunge-jobs.path" in [p.name for p in stale.iterdir()]
+    assert [p.name for p in live.iterdir()] == ["boxmunge-health.timer"]
+    assert (live / "boxmunge-health.timer").read_text() == "old boxmunge-health.timer\n"
+    assert not (tmp_path / "env-b" / ".boxmunge-systemd.OLD").exists()  # replaced whole
+
+
+@pytest.mark.parametrize("active", ["env-c", None])
+def test_under_the_shim_an_unknown_live_slot_fails_loudly(tmp_path, active) -> None:
+    (tmp_path / "env-a").mkdir()
+    if active:
+        (tmp_path / "env-active").symlink_to(tmp_path / active)
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        _run(tmp_path, _bundle(tmp_path), BOXMUNGE_ROOT=str(tmp_path),
+             BOXMUNGE_SLOT_UNITS=str(tmp_path / "env-a" / "boxmunge-systemd"),
+             FROM_UPGRADE_SHIM="1")
+    assert b"not env-a or env-b" in raised.value.stderr

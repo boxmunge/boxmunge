@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from boxmunge.api import job_runner, job_worker
+from boxmunge.api import job_failure, job_runner, job_worker
 from boxmunge.api.actions import build_registry
 from boxmunge.api.audit import AuditLog
 from boxmunge.api.invoke import Invoker
@@ -61,6 +61,7 @@ def box(paths, monkeypatch):
 
     monkeypatch.setattr(job_worker, "notify", collect)
     monkeypatch.setattr(job_runner, "notify", collect)
+    monkeypatch.setattr(job_failure, "notify", collect)
     paths.alerts = alerts
     return paths
 

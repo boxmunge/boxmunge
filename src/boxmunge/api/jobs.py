@@ -160,13 +160,20 @@ class JobStore:
         return records, unreadable
 
     def events(self, job_id: str, *, after: int = 0) -> list[dict[str, Any]]:
-        """The job's events with seq greater than *after*, in order."""
+        """The job's events with seq greater than *after*, in order.
+
+        A final line with no newline yet, or only NULs (a worker killed
+        mid-write, or a crash that left the file's end zero-filled), is
+        not written yet and is left out; any other bad line is corrupt."""
         path = self._done / f"{job_id}.events.jsonl"
         text = _read(path, "job events")
         if text is None:
             return []
+        lines = text.split("\n")[:-1]  # the last piece has no newline: not written yet
+        if lines and not lines[-1].strip("\0"):
+            lines.pop()
         events = []
-        for lineno, line in enumerate(text.splitlines(), start=1):
+        for lineno, line in enumerate(lines, start=1):
             if not line.strip():
                 continue
             try:
@@ -254,7 +261,35 @@ def read_record_text(paths: BoxPaths, job_id: str, path: Path) -> str | None:
     queue/ leaves one file under both names, with two links. That record is
     read, from either name; any other extra link is refused.
     """
-    return _read(path, "job record", links=2 if is_mid_move(paths, job_id) else 1)
+    try:
+        return _read(path, "job record", links=2 if is_mid_move(paths, job_id) else 1)
+    except StateError:
+        if _publish_cut_short(paths, job_id, path):
+            raise StateError(
+                f"Job record {path} is a queued job whose publish was cut short (its temp "
+                f"in {paths.jobs_dir} is a second link to it); the job runner's next scan "
+                f"clears it. Do not remove it.") from None
+        raise
+
+
+def _publish_cut_short(paths: BoxPaths, job_id: str, path: Path) -> bool:
+    """Whether *path* is a regular file with two links, the other one of
+    the job's own temps in jobs/: a publish that crashed before dropping
+    its temp (every writer's next step sweeps it)."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 2:
+        return False
+    for tmp in paths.jobs_dir.glob(f".{job_id}.*.tmp"):
+        try:
+            other = os.lstat(tmp)
+        except OSError:
+            continue
+        if (other.st_dev, other.st_ino) == (st.st_dev, st.st_ino):
+            return True
+    return False
 
 
 def is_mid_move(paths: BoxPaths, job_id: str) -> bool:

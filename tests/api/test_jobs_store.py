@@ -276,6 +276,52 @@ def test_corrupt_event_lines_are_reported(paths, line, message) -> None:
         JobStore(paths, result_schemas=registry_results).events(_id(1))
 
 
+_GOOD_EVENT = '{"seq": 1, "ts": "2026-10-14T00:00:01Z", "type": "state", "state": "running"}\n'
+
+
+@pytest.mark.parametrize("tail", [
+    '{"seq": 2, "ts": "2026-10-14T00:00:02Z", "ty',  # a write cut off mid-line
+    "{not json",  # unterminated, so not written yet, whatever it holds
+    "\0" * 40,  # a crash left the end of the file zero-filled
+    "\0" * 40 + "\n",
+])
+def test_a_final_line_not_yet_written_is_left_out(paths, tail) -> None:
+    paths.jobs_dir.mkdir(parents=True)
+    (paths.jobs_dir / f"{_id(1)}.events.jsonl").write_text(_GOOD_EVENT + tail)
+    assert [e["seq"] for e in JobStore(paths, result_schemas=registry_results).events(_id(1))] == [1]
+
+
+def test_a_malformed_line_before_the_last_is_still_corrupt(paths) -> None:
+    paths.jobs_dir.mkdir(parents=True)
+    (paths.jobs_dir / f"{_id(1)}.events.jsonl").write_text("{not json\n" + _GOOD_EVENT)
+    with pytest.raises(StateError, match=":1: not JSON"):
+        JobStore(paths, result_schemas=registry_results).events(_id(1))
+
+
+def test_a_publish_cut_short_is_reported_as_such_not_as_removable(paths) -> None:
+    """A publish that crashed before dropping its temp leaves the queued
+    record with a second link, the temp: following the generic "remove it"
+    would delete a valid queued job."""
+    _write(paths.jobs_queue, _record(1))
+    queued = paths.jobs_queue / f"{_id(1)}.json"
+    os.link(queued, paths.jobs_dir / f".{_id(1)}.abc123.tmp")
+    store = JobStore(paths, result_schemas=registry_results)
+    with pytest.raises(StateError) as raised:
+        store.get(_id(1))
+    message = str(raised.value)
+    assert "publish was cut short" in message and "next scan clears it" in message
+    assert "Do not remove it" in message and "Remove it so it can be recreated" not in message
+    [unreadable] = store.unfinished().unreadable
+    assert "publish was cut short" in unreadable["problem"]
+
+
+def test_a_record_with_a_foreign_second_link_is_still_refused(paths, tmp_path) -> None:
+    _write(paths.jobs_queue, _record(1))
+    os.link(paths.jobs_queue / f"{_id(1)}.json", tmp_path / "elsewhere")
+    with pytest.raises(StateError, match="Remove it so it can be recreated"):
+        JobStore(paths, result_schemas=registry_results).get(_id(1))
+
+
 def test_an_unreadable_record_is_listed_not_raised(paths) -> None:
     _write(paths.jobs_dir, _record(1))
     _write(paths.jobs_dir, _record(2, state="done"))

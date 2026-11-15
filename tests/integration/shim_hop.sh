@@ -20,7 +20,7 @@
 #            `ok` runs the real install.sh's steps that tell a shim's run from
 #            one by hand and act on it (the floor check, the venv install, the
 #            shim install, deploy's sudo rule as the new shim writes it, and
-#            the version record) and installs the bundle's systemd units.
+#            the version record) and runs bootstrap/systemd-units.sh.
 #            Then the installed shim must work, and deploy's rule must be the
 #            new shim's. `rollback` is `ok` whose `upgrade --apply` fails
 #            after the swap: the old shim rolls back, and must put the
@@ -130,8 +130,11 @@ case "$MODE" in
           echo 'cp "$BOXMUNGE_SUDOERS_FILE" /tmp/sudoers-before-install-sh'
           grep -Fx '"${BOXMUNGE_ROOT}/bin/boxmunge-upgrade" install-sudoers' "$I"
           sed -n '/^INSTALLED_VERSION=/,/^fi$/p' "$I"
-          # The release's units, as bootstrap/systemd-units.sh installs them.
-          echo 'rm -f "$BOXMUNGE_SYSTEMD_DIR"/boxmunge-*; cp "$SCRIPT_DIR"/systemd/boxmunge-* "$BOXMUNGE_SYSTEMD_DIR/"'
+          # The release's units, by the real bootstrap/systemd-units.sh, as
+          # install.sh runs it: it records the units of both slots. The
+          # systemctl calls read afterwards are those from the swap on.
+          grep -A1 '^BOXMUNGE_ROOT="${BOXMUNGE_ROOT}" BOXMUNGE_SLOT_UNITS=' "$I"
+          echo ': > /tmp/systemctl.log'
           echo 'ls "$BOXMUNGE_SYSTEMD_DIR" | sort | paste -sd, - > /tmp/units-after-install-sh'
         } > /tmp/install.sh ;;
     *) echo "usage: shim_hop.sh <floor|ok|fail|rollback> <old-shim> <installed>" >&2; exit 2 ;;
@@ -160,7 +163,8 @@ install -m 0755 "$OLD" "$R/bin/boxmunge-upgrade"
 export PATH="/stub/bin:$PATH" BOXMUNGE_SUDOERS_FILE=/tmp/sudoers-boxmunge BOXMUNGE_SYSTEMD_DIR=/tmp/units
 mkdir -p "$BOXMUNGE_SYSTEMD_DIR"
 cp /bundle/boxmunge/systemd/boxmunge-* "$BOXMUNGE_SYSTEMD_DIR/"
-rm "$BOXMUNGE_SYSTEMD_DIR"/boxmunge-{maintenance,kev-watch,audit-rotate}.{timer,service} "$BOXMUNGE_SYSTEMD_DIR/boxmunge-autofix.service"
+rm "$BOXMUNGE_SYSTEMD_DIR"/boxmunge-{maintenance,kev-watch,audit-rotate}.{timer,service} "$BOXMUNGE_SYSTEMD_DIR/boxmunge-autofix.service" \
+    "$BOXMUNGE_SYSTEMD_DIR"/boxmunge-jobs.{path,service}
 for t in cve-scan container-update; do
     printf '[Timer]\nOnCalendar=daily\nUnit=boxmunge-%s.service\n' "$t" > "$BOXMUNGE_SYSTEMD_DIR/boxmunge-$t.timer"
 done
@@ -207,7 +211,9 @@ else
         rc="$(shim /tmp/cmd.log $c)"
         echo "CMD ${c%% *} rc=$rc :: $(tr '\n' ' ' < /tmp/cmd.log | cut -c1-2000)"
     done
-    # After the new shim's own commands: the jobs gate as they left it.
+    # After the new shim's own commands: the units and the jobs gate as they
+    # left them.
+    echo "UNITS_AFTER_COMMANDS=$(units)"
     gate="$(stat -c '%U:%G:%a' "$R/state/jobs" "$R/state/jobs/gate.lock" 2>/dev/null | paste -sd, -)"
     echo "JOBS_GATE=${gate:-none}"
     for f in /tmp/during-*.log; do

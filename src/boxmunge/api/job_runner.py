@@ -18,6 +18,9 @@ once queue/ is empty and no worker of its own is left:
   service again on the code now installed.
 - A worker that exits before claiming its job (a crash on start) leaves it
   queued; the runner fails it (nothing ran) instead of starting it again.
+- A queued job older than JOB_MAX_QUEUED_AGE (job_failure) is failed
+  `expired` by the scan, never started; its worker checks again before its
+  claim.
 
 The unit's KillMode=control-group (systemd's default) is relied on: a
 service stop signals every worker, and each fails its own job. So the
@@ -37,12 +40,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
-from boxmunge.api.audit import AuditError, AuditLog, audit_record
-from boxmunge.api.job_events import EventLog
+from boxmunge.api.job_failure import (
+    COMPONENT, audit_outcome, fail_if_expired, record_failure,
+)
 from boxmunge.api.job_recovery import (
     Recovery, advice_text, classify, lost_message, retry_command,
 )
-from boxmunge.api.job_worker import COMPONENT, EX_TEMPFAIL
+from boxmunge.api.job_worker import EX_TEMPFAIL
 from boxmunge.api.job_writer import (
     complete_finish, fail_unclaimed, finish, load_for_recovery,
 )
@@ -111,7 +115,7 @@ def recover_queue(paths: BoxPaths, alive: Callable[[WorkerIdentity], bool]) -> S
             _recover_outcome_line(paths, record)
         elif recovery is Recovery.LEAVE:
             scan.running.append(record)
-        else:
+        elif not fail_if_expired(paths, record):
             scan.queued.append(record)
     scan.queued.sort(key=lambda r: (r["created_at"], r["id"]))
     return scan
@@ -144,9 +148,21 @@ class _Runner:
                       f"no more jobs and exits once its {len(self._children)} running "
                       f"worker(s) finish", self._paths,
                       detail={"traceback": traceback.format_exc()})
-            while self._children:
-                self._reap(timeout=None)
+            self._drain()
             raise
+
+    def _drain(self) -> None:
+        """Wait for every running worker. A worker's exit whose follow-up
+        fails (failing its unclaimed job, say) is logged, and the wait goes
+        on: exiting would have systemd stop the others mid-job."""
+        while self._children:
+            try:
+                self._reap(timeout=None)
+            except Exception as e:
+                log_error(COMPONENT, f"while the job runner waited for its workers to finish, "
+                          f"handling a worker's exit failed: {type(e).__name__}: {e}; it "
+                          f"still waits for {len(self._children)} running worker(s)",
+                          self._paths, detail={"traceback": traceback.format_exc()})
 
     def _loop(self) -> int:
         while True:
@@ -211,7 +227,7 @@ def _fail_if_unclaimed(paths: BoxPaths, job_id: str, code: int) -> None:
     error = {"code": ErrorCode.FAILED.value, "message": message}
     if fail_unclaimed(paths, job_id, error=error, now=_now()) is None:
         return  # a worker claimed it after all
-    _record_failure(paths, record, error, f"boxmunge: job {job_id} ({record['action']} "
+    record_failure(paths, record, error, f"boxmunge: job {job_id} ({record['action']} "
                     f"{record['project']}) could not start")
 
 
@@ -231,70 +247,19 @@ def _mark_lost(paths: BoxPaths, record: dict[str, Any]) -> None:
         log_warning(COMPONENT, f"job {job_id} was lost, but was finished elsewhere before "
                     f"the runner could fail it", paths, project=project)
         return
-    _record_failure(paths, record, error, f"boxmunge: job {job_id} ({action} {project}) "
+    record_failure(paths, record, error, f"boxmunge: job {job_id} ({action} {project}) "
                     f"was cut off")
-
-
-def _record_failure(paths: BoxPaths, record: dict[str, Any], error: dict[str, str],
-                    title: str) -> None:
-    """The events, outcome audit line and alert of a job the runner failed."""
-    _write_failure_events(paths, record, error["message"])
-    _audit(paths, record, "failed", error)
-    notify(paths, title, error["message"], component=COMPONENT, project=record["project"],
-           priority=1)
-
-
-def _write_failure_events(paths: BoxPaths, record: dict[str, Any], message: str) -> None:
-    """Append the failure to the job's events. A worker killed mid-write
-    leaves a torn last line, which EventLog refuses (StateError): the record
-    is already failed, so that is logged, not raised."""
-    job_id, project = record["id"], record["project"]
-    path = paths.jobs_dir / f"{job_id}.events.jsonl"
-    try:
-        events = EventLog(paths, job_id)
-    except (StateError, OSError) as e:
-        log_error(COMPONENT, f"job {job_id} was failed, but its events {path} cannot be "
-                  f"appended ({e}); the job record holds the outcome.", paths, project=project)
-        return
-    try:
-        events.log(message)
-        events.state("failed")
-    except OSError as e:
-        log_error(COMPONENT, f"job {job_id} was failed, but writing to its events {path} "
-                  f"failed ({e}); the job record holds the outcome.", paths, project=project)
-    finally:
-        events.close()
 
 
 def _recover_outcome_line(paths: BoxPaths, record: dict[str, Any]) -> None:
     """A finish cut off mid-move: its worker audits strictly after the move
     (and finish holds the job lock across it), so it never wrote the
     outcome line. Write it from the record, once."""
-    _audit(paths, record, record["state"], record["error"])
+    audit_outcome(paths, record, record["state"], record["error"])
     log_operation(COMPONENT, f"job {record['id']}: its worker died while moving the finished "
                   f"record out of the queue; the move was completed and the outcome audit "
                   f"line ({record['state']}) recovered from the record", paths,
                   project=record["project"])
-
-
-def _audit(paths: BoxPaths, record: dict[str, Any], outcome: str,
-           error: dict[str, str] | None) -> None:
-    """The outcome audit line the worker could not write. params are left
-    out: the runner loads no registry to redact them, and the job's
-    accepted line already carries them."""
-    code = None if error is None else error["code"]
-    line = audit_record(record["principal"], record["action"], outcome, code=code,
-                        message=None if error is None else error["message"], job=record["id"])
-    try:
-        AuditLog(paths.audit_log, create=False).append(line)
-    except AuditError as e:
-        shown = outcome if code is None else f"{outcome}, {code}"
-        log_error("audit", f"could not record the outcome of {record['action']} (job "
-                  f"{record['id']}): {e}", paths, detail={"outcome": outcome})
-        notify(paths, "boxmunge: audit log write failed",
-               f"The outcome ({shown}) of {record['action']} by "
-               f"{record['principal']} (job {record['id']}) was not recorded: {e}. The job "
-               f"record keeps it.", component="audit", priority=1)
 
 
 def _set_aside(paths: BoxPaths, name: str, why: str) -> None:

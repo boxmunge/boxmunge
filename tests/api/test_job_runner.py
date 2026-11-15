@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from boxmunge.api import job_runner, job_writer
+from boxmunge.api import job_failure, job_runner, job_writer
 from boxmunge.api.job_runner import MAX_CONCURRENT_JOBS, run_runner
 from boxmunge.api.job_worker import EX_TEMPFAIL
 from boxmunge.api.worker_identity import WorkerIdentity
@@ -126,10 +126,12 @@ def box(tmp_path, monkeypatch) -> Box:
     paths.audit_log.touch()
     b = Box(paths)
     monkeypatch.setattr(job_runner, "RUNNER_POLL_SECONDS", 0.01)
-    monkeypatch.setattr(job_runner, "notify", lambda _p, title, body, **kw: b.alerts.append(
-        {"title": title, "body": body, **kw}) or True)
-    monkeypatch.setattr(job_runner, "log_error",
-                        lambda _c, message, *_a, **_kw: b.errors.append(message))
+    for module in (job_runner, job_failure):
+        monkeypatch.setattr(module, "notify", lambda _p, title, body, **kw: b.alerts.append(
+            {"title": title, "body": body, **kw}) or True)
+        monkeypatch.setattr(module, "log_error",
+                            lambda _c, message, *_a, **_kw: b.errors.append(message))
+    monkeypatch.setattr(job_failure, "clock", lambda: NOW + timedelta(minutes=30))
     return b
 
 
@@ -214,6 +216,28 @@ def test_lost_job_with_a_torn_events_file_is_still_failed_and_moved(box):
     assert not (box.paths.jobs_queue / f"{job_id}.json").exists()
     assert any(str(events) in e for e in box.errors)
     assert len(box.alerts) == 1
+
+
+def test_a_job_queued_too_long_is_failed_expired_never_run(box, monkeypatch):
+    old, fresh = box.publish(0), box.publish(1, project="blog")
+    monkeypatch.setattr(job_failure, "clock",
+                        lambda: NOW + job_failure.JOB_MAX_QUEUED_AGE + timedelta(seconds=1))
+    assert box.run() == 0
+    assert box.spawned == [fresh]  # created a second later: not yet too old
+    record = box.record(old)
+    assert not (box.paths.jobs_queue / f"{old}.json").exists()
+    assert (record["state"], record["error"]["code"]) == ("failed", "expired")
+    message = record["error"]["message"]
+    assert record["created_at"] in message and "2 hours" in message
+    assert "rollback" in message and "job runner was down" in message
+    assert message.endswith("boxmunge job run project.backup '{\"project\":\"myapp\"}'")
+    [alert] = box.alerts
+    assert alert["title"] == f"boxmunge: job {old} (project.backup myapp) expired in the queue"
+    assert alert["body"] == message
+    [audit] = [r for r in read_audit(box.paths) if r.get("job") == old]
+    assert (audit["outcome"], audit["code"]) == ("failed", "expired")
+    events = (box.paths.jobs_dir / f"{old}.events.jsonl").read_text().splitlines()
+    assert json.loads(events[-1])["state"] == "failed"
 
 
 def test_child_killed_by_signal_is_lost_immediately(box):
@@ -382,6 +406,35 @@ def test_an_error_mid_run_waits_for_running_workers_then_raises(box, monkeypatch
         box.run()
     assert box.record(job_id)["state"] == "succeeded"  # waited for, not cut off
     assert any("running worker" in e for e in box.errors)
+
+
+def test_a_failed_follow_up_while_draining_is_logged_and_the_drain_goes_on(box, monkeypatch):
+    first, crashing, last = box.publish(0), box.publish(1, project="blog"), box.publish(2, None)
+    box.scripts[first] = work(0.05)
+
+    def crash_late(_box: Box, _job_id: str) -> int:
+        time.sleep(0.3)
+        return 1  # died before its claim
+    box.scripts[crashing] = crash_late
+    box.scripts[last] = work(0.6)
+    real = job_runner.recover_queue
+    calls: list[int] = []
+
+    def failing(paths, alive):
+        calls.append(1)
+        if len(calls) > 1:
+            raise OSError("queue/ cannot be listed")
+        return real(paths, alive)
+
+    def follow_up_fails(_paths, job_id, _code):
+        raise OSError(f"cannot fail {job_id}")
+
+    monkeypatch.setattr(job_runner, "recover_queue", failing)
+    monkeypatch.setattr(job_runner, "_fail_if_unclaimed", follow_up_fails)
+    with pytest.raises(OSError, match="cannot be listed"):
+        box.run()
+    assert box.record(last)["state"] == "succeeded"  # still waited for
+    assert any(f"cannot fail {crashing}" in e for e in box.errors)
 
 
 def test_a_lost_job_another_runner_failed_first_is_left_to_it(box, monkeypatch):

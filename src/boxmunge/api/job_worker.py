@@ -4,7 +4,9 @@
 1. Hold the jobs gate shared for the whole job. A worker that had to wait
    for it (an upgrade held it) leaves the job queued and exits EX_TEMPFAIL,
    so the job runs on the code the upgrade installed, never the old code.
-2. Claim the job durably; a job that is not queued is not ours (exit 1).
+2. A queued job older than JOB_MAX_QUEUED_AGE is failed `expired`, never
+   run (exit 0). Otherwise claim the job durably; a job that is not queued
+   is not ours (exit 1).
 3. Open its event log; check the action and parameters still hold on the
    code installed now.
 4. With fds 1 and 2 captured as log events, wait up to
@@ -42,7 +44,8 @@ from boxmunge.api.job_capture import (
 from boxmunge.api.job_events import EventLog
 from boxmunge.api.job_gate import GateTimeout, job_gate
 from boxmunge.api.job_recovery import advice_text, retry_command
-from boxmunge.api.job_writer import claim, finish
+from boxmunge.api.job_failure import COMPONENT, fail_if_expired
+from boxmunge.api.job_writer import claim, finish, load_for_recovery
 from boxmunge.api.param_tiers import param_tier_refusal
 from boxmunge.api.principal import Principal, Tier, refusal
 from boxmunge.api.registry import Action, Registry
@@ -60,7 +63,6 @@ from boxmunge.termination import Terminated
 JOB_LOCK_WAIT_SECONDS = 120
 EX_TEMPFAIL = 75
 NO_RUNNABLE_JOB = 1
-COMPONENT = "jobs"
 CUT_OFF = ("Output was cut off: a process this job started still held its output open "
            "after the job's work ended, so anything it printed later is not shown.")
 _AGENT_ID = re.compile(r"agent:mcp\((.+)\)")
@@ -77,6 +79,11 @@ def run_job(paths: BoxPaths, job_id: str, registry: Registry, host: HostProbe, *
                 log_operation(COMPONENT, f"job {job_id}: an upgrade held the jobs gate, so "
                               f"the job is left queued to run on the code it installed", paths)
                 return EX_TEMPFAIL
+            queued = load_for_recovery(paths, job_id)
+            if queued is not None and fail_if_expired(paths, queued):
+                log_warning(COMPONENT, f"job {job_id} waited in the queue too long, so it "
+                            f"was failed expired, not run", paths, project=queued["project"])
+                return 0
             record = claim(paths, job_id, current(proc), _now())
             if record is None:
                 log_warning(COMPONENT, f"job {job_id} is not queued: another worker has it, "

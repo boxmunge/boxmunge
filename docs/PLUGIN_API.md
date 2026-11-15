@@ -224,6 +224,10 @@ once the job has succeeded, in the shape of that action's catalog `result` schem
 - A `running` job whose worker is gone is reported as `failed` with the error code `worker_lost`.
   Such a job is never re-run, since repeating half of a deploy or restore could do harm: check what
   it changed before starting it again.
+- A `queued` job that has not started 2 hours after its `created_at` is failed, never run, with
+  the error code `expired` (it may no longer be wanted, for example after a platform rollback or
+  a job runner outage). Its message names when it was queued and the command that makes the same
+  call again.
 
 Events have `seq` (from 1), `ts` and `type`:
 

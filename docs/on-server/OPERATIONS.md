@@ -629,7 +629,7 @@ Every call through the action API that changes something is recorded in `/opt/bo
 
 `boxmunge-audit-rotate.timer` rotates it at 00:15 on the 1st of each month (a month missed while the box was off is rotated at the next boot). As root, it clears the attribute, moves the log to `audit.jsonl.YYYY-MM-DD`, sets the attribute on that archive, starts a new sealed log and deletes archives beyond the newest 12, clearing each one's attribute first. An empty log is left alone. While the log is moved aside, root's marker `upgrade-root/audit-rotating` says so, and `health` warns "rotation in progress" instead of reporting the log missing (a marker older than 10 minutes, left by a rotation that was killed, is ignored). A step that fails is logged and alerted at high priority, naming the step and its fix: usually `sudo boxmunge-server _audit-seal`; for an archive name that is already taken, moving that archive aside; for an archive that is a link, removing it. After either of the last two, `sudo systemctl start boxmunge-audit-rotate.service` runs the rotation again.
 
-`health` reports the log as an error (`audit-log`) when it is missing, is a link or not a plain file, or has lost the attribute: install sets all of these, so the error means a control is off, and an upgrade in probation that finds it rolls back. The fix is `sudo boxmunge-server _audit-seal`.
+`health` reports the log as an error (`audit-log`) when it is missing, is a link or not a plain file, or has lost the attribute: install sets all of these, so the error means a control is off, and an upgrade in probation that finds it rolls back. The fix is `sudo boxmunge-server _audit-seal`. A name in `logs/` that looks like an archive (`audit.jsonl.YYYY-MM-DD`) but is a link or not a plain file is left alone by the seal, which warns and alerts naming it; remove it if it is not an archive.
 
 Some hosts cannot set the attribute at all: a filesystem without it, or a container whose root lacks `CAP_LINUX_IMMUTABLE`. There, install still completes. `_audit-seal` records the reason in `upgrade-root/audit-append-unsupported` (root's, in a directory only root can write), leaves the log `deploy`'s with mode 0640, and prints a warning that `deploy` can rewrite the audit log on this host. `health` then warns, and never errors, so the box can still upgrade. Rotation works the same way but skips the attribute steps. If the host later supports the attribute (the box moved to another filesystem), a run of `_audit-seal` that sets it removes the record. A record root does not own is refused, so `health` still reports an error. Both records are root-only, so `health` run from the deploy shell reports the check as needing root when the log is not sealed; the root health timer gives the verdict.
 
@@ -1176,6 +1176,12 @@ action must not repeat itself. The alert names the way out for that action, as f
 mid-work; for a deploy that left an install open, the install's options. Check what it changed
 (`boxmunge status myapp`, `boxmunge job show <id> --events`), then follow the alert.
 
+### expired
+
+A job still queued 2 hours after it was created (it waited out a platform rollback, or a job runner
+that was down) is failed with `expired` and never run, with an alert. Its message names when it was
+queued and the `boxmunge job run ...` command that makes the same call again, if it is still wanted.
+
 ### A job's audit lines
 
 A job writes two audit lines with its id: `accepted` when it is queued, and its outcome once it has
@@ -1192,7 +1198,9 @@ A platform upgrade and jobs never overlap:
 
 - While an upgrade runs, new jobs are refused (`unavailable`: `boxmunge is being upgraded, so new
   jobs are refused until the upgrade finishes ...`). Run the same `job run` again once it has
-  finished (`boxmunge log --component upgrade`).
+  finished (`boxmunge log --component upgrade`). The probation check after an upgrade refuses
+  them only while it changes a slot or the systemd units (a rollback or promotion), not for the
+  whole probation.
 - An upgrade waits up to 60 minutes for running jobs to finish, printing `Waiting up to 60 minutes
   for running jobs to finish`; if they are still running then, it installs nothing and stops (see
   UPGRADING.md).
@@ -1774,7 +1782,7 @@ unless `health` also ran past its budget before the upgrade.
 | `registry` | a registered project's directory is gone but its deploy, scan or health state is not (a removal that did not finish); a name never deployed is ok | the supervisor user runs `sudo boxmunge-server project-forget <project>` |
 | `sshd-hardening`, `sshd-deploy-env` | `00-boxmunge.conf` is missing or changed, or `sshd -T` shows a later setting widening what deploy accepts (error; `sshd-deploy-env` needs root); `sshd -T` itself fails or times out (warning) | the supervisor user re-runs the installer, or removes the widening setting; `sudo sshd -t` names a config error |
 | `operational-log` | the active log file's first line is not a log entry, which stops all logging | move the file aside (see [Reading Logs](#reading-logs)) |
-| `audit-log` | `logs/audit.jsonl` is missing, a link or not a plain file, or has lost its append-only attribute on a host that supports it (error: every audited call is refused, or the log can be rewritten); on a host recorded as unable to set the attribute, a warning naming the reason | the supervisor user runs `sudo boxmunge-server _audit-seal`; see [The action audit log](#the-action-audit-log) |
+| `audit-log` | `logs/audit.jsonl` is missing, a link or not a plain file, or has lost its append-only attribute on a host that supports it (error: every audited call is refused, or the log can be rewritten); on a host recorded as unable to set the attribute, a warning naming the reason; while the monthly rotation has the log moved aside, a warning (`rotation in progress`) | the supervisor user runs `sudo boxmunge-server _audit-seal`; see [The action audit log](#the-action-audit-log) |
 | `jobs-runner` | the job runner's path unit, `boxmunge-jobs.path`, is not active, so no queued job starts (error: install enables it). The detail gives its result; `unit-start-limit-hit` means the runner failed to start 20 times in 10 minutes and systemd stopped starting it. A warning when a job has been queued for more than 10 minutes without starting, or a record in `state/jobs/queue/` cannot be read | the supervisor user runs `sudo systemctl reset-failed boxmunge-jobs.path boxmunge-jobs.service && sudo systemctl start boxmunge-jobs.path`, then `journalctl -u boxmunge-jobs.service` says why the runner failed |
 | `cve-scan` | a deployed project has not been scanned for 36 hours, was never scanned, or its last scan was incomplete | `security scan <project>`; see `agent-help cve` |
 | `kev-watch` | the KEV watch has not run for 75 minutes (or its timer is installed and it has never run), its record cannot be read, or a known-exploited source that is turned on (the EU list, VulnCheck) is stale or was never fetched | the supervisor user runs `systemctl status boxmunge-kev-watch.timer`; for a source, `log --component cve-scan` names its error. See `agent-help cve`, "Known-exploited sources" |
