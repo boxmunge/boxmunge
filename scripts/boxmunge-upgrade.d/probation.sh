@@ -114,8 +114,8 @@ refuse_unrecorded_probation() {
 # load_probation: 0 with PROB_* set while a release is on probation, 1 when
 # there is none. A probation naming the live slot as previous_slot is stale
 # (an older shim's rollback left it behind; deploy may remove it anyway), so
-# it is removed with a warning. previous_slot need not hold a working venv:
-# a pre-0.11 shim could recycle it mid-probation. Only a rollback needs it
+# it is removed with a warning. previous_slot need not hold a working venv
+# (a broken or half-removed slot). Only a rollback needs it
 # (do_rollback checks); promotion deletes it, and demanding it here left such
 # a probation unable to expire, deferring every upgrade for good (#119).
 load_probation() {
@@ -223,8 +223,8 @@ clear_probation_markers() {
 }
 
 # rollback_impossible <version> <prev_slot> <why>: the release on probation
-# failed (<why>), but the previous slot cannot take over (a pre-0.11 shim may
-# have recycled it). Said once per probation, as an error and an alert; later
+# failed (<why>), but the previous slot cannot take over (its venv is broken
+# or gone). Said once per probation, as an error and an alert; later
 # timer fires only print it, rather than adding an error to the log every five
 # minutes. With a live slot that still runs, expiry promotes the release; with
 # one that does not, nothing can until it is reinstalled.
