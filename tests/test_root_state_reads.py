@@ -39,7 +39,7 @@ from boxmunge.blocked_update import read_blocked_state
 from boxmunge.commands.security_scan_inputs import project_suppressions_path
 from boxmunge.container_update_targets import read_target_state
 from boxmunge.cve import (
-    breaker, kev, kev_source_history, kev_withdrawals, quarantine, scan_state,
+    breaker, exploited, kev, kev_source_history, kev_withdrawals, quarantine, scan_state,
     suppressions,
 )
 from boxmunge.discovery_freshness import stale_discovery_warning
@@ -166,6 +166,15 @@ READERS = [
            {"sources": {"https://cisa.example/kev.json":
                         {"released_at": ISO, "disagreed_runs": 0}}},
            kev_source_history.load_history),
+    # Optional caches: absent is "never fetched" (not read here); a record
+    # the reader cannot use is a fault, so a dangling link is refused.
+    Reader("kev_enisa", lambda p: p.kev_enisa,
+           {"fetched_at": ISO, "etag": None, "last_modified": None,
+            "entries": {"CVE-1": ["eu_kev"]}},
+           exploited.read_enisa_cache),
+    Reader("kev_vulncheck", lambda p: p.kev_vulncheck,
+           {"fetched_at": ISO, "entries": ["CVE-1"]},
+           exploited.read_vulncheck_cache),
     Reader("blocked_update", lambda p: p.platform_update_state,
            {"checked_at": ISO, "current_version": "0.1.0", "blocked": None, "alerted": None},
            read_blocked_state),
