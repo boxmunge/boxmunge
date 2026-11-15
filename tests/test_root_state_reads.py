@@ -33,6 +33,7 @@ from boxmunge import (
     overlay_users, pause, release, release_txn, run_as, staged_release,
     upgrade_state, user_drift,
 )
+from boxmunge.api.job_events import EventLog
 from boxmunge.api.jobs import JobStore
 from boxmunge.backup_evidence import project_evidence, sync_evidence
 from boxmunge.bind_sources import read_record
@@ -112,6 +113,15 @@ JOB_EVENT = json.dumps({"seq": 1, "ts": "2026-10-14T01:00:06Z", "type": "log", "
 
 def _jobs(paths: BoxPaths) -> JobStore:
     return JobStore(paths, result_schemas=registry_results)
+
+
+def _event_log_resumed(paths: BoxPaths) -> int:
+    """The worker reopening a job's event log numbers on from its last line."""
+    log = EventLog(paths, JOB_ID)
+    try:
+        return log.log("m")
+    finally:
+        log.close()
 
 
 def _alerted(paths: BoxPaths) -> bool:
@@ -280,6 +290,8 @@ READERS = [
            lambda p: _jobs(p).get(JOB_ID)),
     Reader("job events", lambda p: p.jobs_dir / f"{JOB_ID}.events.jsonl", JOB_EVENT,
            lambda p: _jobs(p).events(JOB_ID)),
+    Reader("job event log", lambda p: p.jobs_dir / f"{JOB_ID}.events.jsonl", JOB_EVENT,
+           _event_log_resumed),
     Reader("backup sync evidence", lambda p: p.backup_sync_state, {"synced_at": ISO},
            sync_evidence),
     Reader("health backup_freshness", lambda p: p.project_backup_state(P),

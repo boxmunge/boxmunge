@@ -189,10 +189,12 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `compose_up_steps.py` | `sweep_live_scripts` | the generated compose overlay, searched for one string (1 MiB) | `projects/<p>/` |
 | `secrets.py` | `_parse` | a project's `secrets.env`. Cap: 1 MiB | `projects/<p>/` |
 | `api/jobs.py` | `_read` | a job's record and events | `state/jobs/` |
+| `api/job_events.py` | `_last_seq` | a job's events, so a reopened log numbers on from its last line | `state/jobs/` |
 | `commands/logs.py` | `_show_boxmunge_logs` | `boxmunge.log` and its archives | `logs/` |
 | `commands/quarantine_gate.py` | `lift_after_deploy` | `<p>.conf`, the site a lift republishes (capped at the size of a site file) | `caddy/sites/` |
 
-Of the action-API modules, `api/jobs.py` has a row above (its reads of `state/jobs/`). Two need
+Of the action-API modules, `api/jobs.py` and `api/job_events.py` have rows above (their reads of
+`state/jobs/`). Two need
 none: `api/actions/logs.py` reads nothing itself (the operational log goes through
 `commands/log_cmd.parse_log_file` below, the manifest through `load_manifest`), and
 `api/dev/fixture_host.py` (3 reads) serves canned answers from `dev/` of a fixture box, which `apid`
