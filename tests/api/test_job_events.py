@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import threading
 
 import pytest
 
+from boxmunge.api import job_events
 from boxmunge.api.job_events import MAX_EVENT_MESSAGE, EventLog
 from boxmunge.api.jobs import EVENT_SCHEMA
 from boxmunge.api.schema import validate
@@ -108,3 +110,22 @@ def test_long_message_is_cut_and_says_how_much(paths, jobs_dir) -> None:
     log.close()
     message = _events(paths)[0]["message"]
     assert message == "x" * MAX_EVENT_MESSAGE + "…(123 more characters)"
+
+
+def test_an_existing_file_is_set_to_0640(paths, jobs_dir) -> None:
+    path = jobs_dir / f"{JOB_ID}.events.jsonl"
+    path.write_text("")
+    path.chmod(0o600)
+    EventLog(paths, JOB_ID).close()
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+def test_a_failed_handover_does_not_leak_the_descriptor(paths, jobs_dir, monkeypatch) -> None:
+    def refuse(_fd: int, _what: str) -> None:
+        raise OSError("chown refused")
+
+    monkeypatch.setattr(job_events, "fchown_deploy", refuse)
+    before = len(os.listdir("/dev/fd"))
+    with pytest.raises(OSError, match="chown refused"):
+        EventLog(paths, JOB_ID)
+    assert len(os.listdir("/dev/fd")) == before

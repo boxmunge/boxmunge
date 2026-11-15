@@ -22,10 +22,16 @@ from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from boxmunge.api.job_events import MAX_EVENT_MESSAGE
+
 CAPTURE_DRAIN_SECONDS = 5
 OUTPUT_TAIL_LINES = 20
 FAILURE_MESSAGE_CAP = 1000
 _POLL_SECONDS = 0.1
+# The longest piece of output handed on as one line: an event message is
+# cut at MAX_EVENT_MESSAGE characters anyway, and output that never ends a
+# line must not be buffered without limit.
+MAX_LINE_BYTES = MAX_EVENT_MESSAGE
 _ERROR_LINES_SHOWN = 3
 
 
@@ -69,21 +75,45 @@ def failure_message(verb: str, rc: int, tail: Sequence[str], *, job_id: str) -> 
     return head + body + pointer
 
 
+# fds 0-2 and sys.stdout/sys.stderr belong to the whole process: two
+# captures at once would restore each other's descriptors out of order.
+_ACTIVE = threading.Lock()
+
+
 @contextmanager
 def capture_output(on_line: Callable[[str], None]) -> Iterator[CaptureResult]:
     """Inside the block, everything written to fds 1 and 2 (by this
     process or any child) reaches *on_line* one line at a time, decoded
     as UTF-8 with undecodable bytes replaced, and is echoed to the
-    original fd 1. On exit the descriptors and sys.stdout/sys.stderr are
-    restored. An exception *on_line* raised is raised here once they are,
-    and no line after it is handed on (output is still drained and echoed,
-    so writers never block on a full pipe)."""
+    original fd 1. A line longer than MAX_LINE_BYTES (a progress bar that
+    never prints a newline) is handed on in pieces of at most that size.
+    On exit the descriptors and sys.stdout/sys.stderr are restored.
+
+    The pipe is always drained, so a writer never blocks on it: if
+    *on_line* raises, later lines are still echoed; if the echo fails (the
+    journal is gone), later lines still reach *on_line*. Either first
+    failure is raised here once the descriptors are restored.
+
+    One capture at a time per process: a second one raises RuntimeError."""
+    if not _ACTIVE.acquire(blocking=False):
+        raise RuntimeError("capture_output is already active in this process; a job's "
+                           "output can only be captured by one block at a time")
+    try:
+        yield from _capture(on_line)
+    finally:
+        _ACTIVE.release()
+
+
+def _capture(on_line: Callable[[str], None]) -> Iterator[CaptureResult]:
     for stream in (sys.stdout, sys.stderr):
         stream.flush()
     saved = [os.dup(fd) for fd in (0, 1, 2)]
     read_end, write_end = os.pipe()
     null = os.open(os.devnull, os.O_RDONLY)
-    reader = _Reader(read_end, saved[1], on_line)
+    # The reader closes these itself when it ends: one stuck past the
+    # drain time must not have its descriptors closed (and reused) under it.
+    reader_fds = [read_end, os.dup(saved[1])]
+    reader = _Reader(*reader_fds, on_line)
     streams = sys.stdout, sys.stderr
     result = CaptureResult()
     unclosed = [write_end, null]
@@ -94,6 +124,7 @@ def capture_output(on_line: Callable[[str], None]) -> Iterator[CaptureResult]:
         while unclosed:
             os.close(unclosed.pop())
         reader.start()
+        reader_fds = []
         sys.stdout, sys.stderr = (os.fdopen(fd, "w", buffering=1, encoding="utf-8",
                                             errors="replace", closefd=False) for fd in (1, 2))
         yield result
@@ -104,43 +135,47 @@ def capture_output(on_line: Callable[[str], None]) -> Iterator[CaptureResult]:
         sys.stdout, sys.stderr = streams
         for fd, copy in zip((0, 1, 2), saved):
             os.dup2(copy, fd)
-        for fd in unclosed:
+        for fd in (*unclosed, *reader_fds, *saved):
             os.close(fd)
         if reader.is_alive():
             result.cut_off = not reader.finish(CAPTURE_DRAIN_SECONDS)
-        for fd in (*saved, read_end):
-            os.close(fd)
     if reader.error is not None:
         raise reader.error
 
 
 class _Reader(threading.Thread):
     """Reads the capture pipe until every writer has closed it, or until
-    told to stop."""
+    told to stop. Owns (and closes) the pipe's read end and its echo fd."""
 
     def __init__(self, fd: int, echo_fd: int, on_line: Callable[[str], None]) -> None:
         super().__init__(name="job-output-capture", daemon=True)
         self._fd = fd
-        self._echo_fd = echo_fd
-        self._on_line = on_line
+        self._echo_fd: int | None = echo_fd
+        self._on_line: Callable[[str], None] | None = on_line
         self._stop_reading = threading.Event()
         self.error: BaseException | None = None
 
     def finish(self, seconds: float) -> bool:
         """Wait up to *seconds* for the writers to close the pipe; whether
-        they did. If not, the reader stops and its remaining output is lost."""
+        they did. If not, the reader is told to stop and given one poll
+        interval more; its remaining output is lost, and a reader stuck in
+        a handler is left to end on its own."""
         self.join(seconds)
         if not self.is_alive():
             return True
         self._stop_reading.set()
-        self.join()
+        self.join(_POLL_SECONDS * 2)
         return False
 
     def run(self) -> None:
         try:
             self._read_until_closed()
         except Exception as e:  # noqa: BLE001 - raised by capture_output on exit
-            self.error = self.error or e
+            self._failed(e)
+        finally:
+            os.close(self._fd)
+            if self._echo_fd is not None:
+                os.close(self._echo_fd)
 
     def _read_until_closed(self) -> None:
         pending = b""
@@ -154,15 +189,40 @@ class _Reader(threading.Thread):
                     break
                 *lines, pending = (pending + chunk).split(b"\n")
                 for line in lines:
-                    self._emit(line)
+                    self._emit_cut(line)
+                while len(pending) > MAX_LINE_BYTES:
+                    self._emit(pending[:MAX_LINE_BYTES])
+                    pending = pending[MAX_LINE_BYTES:]
         if pending:
             self._emit(pending)
 
+    def _emit_cut(self, raw: bytes) -> None:
+        for start in range(0, max(len(raw), 1), MAX_LINE_BYTES):
+            self._emit(raw[start:start + MAX_LINE_BYTES])
+
     def _emit(self, raw: bytes) -> None:
-        os.write(self._echo_fd, raw + b"\n")
-        if self.error is not None:
+        if self._echo_fd is not None:
+            try:
+                _write_all(self._echo_fd, raw + b"\n")
+            except OSError as e:
+                self._failed(e)
+                os.close(self._echo_fd)
+                self._echo_fd = None
+        if self._on_line is None or self._stop_reading.is_set():
             return
         try:
             self._on_line(raw.decode("utf-8", errors="replace"))
         except Exception as e:  # noqa: BLE001 - raised by capture_output on exit
-            self.error = e
+            self._failed(e)
+            self._on_line = None
+
+    def _failed(self, error: BaseException) -> None:
+        """Keep the first failure; capture_output raises it on exit."""
+        if self.error is None:
+            self.error = error
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]

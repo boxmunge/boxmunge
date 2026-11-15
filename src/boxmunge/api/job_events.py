@@ -33,7 +33,12 @@ class EventLog:
         self._seq = _last_seq(self._path)
         self._fd = open_regular_nofollow(self._path, os.O_WRONLY | os.O_APPEND | os.O_CREAT,
                                          0o640)
-        fchown_deploy(self._fd, str(self._path))
+        try:
+            os.fchmod(self._fd, 0o640)  # the create mode is umasked, an existing file's kept
+            fchown_deploy(self._fd, str(self._path))
+        except BaseException:
+            os.close(self._fd)
+            raise
         self._lock = threading.Lock()
 
     def log(self, message: str) -> int:

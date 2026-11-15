@@ -6,13 +6,15 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
 
+from boxmunge.api import job_capture
 from boxmunge.api.job_capture import (
-    CAPTURE_DRAIN_SECONDS, OUTPUT_TAIL_LINES, CoreFailed, OutputTail, capture_output,
-    failure_message,
+    CAPTURE_DRAIN_SECONDS, MAX_LINE_BYTES, OUTPUT_TAIL_LINES, CoreFailed, OutputTail,
+    capture_output, failure_message,
 )
 
 
@@ -79,6 +81,62 @@ def test_a_failing_line_handler_is_raised_after_the_fds_are_restored() -> None:
             print("first")
             print("second")
     assert _fds() == before
+
+
+@pytest.mark.timeout(30)
+def test_a_broken_journal_still_drains_and_raises_on_exit() -> None:
+    """With the echo target gone, the core must not block on a full pipe:
+    every line still reaches the handler, and the echo failure is raised."""
+    journal_read, journal_write = os.pipe()
+    os.close(journal_read)
+    real_stdout = os.dup(1)
+    os.dup2(journal_write, 1)
+    os.close(journal_write)
+    lines: list[str] = []
+    try:
+        with pytest.raises(BrokenPipeError):
+            with capture_output(lines.append):
+                for n in range(2000):
+                    print(f"{n:04d}" + "x" * 100)
+    finally:
+        os.dup2(real_stdout, 1)
+        os.close(real_stdout)
+    assert len(lines) == 2000 and lines[-1].startswith("1999")
+
+
+def test_a_second_capture_in_the_same_process_is_refused() -> None:
+    lines: list[str] = []
+    with capture_output(lines.append):
+        with pytest.raises(RuntimeError, match="already"):
+            with capture_output(lines.append):
+                pass
+        print("outer still works")
+    assert lines == ["outer still works"]
+    with capture_output(lines.append):
+        print("and a later one too")
+    assert lines[-1] == "and a later one too"
+
+
+def test_exit_is_bounded_when_the_handler_is_stuck(monkeypatch) -> None:
+    monkeypatch.setattr(job_capture, "CAPTURE_DRAIN_SECONDS", 1)
+    release = threading.Event()
+    started = time.monotonic()
+    try:
+        with capture_output(lambda _line: release.wait(30)) as result:
+            print("one line")
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+    assert result.cut_off is True
+    assert elapsed < 2
+
+
+def test_output_without_newlines_is_handed_on_in_bounded_pieces() -> None:
+    lines: list[str] = []
+    with capture_output(lines.append):
+        os.write(1, b"y" * (MAX_LINE_BYTES * 3 + 7))
+    assert all(len(line) <= MAX_LINE_BYTES for line in lines)
+    assert "".join(lines) == "y" * (MAX_LINE_BYTES * 3 + 7)
 
 
 def test_output_tail_keeps_the_last_lines() -> None:
