@@ -130,6 +130,9 @@ case "$MODE" in
           echo 'cp "$BOXMUNGE_SUDOERS_FILE" /tmp/sudoers-before-install-sh'
           grep -Fx '"${BOXMUNGE_ROOT}/bin/boxmunge-upgrade" install-sudoers' "$I"
           sed -n '/^INSTALLED_VERSION=/,/^fi$/p' "$I"
+          # The jobs directory and gate the installer makes (deploy's on a box;
+          # this box has no deploy user), which the new shim opens for every lock.
+          echo 'install -d -m 0750 "$BOXMUNGE_ROOT/state/jobs"; install -m 0660 /dev/null "$BOXMUNGE_ROOT/state/jobs/gate.lock"'
           # The release's units, as bootstrap/systemd-units.sh installs them.
           echo 'rm -f "$BOXMUNGE_SYSTEMD_DIR"/boxmunge-*; cp "$SCRIPT_DIR"/systemd/boxmunge-* "$BOXMUNGE_SYSTEMD_DIR/"'
           echo 'ls "$BOXMUNGE_SYSTEMD_DIR" | sort | paste -sd, - > /tmp/units-after-install-sh'

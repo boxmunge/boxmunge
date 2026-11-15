@@ -152,12 +152,21 @@ rm -rf "$(dirname "$VICTIM")"
 drop_root
 unset VICTIM
 
-# A lock descriptor handed in by the environment must be upgrade.lock itself.
+# Descriptors handed in by the environment must be upgrade.lock (fd 9) and the
+# jobs gate (fd 8) themselves.
 new_root a
 other="$(mktemp)"
 RC=0
-OUT="$(BM_UPGRADE_LOCK_FD=9 bash "$SHIM" check-probation 9<>"$other" 2>&1)" || RC=$?
+# shellcheck disable=SC2094  # the same file on both descriptors, on purpose
+OUT="$(BM_UPGRADE_LOCK_FD=9 BM_JOBS_GATE_FD=8 bash "$SHIM" check-probation 9<>"$other" 8<"$other" 2>&1)" || RC=$?
 expect 1 "fd 9 is not $BOXMUNGE_ROOT/upgrade-root/upgrade.lock" "a lock descriptor for another file is refused"
+mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+: > "$BOXMUNGE_ROOT/upgrade-root/upgrade.lock"
+: > "$BOXMUNGE_ROOT/state/jobs/gate.lock"
+RC=0
+OUT="$(BM_UPGRADE_LOCK_FD=9 BM_JOBS_GATE_FD=8 bash "$SHIM" check-probation \
+    9<>"$BOXMUNGE_ROOT/upgrade-root/upgrade.lock" 8<"$other" 2>&1)" || RC=$?
+expect 1 "fd 8 is not $BOXMUNGE_ROOT/state/jobs/gate.lock" "a gate descriptor for another file is refused"
 rm -f "$other"
 drop_root
 

@@ -57,6 +57,9 @@ PROBATION_FILE="$STATE_DIR/probation.json"
 # failure_count in state.sh.
 UPGRADE_ROOT_DIR="$BOXMUNGE_ROOT/upgrade-root"
 LOCK_FILE="$UPGRADE_ROOT_DIR/upgrade.lock"
+# deploy's (install makes state/jobs/ deploy:deploy 0750); see acquire_lock.
+JOBS_DIR="$BOXMUNGE_ROOT/state/jobs"
+JOBS_GATE_FILE="$JOBS_DIR/gate.lock"
 INTERRUPTED_FILE="$UPGRADE_ROOT_DIR/interrupted.json"
 PIP_FAILURES_FILE="$UPGRADE_ROOT_DIR/pip-failures.json"
 COSIGN_FAILURES_FILE="$UPGRADE_ROOT_DIR/cosign-failures.json"

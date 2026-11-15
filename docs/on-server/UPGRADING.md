@@ -286,6 +286,13 @@ What it prints, in order:
 
 Lines such as `Caddyfile input is not formatted` and Perl locale warnings are harmless.
 
+From 0.12 on, an upgrade also waits for running jobs (the operations boxmunge runs in the
+background, listed by `boxmunge jobs --running`), as it waits for another upgrade. It prints
+`Waiting up to 60 minutes for running jobs to finish` and goes ahead as soon as they finish.
+No new job starts while an upgrade runs. If jobs are still running after 60 minutes, it stops
+and installs nothing; run it again once they finish. The health timer's probation check
+skips a run while a job runs, as it does while an upgrade runs.
+
 ## After the upgrade
 
 ```

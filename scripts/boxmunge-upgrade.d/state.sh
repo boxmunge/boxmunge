@@ -20,6 +20,11 @@ ACTIVE_SLOT=""
 LOCK_HELD=0
 # How long the auto-update timer's run waits for upgrade.lock (acquire_lock).
 LOCK_WAIT_SECS=900
+# How long an upgrade waits for running jobs to finish (acquire_lock). The
+# messages there say 60 minutes; a test may shorten the wait (sudo and the
+# timers start the shim with a clean environment).
+JOBS_GATE_WAIT_SECS="${JOBS_GATE_WAIT_SECS:-3600}"
+[[ "$JOBS_GATE_WAIT_SECS" =~ ^[0-9]+$ ]] || die "JOBS_GATE_WAIT_SECS must be a number of seconds, not '$JOBS_GATE_WAIT_SECS'"
 
 printable() { local s="${1:0:80}"; printf '%s' "${s//[^[:alnum:]._+-]/?}"; }
 
@@ -145,24 +150,38 @@ active_venv() { echo "$BOXMUNGE_ROOT/env-$ACTIVE_SLOT"; }
 # it on fd 9 and run this shim again with the same arguments. That run finds
 # BM_UPGRADE_LOCK_FD=9 and checks fd 9 is the lock file before it takes the
 # flock.
+#
+# Then the jobs gate, state/jobs/gate.lock, on fd 8 (BM_JOBS_GATE_FD=8): every
+# running job holds it shared (api/job_gate.py), and an upgrade takes it
+# exclusively, so it waits for running jobs as it waits for a held lock, and
+# no new job starts until it ends. "skip" skips when a job runs; "try" (the
+# readiness check, which installs nothing) does not take the gate. state/jobs/
+# is deploy's, so the gate is opened without following a link (see
+# open_lock_and_reexec); a running job is no reason to remove it. Children,
+# the userns verbs' among them, inherit fds 8 and 9 and the locks with them.
 acquire_lock() {
     [[ "$LOCK_HELD" -eq 1 ]] && return 0
-    if [[ "${BM_UPGRADE_LOCK_FD:-}" != 9 ]]; then
+    if [[ "${BM_UPGRADE_LOCK_FD:-}" != 9 || "${BM_JOBS_GATE_FD:-}" != 8 ]]; then
         refuse_symlink "$UPGRADE_ROOT_DIR"
         [[ -d "$UPGRADE_ROOT_DIR" ]] || mkdir -m 0700 "$UPGRADE_ROOT_DIR"
         refuse_symlink "$LOCK_FILE"
+        refuse_symlink "$BOXMUNGE_ROOT/state"
+        refuse_symlink "$JOBS_DIR"
+        [[ -d "$JOBS_DIR" ]] \
+            || die_logged "$JOBS_DIR is missing, so running jobs cannot be kept out of this upgrade; install makes it. Re-run the installed release's installer as root (sudo bash boxmunge-install.sh)"
+        refuse_symlink "$JOBS_GATE_FILE"
         open_lock_and_reexec
     fi
-    unset BM_UPGRADE_LOCK_FD  # children inherit fd 9, never the claim that it is checked
+    unset BM_UPGRADE_LOCK_FD BM_JOBS_GATE_FD  # children inherit fds 8 and 9, never the claim that they are checked
     local why
     why="$(python3 -c 'import os, stat, sys
-path = sys.argv[1]
-try:
-    held, name = os.fstat(9), os.lstat(path)
-except OSError:
-    sys.exit(f"fd 9 is not {path}")
-if not (stat.S_ISREG(held.st_mode) and (held.st_dev, held.st_ino) == (name.st_dev, name.st_ino)):
-    sys.exit(f"fd 9 is not {path}")' "$LOCK_FILE" 2>&1)" \
+for fd, path in ((9, sys.argv[1]), (8, sys.argv[2])):
+    try:
+        held, name = os.fstat(fd), os.lstat(path)
+    except OSError:
+        sys.exit(f"fd {fd} is not {path}")
+    if not (stat.S_ISREG(held.st_mode) and (held.st_dev, held.st_ino) == (name.st_dev, name.st_ino)):
+        sys.exit(f"fd {fd} is not {path}")' "$LOCK_FILE" "$JOBS_GATE_FILE" 2>&1)" \
         || die "$why (it was replaced, or the descriptor came from elsewhere); refusing to lock it. Remove it and re-run."
     if [[ "${1:-}" == wait ]]; then
         if ! flock -w "$LOCK_WAIT_SECS" 9; then
@@ -173,8 +192,20 @@ if not (stat.S_ISREG(held.st_mode) and (held.st_dev, held.st_ino) == (name.st_de
         [[ "${1:-}" != "try" ]] || return 1
         die "Another upgrade is in progress"
     fi
+    [[ "${1:-}" == "try" ]] || take_jobs_gate "${1:-}"
     [[ "${1:-}" == "try" ]] || rm -f "$LOCK_SKIPS_FILE"
     LOCK_HELD=1
+}
+
+# take_jobs_gate [skip|wait]: flock fd 8 exclusively, with upgrade.lock held
+# (see acquire_lock). "skip" skips at once when a job runs; any other mode
+# waits up to JOBS_GATE_WAIT_SECS for running jobs, then dies, logged.
+take_jobs_gate() {
+    flock -n 8 && return 0
+    [[ "$1" != "skip" ]] || lock_busy_skip "a job is running"
+    log "Waiting up to 60 minutes for running jobs to finish (see: boxmunge jobs --running)"
+    flock -w "$JOBS_GATE_WAIT_SECS" 8 \
+        || die_logged "Jobs were still running after the 60 minutes this upgrade waited, so nothing was installed. See them with: boxmunge jobs --running; the upgrade can be run again once they finish."
 }
 
 # lock_busy_skip <why>: check-probation could not take upgrade.lock (<why>),
@@ -199,33 +230,93 @@ lock_busy_skip() {
 }
 
 # open_lock_and_reexec: see acquire_lock. Replaces this process; prints a
-# FATAL line like die() when a lock file cannot be used.
+# FATAL line like die() when a lock file cannot be used. The gate is opened
+# read-only (flock needs no more) under descriptors for state/ and jobs/, none
+# followed if a link; one missing is made O_EXCL (a job's open may make it
+# first), deploy:deploy 0660, as install makes it.
 open_lock_and_reexec() {
     exec python3 -c '
-import errno, os, stat, sys, time
-path, shell, shim, args = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
+import errno, fcntl, os, stat, sys, time
+lock, state, shell, shim, args = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5:]
 
-def fatal(what):
+def die(message):
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    sys.exit(f"{now} boxmunge-upgrade: FATAL: {path} {what}; refusing to use it as root. Remove it and re-run.")
+    sys.exit(f"{now} boxmunge-upgrade: FATAL: {message}")
+
+def fatal(path, what):
+    die(f"{path} {what}; refusing to use it as root. Remove it and re-run.")
+
+def refused(path, e, linked="is a symlink"):
+    planted = e.errno in (errno.ELOOP, errno.ENOTDIR)
+    fatal(path, linked if planted else f"cannot be opened ({e.strerror})")
+
+def above_9(fd):  # out of the way of fds 8 and 9 until both are placed
+    high = fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 10)
+    os.close(fd)
+    return high
 
 try:
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
 except OSError as e:
-    fatal("is a symlink" if e.errno == errno.ELOOP else f"cannot be opened ({e.strerror})")
+    refused(lock, e)
 st = os.fstat(fd)
 if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
-    fatal("is not a plain regular file")
+    fatal(lock, "is not a plain regular file")
 if st.st_uid != os.geteuid():
-    fatal("is not root\x27s")
+    fatal(lock, "is not root\x27s")
 os.set_blocking(fd, True)
-if fd != 9:
-    os.dup2(fd, 9)
-    os.close(fd)
-os.set_inheritable(9, True)
+lock_fd = above_9(fd)
+
+directory = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+jobs, gate = f"{state}/jobs", f"{state}/jobs/gate.lock"
+try:
+    state_fd = os.open(state, directory)
+except OSError as e:
+    refused(state, e, "is a symlink or not a directory")
+try:
+    jobs_fd = os.open("jobs", directory, dir_fd=state_fd)
+except OSError as e:
+    refused(jobs, e, "is a symlink or not a directory")
+flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+created = False
+try:
+    fd = os.open("gate.lock", flags, dir_fd=jobs_fd)
+except FileNotFoundError:
+    owner = None  # deploy, whose jobs take the gate; settled before it is made
+    if os.geteuid() == 0:
+        import grp, pwd
+        try:
+            owner = pwd.getpwnam("deploy").pw_uid, grp.getgrnam("deploy").gr_gid
+        except KeyError:
+            die(f"{gate} is missing, and there is no deploy user and group to own it; "
+                "reinstall as root (sudo bash boxmunge-install.sh)")
+    try:
+        fd = os.open("gate.lock", flags | os.O_CREAT | os.O_EXCL, 0o660, dir_fd=jobs_fd)
+        created = True
+    except FileExistsError:
+        fd = os.open("gate.lock", flags, dir_fd=jobs_fd)
+    except OSError as e:
+        refused(gate, e)
+except OSError as e:
+    refused(gate, e)
+if not stat.S_ISREG(os.fstat(fd).st_mode):
+    fatal(gate, "is not a regular file")
+if created:
+    if owner is not None:
+        os.fchown(fd, *owner)
+    os.fchmod(fd, 0o660)
+os.set_blocking(fd, True)
+gate_fd = above_9(fd)
+os.close(jobs_fd)
+os.close(state_fd)
+
+for high, low in ((lock_fd, 9), (gate_fd, 8)):
+    os.dup2(high, low)
+    os.close(high)
 os.environ["BM_UPGRADE_LOCK_FD"] = "9"
+os.environ["BM_JOBS_GATE_FD"] = "8"
 os.execv(shell, [shell, shim, *args])
-' "$LOCK_FILE" "$BASH" "$SHIM_PATH" "${SHIM_ARGS[@]+"${SHIM_ARGS[@]}"}"
+' "$LOCK_FILE" "$BOXMUNGE_ROOT/state" "$BASH" "$SHIM_PATH" "${SHIM_ARGS[@]+"${SHIM_ARGS[@]}"}"
 }
 
 # is_blocklisted <version>: 0 if listed, 1 if not. A blocklist that is not a

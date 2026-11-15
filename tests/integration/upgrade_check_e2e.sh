@@ -170,7 +170,7 @@ useradd -m -s /bin/bash deploy
 gid="$(stat -c %g /var/run/docker.sock)"
 if ! group="$(getent group "$gid")"; then groupadd -g "$gid" docker-host; group=docker-host; fi
 usermod -aG "${group%%:*}" deploy
-mkdir -p "$R"/{upgrade-state,bin,config,logs,state/deploy,projects,caddy/sites,env-a/boxmunge-docs}
+mkdir -p "$R"/{upgrade-state,bin,config,logs,state/deploy,state/jobs,projects,caddy/sites,env-a/boxmunge-docs}
 install -d -m 0770 -g deploy "$R/stashes"
 printf 'hostname: box.example.com\nadmin_email: ops@example.com\n' > "$R/config/boxmunge.yml"
 echo "$INSTALLED+abc1234" > "$R/config/version"

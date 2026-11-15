@@ -272,7 +272,7 @@ new_root() {
     local slot="${1:-a}"
     BOXMUNGE_ROOT="$(mktemp -d)"
     export BOXMUNGE_ROOT
-    mkdir -p "$BOXMUNGE_ROOT/upgrade-state" "$BOXMUNGE_ROOT/bin" "$BOXMUNGE_ROOT/state" \
+    mkdir -p "$BOXMUNGE_ROOT/upgrade-state" "$BOXMUNGE_ROOT/bin" "$BOXMUNGE_ROOT/state/jobs" \
         "$BOXMUNGE_ROOT/config" "$BOXMUNGE_ROOT/sudoers.d"
     echo "0.5.0+abc1234" > "$BOXMUNGE_ROOT/config/version"
     export BOXMUNGE_SUDOERS_FILE="$BOXMUNGE_ROOT/sudoers.d/boxmunge-deploy"
