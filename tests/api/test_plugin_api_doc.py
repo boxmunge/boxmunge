@@ -72,6 +72,11 @@ def test_result_of_action_is_documented() -> None:
     assert "treat `result` as any JSON value or null" in DOC
 
 
+def test_x_tier_is_documented() -> None:
+    assert "`x-tier: \"govern\"`" in DOC
+    assert "It never affects validation" in DOC
+
+
 def test_transport_limits_are_documented() -> None:
     from boxmunge.api import server
     assert f"at most {server.MAX_CONNECTIONS} connections at once" in DOC

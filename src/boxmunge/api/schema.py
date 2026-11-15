@@ -3,7 +3,10 @@
 
 Keywords: type, properties, required, additionalProperties (false only),
 enum, pattern, minimum, maximum, minLength, maxLength, items, const.
-Annotations that never affect validation: description, secret.
+Annotations that never affect validation: description, secret, and
+x-tier, which names the tier a parameter raises its call to (see
+api/param_tiers.py). x-tier is "govern" and allowed only on an optional
+boolean or string property; the registry checks the rest.
 
 One keyword of our own, x-result-of-action, exists for job records: on a
 `result` property beside an `action` property it means "null, or the
@@ -29,6 +32,8 @@ import math
 import re
 from typing import Any, Callable
 
+from boxmunge.api.principal import Tier
+
 # Looks up an action's result schema by name; None for an unknown action.
 ResultSchemas = Callable[[str], "dict[str, Any] | None"]
 
@@ -36,8 +41,13 @@ TYPES = ("object", "array", "string", "integer", "number", "boolean", "null")
 _KEYWORDS = frozenset({
     "type", "properties", "required", "additionalProperties", "enum",
     "pattern", "minimum", "maximum", "minLength", "maxLength", "items",
-    "const", "description", "secret", "x-result-of-action",
+    "const", "description", "secret", "x-result-of-action", "x-tier",
 })
+X_TIER = "x-tier"
+# Only govern for now: a platform parameter would need the upgrade shim's
+# route, which a parameter refusal cannot name.
+_X_TIER_VALUES = (Tier.GOVERN.value,)
+_X_TIER_TYPES = ("boolean", "string")
 _RESULT_OF_ACTION = "x-result-of-action"
 _RESULT_OF_ACTION_TYPES = ["object", "null"]
 _OBJECT_ONLY = ("properties", "required", "additionalProperties")
@@ -110,18 +120,24 @@ def _check_object(schema: dict[str, Any], path: str) -> None:
     required = schema.get("required", [])
     if not isinstance(required, list) or len(set(required)) != len(required):
         raise SchemaDefinitionError(f"{path}: required must be a list of distinct names")
+    for name in required:
+        if isinstance(properties.get(name), dict) and X_TIER in properties[name]:
+            raise SchemaDefinitionError(
+                f"{path}.{name}: {X_TIER} is allowed only on an optional property")
     missing = [name for name in required if name not in properties]
     if missing:
         raise SchemaDefinitionError(
             f"{path}: required names undeclared properties: {', '.join(missing)}")
 
 
-def uses_result_of_action(schema: dict[str, Any]) -> bool:
-    """True if x-result-of-action appears anywhere in *schema*."""
-    if _RESULT_OF_ACTION in schema:
-        return True
-    return (any(uses_result_of_action(sub) for sub in schema.get("properties", {}).values())
-            or ("items" in schema and uses_result_of_action(schema["items"])))
+def keyword_values(schema: dict[str, Any], keyword: str) -> list[Any]:
+    """The value of *keyword* in *schema* and in every schema nested in it."""
+    found = [schema[keyword]] if keyword in schema else []
+    for sub in schema.get("properties", {}).values():
+        found.extend(keyword_values(sub, keyword))
+    if "items" in schema:
+        found.extend(keyword_values(schema["items"], keyword))
+    return found
 
 
 def _check_result_of_action(schema: dict[str, Any], path: str, in_slot: bool) -> None:
@@ -160,6 +176,17 @@ def _check_scalar_keywords(schema: dict[str, Any], path: str) -> None:
         raise SchemaDefinitionError(f"{path}: secret must be true or false")
     if "description" in schema and not isinstance(schema["description"], str):
         raise SchemaDefinitionError(f"{path}: description must be a string")
+    if X_TIER in schema:
+        _check_x_tier(schema, path)
+
+
+def _check_x_tier(schema: dict[str, Any], path: str) -> None:
+    if schema[X_TIER] not in _X_TIER_VALUES:
+        raise SchemaDefinitionError(
+            f"{path}: {X_TIER} must be {', '.join(map(repr, _X_TIER_VALUES))}")
+    if schema.get("type") not in _X_TIER_TYPES:
+        raise SchemaDefinitionError(
+            f"{path}: {X_TIER} is allowed only on a boolean or string property")
 
 
 # ---------- value validation ----------

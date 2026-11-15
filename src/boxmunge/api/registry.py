@@ -19,14 +19,18 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from boxmunge.api.context import ActionContext
+from boxmunge.api.param_tiers import tier_rule_problem
 from boxmunge.api.principal import Principal, Tier, refusal
 from boxmunge.api.result import ActionError, ErrorCode
-from boxmunge.api.schema import SchemaDefinitionError, check_schema, uses_result_of_action
+from boxmunge.api.schema import SchemaDefinitionError, check_schema, keyword_values
 
 ACTION_NAME_RE = re.compile(r"[a-z][a-z_]*\.[a-z][a-z_]*")
 LOCK_NAMES = frozenset({"project"})
 
 Handler = Callable[[dict[str, Any], ActionContext], dict[str, Any]]
+# A check across parameters that passed the schema: the message of an
+# invalid_params refusal, or None when the parameters are fine.
+ParamCheck = Callable[[dict[str, Any]], "str | None"]
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,7 @@ class Action:
     cli: str | None = None          # the CLI/shell command this backs
     mcp: bool = False               # expose as an MCP tool
     agent_allowed: bool = False     # a govern action an agent may run
+    param_check: ParamCheck | None = None
 
     def catalog_entry(self) -> dict[str, Any]:
         """The public description a caller sees in GET /v1/actions."""
@@ -80,9 +85,15 @@ class Registry:
                 raise RegistryError(f"{name}: {label} schema: {e}") from e
             if schema["type"] != "object":
                 raise RegistryError(f"{name}: {label} schema must be an object")
-        if uses_result_of_action(action.params):
+        if keyword_values(action.params, "x-result-of-action"):
             raise RegistryError(f"{name}: a params schema may not use x-result-of-action; "
                                 f"only job records in results carry it")
+        tier_problem = tier_rule_problem(action)
+        if tier_problem is not None:
+            raise RegistryError(f"{name}: {tier_problem}")
+        if action.job and True in keyword_values(action.params, "secret"):
+            raise RegistryError(f"{name}: a job action may not have a secret parameter; "
+                                f"its parameters are stored in the job record")
         unknown = sorted(set(action.locks) - LOCK_NAMES)
         if unknown:
             raise RegistryError(f"{name}: unknown lock(s): {', '.join(unknown)}")
