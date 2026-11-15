@@ -34,8 +34,17 @@ containers), one it leaves up or at risk stays so; then one urgent alert
 names the step. The lift or the fallback comes first, then the entry and
 the marker are cleared (both kept when the lift or the fallback failed, so
 the next run retries), then the one alert, which says what of that
-failed. Upgrade probation does not hold this back; only the nightly flow
-waits for it.
+failed. A failure is remembered (cve.autofix_failed), so the scans do not
+queue the same patch again until what it depends on changes. A patch that
+finds no running image still carrying its CVEs (a deploy or an upstream
+update fixed them since the scan) is no failure: no fallback, the entry
+and the marker go, one quiet note. Upgrade probation does not hold this
+back; only the nightly flow waits for it.
+
+An entry the stored scan is older than (the scan that queued it could not
+record its results) is kept, not read as gone. A project another
+operation holds is left for the next run, and alerted as stuck once its
+entry has waited AUTOFIX_QUEUE_MAX_WAIT (commands.autofix_urgent_scan).
 
 A queue entry that cannot be read is logged on every run, alerted at most
 once a day per project, and skipped; the rest of the queue still runs.
@@ -288,14 +297,14 @@ def _conclude(paths: BoxPaths, project: str, job: _Job, outcome: AutofixOutcome)
         return
     if outcome.ok:
         forget(paths, project, "urgent")
-    elif job.meta.autofix:   # what it depends on must change before it is tried again
-        remember(paths, project, "urgent", [(d, fd) for d in job.decisions for fd in d.findings
-                                            if fd in job.findings], outcome, _now())
-    if outcome.ok:
         site, settled, urgent = _succeeded(paths, project, job)
         alert = format_autofix_patched_alert(project, cves, outcome.records, site=site,
                                              urgent=urgent, timing=timing)
     else:
+        if job.meta.autofix:   # what it depends on must change before it is tried again
+            remember(paths, project, "urgent", [(d, fd) for d in job.decisions
+                                                for fd in d.findings if fd in job.findings],
+                     outcome, _now())
         site, settled = _fallback(paths, project, job)
         alert = format_autofix_failed_alert(
             project, cves, step=outcome.failed_step, reason=outcome.reason, site=site,
