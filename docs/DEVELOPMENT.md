@@ -189,6 +189,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `compose_up_steps.py` | `sweep_live_scripts` | the generated compose overlay, searched for one string (1 MiB) | `projects/<p>/` |
 | `secrets.py` | `_parse` | a project's `secrets.env`. Cap: 1 MiB | `projects/<p>/` |
 | `api/jobs.py` | `_read` | a job's record and events | `state/jobs/` |
+| `api/job_retention.py` | `_finished_at` | a finished job's record: its id and `finished_at` | `state/jobs/` |
 | `commands/logs.py` | `_show_boxmunge_logs` | `boxmunge.log` and its archives | `logs/` |
 | `commands/quarantine_gate.py` | `lift_after_deploy` | `<p>.conf`, the site a lift republishes (capped at the size of a site file) | `caddy/sites/` |
 
