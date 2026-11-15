@@ -191,3 +191,72 @@ def test_fleet_view_lists_at_risk_only_with_findings(tmp_path, monkeypatch, caps
     cmd_security(["--json"])
     assert json.loads(capsys.readouterr().out)["at_risk_running"] == ["exposed"]
 
+
+
+# ---------- 0.12: every list a suppression would not apply to ----------
+
+
+def _seed_enisa(paths, **entries) -> None:
+    paths.kev_enisa.parent.mkdir(parents=True, exist_ok=True)
+    paths.kev_enisa.write_text(kev_module.json.dumps({
+        "fetched_at": datetime.now(timezone.utc).isoformat(), "etag": None,
+        "last_modified": None, "entries": entries}))
+
+
+def _seed_vulncheck(paths, *ids: str) -> None:
+    paths.kev_vulncheck.parent.mkdir(parents=True, exist_ok=True)
+    paths.kev_vulncheck.write_text(kev_module.json.dumps({
+        "fetched_at": datetime.now(timezone.utc).isoformat(), "entries": list(ids)}))
+
+
+def _host_args(cve: str) -> list[str]:
+    until = (utc_today() + timedelta(days=30)).isoformat()
+    return [cve, "--host", "--until", until, "--reason", "reviewed"]
+
+
+@pytest.mark.parametrize("scope", ["project", "host"])
+def test_suppress_refuses_an_eu_only_kev_cve(box, capsys, scope):
+    box.logs.mkdir(parents=True, exist_ok=True)
+    _seed_kev_cache(box)
+    _seed_enisa(box, **{_CVE: ["eukev_kev"]})
+    args = _suppress_args(_CVE) if scope == "project" else _host_args(_CVE)
+    assert cmd_security_suppress(args, box) == 1
+    err = capsys.readouterr().err
+    assert f"ERROR: {_CVE} is on the EU's known-exploited list" in err
+    assert "Suppressions do not apply to KEV-listed CVEs" in err
+    assert not (box.project_dir("demo") / "security" / "suppressions.yml").exists()
+    assert not box.host_suppressions.exists()
+    assert "eu_kev" in box.log_file.read_text()
+
+
+def test_a_cisa_refusal_names_the_eu_listing_too(box, capsys):
+    _seed_kev_cache(box, _CVE)
+    _seed_enisa(box, **{_CVE: ["cisa_kev", "eukev_kev"]})
+    assert cmd_security_suppress(_suppress_args(_CVE), box) == 1
+    assert "(also listed by EU KEV)" in capsys.readouterr().err
+
+
+def test_suppress_refuses_a_vulncheck_only_cve_on_a_paranoid_project(box, capsys):
+    """make_box's project is paranoid."""
+    _seed_kev_cache(box)
+    _seed_vulncheck(box, _CVE)
+    assert cmd_security_suppress(_suppress_args(_CVE), box) == 1
+    err = capsys.readouterr().err
+    assert f"{_CVE} is listed as actively exploited by VulnCheck KEV, and demo is paranoid" in err
+    assert not (box.project_dir("demo") / "security" / "suppressions.yml").exists()
+
+
+def test_a_vulncheck_only_cve_is_suppressed_below_paranoid(tmp_path, capsys):
+    paths = make_box(tmp_path, security={"posture": "balanced"})
+    _seed_kev_cache(paths)
+    _seed_vulncheck(paths, _CVE)
+    assert cmd_security_suppress(_suppress_args(_CVE), paths) == 0
+    assert _CVE in (paths.project_dir("demo") / "security" / "suppressions.yml").read_text()
+
+
+def test_a_host_suppression_of_a_vulncheck_only_cve_says_paranoid_ignores_it(box, capsys):
+    _seed_kev_cache(box)
+    _seed_vulncheck(box, _CVE)
+    assert cmd_security_suppress(_host_args(_CVE), box) == 0
+    assert "will not apply to a paranoid project" in capsys.readouterr().err
+    assert _CVE in box.host_suppressions.read_text()

@@ -14,6 +14,13 @@ CVE still in the release's images refuses as before: a fresh one would
 too), logged before anything starts, and alerted at priority 1 with the
 lift. Without anything to accept it says so, as resume does.
 
+The deploy guard (security_regression_guard) refuses any release with no
+usable catalog, quarantined or not, and takes the same acceptance
+(accept_at_guard); a project that is not quarantined has no lift to alert
+it, so the guard alerts it (priority 0). An acceptance is said and logged
+once per command, however many checks consult it (the guard, then the gate;
+a rollback decides its release twice).
+
 prod-deploy sets the acceptance for its own run (prod_deploy_acceptance)
 and the gate reads it. It is scoped to that one command instead of being
 threaded through every route a prod-deploy takes to the gate (a bundle, a
@@ -25,12 +32,13 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from boxmunge.cve.lift_rule import ACCEPT_FLAG, KevLiftCheck, fresh_data_advice
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.log import log_warning
+from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
 from boxmunge.redeploy_hint import redeploy_command
 from boxmunge.release_txn import load_txn, rerun_command
@@ -40,6 +48,7 @@ from boxmunge.release_txn import load_txn, rerun_command
 class _Acceptance:
     accepted: bool
     consulted: bool = False
+    said: set[str | None] = field(default_factory=set)  # the stale reasons accepted
 
 
 _CURRENT: ContextVar[_Acceptance | None] = ContextVar("prod_deploy_kev_acceptance",
@@ -66,24 +75,53 @@ def prod_deploy_acceptance(paths: BoxPaths, project: str, accepted: bool) -> Ite
 def accept_at_gate(project: str, check: KevLiftCheck, paths: BoxPaths) -> str | None:
     """The refusal this prod-deploy's --accept-stale-kev lets through, or
     None. Logged before anything starts; the lift alerts it."""
+    return _accept(project, check, paths)[0]
+
+
+def accept_at_guard(project: str, check: KevLiftCheck, paths: BoxPaths) -> str | None:
+    """accept_at_gate for the deploy guard. A project that is not
+    quarantined has no lift to alert the acceptance: it is alerted here."""
+    refusal, first = _accept(project, check, paths)
+    if refusal is not None and first and not is_quarantined(project, paths):
+        notify(paths, f"{project}: deploying without a usable KEV catalog",
+               f"{project}: {ACCEPT_FLAG} accepted on prod-deploy, deploying although "
+               f"{refusal}. A CVE that is actively exploited may go live.",
+               component="deploy", project=project, priority=0)
+    return refusal
+
+
+def stale_exit(project: str, paths: BoxPaths) -> str | None:
+    """The --accept-stale-kev exit a prod-deploy refused for no usable
+    catalog has (None off prod-deploy)."""
+    if _CURRENT.get() is None:
+        return None
+    return (f"Or, having judged the risk, deploy it anyway: {_again(project, paths)} "
+            f"(logged and alerted).")
+
+
+def _accept(project: str, check: KevLiftCheck, paths: BoxPaths) -> tuple[str | None, bool]:
+    """(the refusal let through, whether this command had not let it through before)."""
     acceptance = _CURRENT.get()
     if acceptance is None or not acceptance.accepted:
-        return None
+        return None, False
     acceptance.consulted = True
     if check.refusal is None:
         print(f"  {ACCEPT_FLAG}: nothing to accept: "
               + ("the KEV catalog is fresh." if check.stale is None else
                  "the KEV catalog is stale but lists no CVE in the images, so the release "
                  "goes ahead without it (and the lift is alerted as on a stale catalog)."))
-        return None
+        return None, False
     if not check.acceptable:
-        return None
+        return None, False
+    if check.stale in acceptance.said:
+        return check.refusal, False
+    acceptance.said.add(check.stale)
     print(f"  {ACCEPT_FLAG}: deploying although {check.refusal}. A CVE that is actively "
           f"exploited may go live with this release.")
     log_warning("deploy", f"{ACCEPT_FLAG}: release cleared without a usable KEV source",
                 paths, project=project,
                 detail={"reason": check.refusal, "kev_stale": check.stale})
-    return check.refusal
+    return check.refusal, True
 
 
 def gate_exits(project: str, check: KevLiftCheck, paths: BoxPaths) -> list[str]:

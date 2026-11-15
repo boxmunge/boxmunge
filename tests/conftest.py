@@ -258,11 +258,12 @@ def _no_kev_network(monkeypatch):
     from boxmunge.cve.kev_refresh import KevRefresh
 
     monkeypatch.setattr(
-        "boxmunge.cve.kev_refresh.refresh_kev", lambda paths: KevRefresh(source=None),
+        "boxmunge.cve.kev_refresh.refresh_kev",
+        lambda paths, **kw: KevRefresh(source=None),
     )
     monkeypatch.setattr(
         "boxmunge.commands.security_kev.refresh_kev",
-        lambda paths: KevRefresh(source=None),
+        lambda paths, **kw: KevRefresh(source=None),
     )
     # The real refresh_kev also refreshes ENISA's list; tests of the CISA
     # refresh have no answer for it (test_kev_enisa.py puts the real one back).
@@ -391,3 +392,34 @@ def _users_decided_without_images(request, monkeypatch):
     monkeypatch.setattr("boxmunge.commands.deploy_images.prepare_release_users",
                         lambda paths, target, manifest, *, component, pull, rollback=False,
                         refetch=frozenset(): {})
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _deploy_guard_off():
+    """Every stage, deploy, promote and rollback runs the deploy guard,
+    which scans the release's images with Trivy
+    (commands/security_regression_guard). For the whole session, module-
+    and session-scoped fixtures included (the userns tier deploys from
+    one), it passes every release, and Trivy's version key is a new one on
+    each call, so a quarantine gate's test never reads a cached scan
+    (cve.scan_cache). Tests marked `deploy_guard` get the real ones back
+    (_deploy_guard_on)."""
+    from boxmunge.commands import quarantine_gate, security_regression_guard
+    real = (security_regression_guard.guard_release, quarantine_gate.trivy_version_key)
+    versions = iter(range(1, 1 << 30))
+    mp = pytest.MonkeyPatch()
+    mp.setattr(security_regression_guard, "guard_release", lambda paths, target, manifest: None)
+    mp.setattr(quarantine_gate, "trivy_version_key", lambda: f"test-db-{next(versions)}")
+    yield real
+    mp.undo()
+
+
+@pytest.fixture(autouse=True)
+def _deploy_guard_on(request, monkeypatch, _deploy_guard_off):
+    """A test marked `deploy_guard` runs the real guard and Trivy version key."""
+    if not request.node.get_closest_marker("deploy_guard"):
+        return
+    from boxmunge.commands import quarantine_gate, security_regression_guard
+    guard_release, trivy_version_key = _deploy_guard_off
+    monkeypatch.setattr(security_regression_guard, "guard_release", guard_release)
+    monkeypatch.setattr(quarantine_gate, "trivy_version_key", trivy_version_key)

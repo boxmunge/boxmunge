@@ -1,0 +1,111 @@
+{
+ "version": "0.12.0",
+ "no_project_action": false,
+ "entries": [
+  {
+   "id": "0.12.0-strict-alerts-and-fix-deadline",
+   "scope": "project",
+   "when": "after",
+   "kind": "recommended",
+   "title": "Strict alerts on an unfixed finding and quarantines a fix left undeployed for 7 days",
+   "change": "Under security.posture: strict, a distro-acknowledged, network-reachable Medium-or-worse finding with no fix and not on CISA's or the EU's KEV list no longer quarantines. It is AWAITING_FIX, alerted once, and the site stays up. A strict quarantine taken for such a finding before 0.12 is lifted by the first complete scan after the upgrade.\nIn exchange, a fix that exists must be running within 7 days. The deadline counts from the first scan after the upgrade that finds the fix available and not running. 48 hours before it, one 'Fix deadline' alert names the CVE, the package and the date; at the deadline the project is quarantined until the fix runs (with dangerously_disable_quarantine: true it runs at risk, alerted).\nFor each strict project, deploy the fixes 'security <project>' lists as fixable within the week: rebuild on current base images, or bump the image tag or digest.",
+   "verify": "After the first scan, 'security <project>' shows no [QUARANTINE] row for a finding with no fix that is not on full KEV, and no fix-deadline alert arrives for the project once its fixes are deployed.",
+   "files": [
+    "manifest.yml",
+    "compose.yml",
+    "Dockerfile"
+   ],
+   "superseded_by": null,
+   "refs": [
+    "#235"
+   ]
+  },
+  {
+   "id": "0.12.0-paranoid-fixable-quarantines",
+   "scope": "project",
+   "when": "before",
+   "kind": "recommended",
+   "title": "Paranoid quarantines a fixable finding at once",
+   "change": "Under security.posture: paranoid, a Medium-or-worse finding (the highest rating any source gives) whose fix exists but is not running used to stay up with the rebuild advice. From 0.12 it is quarantined at once, until the fix runs, and a listing by VulnCheck alone (when that source is on) quarantines like CISA's or the EU's.\nBefore upgrading, run 'security <project>' for each paranoid project. A finding over the gate with a fixed version will take the site down at the first scan after the upgrade: deploy the fix first (rebuild on current base images, or bump the image tag or digest), or accept the downtime until it is deployed.",
+   "verify": "After the first scan, 'security <project>' shows status NORMAL, or a quarantine you expected and whose fix is on its way.",
+   "files": [
+    "manifest.yml",
+    "compose.yml",
+    "Dockerfile"
+   ],
+   "superseded_by": null,
+   "refs": [
+    "#235"
+   ]
+  },
+  {
+   "id": "0.12.0-known-exploited-sources",
+   "scope": "box",
+   "when": "after",
+   "kind": "fact",
+   "title": "ENISA's EU KEV list now counts as known exploited; VulnCheck is opt-in",
+   "change": "CISA's KEV catalog is no longer the only known-exploited source. ENISA's EU KEV list is fetched beside it, on by default, and a CVE it lists is treated exactly like a CISA listing (full KEV): it quarantines under every posture, overrides suppressions and is refused by the deploy guard. Turn it off with kev.enisa: {enabled: false} in boxmunge.yml (a kev block always needs kev.sources too).\nVulnCheck's KEV list is opt-in: set kev.vulncheck.token to a VulnCheck token. A VulnCheck-only listing is alerted urgently but takes a site down only under paranoid. The VulnCheck integration follows VulnCheck's published API documentation and has not yet been run against a live token, so check it after setting one.\nA stale source never lifts a quarantine while a CVE it listed is still in the images; --accept-stale-kev is the audited way past.",
+   "verify": "Run 'security scan', then 'health': the kev-watch check is ok. With a VulnCheck token set, it must not say 'vulncheck_kev not usable'; 'log --component cve-scan' names any fetch error.",
+   "files": [],
+   "superseded_by": null,
+   "refs": [
+    "#235"
+   ]
+  },
+  {
+   "id": "0.12.0-maintenance-timer",
+   "scope": "box",
+   "when": "after",
+   "kind": "fact",
+   "title": "The nightly CVE scan and container update run as one maintenance unit",
+   "change": "The separate boxmunge-cve-scan.timer and boxmunge-container-update.timer are replaced by boxmunge-maintenance.timer. It fires at 02:30 with up to 30 minutes of random delay and runs the CVE scan, then the container update, in one unit, so the scan always finishes before the update starts; a failed step does not skip the other. The upgrade disables and removes the two old timers. Move anything outside boxmunge that watched them (monitoring, notes) to the new unit.",
+   "verify": "As root, 'systemctl list-timers boxmunge-*' lists boxmunge-maintenance.timer and boxmunge-kev-watch.timer, and neither old timer. 'health' passes the timers check.",
+   "files": [],
+   "superseded_by": null,
+   "refs": [
+    "#234"
+   ]
+  },
+  {
+   "id": "0.12.0-kev-watch-timer",
+   "scope": "box",
+   "when": "after",
+   "kind": "fact",
+   "title": "A KEV watch rescans affected projects every 30 minutes",
+   "change": "boxmunge-kev-watch.timer runs 'security kev-watch' as root every 30 minutes. Each tick refreshes the known-exploited lists and rescans only the projects whose last stored scan holds a newly listed CVE, judging, quarantining and alerting them as the nightly scan would. Its first tick records the lists and rescans nothing. A tick that finds the nightly scan running skips itself; the nightly scan waits for a running tick, at most an hour. The new kev-watch health check warns when the watch stops ticking or a source that is turned on goes stale.",
+   "verify": "Within an hour of the upgrade, 'health' shows the kev-watch check ok ('the KEV watch is ticking and its sources are fresh').",
+   "files": [],
+   "superseded_by": null,
+   "refs": []
+  },
+  {
+   "id": "0.12.0-deploy-guard",
+   "scope": "project",
+   "when": "before",
+   "kind": "recommended",
+   "title": "Deploys refuse a release that carries a known-exploited CVE",
+   "change": "stage, prod-deploy, promote and rollback now scan every image the release would start and refuse one that carries a CVE on CISA's or the EU's KEV list (under paranoid, VulnCheck's too), whether or not the project is quarantined. The refusal names each CVE, package and fixed version; fix it in the repo. --allow-security-regression --reason \"<why>\" deploys anyway, logged and alerted.\nA project that runs such a CVE today (relaxed with a fixable KEV finding, or dangerously_disable_quarantine: true) has its next deploy refused, rollback included, until the release is rebuilt with the fix: plan that rebuild.\nOn a box that has never fetched the CISA catalog, every deploy is refused until 'security scan' has run once; prod-deploy --accept-stale-kev is the audited exit when no source can be reached.",
+   "verify": "'stage <project>' (or prod-deploy) prints 'Deploy guard: no known-exploited CVE in the release's images.' and goes ahead.",
+   "files": [
+    "compose.yml",
+    "Dockerfile"
+   ],
+   "superseded_by": null,
+   "refs": []
+  },
+  {
+   "id": "0.12.0-scan-state-rewritten",
+   "scope": "box",
+   "when": "after",
+   "kind": "fact",
+   "title": "The first scan after the upgrade re-sends first-scan alerts",
+   "change": "Stored scan states from before 0.12 do not record which known-exploited lists named each finding, so 0.12 refuses to read them as a prior scan. The first scan after the upgrade treats every project as scanned for the first time and sends its first-scan alerts once more (the fixable, no-fix-yet and known-exploited alerts, and the nightly digest), then rewrites the state. Until a project's state is rewritten, the KEV watch skips it (the nightly scan covers it) and 'security scan --apply-held' cannot apply a breaker hold for it. Quarantine records from before 0.12 are still read: they count as listed by CISA alone. Run 'security scan' after the upgrade to rewrite every state at once.",
+   "verify": "After 'security scan', 'log --component cve-scan' shows no 'ignoring unreadable prior scan state' warning on the next scan.",
+   "files": [],
+   "superseded_by": null,
+   "refs": [
+    "#235"
+   ]
+  }
+ ]
+}

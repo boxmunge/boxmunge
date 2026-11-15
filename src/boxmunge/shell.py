@@ -43,7 +43,7 @@ ALLOWED_COMMANDS: set[str] = {
     # Container security & CVE policy.
     # - `security` (no args / <project>): introspection
     # - `security scan|suppress|unsuppress|resume`: mutating
-    # Operator-only forms (host-scope suppressions, scan --apply-held) are
+    # Operator-only forms (host-scope suppressions, scan --apply-held, kev-watch) are
     # refused by operator_only_reason below.
     "security",
     # Project operations.
@@ -88,6 +88,11 @@ def operator_only_reason(command: str, args: list[str]) -> str | None:
     if command == "security" and args[:1] == ["scan"] and "--apply-held" in args:
         return (
             "applying quarantines held by the CVE circuit breaker is "
+            "operator-only"
+        )
+    if command == "security" and args[:1] == ["kev-watch"]:
+        return (
+            "the KEV watch is run by its systemd timer as root and is "
             "operator-only"
         )
     return None

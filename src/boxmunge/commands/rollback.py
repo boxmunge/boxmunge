@@ -24,6 +24,9 @@ from boxmunge.commands.release_config import (
     decide_release_users, generate_release_config, promote_candidates,
 )
 from boxmunge.commands.restore import restore_locked
+from boxmunge.commands.security_regression_guard import (
+    OVERRIDE_FLAG, REASON_OPTION, SecurityRegressionRefused,
+)
 from boxmunge.compose import prepare_compose_override
 from boxmunge.compose_guard import ComposeRefused, check_start
 from boxmunge.crashpoint import crash_point
@@ -362,6 +365,9 @@ def restore_rolled_back_data(project_name: str, paths: BoxPaths, manifest: dict,
         check_start(paths, project_name, component="rollback",
                     compose_files=["compose.yml", "compose.boxmunge.yml"],
                     record=True, deploying=True, txn=txn.id)
+    except SecurityRegressionRefused as e:
+        _guard_refused(project_name, paths, e)
+        return False
     except (ComposeRefused, DeployRefused, DockerError, OSError, ValueError) as e:
         print(f"ERROR: {e}. Rerun 'rollback {project_name}' once the cause is fixed.",
               file=sys.stderr)
@@ -385,6 +391,9 @@ def start_rolled_back(project_name: str, paths: BoxPaths, manifest: dict,
         users = decide_release_users(project_name, paths, manifest, "rollback",
                                      pull=False, carry_record=True).users
         generate_release_config(project_name, paths, manifest, "rollback", users)
+    except SecurityRegressionRefused as e:
+        _guard_refused(project_name, paths, e)
+        return 1
     except (DeployRefused, DockerError, OSError, ValueError) as e:
         print(f"ERROR: Generating the previous release's configs failed: {e}. Rerun "
               f"'rollback {project_name}' once the cause is fixed.", file=sys.stderr)
@@ -403,6 +412,20 @@ def start_rolled_back(project_name: str, paths: BoxPaths, manifest: dict,
         discard_previous_release(paths, project_name)
     close_txn(paths, project_name, txn)
     return rc
+
+
+def _guard_refused(project_name: str, paths: BoxPaths, e: SecurityRegressionRefused) -> None:
+    """The previous release carries a known-exploited CVE (or could not be
+    shown not to): its problems, then the exits a rollback has."""
+    print("ERROR: The deploy guard refused the previous release:", file=sys.stderr)
+    for line in e.reasons:
+        print(f"  {line}", file=sys.stderr)
+    print(f"  Roll back anyway, having judged the risk: 'rollback {project_name} "
+          f"{OVERRIDE_FLAG} {REASON_OPTION} \"<why>\"' (logged and alerted). Or deploy a "
+          f"release with the fix: upload it and run 'prod-deploy {project_name}'.",
+          file=sys.stderr)
+    log_error("rollback", "The deploy guard refused the previous release: "
+              + "; ".join(e.reasons), paths, project=project_name)
 
 
 def _report_not_started(project_name: str, paths: BoxPaths, target: RollbackTarget,
@@ -434,11 +457,16 @@ def _report_not_started(project_name: str, paths: BoxPaths, target: RollbackTarg
 
 def cmd_rollback(args: list[str]) -> None:
     from boxmunge.commands.argv import parse_args, require_project_name
+    from boxmunge.commands.security_regression_guard import (
+        override_reason, regression_override,
+    )
     parsed = parse_args(
-        "rollback", args, flags={"--yes"}, min_positional=1, max_positional=1,
+        "rollback", args, flags={"--yes", OVERRIDE_FLAG}, options={REASON_OPTION},
+        min_positional=1, max_positional=1,
     )
     project = require_project_name("rollback", parsed.positional[0])
     yes = parsed.has("--yes")
 
     paths = BoxPaths()
-    sys.exit(run_rollback(project, paths, yes=yes))
+    with regression_override(paths, project, override_reason("rollback", parsed)):
+        sys.exit(run_rollback(project, paths, yes=yes))

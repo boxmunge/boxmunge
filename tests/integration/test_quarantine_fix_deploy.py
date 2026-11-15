@@ -9,10 +9,13 @@ own candidate images. A paused project is refused; a vulnerable release
 and a failed image scan are refused with nothing changed and no candidate
 left; a clean release deploys and lifts the quarantine, giving the held
 policy back to the container it did not recreate and leaving the
-recreated one with its release's own.
+recreated one with its release's own. The deploy guard runs for real once:
+a project that is not quarantined is refused a release whose image carries
+a CVE the KEV catalog lists, and nothing starts.
 """
 from __future__ import annotations
 
+import json
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -196,5 +199,28 @@ def test_a_release_that_relaxes_the_policy_lifts_and_says_so(int_paths, capsys,
         ((title, body, kw),) = sent
         assert "relaxing the security policy" in title and kw["priority"] == 1
         assert "not shown to be fixed" in body
+    finally:
+        nc.teardown(int_paths, p)
+
+
+@pytest.mark.deploy_guard
+def test_the_deploy_guard_refuses_a_known_exploited_release(int_paths, capsys,
+                                                            monkeypatch) -> None:
+    p = f"bmqg{uuid.uuid4().hex[:8]}"
+    _stub_scanner(monkeypatch)
+    monkeypatch.setattr(quarantine_gate, "trivy_version_key", lambda: "trivy test, DB test")
+    now = datetime.now(timezone.utc).isoformat()
+    int_paths.kev_catalog.parent.mkdir(parents=True, exist_ok=True)
+    int_paths.kev_catalog.write_text(json.dumps({
+        "fetched_at": now, "released_at": now, "source": "test", "cve_ids": [CVE]}))
+    try:
+        rc, out = nc.deploy(int_paths, p, _bundle(p, "yes", "always"), capsys)
+        assert rc == 1, out
+        assert (f"{CVE} in openssl 1 (no fixed version published yet), service app") in out
+        assert "listed as actively exploited by CISA KEV" in out
+        assert "Fix it in the repo: bump the base image" in out
+        assert not is_quarantined(p, int_paths)
+        assert _containers(p) == {}  # nothing started
+        assert _candidates(p) == []
     finally:
         nc.teardown(int_paths, p)

@@ -45,7 +45,7 @@ bootstrap/init-host.sh   one-time host provisioning (users, sshd, UFW, Docker, C
 install.sh               lays down /opt/boxmunge from a release bundle
 scripts/boxmunge-upgrade the root upgrade shim: download, verify signature, swap venvs, probation
 system/                  the boxmunge-system container (age, rclone)
-systemd/                 timers: backup, backup-sync, health, maintenance (scan then container-update), auto-update
+systemd/                 timers: backup, backup-sync, health, kev-watch (every 30 min), maintenance (scan then container-update), auto-update
 canary/                  the project self-test deploys to prove the pipeline works
 docs/on-server/          operator and agent docs, shipped to the box and served by agent-help
 services/version-check/  the public update-discovery service (itself deployed as a boxmunge project)
@@ -97,8 +97,8 @@ MCP still keep their own tables, so adding a command means touching several plac
 
 - **Lock before you mutate.** Per-project changes take the project lock (`fileutil`), Caddy reloads
   take the Caddy lock, registry changes take the registry lock. The health check runs every five
-  minutes as root, and the container-update and CVE-scan timers also run as root, so unlocked
-  writers race with them.
+  minutes as root, and the nightly maintenance run (CVE scan, then container update) and the
+  KEV watch also run as root, so unlocked writers race with them.
 - **Write state atomically** with `fileutil.atomic_write_text` or `state.write_state`.
 - **Mind file ownership.** Some code runs as root (timers, the upgrade shim) and some as `deploy`.
   A file root creates under a deploy-owned directory can become unreadable to `deploy` or to the
@@ -158,6 +158,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `cve/kev.py` | `load_kev` | `kev/catalog.json` | `state/` |
 | `cve/exploited.py` | `_read_cache` | `kev/enisa.json`, `kev/vulncheck.json` | `state/` |
 | `cve/kev_enisa.py` | `_cached` | `kev/enisa.json`, for its validators and entries before they are renewed | `state/` |
+| `cve/kev_watch_state.py` | `read_watch` | `kev/watch.json`, the KEV watch's last-seen set | `state/` |
 | `cve/kev_withdrawals.py` | `_entries` | `kev/withdrawn.json` | `state/` |
 | `cve/kev_source_history.py` | `_entries` | `kev/sources.json` | `state/` |
 | `cve/fix_grace.py` | `load` | `cve/fix_grace/<p>.json`, strict's fix deadlines (`FixGrace.load`) | `state/` |
@@ -165,6 +166,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `cve/autofix_record.py` | `_read_doc` | `autofix/<p>.json` (the patches autofix applied: `read_records`) and `autofix/<p>.active` (the marker of a patch in progress: `read_autofixing`) | `state/` |
 | `cve/quarantine.py` | `read_quarantine_state` | `deploy/<p>.quarantined.json` | `state/` |
 | `cve/scan_state.py` | `scan_problem` | `scans/<p>.json` | `state/` |
+| `cve/scan_cache.py` | `get` | `scans/cache/<image ID>.json`, the deploy guard's Trivy results by image | `state/` |
 | `bind_sources.py` | `_load_record` | a project's bind-source record | `state/` |
 | `run_as.py` | `read_users` | a project's users record | `state/` |
 | `user_drift.py` | `held_back` | a project's user-drift record | `state/` |
@@ -251,6 +253,7 @@ added again under the same name reuses them. Create a new lock under `state/` wi
 | `state/secrets-locks/<project>.lock` | `SecretsFile.locked` | writes of the project's secrets file | kept for good, as above |
 | `state/secrets-locks/.host.lock` | `SecretsFile.locked` | writes of the host secrets file | kept for good |
 | `state/.registry.lock` | `fileutil.registry_lock` | read, change and save of `projects.txt` | kept for good |
+| `state/.cve-fleet.lock` | `cve.fleet_lock.fleet_lock`: the KEV watch doesn't wait (skips its tick); the fleet `security scan` blocks until it is free; the watch service's 1h `TimeoutStartSec` bounds that | one fleet-wide CVE run at a time | kept for good |
 | `state/.caddy.lock` | `docker.caddy_config_lock` | writing Caddy site config and reloading | kept for good |
 | `state/.legacy-stages.lock` | nothing since 0.11.7: `legacy-stage` took it, up to 0.11.6 | (the legacy-stage records) | left on a box where an older release made it |
 | `state/container-updates/.lock` | `commands/container_update_cmd.py` (doesn't wait) | one container-update run at a time | kept for good |

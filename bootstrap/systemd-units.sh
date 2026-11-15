@@ -34,6 +34,7 @@ systemctl enable --now \
     boxmunge-backup-sync.timer \
     boxmunge-backup.timer \
     boxmunge-health.timer \
+    boxmunge-kev-watch.timer \
     boxmunge-maintenance.timer
 if [[ "${#changed[@]}" -gt 0 ]]; then
     systemctl restart "${changed[@]}"

@@ -376,9 +376,14 @@ def report_failed_after_switch(project: str, paths: BoxPaths, staged_ref: str) -
 
 def cmd_promote(args: list[str]) -> None:
     from boxmunge.commands.argv import parse_args, require_project_name
+    from boxmunge.commands.security_regression_guard import (
+        OVERRIDE_FLAG, REASON_OPTION, override_reason, regression_override,
+    )
     from boxmunge.paths import BoxPaths
-    parsed = parse_args("promote", args, flags={"--dry-run", "--no-pull"},
-                        min_positional=1, max_positional=1)
+    parsed = parse_args("promote", args, flags={"--dry-run", "--no-pull", OVERRIDE_FLAG},
+                        options={REASON_OPTION}, min_positional=1, max_positional=1)
     project = require_project_name("promote", parsed.positional[0])
-    sys.exit(run_promote(project, BoxPaths(), dry_run=parsed.has("--dry-run"),
-                         pull=not parsed.has("--no-pull")))
+    paths = BoxPaths()
+    with regression_override(paths, project, override_reason("promote", parsed)):
+        sys.exit(run_promote(project, paths, dry_run=parsed.has("--dry-run"),
+                             pull=not parsed.has("--no-pull")))

@@ -15,10 +15,16 @@ the posture's gate, on the postures where that can decide downtime.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import os
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from boxmunge.commands.health_cmd import HealthCheck
+from boxmunge.config import ConfigError
+from boxmunge.cve.exploited import ExploitedSource, load_exploited
+from boxmunge.cve.kev_config import kev_config
+from boxmunge.cve.kev_watch_state import read_watch
 from boxmunge.cve.policy import PolicyError, parse_posture, penalty_can_decide_downtime
 from boxmunge.cve.scan_state import SCAN_MAX_AGE, read_scan_state, scan_problem
 from boxmunge.manifest import ManifestError, load_manifest
@@ -119,6 +125,54 @@ def check_cve_scan_freshness(paths: BoxPaths, *, now: datetime | None = None) ->
         detail=f"all {len(projects)} deployed projects scanned within {int(SCAN_MAX_AGE.total_seconds() // 3600)}h",
     )
 
+
+# The watch ticks every 30 minutes (RandomizedDelaySec up to 2 more): two
+# missed ticks plus the delay is 75 minutes.
+KEV_WATCH_MAX_AGE = timedelta(minutes=75)
+KEV_WATCH_TIMER = Path("/etc/systemd/system/boxmunge-kev-watch.timer")
+
+
+def _optional_sources(paths: BoxPaths) -> set[ExploitedSource]:
+    """The optional known-exploited sources the operator has left on."""
+    config = kev_config(paths)
+    return ({ExploitedSource.EU} if config.enisa_enabled else set()) | (
+        {ExploitedSource.VULNCHECK} if config.vulncheck_token else set())
+
+
+def check_kev_watch_freshness(paths: BoxPaths, *, now: datetime | None = None) -> HealthCheck:
+    """Warn when the KEV watch has stopped ticking, or an optional
+    known-exploited source (the EU list, VulnCheck) is stale: that is the
+    only operator-visible sign of a feed that keeps failing."""
+    now = now or datetime.now(timezone.utc)
+    problems: list[str] = []
+    watch = None
+    try:
+        watch = read_watch(paths)
+    except StateError as e:
+        problems.append(str(e))
+    if watch is not None:
+        age = now - watch.seen_at
+        if age > KEV_WATCH_MAX_AGE:
+            problems.append(f"the KEV watch last ran {int(age.total_seconds() // 60)} minutes "
+                            f"ago (it runs every 30): new known-exploited CVEs wait for the "
+                            f"nightly scan; check `systemctl status boxmunge-kev-watch.timer`")
+    elif not problems and os.path.lexists(KEV_WATCH_TIMER) and (
+            now - datetime.fromtimestamp(KEV_WATCH_TIMER.lstat().st_mtime, timezone.utc)
+            > KEV_WATCH_MAX_AGE):
+        problems.append("the KEV watch timer is installed but the watch has never run; "
+                        "check `systemctl status boxmunge-kev-watch.service`")
+    try:
+        stale = load_exploited(paths, now.date()).stale
+        optional = _optional_sources(paths)
+    except (StateError, ConfigError) as e:
+        problems.append(f"known-exploited sources unreadable: {e}")
+    else:
+        problems += [f"{src.value} not usable: {why}" for src, why in sorted(stale.items())
+                     if src in optional]
+    if problems:
+        return HealthCheck(name="kev-watch", status="warn", detail="; ".join(problems))
+    return HealthCheck(name="kev-watch", status="ok",
+                       detail="the KEV watch is ticking and its sources are fresh")
 
 
 def _penalty_decides_downtime(paths: BoxPaths, name: str) -> bool:

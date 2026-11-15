@@ -252,7 +252,7 @@ def test_fleet_scan_alerts_once_on_rejected_refresh(tmp_path, monkeypatch):
     monkeypatch.setattr(security_actions, "refresh_db", lambda: None)
     monkeypatch.setattr(
         security_kev, "refresh_kev",
-        lambda p: KevRefresh(source=None, failures=(
+        lambda p, **kw: KevRefresh(source=None, failures=(
             SourceFailure(SOURCE, REJECTED, "rejected: feed returned 0 entries"),)),
     )
     monkeypatch.setattr(security_kev, "load_kev", lambda p: fresh)

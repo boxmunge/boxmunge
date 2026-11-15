@@ -63,7 +63,7 @@ from boxmunge.cve.kev_http import (
     NotModified, ResponseTooLarge, SourceResult, describe, download,
 )
 from boxmunge.cve.kev_vulncheck import refresh_vulncheck
-from boxmunge.cve.kev_source_history import KevHistoryError, load_history, note_served
+from boxmunge.cve.kev_source_history import KevHistoryError, Served, load_history, note_served
 from boxmunge.cve.kev_withdrawals import KevWithdrawalsError, record_withdrawals
 from boxmunge.fileutil import atomic_write_text
 from boxmunge.paths import BoxPaths
@@ -221,6 +221,10 @@ class _Context:
     held_to_cache: bool
     last_served: datetime | None   # what this source served last time, if seen
     contradicting: dict[str, frozenset[str]]  # earlier disagreeing source: its IDs
+    # False for the KEV watch: it must not write the source history, so the
+    # runs a source is "passed over" (KEV_OVERRIDE_RUNS) stay a count of
+    # nightly runs.
+    record_history: bool = True
 
 
 def _validate(
@@ -291,7 +295,7 @@ def _check_content(
 
 
 def _failed(paths: BoxPaths, url: str, e: _Failed, cached: KevCatalog, now: datetime, *,
-            protected: bool) -> tuple[SourceFailure, frozenset[str]]:
+            protected: bool, record: bool = True) -> tuple[SourceFailure, frozenset[str]]:
     """The failure of a source whose catalog failed a check, and the IDs
     later sources may not drop (a young disagreement's). One that came with
     a release date is recorded as served."""
@@ -299,7 +303,11 @@ def _failed(paths: BoxPaths, url: str, e: _Failed, cached: KevCatalog, now: date
     if e.released is None:
         return failure, frozenset()
     try:
-        served = note_served(paths, url, e.released, disagreed=e.kind == DISAGREES)
+        if record:
+            served = note_served(paths, url, e.released, disagreed=e.kind == DISAGREES)
+        else:
+            prior = load_history(paths).get(url)
+            served = Served(e.released, prior.disagreed_runs if prior else 0)
     except KevHistoryError as h:
         return SourceFailure(url, REJECTED, f"{failure.error}; and {h}. Repair or remove "
                                             f"it as root"), frozenset()
@@ -361,7 +369,8 @@ def _try_source(
     except ResponseTooLarge as e:
         return SourceFailure(url, REJECTED, f"rejected: {e}"), [], frozenset()
     except _Failed as e:
-        failure, listed = _failed(paths, url, e, cached, now, protected=protected)
+        failure, listed = _failed(paths, url, e, cached, now, protected=protected,
+                                  record=ctx.record_history)
         return failure, [], listed
     except (OSError, http.client.HTTPException) as e:
         # HTTPError/URLError and socket errors are OSErrors; a body cut
@@ -386,7 +395,8 @@ def _try_source(
                 [], frozenset())
     try:
         # After the cache: the history never names a date the cache did not reach.
-        note_served(paths, url, released, disagreed=False)
+        if ctx.record_history:
+            note_served(paths, url, released, disagreed=False)
     except KevHistoryError as e:
         # The catalog is cached. A failed write is atomic: the history from
         # before this run stays, readable, so the next refresh goes ahead
@@ -406,8 +416,10 @@ def _protected(url: str, sources: tuple[str, ...]) -> bool:
     return url == sources[0] or url == KEV_DEFAULT_SOURCES[0]
 
 
-def refresh_from(paths: BoxPaths, sources: tuple[str, ...]) -> KevRefresh:
-    """Try ``sources`` in order; cache the first catalog that passes."""
+def refresh_from(paths: BoxPaths, sources: tuple[str, ...], *,
+                 nightly: bool = True) -> KevRefresh:
+    """Try ``sources`` in order; cache the first catalog that passes.
+    ``nightly`` False (the KEV watch) leaves the source history alone."""
     cached = load_kev(paths)
     try:
         history = load_history(paths)
@@ -421,7 +433,8 @@ def refresh_from(paths: BoxPaths, sources: tuple[str, ...]) -> KevRefresh:
     for url in sources:
         seen = history.get(url)
         ctx = _Context(_held_to_cache(url, sources, cached),
-                       seen.released_at if seen else None, dict(contradicting))
+                       seen.released_at if seen else None, dict(contradicting),
+                       record_history=nightly)
         failure, withdrawn, listed = _try_source(paths, url, cached, ctx,
                                                  protected=_protected(url, sources))
         if listed:
@@ -446,9 +459,11 @@ def refresh_from(paths: BoxPaths, sources: tuple[str, ...]) -> KevRefresh:
     return KevRefresh(source=None, failures=tuple(failures))
 
 
-def refresh_kev(paths: BoxPaths) -> KevRefresh:
+def refresh_kev(paths: BoxPaths, *, nightly: bool = True) -> KevRefresh:
     """Refresh the caches from the sources configured in boxmunge.yml: the
-    CISA catalog first, then ENISA's list and VulnCheck's (if opted in), whose failure cannot hold it up."""
+    CISA catalog first, then ENISA's list and VulnCheck's (if opted in), whose failure cannot hold it up.
+    ``nightly`` False (the KEV watch) does not count a passed-over source
+    toward KEV_OVERRIDE_RUNS."""
     try:
         config = kev_config(paths)
     except ConfigError as e:
@@ -458,7 +473,7 @@ def refresh_kev(paths: BoxPaths) -> KevRefresh:
         return KevRefresh(source=None, failures=(
             SourceFailure("boxmunge.yml", CONFIG, f"cannot read the KEV sources: {e}"),
         ))
-    result = refresh_from(paths, config.sources)
+    result = refresh_from(paths, config.sources, nightly=nightly)
     now = datetime.now(timezone.utc)
     return replace(result, enisa=refresh_enisa(paths, config, now),
                    vulncheck=refresh_vulncheck(paths, config, now))
