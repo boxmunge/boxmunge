@@ -57,6 +57,8 @@ class ProjectMeta:
     declared_runtimes: Any
     hosts: list[str]
     compose_files: list[str]
+    # security.autofix: whether a fixable finding is patched (cve autofix).
+    autofix: bool = True
 
     def policy(self) -> dict[str, Any]:
         return security_policy(posture=self.posture, dangerously=self.dangerously,
@@ -109,6 +111,10 @@ def project_meta(project: str, manifest: dict[str, Any],
             f"project {project!r}: security.dangerously_disable_quarantine "
             f"must be true or false, got {ddq!r}"
         )
+    autofix = sec_block.get("autofix", True)
+    if not isinstance(autofix, bool):
+        raise ProjectScanError(
+            f"project {project!r}: security.autofix must be true or false, got {autofix!r}")
     return ProjectMeta(
         manifest=manifest,
         posture=posture,
@@ -116,6 +122,7 @@ def project_meta(project: str, manifest: dict[str, Any],
         declared_runtimes=sec_block.get("runtimes"),
         hosts=list(manifest.get("hosts") or []),
         compose_files=compose_files,
+        autofix=autofix,
     )
 
 

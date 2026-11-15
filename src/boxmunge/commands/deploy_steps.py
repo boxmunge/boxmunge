@@ -5,6 +5,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from boxmunge.cve.autofix_record import clear_autofixing, clear_records
+from boxmunge.image_pins import forget_pins
 from boxmunge.log import log_error, log_warning
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.pause import is_paused
@@ -33,6 +35,9 @@ def record_deploy_state(
     it is not the recorded current one (a fix-forward over a rollback, or
     over an attempt that switched): that is the rollback target, paired
     with ``snapshot``, so history[0] names it.
+
+    Then the image pins of the release before are cleared
+    (clear_release_overrides).
     """
     state_path = paths.project_deploy_state(project_name)
     current = read_state(state_path)
@@ -68,6 +73,19 @@ def record_deploy_state(
     new_state.pop(PENDING_SNAPSHOT, None)
 
     write_state(state_path, new_state)
+    clear_release_overrides(paths, project_name)
+
+
+def clear_release_overrides(paths: BoxPaths, project_name: str) -> None:
+    """Production runs the release just recorded (a redeploy of the same
+    one included), from its own images: what ran on top of the release
+    before goes, its image pins and the patch records and marker autofix
+    kept for them. The switch rendered its overlay without the pins
+    already, so only the records go (image_pins.forget_pins): nothing is
+    rendered and Docker is not asked."""
+    forget_pins(paths, project_name)
+    clear_records(paths, project_name)
+    clear_autofixing(paths, project_name)
 
 
 def snapshot_wanted(manifest: dict) -> bool:

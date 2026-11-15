@@ -196,11 +196,12 @@ def _hash_file(project_dir: Path, path: Path, rel: str) -> str | None:
 
 def refresh_control_hash(project_dir: Path, path: Path, rel: str) -> None:
     """Record the hash of a control file boxmunge has just written itself:
-    the overlay (resume, recover, security resume and rollback regenerate
-    it outside a deploy, from compose.yml and the manifest, whose own hashes
-    are still checked), or a manifest the upgrade migrated from the one
-    recorded (control_file_unchanged). Recording boxmunge's own output
-    blesses nothing a container wrote. No record yet: nothing to refresh."""
+    the overlay (resume, recover, security resume, rollback and an image
+    pin write regenerate it outside a deploy, from compose.yml, the manifest
+    and the pins; compose.yml's and the manifest's own hashes are still
+    checked), or a manifest the upgrade migrated from the one recorded
+    (control_file_unchanged). Recording boxmunge's own output blesses
+    nothing a container wrote. No record yet: nothing to refresh."""
     if not os.path.lexists(path):
         return
     doc = _load_record(path)

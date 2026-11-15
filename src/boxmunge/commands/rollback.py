@@ -360,7 +360,8 @@ def restore_rolled_back_data(project_name: str, paths: BoxPaths, manifest: dict,
         # The backup service is the restored release's: its images get
         # their names now, not at the switch.
         promote_candidates(paths, project_name)
-        prepare_compose_override(paths, manifest, component="rollback", users=users or None)
+        prepare_compose_override(paths, manifest, component="rollback", users=users or None,
+                                 installing=True)
         check_start(paths, project_name, component="rollback",
                     compose_files=["compose.yml", "compose.boxmunge.yml"],
                     record=True, deploying=True, txn=txn.id)

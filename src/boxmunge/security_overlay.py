@@ -17,7 +17,7 @@ from boxmunge.published_ports import published_ports_problems
 
 # Fields that describe the whole project and are refused in a service block.
 _PROJECT_ONLY_FIELDS = (
-    "posture", "dangerously_disable_quarantine", "runtimes", "published_ports",
+    "posture", "dangerously_disable_quarantine", "runtimes", "published_ports", "autofix",
 )
 
 # Profile names. v0.5 ships `default` and `off`. Future tiers add `strict` and
@@ -303,15 +303,15 @@ def validate_security_block(
                 f"Valid postures: {sorted(KNOWN_POSTURES)}."
             )
 
-    if "dangerously_disable_quarantine" in block:
-        v = block["dangerously_disable_quarantine"]
+    for flag in ("dangerously_disable_quarantine", "autofix"):
+        if flag not in block:
+            continue
+        v = block[flag]
         # bool is a subtype of int, so check bool first to avoid 0/1 slipping
         # through as "boolean".
         if not isinstance(v, bool):
-            raise SecurityValidationError(
-                f"{context}: 'dangerously_disable_quarantine' must be a "
-                f"boolean (true or false), got {type(v).__name__}: {v!r}"
-            )
+            raise SecurityValidationError(f"{context}: {flag!r} must be a boolean "
+                                          f"(true or false), got {type(v).__name__}: {v!r}")
 
     if "published_ports" in block:
         problems = published_ports_problems(block["published_ports"])
