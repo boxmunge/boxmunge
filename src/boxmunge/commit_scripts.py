@@ -18,6 +18,7 @@ container's bind mount of it survives).
 """
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from pathlib import Path
@@ -25,6 +26,7 @@ from pathlib import Path
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.fs_nofollow import (
     chown_open_tree_deploy, clear_dir_nofollow, copy_entry_nofollow, open_dir_beneath,
+    open_writable_dir,
 )
 
 SCRIPTS = "boxmunge-scripts"
@@ -90,16 +92,19 @@ def install_commit_scripts(tree: Path) -> None:
 
 def _open_dest(tree: Path) -> int:
     """``tree/boxmunge-scripts`` opened as a directory: the existing one
-    (never replaced, so its inode stays), or a new one where nothing or a
-    non-directory (a link, a file) was."""
+    (never replaced, so its inode stays, unless it is an empty one this
+    user cannot write: fs_nofollow.open_writable_dir), or a new one where
+    nothing or a non-directory (a link, a file) was."""
     top = os.open(tree, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
     try:
         try:
-            return os.open(SCRIPTS, _DIR_FLAGS, dir_fd=top)
+            return open_writable_dir(top, SCRIPTS, tree / SCRIPTS, tree.name)
         except FileNotFoundError:
             pass
-        except OSError:  # ELOOP or ENOTDIR: a link or a file at the name
-            os.unlink(SCRIPTS, dir_fd=top)
+        except OSError as e:
+            if e.errno not in (errno.ELOOP, errno.ENOTDIR):
+                raise
+            os.unlink(SCRIPTS, dir_fd=top)  # a link or a file at the name
         os.mkdir(SCRIPTS, 0o755, dir_fd=top)
         return os.open(SCRIPTS, _DIR_FLAGS, dir_fd=top)
     finally:

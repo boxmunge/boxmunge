@@ -40,7 +40,7 @@ from boxmunge.data_dirs import (
 from boxmunge.fileutil import atomic_write_text, discard_dir, fsync_dir, sync_entries
 from boxmunge.fs_nofollow import (
     chmod_nofollow, chown_tree_deploy, clear_dir_nofollow, copy_entry_nofollow, mkdir_p_deploy,
-    read_text_nofollow_or_none,
+    open_writable_dir, read_text_nofollow_or_none,
 )
 from boxmunge.staged_release import SLOT, release_dir
 
@@ -226,10 +226,14 @@ def _refresh_dir_in_place(src_dir: Path, dest_dir: Path) -> None:
     entries are not bind-mount roots, so they are replaced wholesale, through
     descriptors that never follow a link the deploy user planted.
     """
-    with _dir_fd(src_dir) as src_fd, _dir_fd(dest_dir) as dest_fd:
-        clear_dir_nofollow(dest_fd)
-        for name in sorted(os.listdir(src_fd)):
-            copy_entry_nofollow(src_fd, name, dest_fd)
+    with _dir_fd(src_dir) as src_fd, _dir_fd(dest_dir.parent) as parent:
+        dest_fd = open_writable_dir(parent, dest_dir.name, dest_dir, dest_dir.parent.name)
+        try:
+            clear_dir_nofollow(dest_fd)
+            for name in sorted(os.listdir(src_fd)):
+                copy_entry_nofollow(src_fd, name, dest_fd)
+        finally:
+            os.close(dest_fd)
 
 
 @contextmanager

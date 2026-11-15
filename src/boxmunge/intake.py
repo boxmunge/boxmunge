@@ -189,15 +189,17 @@ def scripts_problems(tree: Path, manifest: dict[str, Any]) -> list[str]:
         smoke = svc.get("smoke") if isinstance(svc, dict) else None
         if isinstance(smoke, str) and smoke:
             rel = f"{SCRIPTS}/{PurePosixPath(smoke).name}"
-            if not _has(tree, rel, from_repo):
+            problem = _script_problem(tree, rel, git, from_repo, within=SCRIPTS)
+            if problem:
                 problems.append(f"service {name}: smoke {smoke!r} runs /{rel} in its "
-                                f"container, but {_missing(rel, git, from_repo)}")
+                                f"container, but {problem}")
     program = _pre_deploy_program(manifest.get("deploy"))
     if "/" in program and not program.startswith("/"):
         rel = os.path.normpath(program)
-        if not _has(tree, rel, from_repo):
+        problem = _script_problem(tree, rel, git, from_repo, within=".")
+        if problem:
             problems.append(f"deploy.pre_deploy runs {program!r} from the project "
-                            f"directory, but {_missing(rel, git, from_repo)}")
+                            f"directory, but {problem}")
     return problems
 
 
@@ -210,13 +212,34 @@ def _pre_deploy_program(deploy: object) -> str:
     return words[0] if words else ""
 
 
-def _has(tree: Path, rel: str, from_repo: bool) -> bool:
-    """``rel`` is a regular file, not a link (lstat), in the release."""
-    path = tree / "repo" / rel if from_repo and rel.split("/")[0] == SCRIPTS else tree / rel
+def _script_problem(tree: Path, rel: str, git: bool, from_repo: bool, *,
+                    within: str) -> str | None:
+    """Why ``rel`` cannot run, or None. A regular file runs. So does a link
+    (a bundle may ship one) whose target is a regular file inside
+    ``tree/within``: the container sees only boxmunge-scripts/, and
+    pre_deploy runs in the project. A git commit's own scripts hold no
+    link at all (script_links, checked first)."""
+    in_repo = from_repo and rel.split("/")[0] == SCRIPTS
+    path = tree / "repo" / rel if in_repo else tree / rel
     try:
-        return stat.S_ISREG(os.lstat(path).st_mode)
-    except OSError:
-        return False
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return _missing(rel, git, from_repo)
+    except OSError as e:
+        return f"{rel} cannot be read ({e})"
+    if stat.S_ISREG(st.st_mode):
+        return None
+    bound = os.path.realpath(tree / within)
+    real = os.path.realpath(path)
+    if stat.S_ISLNK(st.st_mode) and not in_repo and real.startswith(bound + os.sep) \
+            and os.path.isfile(real):
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        inside = SCRIPTS + "/" if within == SCRIPTS else "the project"
+        return (f"{rel} is a link that does not resolve to a regular file inside "
+                f"{inside} (it resolves to {real}), so it would not run: make it a regular "
+                f"file, or a relative link to one inside {inside}")
+    return f"{rel} is not a regular file: replace it with the script itself"
 
 
 def _missing(rel: str, git: bool, from_repo: bool) -> str:

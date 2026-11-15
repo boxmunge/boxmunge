@@ -184,3 +184,42 @@ class TestValidateUnknownArg:
         err = capsys.readouterr().err
         assert "ERROR" in err
         assert "--not-a-flag" in err
+
+
+class TestScriptLinks:
+    """A bundle may ship links that stay inside it (bundle checks); a script
+    reached through one runs where its target is."""
+
+    def _project(self, paths: BoxPaths, extra: str = ""):
+        _setup_project(paths, "myapp", VALID_MANIFEST + extra)
+        return paths.project_dir("myapp")
+
+    def test_a_smoke_link_within_boxmunge_scripts_is_fine(self, paths: BoxPaths) -> None:
+        import os
+        pdir = self._project(paths)
+        scripts = pdir / "boxmunge-scripts"
+        (scripts / "smoke.sh").unlink()
+        (scripts / "healthcheck.sh").write_text("#!/bin/sh\n")
+        os.symlink("healthcheck.sh", scripts / "smoke.sh")
+        assert run_validate("myapp", paths) == 0
+
+    def test_a_pre_deploy_link_within_the_project_is_fine(self, paths: BoxPaths) -> None:
+        import os
+        pdir = self._project(paths, "deploy:\n  pre_deploy: bin/migrate\n")
+        (pdir / "scripts").mkdir()
+        (pdir / "scripts" / "migrate.sh").write_text("#!/bin/sh\n")
+        (pdir / "bin").mkdir()
+        os.symlink("../scripts/migrate.sh", pdir / "bin" / "migrate")
+        assert run_validate("myapp", paths) == 0
+
+    def test_a_smoke_link_out_of_boxmunge_scripts_is_refused(self, paths: BoxPaths,
+                                                              capsys) -> None:
+        import os
+        pdir = self._project(paths)
+        (pdir / "boxmunge-scripts" / "smoke.sh").unlink()
+        (pdir / "check.sh").write_text("#!/bin/sh\n")
+        os.symlink("../check.sh", pdir / "boxmunge-scripts" / "smoke.sh")
+        assert run_validate("myapp", paths) == 1
+        err = capsys.readouterr().err
+        assert "boxmunge-scripts/smoke.sh is a link that does not resolve to a regular " \
+               "file inside boxmunge-scripts/" in err

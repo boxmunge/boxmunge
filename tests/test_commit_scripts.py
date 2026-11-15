@@ -113,3 +113,40 @@ def test_a_bundle_refresh_never_writes_through_a_planted_link(tmp_path) -> None:
     assert outside.read_text() == "precious\n"
     assert (dest / "smoke.sh").read_text() == "new\n"
     assert not os.stat(dest / "smoke.sh").st_mode & stat.S_ISUID
+
+
+def _someone_else_owns_everything(monkeypatch) -> None:
+    """As the deploy user, over a directory Docker made as root."""
+    monkeypatch.setattr("boxmunge.fs_nofollow.running_as_root", lambda: False)
+    monkeypatch.setattr("boxmunge.fs_nofollow.os.geteuid", lambda: os.getuid() + 4242)
+
+
+def test_an_empty_directory_someone_else_owns_is_replaced(tree, monkeypatch, capsys) -> None:
+    (tree / "boxmunge-scripts").mkdir()
+    _someone_else_owns_everything(monkeypatch)
+    install_commit_scripts(tree)
+    assert (tree / "boxmunge-scripts" / "smoke.sh").read_text() == "echo ok\n"
+    assert "replaced the empty" in capsys.readouterr().out
+
+
+def test_a_full_directory_someone_else_owns_is_refused_naming_the_remedy(
+        tree, monkeypatch) -> None:
+    (tree / "boxmunge-scripts").mkdir()
+    (tree / "boxmunge-scripts" / "keep.sh").write_text("mine\n")
+    _someone_else_owns_everything(monkeypatch)
+    with pytest.raises(OSError) as e:
+        install_commit_scripts(tree)
+    assert "sudo boxmunge prod-deploy project" in str(e.value)
+    assert "chown -R deploy:deploy" in str(e.value)
+    assert (tree / "boxmunge-scripts" / "keep.sh").read_text() == "mine\n"
+
+
+def test_a_bundle_refresh_replaces_an_empty_directory_someone_else_owns(
+        tmp_path, monkeypatch) -> None:
+    src, dest = tmp_path / "src" / "boxmunge-scripts", tmp_path / "proj" / "boxmunge-scripts"
+    src.mkdir(parents=True)
+    dest.mkdir(parents=True)
+    (src / "smoke.sh").write_text("new\n")
+    _someone_else_owns_everything(monkeypatch)
+    _refresh_dir_in_place(src, dest)
+    assert (dest / "smoke.sh").read_text() == "new\n"
