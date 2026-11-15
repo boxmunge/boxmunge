@@ -178,14 +178,17 @@ def evaluate_finding(
     )
     if d.exploited_by or not sources:
         return d
-    # Below paranoid a VulnCheck-only listing decides nothing: it is alerted.
+    # Below paranoid a VulnCheck-only listing decides nothing: it is alerted,
+    # unless the finding is suppressed (a suppressed finding is not alerted).
     label = listing_label(sources)
     if label in d.explanation:
         note = d.explanation  # the explainer already says so
     else:
+        alerted = ("the suppression stands, so it is not alerted"
+                   if d.disposition is Disposition.SUPPRESSED else "it is alerted urgently")
         note = (f"{d.explanation} {finding.cve_id} is also listed as exploited "
                 f"({label}), which alone does not quarantine under "
-                f"{_POSTURE_LABEL[posture]} posture; it is alerted urgently.")
+                f"{_POSTURE_LABEL[posture]} posture; {alerted}.")
     return replace(d, exploited_by=sources, explanation=note)
 
 
