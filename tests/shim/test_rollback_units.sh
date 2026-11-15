@@ -82,8 +82,8 @@ with_shim_functions seed_slot_units a
     && pass "a slot's own record is kept" || fail "seed overwrote the slot's record"
 drop_root
 
-# Self-heal: a rollback by a shim from before 0.12 left the newer units. The
-# next check-probation (the 0.12 shim, no probation, nothing in flight) puts
+# Self-heal: a rollback by a shim without units.sh left the newer units. The
+# next check-probation (this shim, no probation, nothing in flight) puts
 # the live slot's own back; units that already match are left alone.
 new_root a
 mkdir -p "$BOXMUNGE_ROOT/env-a/boxmunge-systemd"

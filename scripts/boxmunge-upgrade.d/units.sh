@@ -4,8 +4,8 @@
 # Part of boxmunge-upgrade (runs as root); scripts/build-shim.py inlines it into
 # the shim that releases ship.
 #
-# Releases add and retire units: 0.12 replaced the scan and container-update
-# timers with boxmunge-maintenance.timer and added boxmunge-kev-watch.timer and
+# Releases add and retire units: 0.12 replaces the scan and container-update
+# timers with boxmunge-maintenance.timer and adds boxmunge-kev-watch.timer and
 # boxmunge-autofix.service. The new release's install.sh installs its units
 # before the swap, and the older release a rollback returns to knows nothing of
 # them: left as they are, its timers would run commands that release lacks.
