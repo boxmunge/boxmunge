@@ -115,15 +115,19 @@ def run(
     capture: bool = False,
     check: bool = True,
     timeout: int = DEFAULT_TIMEOUT,
+    input: str | None = None,
 ) -> subprocess.CompletedProcess:
     """Run a command, optionally capturing stdout. Raises DockerError on failure.
 
     stderr is always kept, so every DockerError for a failed or timed-out
-    command ends with the tail of what the command printed there.
+    command ends with the tail of what the command printed there. `input`
+    is written to the command's stdin; only a captured command takes it.
     """
+    if input is not None and not capture:
+        raise ValueError("docker_run.run: input is only sent to a captured command")
     try:
         if capture:
-            result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+            result = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, input=input,
                                     check=False, timeout=timeout, env=docker_env())
         else:
             result = _run_streaming(cmd, cwd, timeout)

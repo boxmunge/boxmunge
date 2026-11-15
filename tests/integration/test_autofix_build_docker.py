@@ -16,7 +16,6 @@ import pytest
 from boxmunge.cve.autofix_build import (
     BASE_LABEL, NotPatchable, Patchable, PatchBuildError, build_patched, probe,
 )
-from boxmunge.paths import BoxPaths
 from tests.integration.conftest import skip_no_docker
 from tests.integration.docker_images import docker, image_id
 
@@ -27,13 +26,6 @@ _ALPINE = "alpine:3.19.0"
 _DEBIAN = "debian:bookworm-20240110-slim"
 _CONTRACT = ("User", "Entrypoint", "Cmd", "Env", "WorkingDir", "Healthcheck", "Labels",
              "ExposedPorts")
-
-
-@pytest.fixture
-def paths(tmp_path: Path) -> BoxPaths:
-    p = BoxPaths(tmp_path)
-    p.state.mkdir()
-    return p
 
 
 @pytest.fixture
@@ -72,7 +64,7 @@ def _sh(image: str, script: str) -> str:
                   "/bin/sh", image, "-c", script)
 
 
-def test_patched_image_keeps_config(paths, made) -> None:
+def test_patched_image_keeps_config(made) -> None:
     base = _build(f"""FROM {_ALPINE}
 RUN adduser -D -u 1234 app
 ENV APP_MODE=production GREETING="hello world"
@@ -87,7 +79,7 @@ USER app
 """, made)
     patchability = probe(base)
     assert patchability == Patchable(manager="apk", user="app")
-    patched = build_patched(paths, "shop", "web", base, {"busybox": "1.36.1-r16"},
+    patched = build_patched("shop", "web", base, {"busybox": "1.36.1-r16"},
                             patchability)
     made.append(patched.ref)
     before, after = _config(base), _config(patched.ref)
@@ -95,7 +87,6 @@ USER app
     for field in _CONTRACT:
         assert after.get(field) == before.get(field), field
     assert docker("image", "inspect", "--format", "{{.Id}}", patched.ref) == patched.image_id
-    assert list((paths.state / "autofix" / "build").iterdir()) == []
 
 
 def test_distroless_not_patchable_with_reason(made, tmp_path) -> None:
@@ -111,12 +102,12 @@ def test_distroless_not_patchable_with_reason(made, tmp_path) -> None:
     (_ALPINE, "apk", "busybox", "1.36.1-r16"),
     (_DEBIAN, "apt", "tzdata", "2024a-0+deb12u1"),
 ])
-def test_alpine_and_debian_patch_builds(paths, made, image, manager, package,
+def test_alpine_and_debian_patch_builds(made, image, manager, package,
                                         fixed) -> None:
     base = _repo_digest(image)
     patchability = probe(base)
     assert patchability == Patchable(manager=manager, user="")
-    patched = build_patched(paths, "shop", "web", base, {package: fixed}, patchability)
+    patched = build_patched("shop", "web", base, {package: fixed}, patchability)
     made.append(patched.ref)
     compare = ("apk version -t" if manager == "apk" else
                "dpkg --compare-versions {} gt {} && echo '>'")
@@ -130,9 +121,9 @@ def test_alpine_and_debian_patch_builds(paths, made, image, manager, package,
     assert _config(patched.ref)["Labels"][BASE_LABEL] == base
 
 
-def test_a_version_still_below_the_fix_fails_naming_it(paths, made) -> None:
+def test_a_version_still_below_the_fix_fails_naming_it(made) -> None:
     base = _repo_digest(_ALPINE)
     before = set(docker("image", "ls", "-q", "--no-trunc").split())
     with pytest.raises(PatchBuildError, match="busybox .* is below the fixed 99"):
-        build_patched(paths, "shop", "web", base, {"busybox": "99"}, probe(base))
+        build_patched("shop", "web", base, {"busybox": "99"}, probe(base))
     assert set(docker("image", "ls", "-q", "--no-trunc").split()) <= before

@@ -5,9 +5,7 @@ builds real Debian and Alpine images."""
 from __future__ import annotations
 
 import json
-import os
 import subprocess
-from pathlib import Path
 
 import pytest
 
@@ -18,7 +16,6 @@ from boxmunge.cve.autofix_build import (
 )
 from boxmunge.docker_run import DockerError
 from boxmunge.image_pins import ImagePin, pin_ref
-from boxmunge.paths import BoxPaths
 
 _BASE_ID = "sha256:" + "a" * 64
 _PATCHED_ID = "sha256:" + "b" * 64
@@ -44,9 +41,9 @@ class FakeDocker:
         self.verdicts, self.probe_rc, self.probe_out = verdicts, probe_rc, probe_out
         self.calls: list[list[str]] = []
         self.dockerfile: str | None = None
-        self.build_dir: Path | None = None
+        self.fail_rm: set[str] = set()
 
-    def __call__(self, cmd, cwd=None, capture=False, check=True, timeout=120):
+    def __call__(self, cmd, cwd=None, capture=False, check=True, timeout=120, input=None):
         self.calls.append(cmd)
         assert cmd[0] == "docker"
         verb = cmd[1:3]
@@ -56,7 +53,12 @@ class FakeDocker:
                 return self._fail(cmd, check, f"Error: No such image: {cmd[3]}")
             return _done(cmd, out=json.dumps([doc]))
         if cmd[1] == "build":
+            assert cmd[-1] == "-" and capture and input is not None
+            self.dockerfile = input
             return self._build(cmd)
+        if verb == ["image", "ls"]:
+            return _done(cmd, out="".join(f"{r}\n" for r in self.images
+                                          if r.split(":", 1)[0] == cmd[-1]))
         if cmd[1] == "run":
             script = cmd[cmd.index("-c") + 1]
             if "command -v" in script:
@@ -68,6 +70,8 @@ class FakeDocker:
             self.images[cmd[3]] = self.images[cmd[2]]
             return _done(cmd)
         if verb == ["image", "rm"]:
+            if cmd[3] in self.fail_rm:
+                raise DockerError(f"cannot remove {cmd[3]}")
             doc = self.images.pop(cmd[3])
             if not [r for r, d in self.images.items() if d is doc and not r.startswith("sha256:")]:
                 self.images = {r: d for r, d in self.images.items() if d is not doc}
@@ -80,9 +84,6 @@ class FakeDocker:
         return _done(cmd, 1, "", err)
 
     def _build(self, cmd):
-        dockerfile = Path(cmd[cmd.index("-f") + 1])
-        self.build_dir = dockerfile.parent
-        self.dockerfile = dockerfile.read_text()
         label = json.loads(self.dockerfile.split(f"LABEL {ab.BASE_LABEL}=", 1)[1].split("\n")[0])
         self.images[cmd[cmd.index("-t") + 1]] = self.images[_PATCHED_ID] = {
             "Id": _PATCHED_ID, "RepoTags": [], "RepoDigests": [],
@@ -101,13 +102,6 @@ def fake(monkeypatch) -> FakeDocker:
     return install
 
 
-@pytest.fixture
-def paths(tmp_path: Path) -> BoxPaths:
-    p = BoxPaths(tmp_path)
-    p.state.mkdir()
-    return p
-
-
 _APT = Patchable(manager="apt", user="app")
 _APK = Patchable(manager="apk", user="app")
 
@@ -117,14 +111,15 @@ def test_dockerfile_upgrades_only_named_packages() -> None:
     runs = [line for line in apt.splitlines() if line.startswith("RUN")]
     assert len(runs) == 1
     (script,) = json.loads(runs[0][len("RUN "):])[2:]
-    assert "--only-upgrade libssl3 openssl &&" in script
+    assert "--no-remove --only-upgrade libssl3 openssl &&" in script
     assert "apt-get upgrade" not in script and "dist-upgrade" not in script
     assert script.endswith("rm -rf /var/lib/apt/lists/*")
     assert apt.splitlines()[0] == f"FROM {_PULLED}"
 
     apk = render_dockerfile(_PULLED, _APK, {"busybox": "1.36.1-r20"})
     (run,) = [line for line in apk.splitlines() if line.startswith("RUN")]
-    assert json.loads(run[len("RUN "):]) == ["/bin/sh", "-c", "apk upgrade --no-cache busybox"]
+    assert json.loads(run[len("RUN "):]) == ["/bin/sh", "-c",
+                                                 "apk upgrade --no-cache --no-self-upgrade busybox"]
 
 
 def test_original_user_restored() -> None:
@@ -145,47 +140,47 @@ def test_rejects_no_packages() -> None:
         render_dockerfile(_PULLED, _APT, {})
 
 
-def test_refuses_a_patched_base(fake, paths) -> None:
+def test_refuses_a_patched_base(fake) -> None:
     f = fake()
     patched = f"{pin_ref('shop', 'web', _PATCHED_ID)}"
     with pytest.raises(PatchBuildError, match="already a patched image"):
-        build_patched(paths, "shop", "web", patched, {"curl": "8"}, _APT)
+        build_patched("shop", "web", patched, {"curl": "8"}, _APT)
     f = fake(labels={ab.BASE_LABEL: _PULLED})
     with pytest.raises(PatchBuildError, match="already a patched image"):
-        build_patched(paths, "shop", "web", _BASE_ID, {"curl": "8"}, _APT)
+        build_patched("shop", "web", _BASE_ID, {"curl": "8"}, _APT)
     f = fake(tags=[pin_ref("shop", "web", _BASE_ID)])
     with pytest.raises(PatchBuildError, match="already a patched image"):
-        build_patched(paths, "shop", "web", _BASE_ID, {"curl": "8"}, _APT)
+        build_patched("shop", "web", _BASE_ID, {"curl": "8"}, _APT)
     assert not [c for c in f.calls if c[1] == "build"]
 
 
 @pytest.mark.parametrize("ref", ["registry.example.test/shop/web:1.2", "sha256:abc"])
-def test_refuses_a_base_not_at_a_digest(fake, paths, ref: str) -> None:
+def test_refuses_a_base_not_at_a_digest(fake, ref: str) -> None:
     fake()
     with pytest.raises(PatchBuildError, match="exact digest"):
-        build_patched(paths, "shop", "web", ref, {"curl": "8"}, _APT)
+        build_patched("shop", "web", ref, {"curl": "8"}, _APT)
 
 
-def test_version_check_failure_names_package(fake, paths) -> None:
+def test_version_check_failure_names_package(fake) -> None:
     f = fake(verdicts="low")
     with pytest.raises(PatchBuildError, match=r"openssl 9\.9-1 is below the fixed 3\.0\.15"):
-        build_patched(paths, "shop", "web", _PULLED, {"openssl": "3.0.15-1"}, _APT)
+        build_patched("shop", "web", _PULLED, {"openssl": "3.0.15-1"}, _APT)
     assert not [ref for ref in f.images if ref.startswith("boxmunge.invalid/")]
 
 
-def test_a_version_the_distro_cannot_compare_fails_the_build(fake, paths) -> None:
+def test_a_version_the_distro_cannot_compare_fails_the_build(fake) -> None:
     fake(verdicts="error")
     with pytest.raises(PatchBuildError, match="curl 9.9-1 cannot be compared with the fixed 8"):
-        build_patched(paths, "shop", "web", _PULLED, {"curl": "8"}, _APT)
+        build_patched("shop", "web", _PULLED, {"curl": "8"}, _APT)
 
 
-def test_crash_debris_names_do_not_make_a_base_patched(fake, paths) -> None:
+def test_crash_debris_names_do_not_make_a_base_patched(fake) -> None:
     fake(tags=["boxmunge.invalid/shop/web:autofix-base-0123456789abcdef"])
-    assert build_patched(paths, "shop", "web", _BASE_ID, {"curl": "8"}, _APT).image_id == \
+    assert build_patched("shop", "web", _BASE_ID, {"curl": "8"}, _APT).image_id == \
         _PATCHED_ID
 
 
-def test_a_package_the_image_lacks_fails_the_build(fake, paths, monkeypatch) -> None:
+def test_a_package_the_image_lacks_fails_the_build(fake, monkeypatch) -> None:
     f = fake()
     real = f.__call__
 
@@ -196,33 +191,33 @@ def test_a_package_the_image_lacks_fails_the_build(fake, paths, monkeypatch) -> 
     for module in (ab, docker, docker_containers):
         monkeypatch.setattr(module, "_run", missing)
     with pytest.raises(PatchBuildError, match="curl is not installed"):
-        build_patched(paths, "shop", "web", _PULLED, {"curl": "8"}, _APT)
+        build_patched("shop", "web", _PULLED, {"curl": "8"}, _APT)
 
 
-def test_builds_tags_by_image_id_and_cleans_up(fake, paths) -> None:
+def test_builds_tags_by_image_id_and_cleans_up(fake, tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
     f = fake()
-    patched = build_patched(paths, "shop", "web", _PULLED, {"curl": "8.5-1"}, _APT)
+    patched = build_patched("shop", "web", _PULLED, {"curl": "8.5-1"}, _APT)
     assert patched.image_id == _PATCHED_ID
     assert patched.ref == pin_ref("shop", "web", _PATCHED_ID)
     assert patched.versions == {"curl": "9.9-1"}
     ImagePin("web", patched.ref, patched.image_id, "autofix")  # a valid pin
     assert [ref for ref in f.images if ref.startswith("boxmunge.invalid/")] == [patched.ref]
-    assert f.build_dir is not None and f.build_dir.parent == paths.state / "autofix" / "build"
-    assert not f.build_dir.exists()
     build = next(c for c in f.calls if c[1] == "build")
-    assert "--no-cache" in build and not any("iidfile" in a for a in build)
+    assert build == ["docker", "build", "--no-cache", "-t", build[4], "-"]
+    assert list(tmp_path.iterdir()) == []   # nothing is written anywhere
     assert f"LABEL {ab.BASE_LABEL}=\"{_PULLED}\"" in (f.dockerfile or "")
 
 
-def test_a_built_base_is_built_from_by_a_temporary_name(fake, paths) -> None:
+def test_a_built_base_is_built_from_by_a_temporary_name(fake) -> None:
     f = fake()
-    build_patched(paths, "shop", "web", _BASE_ID, {"curl": "8"}, _APT)
+    build_patched("shop", "web", _BASE_ID, {"curl": "8"}, _APT)
     first = (f.dockerfile or "").splitlines()[0]
     assert first.startswith("FROM boxmunge.invalid/shop/web:autofix-base-")
     assert first[len("FROM "):] not in f.images
 
 
-def test_refuses_an_image_not_built_on_the_base(fake, paths, monkeypatch) -> None:
+def test_refuses_an_image_not_built_on_the_base(fake, monkeypatch) -> None:
     f = fake()
     real_build = f._build
 
@@ -232,35 +227,67 @@ def test_refuses_an_image_not_built_on_the_base(fake, paths, monkeypatch) -> Non
         return out
     monkeypatch.setattr(f, "_build", other_layers)
     with pytest.raises(PatchBuildError, match="not built on"):
-        build_patched(paths, "shop", "web", _PULLED, {"curl": "8"}, _APT)
+        build_patched("shop", "web", _PULLED, {"curl": "8"}, _APT)
     assert not [ref for ref in f.images if ref.startswith("boxmunge.invalid/")]
 
 
-def test_refuses_a_linked_build_dir(fake, paths, tmp_path) -> None:
+def test_a_cleanup_failure_does_not_mask_the_build_error(fake) -> None:
+    f = fake(verdicts="low")
+    real_build = f._build
+
+    def build(cmd):
+        f.fail_rm.add(cmd[cmd.index("-t") + 1])
+        return real_build(cmd)
+    f._build = build
+    with pytest.raises(PatchBuildError, match="below the fixed") as raised:
+        build_patched("shop", "web", _BASE_ID, {"curl": "8"}, _APT)
+    assert any("cleanup could not remove" in n for n in raised.value.__notes__)
+    assert not [r for r in f.images if ":autofix-base-" in r]   # still removed
+
+
+def test_a_cleanup_failure_alone_is_raised(fake) -> None:
     f = fake()
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    os.symlink(elsewhere, paths.state / "autofix")
-    with pytest.raises(OSError):
-        build_patched(paths, "shop", "web", _PULLED, {"curl": "8"}, _APT)
-    assert list(elsewhere.iterdir()) == []
-    assert not [c for c in f.calls if c[1] == "build"]
+    real_build = f._build
+
+    def build(cmd):
+        f.fail_rm.add(cmd[cmd.index("-t") + 1])
+        return real_build(cmd)
+    f._build = build
+    with pytest.raises(PatchBuildError, match="cleanup could not remove"):
+        build_patched("shop", "web", _PULLED, {"curl": "8"}, _APT)
 
 
-def test_patchability_must_describe_the_base(fake, paths) -> None:
+def test_build_sweeps_only_its_own_leftover_names(fake) -> None:
+    f = fake()
+    keep = ["boxmunge.invalid/shop/web:autofix-build-0123456789abcde",   # 15 hex
+            "boxmunge.invalid/shop/web:autofix-0123456789ab",
+            "boxmunge.invalid/shop/web:latest",
+            "boxmunge.invalid/shop/api:autofix-base-0123456789abcdef",
+            "boxmunge.invalid/shop-staging/web:autofix-base-0123456789abcdef"]
+    gone = ["boxmunge.invalid/shop/web:autofix-build-0123456789abcdef",
+            "boxmunge.invalid/shop/web:autofix-base-fedcba9876543210"]
+    for ref in keep + gone:
+        f.images[ref] = {**f.images[_BASE_ID]}
+    build_patched("shop", "web", _PULLED, {"curl": "8"}, _APT)
+    assert all(ref in f.images for ref in keep)
+    assert not [ref for ref in gone if ref in f.images]
+
+
+def test_patchability_must_describe_the_base(fake) -> None:
     fake(user="")
     with pytest.raises(PatchBuildError, match="user"):
-        build_patched(paths, "shop", "web", _PULLED, {"curl": "8"}, _APT)
+        build_patched("shop", "web", _PULLED, {"curl": "8"}, _APT)
 
 
 def test_probe_finds_the_package_manager(fake) -> None:
     f = fake(probe_out="apk\n")
     assert probe(_PULLED) == Patchable(manager="apk", user="app")
     run = next(c for c in f.calls if c[1] == "run")
-    for flag in (["--network", "none"], ["--entrypoint", "/bin/sh"], ["--user", "0:0"]):
+    for flag in (["--network", "none"], ["--entrypoint", "/bin/sh"], ["--user", "0:0"],
+                 ["--pids-limit", "64"], ["--memory", "256m"]):
         i = run.index(flag[0])
         assert run[i:i + 2] == flag
-    assert "--rm" in run and run[run.index("--pull") + 1] == "never"
+    assert "--rm" in run and "--no-healthcheck" in run and run[run.index("--pull") + 1] == "never"
 
 
 def test_probe_no_shell_is_not_patchable(fake) -> None:

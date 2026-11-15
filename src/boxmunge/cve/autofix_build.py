@@ -6,8 +6,8 @@ OS packages upgraded from the image's own distro repositories.
 apt/dpkg in it, and a user the patch can restore. `build_patched` writes a
 four-part Dockerfile (FROM the running digest, switch to root, one RUN that
 upgrades the named packages and cleans the package caches, switch back to
-the image's own user) into a fresh scratch directory under
-state/autofix/build/, never the project tree, builds it without the layer
+the image's own user) and builds it from stdin with no build context (it
+copies nothing in), so there is no file on disk to swap, without the layer
 cache, and checks the result before naming it:
 
 - it is built on the base (the base's layers are its first layers) and
@@ -24,11 +24,14 @@ patched image: each one starts from the upstream or built image itself.
 Everything the builder runs in an image (the probe, the version check) runs
 as root with no network, no capabilities and no entrypoint, and never pulls.
 The build itself needs the distro mirrors, so it has the build network.
+
+The installed versions come from the image's own dpkg or apk, so a hostile
+image can lie about them. That only leaves its own site unpatched, which
+its owner could do anyway; accepted.
 """
 from __future__ import annotations
 
 import json
-import os
 import re
 import secrets
 from dataclasses import dataclass
@@ -38,14 +41,12 @@ from boxmunge.compose_images import built_image_name
 from boxmunge.docker import build_image, tag_image
 from boxmunge.docker_containers import local_image
 from boxmunge.docker_run import DockerError, run as _run
-from boxmunge.fs_nofollow import fchown_deploy
 from boxmunge.image_pins import pin_ref
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
     from boxmunge.image_pins import ImagePin
-    from boxmunge.paths import BoxPaths
 
 # Set on every patched image (the base it was built from): a base carrying
 # it is a patched image, which is never patched again.
@@ -63,7 +64,6 @@ _USER_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?::[A-Za-z0-9_][A-Za-z0-9_.-
 _PATCHED_TAG_RE = re.compile(r"boxmunge\.invalid/\S+:autofix-[0-9a-f]{12}")
 _AT_DIGEST_RE = re.compile(r"[^\s@]+@sha256:[0-9a-f]{64}")
 _IMAGE_ID_RE = re.compile(r"sha256:[0-9a-f]{64}")
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 # Prints the package manager the patch layer would use.
 _PROBE_SCRIPT = (
@@ -145,6 +145,7 @@ def _in_image(image: str, script: str, *args: str) -> list[str]:
     network, capabilities or pull."""
     return ["docker", "run", "--rm", "--pull", "never", "--network", "none",
             "--user", "0:0", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--pids-limit", "64", "--memory", "256m", "--no-healthcheck",
             "--entrypoint", "/bin/sh", image, "-c", script, "sh", *args]
 
 
@@ -191,10 +192,10 @@ def render_dockerfile(from_ref: str, patchability: Patchable,
     names = " ".join(_checked_packages(packages))
     if patchability.manager == "apt":
         script = ("apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y "
-                  f"--no-install-recommends --only-upgrade {names} && apt-get clean && "
+                  f"--no-install-recommends --no-remove --only-upgrade {names} && apt-get clean && "
                   "rm -rf /var/lib/apt/lists/*")
     else:
-        script = f"apk upgrade --no-cache {names}"
+        script = f"apk upgrade --no-cache --no-self-upgrade {names}"
     user = patchability.user
     if user and not _USER_RE.fullmatch(user):
         raise PatchBuildError(f"the image's user {user!r} cannot be restored")
@@ -217,54 +218,46 @@ def _refuse_patched_base(base_ref: str, doc: dict[str, Any] | None) -> None:
                               f"from the image the release runs, never from another patch")
 
 
-def _make_scratch(paths: BoxPaths) -> tuple[int, str]:
-    """(descriptor of state/autofix/build, name of a new empty directory in
-    it). No component under state/ is followed if it is a link."""
-    fd = os.open(paths.state, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    try:
-        for part, mode in (("autofix", 0o755), ("build", 0o700)):
-            created = True
-            try:
-                os.mkdir(part, mode, dir_fd=fd)
-            except FileExistsError:
-                created = False
-            child = os.open(part, _DIR_FLAGS, dir_fd=fd)
-            os.close(fd)
-            fd = child
-            if created and part == "autofix":   # shared with autofix_record
-                fchown_deploy(fd, f"{paths.state}/autofix")
-        name = secrets.token_hex(8)
-        os.mkdir(name, 0o700, dir_fd=fd)
-    except BaseException:
-        os.close(fd)
-        raise
-    return fd, name
-
-
-def _write_dockerfile(build_fd: int, name: str, text: str) -> None:
-    dir_fd = os.open(name, _DIR_FLAGS, dir_fd=build_fd)
-    try:
-        fd = os.open("Dockerfile", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-                     | os.O_CLOEXEC, 0o600, dir_fd=dir_fd)
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
-    finally:
-        os.close(dir_fd)
-
-
-def _remove_scratch(build_fd: int, name: str) -> None:
-    dir_fd = os.open(name, _DIR_FLAGS, dir_fd=build_fd)
-    try:
-        for entry in os.listdir(dir_fd):
-            os.unlink(entry, dir_fd=dir_fd)
-    finally:
-        os.close(dir_fd)
-    os.rmdir(name, dir_fd=build_fd)
-
-
 def _untag(ref: str) -> None:
     if local_image(ref) is not None:
         _run(["docker", "image", "rm", ref], capture=True)
+
+
+def _temp_tag_re(project: str, service: str) -> re.Pattern[str]:
+    """The temporary names a build of `service` gives its base and result."""
+    return re.compile(re.escape(built_image_name(project, service))
+                      + r":autofix-(?:build|base)-[0-9a-f]{16}")
+
+
+def _sweep_temp_tags(project: str, service: str) -> None:
+    """Remove, by name only, the temporary names an interrupted build of
+    `service` left behind."""
+    repo = built_image_name(project, service)
+    out = _run(["docker", "image", "ls", "--format", "{{.Repository}}:{{.Tag}}", repo],
+               capture=True).stdout or ""
+    pattern = _temp_tag_re(project, service)
+    for ref in out.split():
+        if pattern.fullmatch(ref):
+            _run(["docker", "image", "rm", ref], capture=True)
+
+
+def _cleanup(steps: list[tuple[str, Callable[[], None]]], failed: BaseException | None) -> None:
+    """Run every cleanup step, each whatever the others did. Failures are
+    notes on `failed` (the error already in flight, which is kept), or
+    raised as one PatchBuildError when nothing failed before."""
+    problems = []
+    for what, step in steps:
+        try:
+            step()
+        except Exception as e:   # every step runs; each failure is reported
+            problems.append(f"cleanup could not {what}: {e}")
+    if not problems:
+        return
+    if failed is not None:
+        for problem in problems:
+            failed.add_note(problem)
+        return
+    raise PatchBuildError("; ".join(problems))
 
 
 def check_versions(image: str, patchability: Patchable,
@@ -318,15 +311,17 @@ def _check_built(tag: str, base_layers: list[Any], label: str) -> str:
     return image.image_id
 
 
-def build_patched(paths: BoxPaths, project: str, service: str, base_ref_at_digest: str,
+def build_patched(project: str, service: str, base_ref_at_digest: str,
                   packages: Mapping[str, str], patchability: Patchable) -> PatchedImage:
     """Build `service`'s patched image from the local image `base_ref_at_digest`
     (`name@sha256:<digest>`, or the image ID of a built image) with each of
     `packages` upgraded to at least its fixed version, and name it
-    pin_ref(project, service, <its image ID>). Raises PatchBuildError when
-    the base is a patched image, `patchability` is not the base's, or the
-    result fails a check; DockerError when the build fails; OSError for a
-    scratch directory that cannot be made (a link is refused)."""
+    pin_ref(project, service, <its image ID>). The caller holds the project
+    lock for the whole build: the build first removes the temporary names
+    an interrupted build of this service left, which a concurrent build
+    would be using. Raises PatchBuildError when the base is a patched
+    image, `patchability` is not the base's, or the result fails a check
+    (a cleanup failure is a note on it); DockerError when the build fails."""
     _refuse_patched_base(base_ref_at_digest, None)
     if not (_AT_DIGEST_RE.fullmatch(base_ref_at_digest)
             or _IMAGE_ID_RE.fullmatch(base_ref_at_digest)):
@@ -338,20 +333,18 @@ def build_patched(paths: BoxPaths, project: str, service: str, base_ref_at_diges
         raise PatchBuildError(f"the probe found user {patchability.user!r}, but "
                               f"{base_ref_at_digest} runs as "
                               f"{(doc.get('Config') or {}).get('User')!r}")
-    build_fd, scratch = _make_scratch(paths)
-    name = built_image_name(project, service)
-    temp_tag, base_tag = f"{name}:autofix-build-{scratch}", None
+    _sweep_temp_tags(project, service)
+    name, token = built_image_name(project, service), secrets.token_hex(8)
+    temp_tag, base_tag = f"{name}:autofix-build-{token}", None
+    failed: BaseException | None = None
     try:
         from_ref = base_ref_at_digest
         if _IMAGE_ID_RE.fullmatch(base_ref_at_digest):
             # A build cannot start FROM an image ID; it gets a name for the build.
-            from_ref = base_tag = f"{name}:autofix-base-{scratch}"
+            from_ref = base_tag = f"{name}:autofix-base-{token}"
             tag_image(base_ref_at_digest, base_tag)
-        dockerfile = render_dockerfile(from_ref, patchability, packages,
-                                       base=base_ref_at_digest)
-        _write_dockerfile(build_fd, scratch, dockerfile)
-        context = paths.state / "autofix" / "build" / scratch
-        build_image(context, context / "Dockerfile", temp_tag)
+        build_image(render_dockerfile(from_ref, patchability, packages,
+                                      base=base_ref_at_digest), temp_tag)
         image_id = _check_built(temp_tag, (doc.get("RootFS") or {}).get("Layers") or [],
                                 base_ref_at_digest)
         versions = check_versions(image_id, patchability, packages)
@@ -361,14 +354,12 @@ def build_patched(paths: BoxPaths, project: str, service: str, base_ref_at_diges
         if named is None or named.image_id != image_id:
             raise PatchBuildError(f"{ref} does not name the patched image {image_id[:19]}")
         return PatchedImage(ref=ref, image_id=image_id, versions=versions)
+    except BaseException as e:
+        failed = e
+        raise
     finally:
-        try:
-            for tag in (temp_tag, base_tag):
-                if tag is not None:
-                    _untag(tag)
-            _remove_scratch(build_fd, scratch)
-        finally:
-            os.close(build_fd)
+        _cleanup([(f"remove {tag}", lambda tag=tag: _untag(tag))
+                  for tag in (temp_tag, base_tag) if tag is not None], failed)
 
 
 def remove_patched(pin: ImagePin) -> None:
