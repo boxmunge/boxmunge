@@ -18,7 +18,7 @@ from collections.abc import Sequence
 from boxmunge.compose_images import describe_image
 from boxmunge.cve._alerting_types import Alert, Hit
 from boxmunge.cve.policy import Disposition, FindingDisposition
-from boxmunge.cve.policy_types import BALANCED_KEV_ONLY_SINCE
+from boxmunge.cve.policy_types import BALANCED_KEV_ONLY_SINCE, STRICT_ALERTS_ONLY_SINCE, Posture
 from boxmunge.cve.suppressions import Suppression
 
 # Lines listed in an aggregated alert body before "... and N more".
@@ -288,16 +288,27 @@ def format_suppression_expired_alert(
     return Alert(kind="suppression_expired", title=title, body="\n".join(lines), priority=1)
 
 
-def lift_reason(cve_id: str, hits: Sequence[Hit]) -> str:
-    """Why the quarantine ``cve_id`` took no longer holds, from this scan's
-    hits for it (any package)."""
+# Posture → (release, what changed) for a quarantine an earlier rule took
+# that the posture now only alerts on (AWAITING_FIX).
+_ALERT_ONLY_SINCE = {
+    Posture.BALANCED: (BALANCED_KEV_ONLY_SINCE,
+                       "balanced quarantines only on actively exploited (CISA KEV) findings"),
+    Posture.STRICT: (STRICT_ALERTS_ONLY_SINCE,
+                     "strict no longer takes a site down for an unexploited finding with "
+                     "no fix; it alerts instead"),
+}
+
+
+def lift_reason(cve_id: str, hits: Sequence[Hit], posture: Posture) -> str:
+    """Why the quarantine ``cve_id`` took no longer holds under ``posture``,
+    from this scan's hits for it (any package)."""
     if not hits:
         return f"{cve_id} is no longer found in the project's images."
     fd = _ordered(hits)[0].disposition
     if fd.disposition is Disposition.AWAITING_FIX:
-        return (f"The posture rules changed in boxmunge {BALANCED_KEV_ONLY_SINCE}: "
-                f"balanced quarantines only on actively exploited (CISA KEV) "
-                f"findings, and {cve_id} is not on the KEV catalog. {fd.explanation}")
+        since, rule = _ALERT_ONLY_SINCE[posture]
+        return (f"The posture rules changed in boxmunge {since}: {rule}, and "
+                f"{cve_id} is not on the KEV catalog. {fd.explanation}")
     if fd.disposition is Disposition.SUPPRESSED:
         return f"{cve_id} is suppressed. {fd.explanation}"
     return f"{cve_id} no longer quarantines. {fd.explanation}"

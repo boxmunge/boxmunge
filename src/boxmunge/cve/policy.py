@@ -267,8 +267,12 @@ def _decide(
             ).disposition
         without = but_for(posture)
         would = without in GATE_MET
-        patch_gate = (but_for(Posture.BALANCED) in GATE_MET
-                      if posture is Posture.RELAXED else would)
+        if sources:  # VulnCheck only: the listing is the patch gate
+            patch_gate = suppression is None
+        elif posture is Posture.RELAXED:
+            patch_gate = but_for(Posture.BALANCED) in GATE_MET
+        else:
+            patch_gate = would
         if posture is Posture.PARANOID and would:
             return FindingDisposition(
                 finding=finding, base_severity=base,

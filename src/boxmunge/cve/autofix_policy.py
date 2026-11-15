@@ -33,22 +33,27 @@ def on_patch_path(fd: FindingDisposition) -> bool:
 
 
 def nightly_eligible(fd: FindingDisposition, posture: Posture) -> bool:
-    """On the patch path, not known exploited, not suppressed, and without the
-    fix it would meet the gate (balanced's under relaxed): the policy records
-    that as ``fix_meets_patch_gate``. Paranoid never waits for the window: a
+    """On the patch path, not known exploited, and without the fix it would
+    meet the gate (balanced's under relaxed), not suppressed: the policy
+    records that as ``fix_meets_patch_gate``. Paranoid never waits for the window: a
     fixable finding at its gate is patched at once (``urgency``)."""
     return (posture is not Posture.PARANOID and on_patch_path(fd)
             and not fd.exploited_by and fd.fix_meets_patch_gate)
 
 
 def urgency(fd: FindingDisposition, posture: Posture) -> AutofixUrgency:
-    """URGENT for any known-exploited finding on the patch path (CISA, EU or
-    VulnCheck; a suppression never holds one back) and for a paranoid
-    finding at its gate; NIGHTLY when ``nightly_eligible``; else NONE."""
+    """URGENT for a full-KEV finding on the patch path (no suppression applies
+    to one), any listed one under paranoid, a VulnCheck-only one the policy
+    does not suppress, and a paranoid finding at its gate; NIGHTLY when
+    ``nightly_eligible``; else NONE."""
     if not on_patch_path(fd):
         return AutofixUrgency.NONE
-    if fd.exploited_by:
+    # Paranoid takes every listing through the KEV override, where no
+    # suppression applies, as it does for a full-KEV finding anywhere.
+    if fd.full_kev or (fd.exploited_by and posture is Posture.PARANOID):
         return AutofixUrgency.URGENT
+    if fd.exploited_by:  # VulnCheck only: the policy records the suppression
+        return AutofixUrgency.URGENT if fd.fix_meets_patch_gate else AutofixUrgency.NONE
     if posture is Posture.PARANOID and fd.fix_meets_patch_gate:
         return AutofixUrgency.URGENT
     if nightly_eligible(fd, posture):

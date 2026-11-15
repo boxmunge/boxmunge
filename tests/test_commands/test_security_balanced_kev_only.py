@@ -149,6 +149,20 @@ def test_a_quarantine_the_old_rule_took_lifts_at_the_next_scan(box) -> None:
     assert not _titles(pushover, LIFTED_TITLE) and not is_quarantined("demo", paths)
 
 
+def test_a_strict_quarantine_the_0_11_rule_took_lifts_at_the_next_scan(box) -> None:
+    """0.12: strict no longer quarantines an unexploited finding with no fix."""
+    paths, pushover = box("strict")
+    seed_quarantine(paths)
+    fd = _scan(paths).decisions[0].findings[0]
+    assert fd.disposition is Disposition.AWAITING_FIX
+    assert not is_quarantined("demo", paths)
+    [(title, body, priority)] = [m for m in pushover.sent if LIFTED_TITLE in m[0]]
+    assert "back online" in title and _CVE in title and priority == 0
+    assert "The posture rules changed in boxmunge 0.12.0" in body
+    assert "strict no longer takes a site down for an unexploited finding with no fix" in body
+    assert "0.11.2" not in body and "balanced quarantines only" not in body
+
+
 def test_a_failed_smoke_test_after_the_lift_is_priority_1(box) -> None:
     paths, pushover = box()
     seed_quarantine(paths)
@@ -231,14 +245,6 @@ def test_an_incomplete_scan_never_lifts(box, monkeypatch) -> None:
     assert not _titles(pushover, LIFTED_TITLE)
 
 
-def test_strict_keeps_the_quarantine(box) -> None:
-    paths, pushover = box("strict")
-    seed_quarantine(paths)
-    _scan(paths)
-    assert is_quarantined("demo", paths)
-    assert not _titles(pushover, LIFTED_TITLE)
-
-
 @pytest.mark.parametrize("error", [
     BindSourceError("cannot read state/deploy/demo.binds.json"),
     DockerError("docker image rm timed out"),
@@ -293,7 +299,7 @@ def test_relaxed_keeps_a_kev_quarantine_whose_fix_is_published_not_deployed(box)
     assert not _titles(pushover, LIFTED_TITLE)
 
 
-@pytest.mark.parametrize("posture", ["relaxed", "strict", "paranoid"])
+@pytest.mark.parametrize("posture", ["relaxed", "paranoid"])
 def test_other_postures_never_lift_on_their_own(box, posture) -> None:
     """A distro re-triage (here: nothing found any more) is not evidence the
     running images are safe under a posture whose rules did not change."""

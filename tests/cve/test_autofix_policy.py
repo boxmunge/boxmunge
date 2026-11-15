@@ -135,9 +135,32 @@ def test_paranoid_fixable_at_gate_quarantines() -> None:
 @pytest.mark.parametrize("listed", [_CISA, _EU, _VC], ids=["cisa", "eu", "vulncheck"])
 def test_a_fixable_known_exploited_os_finding_is_urgent(posture, listed) -> None:
     for fd in (_judge(_f(), posture, listed=listed),
-               _judge(_f(), posture, listed=listed, sup=_SUP),
                _judge(_f(), posture, listed=listed, ddq=True)):
         assert urgency(fd, posture) is AutofixUrgency.URGENT
+
+
+@pytest.mark.parametrize("posture", list(Posture))
+@pytest.mark.parametrize("listed", [_CISA, _EU], ids=["cisa", "eu"])
+def test_a_suppression_never_holds_back_a_full_kev_patch(posture, listed) -> None:
+    assert urgency(_judge(_f(), posture, listed=listed, sup=_SUP), posture) is (
+        AutofixUrgency.URGENT)
+
+
+@pytest.mark.parametrize("posture", [R, B, S])
+def test_a_suppressed_vulncheck_only_finding_is_not_patched(posture) -> None:
+    """Below paranoid the policy honours a suppression of a VulnCheck-only
+    finding, and so does autofix."""
+    fd = _judge(_f(), posture, listed=_VC, sup=_SUP)
+    assert not fd.fix_meets_patch_gate and not nightly_eligible(fd, posture)
+    assert urgency(fd, posture) is AutofixUrgency.NONE
+
+
+def test_paranoid_patches_a_suppressed_vulncheck_finding_at_once() -> None:
+    """Paranoid takes every exploited listing through the KEV override, where
+    no suppression applies."""
+    fd = _judge(_f(), P, listed=_VC, sup=_SUP)
+    assert fd.disposition is Disposition.QUARANTINE
+    assert urgency(fd, P) is AutofixUrgency.URGENT
 
 
 @pytest.mark.parametrize("posture", [B, S])

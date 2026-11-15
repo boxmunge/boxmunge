@@ -199,11 +199,14 @@ def _compose(box, monkeypatch, **db) -> None:
     monkeypatch.setattr(gate, "resolve_deployed_config", lambda *a, **k: {"services": services})
 
 
+@pytest.mark.parametrize("manifest", [STRICT_MANIFEST, PARANOID_MANIFEST],
+                         ids=["strict", "paranoid"])
 def test_the_gate_warns_and_clears_a_release_only_the_new_penalty_lifts(
-        box, monkeypatch, capsys) -> None:
+        box, monkeypatch, capsys, manifest) -> None:
     _compose(box, monkeypatch)
-    assert box.clear(STRICT_MANIFEST).cve_id == "CVE-2026-0001"
+    assert box.clear(manifest).cve_id == "CVE-2026-0001"
     out = capsys.readouterr().out
+    assert "strict alerts and patches them" in out
     assert "WARNING: from 0.12 the stricter hardening penalty lifts 1 finding(s)" in out
     assert "CVE-2026-5555" in out and "service db" in out and "read_only: true" in out
 
@@ -213,6 +216,15 @@ def test_the_gate_refuses_what_the_legacy_penalty_already_lifts(box, monkeypatch
     with pytest.raises(gate.QuarantineRefused) as e:
         box.clear(PARANOID_MANIFEST)
     assert "CVE-2026-5555" in str(e.value)
+
+
+def test_strict_clears_what_the_legacy_penalty_lifts_with_nothing_to_warn_of(
+        box, monkeypatch, capsys) -> None:
+    """0.12: at strict's gate a finding with no fix is alerted, not refused,
+    and it already meets the gate, so the 0.12 penalty changes nothing."""
+    _compose(box, monkeypatch, read_only=False)
+    assert box.clear(STRICT_MANIFEST).cve_id == "CVE-2026-0001"
+    assert "WARNING: from 0.12" not in capsys.readouterr().out
 
 
 def test_the_gate_refuses_once_the_strict_penalty_is_enforced(box, monkeypatch) -> None:

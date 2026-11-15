@@ -1502,6 +1502,12 @@ def test_scan_does_not_quarantine_unused_runtime_package(
     rc = cmd_security_scan([], paths)
     assert rc == 0
     assert "q" not in called, "perl-base must not quarantine a Python project"
+    # Strict quarantines nothing here without KEV, so the absent quarantine
+    # alone proves nothing: the relevance gate must have exempted it.
+    state = json.loads(paths.project_scan_state("demo").read_text())
+    [judged] = [f for f in state["decisions"][0]["findings"] if f["package"] == "perl-base"]
+    assert judged["disposition"] == "informational"
+    assert "runtime package" in judged["explanation"]
 
 
 def test_scan_judges_runtime_the_project_actually_uses_at_the_gate(

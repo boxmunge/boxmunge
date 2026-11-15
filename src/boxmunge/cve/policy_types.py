@@ -63,6 +63,9 @@ GATE_MET: frozenset[Disposition] = frozenset({
 # The release from which balanced quarantines only on KEV: named when a
 # quarantine taken under the earlier rule is lifted.
 BALANCED_KEV_ONLY_SINCE = "0.11.2"
+# The release from which strict no longer quarantines a finding with no fix
+# that is not known exploited (it alerts instead).
+STRICT_ALERTS_ONLY_SINCE = "0.12.0"
 
 
 def penalty_can_decide_downtime(posture: Posture) -> bool:
@@ -124,9 +127,10 @@ class FindingDisposition:
     # would meet the posture's gate: run at risk, or (balanced, strict) be
     # alerted as AWAITING_FIX. The name predates the alert-only gates.
     fix_would_quarantine: bool = False
-    # Fix available, not known exploited, and without the fix the finding
-    # would meet the gate autofix patches at: the posture's own, balanced's
-    # under relaxed. Set only by the policy's non-KEV fix branch.
+    # Fix available, and the finding meets the gate autofix patches at:
+    # without the fix it would meet the posture's own gate (balanced's under
+    # relaxed), or, listed by VulnCheck only, no suppression applies to it.
+    # Set only by the policy's non-KEV fix branch.
     fix_meets_patch_gate: bool = False
     # Not quarantine-level under the penalty applied today, but it is under
     # the stricter hardening rule that takes full effect in 0.12: a warning

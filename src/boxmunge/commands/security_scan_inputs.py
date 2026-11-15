@@ -124,7 +124,8 @@ class ProjectHardening:
     """The hardening the policy judges a project with, and, until 0.12
     enforces the stricter rule, the profile it will judge from then on
     (None: nothing differs). The policy judges findings under ``upcoming``
-    only on a posture whose severity gate quarantines (strict, paranoid)."""
+    only on a posture where the penalty can decide downtime (strict,
+    paranoid)."""
 
     applied: HardeningProfile
     upcoming: UpcomingHardening | None

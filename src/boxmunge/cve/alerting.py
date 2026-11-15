@@ -208,7 +208,7 @@ def detect_transitions(
     A finding that meets the gate from 0.12 but not now (hardening_would_quarantine)
     is warned once, when it first carries the flag.
 
-    An AWAITING_FIX finding (balanced: no fix yet, not exploited) is alerted
+    An AWAITING_FIX finding (balanced or strict: no fix yet, not exploited) is alerted
     once, when it enters that disposition, never again while it stays there:
     nothing needs doing. Its next alert is the change — a fix landing (the
     fix_available alert, with the rebuild advice) or a KEV listing (the
