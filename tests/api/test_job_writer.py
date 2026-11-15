@@ -148,6 +148,39 @@ def test_publish_refuses_an_id_already_in_queue_or_jobs(paths, where) -> None:
         assert not _queued(paths).exists()
 
 
+def test_publish_that_fails_after_its_link_queues_nothing(paths) -> None:
+    real = job_writer.fsync_dir
+
+    def fsync_dir(path):
+        if Path(path) == paths.jobs_queue:
+            raise OSError(5, "Input/output error")
+        real(path)
+
+    with patch.object(job_writer, "fsync_dir", fsync_dir), \
+            pytest.raises(OSError, match="Input/output error"):
+        job_writer.publish(paths, _record())
+    assert list(paths.jobs_queue.iterdir()) == []
+    assert not list(paths.jobs_dir.glob("*.tmp"))
+    assert job_writer.publish(paths, _record()) is True
+
+
+def test_publish_whose_link_cannot_be_withdrawn_says_the_job_is_queued(paths) -> None:
+    def fail(path):
+        raise OSError(5, "Input/output error")
+
+    real_unlink = os.unlink
+
+    def unlink(path, *args, **kwargs):
+        if Path(path) == _queued(paths):
+            raise OSError(30, "Read-only file system")
+        real_unlink(path, *args, **kwargs)
+
+    with patch.object(job_writer, "durable_unlink", fail), patch.object(os, "unlink", unlink), \
+            pytest.raises(StateError, match="the job is queued and will run"):
+        job_writer.publish(paths, _record())
+    assert _queued(paths).exists()
+
+
 def test_publish_refuses_a_record_that_breaks_the_schema(paths) -> None:
     with pytest.raises(ValueError, match="params"):
         job_writer.publish(paths, _record(params={"not": "text"}))
@@ -279,7 +312,9 @@ def _crash_after(paths, step: str) -> None:
     def crash(path):
         raise Crash(path)
 
-    with patch.object(job_writer, "durable_unlink", crash), pytest.raises(Crash):
+    # A reboot runs no cleanup, so a publish's withdrawal never happens.
+    with patch.object(job_writer, "durable_unlink", crash), \
+            patch.object(job_writer, "_withdraw", lambda *args: None), pytest.raises(Crash):
         if step == "publish":
             job_writer.publish(paths, _record())
         else:

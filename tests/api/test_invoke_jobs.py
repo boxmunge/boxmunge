@@ -21,6 +21,7 @@ from boxmunge.api.result import ActionError, ErrorCode
 from boxmunge.api.schema import BOOLEAN, obj
 from boxmunge.api.timefmt import format_utc
 from boxmunge.fileutil import open_shared_lockfile
+from boxmunge.state import StateError
 from tests.api.fakes import StubHost, read_audit
 
 PROJECT = {"type": "string", "pattern": "[a-z0-9][a-z0-9-]{0,62}"}
@@ -132,6 +133,8 @@ def test_publish_prunes_old_jobs(shop, monkeypatch) -> None:
 
     def prune(paths, now):
         assert _queued(paths) == [], "prune runs before the new job is published"
+        assert [r["outcome"] for r in read_audit(paths)] == ["accepted"], \
+            "prune runs after the accepted record"
         calls.append((paths, now))
         return []
 
@@ -154,6 +157,60 @@ def test_publish_failure_is_audited_failed_and_unavailable(shop, monkeypatch) ->
     accepted, failed = read_audit(shop)
     assert accepted["outcome"] == "accepted" and failed["outcome"] == "failed"
     assert failed["job"] == accepted["job"] and failed["code"] == "unavailable"
+
+
+def test_prune_failure_is_audited_failed_and_queues_nothing(shop, monkeypatch) -> None:
+    def prune(paths, now):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(invoke_mod, "prune", prune)
+    with pytest.raises(ActionError) as excinfo:
+        _invoker(shop).invoke("project.stage", {"project": "shop"}, OPERATOR)
+    assert excinfo.value.code is ErrorCode.UNAVAILABLE
+    assert f"pruning old jobs in {shop.jobs_dir} failed" in excinfo.value.message
+    assert _queued(shop) == []
+    accepted, failed = read_audit(shop)
+    assert (accepted["outcome"], failed["outcome"]) == ("accepted", "failed")
+    assert failed["job"] == accepted["job"]
+
+
+def test_publish_failing_after_its_link_queues_nothing_and_says_so(shop, monkeypatch) -> None:
+    real = job_writer.fsync_dir
+
+    def fsync_dir(path):
+        if path == shop.jobs_queue:
+            raise OSError(5, "Input/output error")
+        real(path)
+
+    monkeypatch.setattr(job_writer, "fsync_dir", fsync_dir)
+    with pytest.raises(ActionError) as excinfo:
+        _invoker(shop).invoke("project.stage", {"project": "shop"}, OPERATOR)
+    assert excinfo.value.code is ErrorCode.UNAVAILABLE
+    assert "writing the queued record" in excinfo.value.message
+    assert _queued(shop) == []
+    assert [r["outcome"] for r in read_audit(shop)] == ["accepted", "failed"]
+
+
+def test_publish_state_error_reaches_the_client_as_failed(shop, monkeypatch) -> None:
+    def publish(paths, record):
+        raise StateError("queue/x.json appeared; inspect it")
+
+    monkeypatch.setattr(invoke_mod, "publish", publish)
+    with pytest.raises(ActionError) as excinfo:
+        _invoker(shop).invoke("project.stage", {"project": "shop"}, OPERATOR)
+    assert excinfo.value.code is ErrorCode.FAILED
+    assert excinfo.value.message == "queue/x.json appeared; inspect it"
+    assert read_audit(shop)[-1]["message"] == "queue/x.json appeared; inspect it"
+
+
+def test_a_taken_job_id_is_a_reported_bug(shop, monkeypatch) -> None:
+    monkeypatch.setattr(invoke_mod, "publish", lambda paths, record: False)
+    with pytest.raises(ActionError) as excinfo:
+        _invoker(shop).invoke("project.stage", {"project": "shop"}, OPERATOR)
+    assert excinfo.value.code is ErrorCode.FAILED
+    assert "already taken" in excinfo.value.message and "bug" in excinfo.value.message
+    accepted, failed = read_audit(shop)
+    assert failed["outcome"] == "failed" and failed["job"] == accepted["job"]
 
 
 def test_job_actions_without_a_runner_are_still_refused(shop) -> None:

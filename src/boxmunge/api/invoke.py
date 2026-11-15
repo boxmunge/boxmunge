@@ -20,8 +20,9 @@ A job action needs an Invoker made with jobs=True (unavailable otherwise).
 After step 4 its project must exist (not_found) and no upgrade may hold the
 jobs gate (unavailable, UPGRADE_REFUSAL). Then it gets an id, the accepted
 record names that id, old jobs are pruned and the queued record is
-published durably; a publish that fails with OSError is audited as failed
-and refused as unavailable. invoke takes no lock for a job and writes no
+published durably. A failed prune or publish is audited as failed: an
+OSError is unavailable naming the step, a StateError is failed with its
+message, and either way nothing was queued. invoke takes no lock for a job and writes no
 outcome: the worker does both.
 
 Every refusal in steps 1-4 is audited. A handler that hits unreadable box
@@ -50,6 +51,7 @@ from boxmunge.fleet import PROJECT_INPUT_ERRORS
 from boxmunge.log import log_error
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
+from boxmunge.state import StateError
 from boxmunge.ulid import generate_ulid
 
 ALL_TIERS = frozenset(Tier)
@@ -162,24 +164,33 @@ class Invoker:
         job_id = generate_ulid()
         self._accepted(principal, name, safe_params, job=job_id)
         now = datetime.now(timezone.utc)
-        record = new_record(job_id, name, params, principal.id, params.get("project"), now)
+        queued = self._paths.jobs_queue / f"{job_id}.json"
+        step = "building the job record"
         try:
+            record = new_record(job_id, name, params, principal.id, params.get("project"), now)
+            step = f"pruning old jobs in {self._paths.jobs_dir}"
             prune(self._paths, now)
+            step = f"writing the queued record {queued}"
             published = publish(self._paths, record)
         except OSError as e:
             error = ActionError(ErrorCode.UNAVAILABLE,
-                                f"Job {job_id} for {name} could not be queued, so it will not "
-                                f"run: {e}. Fix the cause, then make the call again.")
+                                f"Job {job_id} for {name} was not queued, so it will not run: "
+                                f"{step} failed: {e}. Fix the cause, then make the call again.")
             self._outcome(principal, name, safe_params, "failed", error.code.value,
                           error.message, job=job_id)
             raise error from e
+        except StateError as e:
+            self._outcome(principal, name, safe_params, "failed", ErrorCode.FAILED.value,
+                          str(e), job=job_id)
+            raise ActionError(ErrorCode.FAILED, str(e)) from e
         except BaseException as e:
             self._outcome(principal, name, safe_params, "failed", ErrorCode.FAILED.value,
-                          f"internal error: {type(e).__name__}: {e}", job=job_id)
+                          f"internal error while {step}: {type(e).__name__}: {e}", job=job_id)
             raise
         if not published:
-            message = (f"Job id {job_id} for {name} is already taken. This is a boxmunge "
-                       f"bug; please report it.")
+            message = (f"Job id {job_id} for {name} is already taken ({queued} or "
+                       f"{self._paths.jobs_dir / f'{job_id}.json'} exists). This is a "
+                       f"boxmunge bug; please report it.")
             self._outcome(principal, name, safe_params, "failed", ErrorCode.FAILED.value,
                           message, job=job_id)
             raise ActionError(ErrorCode.FAILED, message)
