@@ -291,7 +291,7 @@ background, listed by `boxmunge jobs --running`), as it waits for another upgrad
 `Waiting up to 60 minutes for running jobs to finish` and goes ahead as soon as they finish.
 No new job starts while an upgrade runs. If jobs are still running after 60 minutes, it stops
 and installs nothing; run it again once they finish. The health timer's probation check
-skips a run while a job runs, as it does while an upgrade runs.
+skips its runs while jobs run or an upgrade waits for them, and those skips raise no alert.
 
 ## After the upgrade
 

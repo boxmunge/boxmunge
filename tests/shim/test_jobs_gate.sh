@@ -6,7 +6,8 @@
 # whole run. An upgrade waits for running jobs to finish, up to
 # JOBS_GATE_WAIT_SECS, as it waits for a held lock; check-probation skips
 # instead, and the readiness check, which installs nothing, never takes it.
-# state/jobs/ is deploy's, so the gate is opened without following a link.
+# state/jobs/ is deploy's, so the gate is opened without following a link,
+# and a missing one is made with its directory, deploy's, as install makes them.
 # pass() always returns 0, so "cond && pass || fail" is a safe if/else here.
 # shellcheck disable=SC2015,SC2016  # SC2016: mock bodies are literal bash
 set -euo pipefail
@@ -21,6 +22,7 @@ mode_of() { stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1"; }
 # running job does; release it with `exec 7<&-`. The lock belongs to the open
 # file description, so it outlives the python that took it.
 hold_shared() {
+    mkdir -p "$BOXMUNGE_ROOT/state/jobs"
     : >> "$BOXMUNGE_ROOT/$GATE"
     exec 7<"$BOXMUNGE_ROOT/$GATE"
     python3 -c 'import fcntl; fcntl.flock(7, fcntl.LOCK_SH | fcntl.LOCK_NB)' \
@@ -42,8 +44,12 @@ waiter=$!
 sleep 2
 kill -0 "$waiter" 2>/dev/null && pass "an upgrade waits while a job holds the gate" \
     || fail "the upgrade did not wait: $(cat "$BOXMUNGE_ROOT/run.out")"
+[[ "$(cat "$BOXMUNGE_ROOT/upgrade-root/jobs-wait" 2>/dev/null)" =~ ^[0-9]+$ ]] \
+    && pass "the waiting upgrade records when its wait began" || fail "no jobs-wait record"
 exec 7<&-
 RC=0; wait "$waiter" || RC=$?
+[[ ! -e "$BOXMUNGE_ROOT/upgrade-root/jobs-wait" ]] && pass "the record goes once the wait ends" \
+    || fail "jobs-wait left behind"
 OUT="$(cat "$BOXMUNGE_ROOT/run.out")"
 expect 1 "Waiting up to 60 minutes for running jobs to finish (see: boxmunge jobs --running)" \
     "the wait says what it waits for and where to see it"
@@ -64,17 +70,47 @@ grep -q "^bm_log error Jobs were still running after the 60 minutes" "$BOXMUNGE_
     && pass "the give-up is an error in the operational log" || fail "not logged: $(cat "$BOXMUNGE_ROOT/calls" 2>&1)"
 drop_root
 
-# test_check_probation_skips_while_a_job_runs
+# test_check_probation_skips_while_a_job_runs: with no count and no alert,
+# however many in a row (a job is not stuck upgrade work).
 new_root a
+record_bm_log
+mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+echo 11 > "$BOXMUNGE_ROOT/upgrade-root/lock-skips"
 hold_shared
-RC=0; OUT="$(bash "$SHIM" check-probation 2>&1 7<&-)" || RC=$?
+for _ in 1 2 3; do
+    RC=0; OUT="$(bash "$SHIM" check-probation 2>&1 7<&-)" || RC=$?
+done
 exec 7<&-
-expect 0 "Another upgrade is in progress; skipping (1 in a row: a job is running)" \
-    "check-probation skips while a job runs, and counts the skip"
+expect 0 "Jobs are running; skipping until they finish (see: boxmunge jobs --running)" \
+    "check-probation skips while a job runs"
+[[ "$(cat "$BOXMUNGE_ROOT/upgrade-root/lock-skips")" == 11 && "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" != *"bm_log error"* ]] \
+    && pass "skips for running jobs feed no lock-skip count and raise no alert" \
+    || fail "count $(cat "$BOXMUNGE_ROOT/upgrade-root/lock-skips"), calls: $(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)"
 run_shim check-probation
 expect 0 "" "check-probation runs once the job finishes"
 [[ ! -e "$BOXMUNGE_ROOT/upgrade-root/lock-skips" ]] && pass "taking the gate resets the skip count" \
     || fail "count left: $(cat "$BOXMUNGE_ROOT/upgrade-root/lock-skips")"
+drop_root
+
+# An upgrade waiting for jobs holds upgrade.lock for up to 60 minutes: the
+# check-probation runs it holds off skip with no count and no alert (the wait
+# fails loudly at its end). A record older than the wait is one a killed
+# upgrade left: that skip is counted, and alerts, as usual.
+new_root a
+record_bm_log
+mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
+echo 11 > "$BOXMUNGE_ROOT/upgrade-root/lock-skips"
+date +%s > "$BOXMUNGE_ROOT/upgrade-root/jobs-wait"
+for _ in 1 2 3; do PATH="$BUSYLOCK:$PATH" run_shim check-probation; done
+expect 0 "An upgrade is waiting for running jobs; skipping" "check-probation skips while an upgrade waits for jobs"
+[[ "$(cat "$BOXMUNGE_ROOT/upgrade-root/lock-skips")" == 11 && "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" != *"bm_log error"* ]] \
+    && pass "skips while an upgrade waits for jobs feed no count and raise no lock alert" \
+    || fail "count $(cat "$BOXMUNGE_ROOT/upgrade-root/lock-skips"), calls: $(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)"
+echo $(( $(date +%s) - 3700 )) > "$BOXMUNGE_ROOT/upgrade-root/jobs-wait"
+PATH="$BUSYLOCK:$PATH" run_shim check-probation
+expect 0 "skipping (12 in a row: upgrade.lock is held)" "a stale wait record does not hide a held lock"
+[[ "$(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)" == *"bm_log error check-probation could not take upgrade.lock 12 times"* ]] \
+    && pass "the held lock alerts as usual" || fail "no alert: $(cat "$BOXMUNGE_ROOT/calls" 2>/dev/null)"
 drop_root
 
 # test_readiness_check_does_not_take_the_gate: _check-run exits 75 when it
@@ -93,14 +129,15 @@ expect 76 "" "the readiness check takes upgrade.lock and not the gate"
 drop_root
 
 # test_a_symlinked_gate_is_refused (and a linked jobs/ or state/, and a FIFO)
-for planted in gate jobs state fifo; do
+for planted in gate jobs state fifo file; do
     new_root a
     elsewhere="$(mktemp -d)"
     case "$planted" in
-        gate) ln -s "$elsewhere/gate.lock" "$BOXMUNGE_ROOT/$GATE"; want="gate.lock is a symlink" ;;
-        jobs) rmdir "$BOXMUNGE_ROOT/state/jobs"; ln -s "$elsewhere" "$BOXMUNGE_ROOT/state/jobs"; want="jobs is a symlink" ;;
+        gate) mkdir "$BOXMUNGE_ROOT/state/jobs"; ln -s "$elsewhere/gate.lock" "$BOXMUNGE_ROOT/$GATE"; want="gate.lock is a symlink" ;;
+        jobs) ln -s "$elsewhere" "$BOXMUNGE_ROOT/state/jobs"; want="jobs is a symlink" ;;
         state) rm -rf "$BOXMUNGE_ROOT/state"; mkdir "$elsewhere/jobs"; ln -s "$elsewhere" "$BOXMUNGE_ROOT/state"; want="state is a symlink" ;;
-        fifo) mkfifo "$BOXMUNGE_ROOT/$GATE"; want="gate.lock is not a regular file" ;;
+        fifo) mkdir "$BOXMUNGE_ROOT/state/jobs"; mkfifo "$BOXMUNGE_ROOT/$GATE"; want="gate.lock is not a regular file" ;;
+        file) : > "$BOXMUNGE_ROOT/state/jobs"; want="state/jobs is a symlink or not a directory" ;;
     esac
     run_shim_unless_blocked "$BOXMUNGE_ROOT/$GATE" check-probation
     expect 1 "$want" "a planted $planted is refused, not followed"
@@ -125,8 +162,8 @@ for planted in gate jobs state; do
     elsewhere="$(mktemp -d)"
     mkdir "$elsewhere/jobs"
     case "$planted" in
-        gate) ln -s "$elsewhere/jobs/gate.lock" "$BOXMUNGE_ROOT/$GATE"; want="$GATE is a symlink" ;;
-        jobs) rmdir "$BOXMUNGE_ROOT/state/jobs"; ln -s "$elsewhere/jobs" "$BOXMUNGE_ROOT/state/jobs"; want="state/jobs is a symlink or not a directory" ;;
+        gate) mkdir "$BOXMUNGE_ROOT/state/jobs"; ln -s "$elsewhere/jobs/gate.lock" "$BOXMUNGE_ROOT/$GATE"; want="$GATE is a symlink" ;;
+        jobs) ln -s "$elsewhere/jobs" "$BOXMUNGE_ROOT/state/jobs"; want="state/jobs is a symlink or not a directory" ;;
         state) rm -rf "$BOXMUNGE_ROOT/state"; ln -s "$elsewhere" "$BOXMUNGE_ROOT/state"; want="/state is a symlink or not a directory" ;;
     esac
     RC=0; OUT="$(with_shim_functions open_directly 2>&1)" || RC=$?
@@ -147,26 +184,25 @@ want="$(python3 -c 'import os, sys; print(os.stat(sys.argv[1]).st_ino, os.stat(s
 drop_root
 rm -f "$PROBE"
 
-# A missing state/jobs/ is install's to make (deploy's, 0750): refused, not made.
-new_root a
-rmdir "$BOXMUNGE_ROOT/state/jobs"
-run_shim check-probation
-expect 1 "state/jobs is missing" "a missing jobs directory is refused"
-[[ ! -e "$BOXMUNGE_ROOT/state/jobs" ]] && pass "the jobs directory is not made by the shim" || fail "made state/jobs"
-drop_root
-
-# test_a_missing_gate_is_created_deploy_owned: 0660, and deploy's when root
-# runs the shim (as on a box); a test run as another user cannot give a file
-# away, so it checks the mode and that the gate is a plain file.
+# test_a_missing_gate_is_created_deploy_owned: a missing state/jobs/ (0750)
+# and gate (0660) are made as install makes them, deploy's when root runs the
+# shim (as on a box); a test run as another user cannot give a file away, so
+# it checks the modes and that each is a plain directory or file.
 new_root a
 run_shim check-probation
-expect 0 "" "check-probation runs with no gate yet"
+expect 0 "" "check-probation runs with no jobs directory or gate yet"
+[[ -d "$BOXMUNGE_ROOT/state/jobs" && ! -L "$BOXMUNGE_ROOT/state/jobs" && "$(mode_of "$BOXMUNGE_ROOT/state/jobs")" == 750 ]] \
+    && pass "a missing jobs directory is made, a plain directory, 0750" \
+    || fail "jobs: $(ls -ld "$BOXMUNGE_ROOT/state/jobs" 2>&1)"
 [[ -f "$BOXMUNGE_ROOT/$GATE" && ! -L "$BOXMUNGE_ROOT/$GATE" && "$(mode_of "$BOXMUNGE_ROOT/$GATE")" == 660 ]] \
-    && pass "a missing gate is created, a plain file, 0660" \
+    && pass "a missing gate is made, a plain file, 0660" \
     || fail "gate: $(ls -l "$BOXMUNGE_ROOT/$GATE" 2>&1)"
+[[ "$OUT" != *FATAL* && "$OUT" != *ERROR* ]] && pass "making them logs nothing alarming" || fail "said: $OUT"
 if [[ "$(id -u)" -eq 0 ]] && id deploy >/dev/null 2>&1; then
-    owner="$(stat -c %U:%G "$BOXMUNGE_ROOT/$GATE" 2>/dev/null || stat -f %Su:%Sg "$BOXMUNGE_ROOT/$GATE")"
-    [[ "$owner" == deploy:deploy ]] && pass "root creates the gate deploy:deploy" || fail "gate owned by $owner"
+    for made in state/jobs "$GATE"; do
+        owner="$(stat -c %U:%G "$BOXMUNGE_ROOT/$made" 2>/dev/null || stat -f %Su:%Sg "$BOXMUNGE_ROOT/$made")"
+        [[ "$owner" == deploy:deploy ]] && pass "root makes $made deploy:deploy" || fail "$made owned by $owner"
+    done
 fi
 drop_root
 

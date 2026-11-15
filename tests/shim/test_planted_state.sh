@@ -162,6 +162,7 @@ OUT="$(BM_UPGRADE_LOCK_FD=9 BM_JOBS_GATE_FD=8 bash "$SHIM" check-probation 9<>"$
 expect 1 "fd 9 is not $BOXMUNGE_ROOT/upgrade-root/upgrade.lock" "a lock descriptor for another file is refused"
 mkdir -m 0700 "$BOXMUNGE_ROOT/upgrade-root"
 : > "$BOXMUNGE_ROOT/upgrade-root/upgrade.lock"
+mkdir "$BOXMUNGE_ROOT/state/jobs"
 : > "$BOXMUNGE_ROOT/state/jobs/gate.lock"
 RC=0
 OUT="$(BM_UPGRADE_LOCK_FD=9 BM_JOBS_GATE_FD=8 bash "$SHIM" check-probation \

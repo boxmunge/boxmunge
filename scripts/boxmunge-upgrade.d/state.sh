@@ -20,11 +20,6 @@ ACTIVE_SLOT=""
 LOCK_HELD=0
 # How long the auto-update timer's run waits for upgrade.lock (acquire_lock).
 LOCK_WAIT_SECS=900
-# How long an upgrade waits for running jobs to finish (acquire_lock). The
-# messages there say 60 minutes; a test may shorten the wait (sudo and the
-# timers start the shim with a clean environment).
-JOBS_GATE_WAIT_SECS="${JOBS_GATE_WAIT_SECS:-3600}"
-[[ "$JOBS_GATE_WAIT_SECS" =~ ^[0-9]+$ ]] || die "JOBS_GATE_WAIT_SECS must be a number of seconds, not '$JOBS_GATE_WAIT_SECS'"
 
 printable() { local s="${1:0:80}"; printf '%s' "${s//[^[:alnum:]._+-]/?}"; }
 
@@ -154,10 +149,10 @@ active_venv() { echo "$BOXMUNGE_ROOT/env-$ACTIVE_SLOT"; }
 # Then the jobs gate, state/jobs/gate.lock, on fd 8 (BM_JOBS_GATE_FD=8): every
 # running job holds it shared (api/job_gate.py), and an upgrade takes it
 # exclusively, so it waits for running jobs as it waits for a held lock, and
-# no new job starts until it ends. "skip" skips when a job runs; "try" (the
+# no new job starts until it ends (take_jobs_gate, in jobsgate.sh). "try" (the
 # readiness check, which installs nothing) does not take the gate. state/jobs/
-# is deploy's, so the gate is opened without following a link (see
-# open_lock_and_reexec); a running job is no reason to remove it. Children,
+# is deploy's, so the gate is opened without following a link, and made with
+# its directory if missing (see open_lock_and_reexec). Children,
 # the userns verbs' among them, inherit fds 8 and 9 and the locks with them.
 acquire_lock() {
     [[ "$LOCK_HELD" -eq 1 ]] && return 0
@@ -167,8 +162,6 @@ acquire_lock() {
         refuse_symlink "$LOCK_FILE"
         refuse_symlink "$BOXMUNGE_ROOT/state"
         refuse_symlink "$JOBS_DIR"
-        [[ -d "$JOBS_DIR" ]] \
-            || die_logged "$JOBS_DIR is missing, so running jobs cannot be kept out of this upgrade; install makes it. Re-run the installed release's installer as root (sudo bash boxmunge-install.sh)"
         refuse_symlink "$JOBS_GATE_FILE"
         open_lock_and_reexec
     fi
@@ -188,6 +181,7 @@ for fd, path in ((9, sys.argv[1]), (8, sys.argv[2])):
             die_logged "upgrade.lock was held for the whole $((LOCK_WAIT_SECS / 60)) minutes the auto-update timer waited, so nothing was installed; it tries again on its next run. Find the holder as supervisor: sudo lslocks | grep upgrade.lock"
         fi
     elif ! flock -n 9; then
+        [[ "${1:-}" != "skip" ]] || skip_while_upgrade_waits_for_jobs
         [[ "${1:-}" != "skip" ]] || lock_busy_skip "upgrade.lock is held"
         [[ "${1:-}" != "try" ]] || return 1
         die "Another upgrade is in progress"
@@ -195,17 +189,6 @@ for fd, path in ((9, sys.argv[1]), (8, sys.argv[2])):
     [[ "${1:-}" == "try" ]] || take_jobs_gate "${1:-}"
     [[ "${1:-}" == "try" ]] || rm -f "$LOCK_SKIPS_FILE"
     LOCK_HELD=1
-}
-
-# take_jobs_gate [skip|wait]: flock fd 8 exclusively, with upgrade.lock held
-# (see acquire_lock). "skip" skips at once when a job runs; any other mode
-# waits up to JOBS_GATE_WAIT_SECS for running jobs, then dies, logged.
-take_jobs_gate() {
-    flock -n 8 && return 0
-    [[ "$1" != "skip" ]] || lock_busy_skip "a job is running"
-    log "Waiting up to 60 minutes for running jobs to finish (see: boxmunge jobs --running)"
-    flock -w "$JOBS_GATE_WAIT_SECS" 8 \
-        || die_logged "Jobs were still running after the 60 minutes this upgrade waited, so nothing was installed. See them with: boxmunge jobs --running; the upgrade can be run again once they finish."
 }
 
 # lock_busy_skip <why>: check-probation could not take upgrade.lock (<why>),
@@ -232,8 +215,10 @@ lock_busy_skip() {
 # open_lock_and_reexec: see acquire_lock. Replaces this process; prints a
 # FATAL line like die() when a lock file cannot be used. The gate is opened
 # read-only (flock needs no more) under descriptors for state/ and jobs/, none
-# followed if a link; one missing is made O_EXCL (a job's open may make it
-# first), deploy:deploy 0660, as install makes it.
+# followed if a link. A missing jobs/ or gate is made as install makes them
+# (jobs/ deploy:deploy 0750, the gate O_EXCL, deploy:deploy 0660), so a box
+# whose installer has not yet run this release's steps (the hop from 0.11.11)
+# still upgrades; one a job's open made first is used as found.
 open_lock_and_reexec() {
     exec python3 -c '
 import errno, fcntl, os, stat, sys, time
@@ -249,6 +234,21 @@ def fatal(path, what):
 def refused(path, e, linked="is a symlink"):
     planted = e.errno in (errno.ELOOP, errno.ENOTDIR)
     fatal(path, linked if planted else f"cannot be opened ({e.strerror})")
+
+def deploy_owner():  # settled before anything is made, so nothing is left root-owned
+    if os.geteuid() != 0:
+        return None
+    import grp, pwd
+    try:
+        return pwd.getpwnam("deploy").pw_uid, grp.getgrnam("deploy").gr_gid
+    except KeyError:
+        die(f"{gate} or its directory is missing, and there is no deploy user and group to own it; "
+            "reinstall as root (sudo bash boxmunge-install.sh)")
+
+def made(fd, mode, owner):
+    if owner is not None:
+        os.fchown(fd, *owner)
+    os.fchmod(fd, mode)
 
 def above_9(fd):  # out of the way of fds 8 and 9 until both are placed
     high = fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 10)
@@ -269,42 +269,48 @@ lock_fd = above_9(fd)
 
 directory = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 jobs, gate = f"{state}/jobs", f"{state}/jobs/gate.lock"
+not_a_dir = "is a symlink or not a directory"
 try:
     state_fd = os.open(state, directory)
 except OSError as e:
-    refused(state, e, "is a symlink or not a directory")
+    refused(state, e, not_a_dir)
 try:
     jobs_fd = os.open("jobs", directory, dir_fd=state_fd)
+except FileNotFoundError:
+    owner, created = deploy_owner(), True
+    try:
+        os.mkdir("jobs", 0o750, dir_fd=state_fd)
+    except FileExistsError:
+        created = False
+    try:
+        jobs_fd = os.open("jobs", directory, dir_fd=state_fd)
+    except OSError as e:
+        refused(jobs, e, not_a_dir)
+    if created:
+        made(jobs_fd, 0o750, owner)
 except OSError as e:
-    refused(jobs, e, "is a symlink or not a directory")
+    refused(jobs, e, not_a_dir)
 flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
-created = False
 try:
     fd = os.open("gate.lock", flags, dir_fd=jobs_fd)
 except FileNotFoundError:
-    owner = None  # deploy, whose jobs take the gate; settled before it is made
-    if os.geteuid() == 0:
-        import grp, pwd
-        try:
-            owner = pwd.getpwnam("deploy").pw_uid, grp.getgrnam("deploy").gr_gid
-        except KeyError:
-            die(f"{gate} is missing, and there is no deploy user and group to own it; "
-                "reinstall as root (sudo bash boxmunge-install.sh)")
+    owner, created = deploy_owner(), True
     try:
         fd = os.open("gate.lock", flags | os.O_CREAT | os.O_EXCL, 0o660, dir_fd=jobs_fd)
-        created = True
     except FileExistsError:
-        fd = os.open("gate.lock", flags, dir_fd=jobs_fd)
+        created = False
+        try:
+            fd = os.open("gate.lock", flags, dir_fd=jobs_fd)
+        except OSError as e:
+            refused(gate, e)
     except OSError as e:
         refused(gate, e)
+    if created:
+        made(fd, 0o660, owner)
 except OSError as e:
     refused(gate, e)
 if not stat.S_ISREG(os.fstat(fd).st_mode):
     fatal(gate, "is not a regular file")
-if created:
-    if owner is not None:
-        os.fchown(fd, *owner)
-    os.fchmod(fd, 0o660)
 os.set_blocking(fd, True)
 gate_fd = above_9(fd)
 os.close(jobs_fd)

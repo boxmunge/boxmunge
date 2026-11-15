@@ -27,7 +27,7 @@
 #   userns-rollback            operator only: undo an uncommitted or interrupted migration
 #   userns-commit              operator only: delete the old root after the soak
 #
-# In the source tree the functions live in boxmunge-upgrade.d/ (state, slots,
+# In the source tree the functions live in boxmunge-upgrade.d/ (state, jobsgate, slots,
 # probation, health, release, system, userns, readiness, check, gate). The
 # release build (scripts/build-shim.py) inlines them, so the shim a box runs
 # is this one self-contained file: whatever installs it (install.sh, or an
@@ -132,7 +132,7 @@ die_logged() {
 SHIM_LIB_DIR="$(dirname "$SHIM_PATH")/boxmunge-upgrade.d"
 [[ -d "$SHIM_LIB_DIR" ]] \
     || die "This is the unbuilt source shim and $SHIM_LIB_DIR is missing; install a release bundle, whose shim is built"
-for lib in state slots probation health release system units userns readiness check gate; do
+for lib in state jobsgate slots probation health release system units userns readiness check gate; do
     # shellcheck source=/dev/null
     source "$SHIM_LIB_DIR/$lib.sh"
 done
