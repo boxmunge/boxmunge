@@ -1,6 +1,7 @@
 services:
   web:
     build: .
+    # Intentional: self-test runs canary outside the project flow and probes this port (vm-test strips it).
     ports:
       - "${CANARY_PORT:-19876}:8080"
     environment:

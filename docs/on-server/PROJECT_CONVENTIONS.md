@@ -13,7 +13,7 @@ Each project lives at `/opt/boxmunge/projects/<project-name>/`. The directory st
   manifest.yml                 # Declares what boxmunge needs to know
   compose.yml                  # Project-authored Docker Compose file
   compose.boxmunge.yml         # Auto-generated overlay (do not edit)
-  project.env                  # Non-secret config (ships with bundle)
+  project.env                  # Non-secret config (ships with a bundle; see below for git)
   secrets.env                  # CLI-managed secrets (boxmunge secrets)
   caddy.override.conf          # Optional: operator-placed Caddy config override
   boxmunge-scripts/
@@ -189,7 +189,9 @@ services:
 
 # Backup configuration.
 backup:
-  # Valid values: none, postgres, mysql, files, custom.
+  # A free-form label (rule 9): only `none` changes behaviour, by turning
+  # backups off. Any other value, such as postgres or db-dump, names the
+  # backup and requires the commands below.
   type: postgres
 
   # REQUIRED unless the manifest has exactly one service: the compose
@@ -555,6 +557,17 @@ The `boxmunge-scripts/` directory is the project's side of the integration. boxm
 `smoke.sh` is run with `sh`, so its mode does not matter there; a script `pre_deploy` names is
 executed directly and must be executable.
 
+A bundle ships `boxmunge-scripts/` at its top level. A git project commits it at the top of its
+repository: every checkout of a commit (deploy, promote, rollback, and the staged release) makes the
+project directory's `boxmunge-scripts/` exactly the commit's, and removes it when the commit has
+none, so nothing has to be placed on the server by hand. Of a git project's repository only
+`compose.yml`, `manifest.yml` and `boxmunge-scripts/` are used from the project directory, so a
+relative `pre_deploy` names a script under `boxmunge-scripts/`.
+
+A deploy, stage or promote whose manifest names a smoke script, or a relative `pre_deploy`, that the
+release does not have is refused before anything starts, naming the missing file (`validate`
+reports the same). A start of a release that is already installed is not refused for it.
+
 Backups run the manifest's `backup.dump_command` and `restore_command` inside `backup.service`; no
 script is needed for them.
 
@@ -668,6 +681,16 @@ NODE_ENV=production
 ```
 
 `project.env` is part of the project source and is replaced on each bundle deploy. It should not contain credentials.
+
+A git project has no bundle to carry it, and boxmunge does not copy a `project.env.example` from the
+repository (`add-git-project` notes one it finds). Configuration that belongs with the code goes in
+`compose.yml` (`environment:`), committed with it. Values this box sets for the project are set from
+the deploy shell with `secrets set <project> KEY=value`: `secrets.env` reaches every service the
+manifest declares exactly as `project.env` does, and wins over it. A `project.env` a **supervisor**
+places in a git project's directory is read too.
+
+The manifest has no key that names other env files: an `env_files:` list (in manifests written
+before 0.12) is ignored, and `validate` warns about it.
 
 ### `${VAR}` in compose.yml
 

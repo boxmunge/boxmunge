@@ -33,6 +33,7 @@ from boxmunge.compose_resolve import ComposeResolveError, resolve_deployed_confi
 from boxmunge.docker import staging_compose_project
 from boxmunge.project_yaml import load_project_yaml
 from boxmunge.staged_release import ComposeTarget, has_slot, staging_target
+from boxmunge.state import read_state
 
 if TYPE_CHECKING:
     from boxmunge.paths import BoxPaths
@@ -225,6 +226,21 @@ def resolving() -> Iterator[None]:
         raise StagingIsolationError(f"cannot resolve the environments to compare: {e}") from e
 
 
+def never_deployed(paths: BoxPaths, project: str) -> bool:
+    """No deploy of ``project`` was ever recorded (a git project that
+    add-git-project registered, or whose first deploy failed)."""
+    return "current_ref" not in read_state(paths.project_deploy_state(project))
+
+
+def never_deployed_refusal(project: str) -> str:
+    """Why a stage of a never-deployed project with a production manifest
+    (a git project) is refused, and what to run instead."""
+    return (f"'{project}' has never been deployed to production, so there is no "
+            f"production for staging to be checked against, nor data for "
+            f"staging.copy_data to copy. Deploy its first release straight to "
+            f"production with 'prod-deploy {project}', then stage the releases after it.")
+
+
 def production_model(paths: BoxPaths, project: str) -> dict[str, Any] | None:
     """The model production runs with, from its project dir; None when it
     was never deployed."""
@@ -233,6 +249,8 @@ def production_model(paths: BoxPaths, project: str) -> dict[str, Any] | None:
         return None
     overlay = paths.project_compose_override(project)
     if not overlay.exists():
+        if never_deployed(paths, project):
+            raise StagingIsolationError(never_deployed_refusal(project))
         raise StagingIsolationError(
             f"production of '{project}' has no {overlay.name}, so what it runs cannot be "
             f"checked against staging. Redeploy production first.")

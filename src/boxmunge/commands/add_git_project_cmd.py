@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from boxmunge.fs_nofollow import chown_tree_deploy, mkdir_p_deploy
 from boxmunge.git_slot import GitRefError, clone
 from boxmunge.identity import check_project_identity, register_project_identity
+from boxmunge.intake import scripts_problems
 from boxmunge.log import log_operation
 from boxmunge.manifest import load_manifest_as_written, validate_manifest, ManifestError
 from boxmunge.project_registry import check_new_name
@@ -57,6 +58,8 @@ def run_add_git_project(
         return 1
     for w in warnings:
         print(f"  WARN: {w}")
+    for problem in scripts_problems(project_dir, manifest):
+        print(f"  WARN: {problem}. prod-deploy refuses the project until it is fixed.")
 
     manifest_id = manifest.get("id", "")
     try:
@@ -86,7 +89,12 @@ def run_add_git_project(
 
     log_operation("add-git-project", f"Added git project from {repo_url}", paths, project=name)
     print(f"Project '{name}' created from {repo_url}.")
-    print(f"  Run 'stage {name}' or 'prod-deploy {name}' to start it.")
+    if (repo_dir / "project.env.example").exists():
+        print(f"  NOTE: the repository has a project.env.example, which boxmunge does not "
+              f"copy: a git project's configuration is set on the box. Set each value "
+              f"this box needs with 'secrets set {name} KEY=value' before deploying.")
+    print(f"  Run 'prod-deploy {name}' to deploy its first release; stage the releases "
+          f"after it.")
     return 0
 
 

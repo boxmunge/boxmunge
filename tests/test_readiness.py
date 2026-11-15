@@ -281,19 +281,20 @@ def test_never_laxer_than_the_dry_run(box) -> None:
 
 # --- a check that fails is a block, never a missing verdict -------------------
 
-def _manifest_with(paths, name: str, **values) -> None:
-    path = paths.project_manifest(name)
-    path.write_text(yaml.dump({**yaml.safe_load(path.read_text()), **values}))
-
-
-@pytest.mark.parametrize("env_files, error", [(5, "TypeError"), ([5], "TypeError")])
-def test_a_project_check_that_fails_is_unreadable_naming_it(box, env_files, error) -> None:
+def test_a_project_check_that_fails_is_unreadable_naming_it(box, monkeypatch) -> None:
+    from boxmunge import readiness
     add_project(box, "alpha")
     add_project(box, "shop")
-    _manifest_with(box, "shop", env_files=env_files)
+    real = readiness.gather_validation
+
+    def broken(name, paths):
+        if name == "shop":
+            raise TypeError("'int' object is not iterable")
+        return real(name, paths)
+    monkeypatch.setattr("boxmunge.readiness.gather_validation", broken)
     r = evaluate(box)
     finding = _only(r, "project.unreadable")
-    assert finding.message.startswith(f"project shop could not be checked: {error}: ")
+    assert finding.message.startswith("project shop could not be checked: TypeError: ")
     assert ids(r) == [("shop", "project.unreadable")] and r.result == "blocked"
 
 

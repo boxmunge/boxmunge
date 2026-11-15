@@ -348,6 +348,38 @@ def install_release(tree: Path, project_dir: Path,
     return KeptData(retained=retained, copies=copies)
 
 
+SCRIPTS = "boxmunge-scripts"
+
+
+def install_commit_scripts(tree: Path) -> None:
+    """Make a git release's ``boxmunge-scripts/`` its checked-out commit's.
+
+    The overlay mounts ``./boxmunge-scripts`` from the release's top
+    directory (the project dir, or a git slot's release) and a relative
+    pre_deploy runs from there, but a git project's scripts are committed
+    in ``repo/``. So after every checkout ``tree/boxmunge-scripts`` is made
+    exactly ``tree/repo/boxmunge-scripts`` (refreshed in place, so a running
+    container's mount survives; see _install_entry), or removed when the
+    commit has none. Raises ReleaseStateError for a committed entry that is
+    not a directory; OSError if copying fails.
+    """
+    src, dest = tree / "repo" / SCRIPTS, tree / SCRIPTS
+    if not os.path.lexists(src):
+        if os.path.lexists(dest):
+            _remove(dest)
+            print(f"  NOTE: removed {SCRIPTS}/ from {tree}: the checked-out commit has "
+                  f"none, and a git project's scripts come from its repository")
+        return
+    if src.is_symlink() or not src.is_dir():
+        raise ReleaseStateError(
+            f"{src} is not a directory. boxmunge copies a git project's {SCRIPTS}/ "
+            f"from the checked-out commit: commit it as a directory of scripts at the top "
+            f"of the repository (not a link), then deploy that commit")
+    _install_entry(src, dest)
+    _make_scripts_executable([dest])
+    chown_tree_deploy(dest)
+
+
 def live_ref(paths: BoxPaths, project_name: str) -> str:
     """The ref of the release code currently installed in the project dir."""
     meta = _live_meta(paths, project_name)

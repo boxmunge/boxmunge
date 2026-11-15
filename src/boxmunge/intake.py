@@ -9,11 +9,13 @@ bundle never reaches the files that root timers later ``compose up``
 """
 from __future__ import annotations
 
+import os
+import shlex
 import shutil
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from boxmunge.bundle import check_bundle_contents, extract_bundle
@@ -23,6 +25,7 @@ from boxmunge.log import log_error
 from boxmunge.manifest import (
     ManifestError, at_current_schema, load_manifest_as_written, validate_manifest,
 )
+from boxmunge.release import SCRIPTS
 from boxmunge.security_overlay import services_with_off_profile
 from boxmunge.user_entries import USER_ENTRIES
 
@@ -125,20 +128,14 @@ def validate_release_tree(
     except ValueError as e:
         raise IntakeError(str(e)) from e
 
-    # User compose is checked against silent-floor-defeating keys before any
-    # overlay exists: compose's multi-file merge would otherwise let a user
-    # `privileged: true` win over the boxmunge baseline.
-    off_services = {svc for svc, _ in services_with_off_profile(manifest)}
+    # A start of an installed release (lenient) is not refused for a script
+    # it was deployed without: its smoke check says so instead.
+    problems = [] if lenient_values else scripts_problems(tree, manifest)
+    if problems:
+        raise IntakeError("\n".join(problems))
     try:
-        validate_user_compose(
-            tree / "compose.yml", paths,
-            off_services=off_services,
-            project_name=project_name,
-            cve_policy=manifest.get("security"),
-            manifest_services=manifest.get("services"),
-            user_entries=manifest.get(USER_ENTRIES),
-            lenient_values=lenient_values,
-        )
+        check_release_compose(tree, project_name, paths, manifest,
+                              lenient_values=lenient_values)
     except ComposeSecurityError as e:
         log_error(component, f"Compose validation rejected: {e}",
                   paths, project=project_name)
@@ -146,6 +143,80 @@ def validate_release_tree(
     return manifest
 
 
+def check_release_compose(tree: Path, project_name: str, paths: BoxPaths,
+                          manifest: dict[str, Any], *, lenient_values: bool = False) -> None:
+    """The release's compose.yml against the hardening, isolation and
+    posture rules (compose_validate.validate_user_compose), with the
+    manifest (at the current schema) it would deploy with. Deploy and
+    `validate` both run it. Raises ComposeSecurityError.
+
+    User compose is checked against silent-floor-defeating keys before any
+    overlay exists: compose's multi-file merge would otherwise let a user
+    `privileged: true` win over the boxmunge baseline."""
+    validate_user_compose(
+        tree / "compose.yml", paths,
+        off_services={svc for svc, _ in services_with_off_profile(manifest)},
+        project_name=project_name,
+        cve_policy=manifest.get("security"),
+        manifest_services=manifest.get("services"),
+        user_entries=manifest.get(USER_ENTRIES),
+        lenient_values=lenient_values,
+    )
+
+
+def scripts_problems(tree: Path, manifest: dict[str, Any]) -> list[str]:
+    """Each script the manifest runs that the release does not have.
+
+    A smoke check runs ``/boxmunge-scripts/<its file name>`` in the
+    container, which mounts the release's ``boxmunge-scripts/``, and a
+    relative pre_deploy command is run from the release's top directory.
+    A git project's ``boxmunge-scripts/`` is its commit's (in ``repo/``;
+    release.install_commit_scripts puts it beside). Refused before compose
+    runs: Docker would otherwise create a missing ``boxmunge-scripts/`` as
+    an empty root-owned directory."""
+    git = (tree / "repo").is_dir()
+    problems = []
+    services = manifest.get("services")
+    for name, svc in (services.items() if isinstance(services, dict) else ()):
+        smoke = svc.get("smoke") if isinstance(svc, dict) else None
+        if isinstance(smoke, str) and smoke:
+            rel = f"{SCRIPTS}/{PurePosixPath(smoke).name}"
+            if not _has(tree, rel, git):
+                problems.append(f"service {name}: smoke {smoke!r} runs /{rel} in its "
+                                f"container, but {_missing(rel, git)}")
+    program = _pre_deploy_program(manifest.get("deploy"))
+    if "/" in program and not program.startswith("/"):
+        rel = os.path.normpath(program)
+        if not _has(tree, rel, git):
+            problems.append(f"deploy.pre_deploy runs {program!r} from the project "
+                            f"directory, but {_missing(rel, git)}")
+    return problems
+
+
+def _pre_deploy_program(deploy: object) -> str:
+    hook = deploy.get("pre_deploy") if isinstance(deploy, dict) else None
+    try:
+        words = shlex.split(hook) if isinstance(hook, str) else []
+    except ValueError:
+        return ""  # validate_manifest names the quoting problem
+    return words[0] if words else ""
+
+
+def _has(tree: Path, rel: str, git: bool) -> bool:
+    from_repo = git and rel.split("/")[0] == SCRIPTS
+    return (tree / "repo" / rel if from_repo else tree / rel).is_file()
+
+
+def _missing(rel: str, git: bool) -> str:
+    if not git:
+        return (f"the release has no {rel}: add it to the project, then upload a new "
+                f"bundle and deploy it")
+    if rel.split("/")[0] == SCRIPTS:
+        return (f"the repository has no {rel} at this commit: commit it there, then "
+                f"deploy that commit")
+    return (f"the project directory has no {rel}: of a git project's repository, only "
+            f"{SCRIPTS}/ is put there, so commit the script under {SCRIPTS}/ and name it "
+            f"as {SCRIPTS}/<script>")
 def check_installable(tree: Path, project_dir: Path) -> None:
     """Refuse, before anything changes, a release install_release would refuse."""
     from boxmunge.release import check_install

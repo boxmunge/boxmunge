@@ -74,18 +74,26 @@ For projects hosted in a git repository.
    add-git-project myapp https://github.com/example/myapp.git
    ```
 
-2. Stage or deploy:
+2. Set what the box must supply: `secrets set myapp KEY=value` for each value. A git project has
+   no bundle to carry `project.env`, and boxmunge does not copy a `project.env.example` from the
+   repository (PROJECT_CONVENTIONS.md, "project.env").
+
+3. Deploy the first release straight to production:
+
+   ```
+   prod-deploy myapp
+   ```
+
+   `stage` refuses a git project that was never deployed: staging is checked against production,
+   and `staging.copy_data` copies production's data. Stage and promote the releases after it:
 
    ```
    stage myapp
    promote myapp
    ```
 
-   Or deploy directly:
-
-   ```
-   prod-deploy myapp
-   ```
+The repository's `boxmunge-scripts/` (smoke checks, a `pre_deploy` script) is put in the project
+directory at every checkout, so nothing is placed on the server by hand.
 
 Deploy a specific git ref:
 
@@ -104,7 +112,7 @@ is checked out.
 
 `stage` of a git project checks the resolved commit out in a clone of its own in the slot
 (`.releases/staged/release/repo/`), beside copies of the project directory's other release files
-(`.env`, `project.env`, `boxmunge-scripts/`, ...); production's `repo/` and its `HEAD` never
+(`.env`, `project.env`, ...) and the staged commit's own `boxmunge-scripts/`; production's `repo/` and its `HEAD` never
 move. `promote` then deploys exactly that SHA, even if the branch has moved since, and `unstage`
 leaves production on its own commit. A `.gitmodules` is staged with a warning: submodules are
 checked out in neither production nor staging. A commit whose `.gitattributes` assigns a `filter`
@@ -375,10 +383,18 @@ images), run:
 prod-deploy myapp --redeploy
 ```
 
+A git project has no inbox, so `--redeploy` is refused for it, and the refusal prints the command
+that does the same: deploy the installed commit again by naming it with `--ref` (or deploy whatever
+its `ref` names now with a bare `prod-deploy myapp`):
+
+```
+prod-deploy myapp --ref <deployed commit SHA>
+```
+
 A redeploy checks the release as strictly as a new deploy: a release that this boxmunge's rules
-refuse (one deployed by an older version, say) has to be fixed and uploaded again. `--redeploy`
-does not take a bundle waiting in the inbox (it says so), and an install left open is finished
-first.
+refuse (one deployed by an older version, say) has to be fixed and uploaded again (a git project:
+fixed in the repository and deployed). `--redeploy` does not take a bundle waiting in the inbox
+(it says so), and an install left open is finished first.
 
 A release that stops bind-mounting a data directory (say `./uploads`) does not delete it: the deploy
 keeps it and prints `WARNING: uploads/ holds data but this release's compose.yml does not mount it
@@ -472,7 +488,7 @@ secrets list --host
 secrets unset --host OLD_KEY
 ```
 
-**Note:** `project.env` ships with the bundle and contains non-secret configuration. `secrets.env` is managed by the CLI and contains credentials. Do not confuse the two.
+**Note:** `project.env` ships with the bundle and contains non-secret configuration (a git project sets such values with `secrets set`). `secrets.env` is managed by the CLI and contains credentials. Do not confuse the two.
 
 ---
 
@@ -1281,6 +1297,10 @@ boxmunge prod-deploy myapp --redeploy   # or prod-deploy after an upload, or pro
                                         # ends the pause once its containers start
 ```
 
+For a git project the second line is `boxmunge prod-deploy myapp --ref <deployed commit SHA>`
+(or a bare `prod-deploy myapp` for the newest commit on its ref): `--redeploy` is for bundle
+projects only.
+
 `--no-start` hands the pause to the next deploy. Until that deploy starts the containers, the
 project stays paused for everything else: the maintenance page stays up, the containers stay
 stopped with their restart policies held (a reboot does not start them), health checks, backups,
@@ -1603,7 +1623,8 @@ validate myapp
 If the config looks stale, redeploy the installed release to regenerate it:
 
 ```
-prod-deploy myapp --redeploy
+prod-deploy myapp --redeploy                      # a bundle project
+prod-deploy myapp --ref <deployed commit SHA>     # a git project
 ```
 
 If deeper Caddy investigation is needed (container logs, config file inspection), this requires the **supervisor** user.

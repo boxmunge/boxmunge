@@ -245,6 +245,15 @@ def _missing_images(paths: BoxPaths, name: str, docker: _Docker) -> list[Finding
     return missing
 
 
+def _validate_errors(paths: BoxPaths, name: str, dry_run_refused: bool) -> list[str]:
+    """validate's errors; its compose.yml rejection is left out when the
+    dry run already refused the project's compose files (said once)."""
+    validation = gather_validation(name, paths)
+    if not dry_run_refused:
+        return validation.errors
+    return [e for e in validation.errors if e != validation.compose_rejection]
+
+
 def _project(paths: BoxPaths, name: str, refused: list[DryRunLine],
              docker: _Docker) -> ProjectReadiness:
     findings = [_todo(COMPOSE, _unnamed(name, line.text), str(line.remedy)) for line in refused]
@@ -253,7 +262,7 @@ def _project(paths: BoxPaths, name: str, refused: list[DryRunLine],
                        f"`prod-deploy {name}` after uploading it, or once the fix is on a "
                        f"git project's ref; `validate {name}` lists every problem, and "
                        f"the next deploy is refused until they are fixed")
-                 for error in gather_validation(name, paths)[0]]
+                 for error in _validate_errors(paths, name, bool(refused))]
     return ProjectReadiness(name, tuple(findings + _missing_images(paths, name, docker)))
 
 

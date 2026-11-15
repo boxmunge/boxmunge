@@ -22,7 +22,7 @@ from boxmunge.commands.rollback import (
 from boxmunge.crashpoint import crash_point
 from boxmunge.data_dirs import ReleaseStateError
 from boxmunge.git_slot import (
-    GitRefError, checkout_detached, head_sha, manifest_at, resolve_recorded_ref,
+    GitRefError, checkout_release, head_sha, manifest_at, resolve_recorded_ref,
 )
 from boxmunge.intake import IntakeError, report_refusal, validate_release_tree
 from boxmunge.log import log_error
@@ -90,7 +90,7 @@ def roll_back_git(project_name: str, paths: BoxPaths, target: RollbackTarget,
     crash_point("rollback.committed")
     print(f"--- Checking out {target.ref} ---")
     try:  # idempotent: a resume makes sure the tree is the target
-        checkout_detached(repo, target.ref)
+        checkout_release(paths.project_dir(project_name), target.ref)
     except GitRefError as e:
         print(f"ERROR: {e}. Rerun 'rollback {project_name}' once the cause is fixed.",
               file=sys.stderr)

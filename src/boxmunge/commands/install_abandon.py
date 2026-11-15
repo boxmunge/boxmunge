@@ -17,7 +17,7 @@ from boxmunge.commands import release_config
 from boxmunge.data_dirs import ReleaseStateError, log_kept, set_aside_announcer
 from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import LockError, discard_dir, fsync_dir, project_lock, sweep_discarded
-from boxmunge.git_slot import checkout_detached
+from boxmunge.git_slot import checkout_release
 from boxmunge.log import log_error, log_operation
 from boxmunge.release import (
     _remove, install_release, live_code_entries, mark_live, previous_dir, sync_release_code,
@@ -41,7 +41,7 @@ def _put_code_back(project_name: str, paths: BoxPaths, txn: InstallTxn) -> None:
     if (project_dir / "repo").is_dir():
         # A first deploy replaced nothing that ran: its checkout stays.
         if txn.replaced_ref is not None:
-            checkout_detached(project_dir / "repo", txn.replaced_ref)
+            checkout_release(project_dir, txn.replaced_ref)
         return
     if txn.replaced_ref is None:
         for entry in live_code_entries(project_dir):

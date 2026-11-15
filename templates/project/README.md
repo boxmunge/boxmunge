@@ -8,18 +8,18 @@ Managed by [boxmunge](https://github.com/boxmunge/boxmunge).
 |------|---------|
 | `manifest.yml` | Project manifest: services, hosts, backup, deploy config |
 | `compose.yml` | Docker Compose service definitions |
-| `project.env` | Non-secret environment variables, kept on the server beside the clone (credentials go in `secrets.env` through `boxmunge secrets set`) |
+| `project.env.example` | The values the project expects. boxmunge does not copy it: set each value on the server with `boxmunge secrets set __PROJECT_NAME__ KEY=value` |
 | `boxmunge-scripts/smoke.sh` | Smoke test, run inside the service's container after each deploy and by the health monitor |
 
 ## Setup
 
 1. Edit `manifest.yml` — set `repo`, `hosts`, and configure any services you need.
-2. Copy the env file and fill in non-secret values (set credentials with
-   `boxmunge secrets set __PROJECT_NAME__ KEY=value`):
+2. Set each value `project.env.example` lists on the server (boxmunge does not copy the file):
    ```
-   cp project.env.example project.env
+   boxmunge secrets set __PROJECT_NAME__ KEY=value
    ```
-3. Configure `boxmunge-scripts/smoke.sh` with health checks for your services.
+3. Configure `boxmunge-scripts/smoke.sh` with health checks for your services, and commit it:
+   every deploy uses the deployed commit's `boxmunge-scripts/`.
 4. Validate the project config:
    ```
    boxmunge validate __PROJECT_NAME__

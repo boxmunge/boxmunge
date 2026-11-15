@@ -89,9 +89,12 @@ def _is_file(store: Store, side: str) -> bool:
     volume, which Compose created) is missing."""
     if store.kind == "volume":
         if not _volume_exists(store.ref):
+            hint = (" Production creates its volumes when it starts: deploy it with "
+                    "prod-deploy first, or remove staging.copy_data (or map the stores "
+                    "with staging.copy_data.sources)." if side == "production" else "")
             raise StagingDataError(
                 f"{side} volume {store.ref} ({store.key}) does not exist. Nothing "
-                f"was copied: copying from it would create an empty volume.")
+                f"was copied: copying from it would create an empty volume.{hint}")
         return False
     if not os.path.lexists(store.ref):
         if side == "staging":
