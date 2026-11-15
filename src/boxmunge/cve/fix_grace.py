@@ -126,7 +126,6 @@ class FixGrace:
                  "warned_at": None if e.warned_at is None else e.warned_at.isoformat()}
                 for (cve, pkg), e in sorted(self._entries.items())]
         try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
             atomic_write_text(self.path, json.dumps({"entries": rows}, indent=2) + "\n")
         except OSError as e:
             raise StateError(f"cannot write the fix grace record {self.path}: {e}") from e

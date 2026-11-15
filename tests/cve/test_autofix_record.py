@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from boxmunge.cve.autofix_record import (
-    AutofixingMarker, PackageChange, PatchRecord, clear_autofixing, clear_records,
+    PackageChange, PatchRecord, clear_autofixing, clear_records,
     mark_autofixing, read_autofixing, read_records, write_records,
 )
 from boxmunge.state import StateError
@@ -93,4 +93,49 @@ def test_bad_marker_raises_state_error(paths) -> None:
         path.write_text(bad)
         with pytest.raises(StateError, match=str(path)):
             read_autofixing(paths, P)
-    assert isinstance(AutofixingMarker, type)
+
+
+def test_marker_link_raises_state_error(paths) -> None:
+    path = paths.project_autofix_marker(P)
+    path.parent.mkdir(parents=True)
+    os.symlink("/etc/hostname", path)
+    with pytest.raises(StateError, match=str(path)):
+        read_autofixing(paths, P)
+
+
+@pytest.mark.parametrize("bad", [
+    {"patched_image_id": "sha256:short"},
+    {"patched_ref": "nginx:evil"},
+    {"patched_ref": f"boxmunge.invalid/blog/web:autofix-{'a' * 12}"},
+    {"trigger": "weekly"},
+    {"created_at": datetime(2026, 1, 1)},
+    {"created_at": datetime.now(timezone.utc) + timedelta(hours=1)},
+    {"cves": ("",)},
+    {"base_ref": ""},
+    {"packages": (PackageChange("x", "", "2"),)},
+])
+def test_a_bad_record_cannot_be_built(bad) -> None:
+    """The rules live in PatchRecord, so a write can only be handed good ones."""
+    with pytest.raises(ValueError):
+        _record(**bad)
+
+
+def test_write_rejects_another_projects_record(paths) -> None:
+    other = _record(project="blog", patched_ref=f"boxmunge.invalid/blog/web:autofix-{'a' * 12}")
+    with pytest.raises(StateError, match="refusing to write"):
+        write_records(paths, P, (other,))
+    assert not paths.project_autofix_records(P).exists()
+
+
+def test_write_rejects_duplicate_services(paths) -> None:
+    with pytest.raises(StateError, match="more than one record"):
+        write_records(paths, P, (_record(), _record()))
+
+
+def test_write_leaves_the_directory_deploy_owned(paths) -> None:
+    from unittest.mock import patch
+    chowned: list[str] = []
+    with patch("boxmunge.fs_nofollow._chown_deploy", side_effect=chowned.append):
+        write_records(paths, P, (_record(),))
+        mark_autofixing(paths, P, ("CVE-2026-1",), downtime=False)
+    assert str(paths.project_autofix_records(P).parent) in chowned

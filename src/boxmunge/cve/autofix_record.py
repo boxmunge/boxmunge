@@ -66,6 +66,28 @@ class PatchRecord:
     created_at: datetime
     trigger: Trigger
 
+    def __post_init__(self) -> None:
+        """Whatever builds a record, read or written, meets the same rules."""
+        for field in ("project", "service", "base_ref", "base_digest"):
+            _text(getattr(self, field), field)
+        prefix = f"boxmunge.invalid/{self.project}/{self.service}:autofix-"
+        tag = self.patched_ref[len(prefix):]
+        if not self.patched_ref.startswith(prefix) or not re.fullmatch(r"[0-9a-f]{12}", tag):
+            raise ValueError(f"patched_ref {self.patched_ref!r} is not {prefix}<12 hex>")
+        if not isinstance(self.patched_image_id, str) \
+                or not _IMAGE_ID_RE.fullmatch(self.patched_image_id):
+            raise ValueError(f"patched_image_id {self.patched_image_id!r} is not a sha256 image ID")
+        if self.trigger not in _TRIGGERS:
+            raise ValueError(f"trigger {self.trigger!r} is not one of {_TRIGGERS}")
+        for change in self.packages:
+            if not isinstance(change, PackageChange):
+                raise ValueError(f"package change {change!r} is not a PackageChange")
+            for field in ("name", "before", "after"):
+                _text(getattr(change, field), f"package {field}")
+        for cve in self.cves:
+            _text(cve, "cve")
+        _check_time(self.created_at, "created_at")
+
 
 @dataclass(frozen=True)
 class AutofixingMarker:
@@ -77,7 +99,13 @@ class AutofixingMarker:
 def _time(value: Any, field: str) -> datetime:
     if not isinstance(value, str):
         raise ValueError(f"{field} is {value!r}, not a time")
-    when = datetime.fromisoformat(value)
+    return _check_time(datetime.fromisoformat(value), field)
+
+
+def _check_time(when: Any, field: str) -> datetime:
+    if not isinstance(when, datetime):
+        raise ValueError(f"{field} is {when!r}, not a time")
+    value = when.isoformat()
     if when.tzinfo is None:
         raise ValueError(f"{field} {value!r} has no timezone")
     if when > datetime.now(timezone.utc) + _CLOCK_SKEW:
@@ -106,8 +134,7 @@ def _read_doc(path: Path, what: str) -> Any:
 
 
 def _write_doc(path: Path, doc: dict[str, Any], what: str) -> None:
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
+    try:   # atomic_write_text makes the directory deploy-owned (mkdir_p_deploy)
         atomic_write_text(path, json.dumps(doc, indent=2) + "\n")
     except OSError as e:
         raise StateError(f"cannot write the {what} {path}: {e}") from e
@@ -123,30 +150,24 @@ def _unlink(path: Path, what: str) -> None:
 def _record(item: Any, project: str) -> PatchRecord:
     if not isinstance(item, dict):
         raise ValueError(f"a record is {item!r}, not an object")
-    if _text(item["project"], "project") != project:
+    if item["project"] != project:
         raise ValueError(f"a record names project {item['project']!r}, not {project!r}")
-    service = _text(item["service"], "service")
-    ref = _text(item["patched_ref"], "patched_ref")
-    prefix = f"boxmunge.invalid/{project}/{service}:autofix-"
-    if not ref.startswith(prefix) or not re.fullmatch(r"[0-9a-f]{12}", ref[len(prefix):]):
-        raise ValueError(f"patched_ref {ref!r} is not {prefix}<12 hex>")
-    image_id = _text(item["patched_image_id"], "patched_image_id")
-    if not _IMAGE_ID_RE.fullmatch(image_id):
-        raise ValueError(f"patched_image_id {image_id!r} is not a sha256 image ID")
-    if item["trigger"] not in _TRIGGERS:
-        raise ValueError(f"trigger {item['trigger']!r} is not one of {_TRIGGERS}")
     packages = item["packages"]
     if not isinstance(packages, list):
         raise ValueError("packages is not a list")
     return PatchRecord(
-        project=project, service=service, base_ref=_text(item["base_ref"], "base_ref"),
-        base_digest=_text(item["base_digest"], "base_digest"), patched_ref=ref,
-        patched_image_id=image_id,
-        packages=tuple(PackageChange(_text(p["name"], "package name"),
-                                     _text(p["before"], "package before"),
-                                     _text(p["after"], "package after")) for p in packages),
+        project=project, service=item["service"], base_ref=item["base_ref"],
+        base_digest=item["base_digest"], patched_ref=item["patched_ref"],
+        patched_image_id=item["patched_image_id"],
+        packages=tuple(PackageChange(p["name"], p["before"], p["after"]) for p in packages),
         cves=_strings(item["cves"], "cves"), created_at=_time(item["created_at"], "created_at"),
-        trigger=cast(Trigger, item["trigger"]))
+        trigger=item["trigger"])
+
+
+def _unique_services(records: Sequence[PatchRecord]) -> None:
+    services = [r.service for r in records]
+    if len(set(services)) != len(services):
+        raise ValueError("a service has more than one record")
 
 
 def read_records(paths: BoxPaths, project: str) -> tuple[PatchRecord, ...]:
@@ -163,9 +184,7 @@ def read_records(paths: BoxPaths, project: str) -> tuple[PatchRecord, ...]:
         if not isinstance(doc["records"], list) or not doc["records"]:
             raise ValueError("records must be a non-empty list")
         records = tuple(_record(item, project) for item in doc["records"])
-        services = [r.service for r in records]
-        if len(set(services)) != len(services):
-            raise ValueError("a service has more than one record")
+        _unique_services(records)
         return records
     except (ValueError, KeyError, TypeError) as e:
         raise StateError(f"{path} is not an autofix record: {e!r}") from e
@@ -176,6 +195,13 @@ def write_records(paths: BoxPaths, project: str, records: Sequence[PatchRecord])
     if not records:
         clear_records(paths, project)
         return
+    try:
+        for r in records:
+            if r.project != project:
+                raise ValueError(f"a record names project {r.project!r}, not {project!r}")
+        _unique_services(records)
+    except ValueError as e:
+        raise StateError(f"refusing to write a bad autofix record for {project}: {e}") from e
     rows = [{"project": r.project, "service": r.service, "base_ref": r.base_ref,
              "base_digest": r.base_digest, "patched_ref": r.patched_ref,
              "patched_image_id": r.patched_image_id,

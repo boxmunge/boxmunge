@@ -211,3 +211,12 @@ def test_warning_says_the_site_is_quarantined(paths: BoxPaths) -> None:
     _run(paths, T0, _fixable())
     _, [alert] = _run(paths, T0 + timedelta(days=6), _fixable())
     assert "or the site is quarantined" in alert.title and "or the site is quarantined" in alert.body
+
+
+def test_first_write_leaves_the_directory_deploy_owned(paths: BoxPaths) -> None:
+    """Root writing first must not leave state/cve/fix_grace root-owned."""
+    from unittest.mock import patch
+    chowned: list[str] = []
+    with patch("boxmunge.fs_nofollow._chown_deploy", side_effect=chowned.append):
+        _run(paths, T0, _fixable())
+    assert str(paths.project_fix_grace(P).parent) in chowned

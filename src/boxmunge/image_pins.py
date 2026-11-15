@@ -155,7 +155,7 @@ def _checked(pins: Iterable[ImagePin], project: str) -> tuple[ImagePin, ...]:
 
 
 def _write(path: Path, pins: tuple[ImagePin, ...]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # atomic_write_text makes the directory deploy-owned (mkdir_p_deploy).
     atomic_write_text(path, json.dumps({"version": RECORD_VERSION,
                                         "pins": [asdict(p) for p in pins]}, indent=2) + "\n")
 

@@ -11,6 +11,7 @@ def test_switch_forgets_patch_records_and_marker(paths) -> None:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text("{}\n")
     other = paths.project_autofix_records("blog")
+    other.parent.mkdir(parents=True, exist_ok=True)
     other.write_text("{}\n")
     clear_release_overrides(paths, "shop")
     assert [f for f in files if f.exists()] == []

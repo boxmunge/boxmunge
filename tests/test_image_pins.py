@@ -560,3 +560,14 @@ def test_autofix_key_bool_only_default_true() -> None:
     assert project_meta(NAME, {"security": {"autofix": False}}, PROD).autofix is False
     with pytest.raises(ProjectScanError, match="autofix"):
         project_meta(NAME, {"security": {"autofix": "off"}}, PROD)
+
+
+def test_first_write_leaves_the_directory_deploy_owned(paths: BoxPaths) -> None:
+    """Root writing first must not leave state/image_pins root-owned."""
+    from unittest.mock import patch
+
+    from boxmunge.image_pins import _write
+    chowned: list[str] = []
+    with patch("boxmunge.fs_nofollow._chown_deploy", side_effect=chowned.append):
+        _write(paths.project_image_pins(NAME), (PIN,))
+    assert str(paths.project_image_pins(NAME).parent) in chowned
