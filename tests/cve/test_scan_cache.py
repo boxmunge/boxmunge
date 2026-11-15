@@ -90,7 +90,7 @@ def test_a_put_prunes_entries_older_than_fourteen_days(cache) -> None:
     assert not old.exists() and cache.get(DIGEST, "2:db-1") is not None
 
 
-def test_the_db_version_is_trivys_db_build(monkeypatch) -> None:
+def test_the_key_names_trivy_and_its_db_build(monkeypatch) -> None:
     import subprocess
 
     from boxmunge.cve import scanner
@@ -98,7 +98,7 @@ def test_the_db_version_is_trivys_db_build(monkeypatch) -> None:
         "Version": 2, "UpdatedAt": "2026-11-14T06:00:00Z", "NextUpdate": "x"}})
     monkeypatch.setattr(scanner.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
         cmd, 0, out, ""))
-    assert scanner.trivy_db_version() == "2:2026-11-14T06:00:00Z"
+    assert scanner.trivy_version_key() == "trivy 0.58.0, DB 2:2026-11-14T06:00:00Z"
 
 
 def test_a_trivy_without_a_db_says_so(monkeypatch) -> None:
@@ -108,4 +108,9 @@ def test_a_trivy_without_a_db_says_so(monkeypatch) -> None:
     monkeypatch.setattr(scanner.subprocess, "run", lambda cmd, **kw: subprocess.CompletedProcess(
         cmd, 0, json.dumps({"Version": "0.58.0"}), ""))
     with pytest.raises(scanner.ScannerError, match="vulnerability DB"):
-        scanner.trivy_db_version()
+        scanner.trivy_version_key()
+
+
+def test_a_trivy_upgrade_invalidates_the_cache(cache) -> None:
+    cache.put(DIGEST, "trivy 0.58.0, DB 2:db-1", _result())
+    assert cache.get(DIGEST, "trivy 0.59.0, DB 2:db-1") is None

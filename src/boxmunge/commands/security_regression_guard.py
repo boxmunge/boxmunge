@@ -21,7 +21,8 @@ The guard refuses:
 - the CISA catalog the way the quarantine gate judges it (cve.lift_rule):
   a stale catalog refuses a CVE its cached copy lists, and with no usable
   catalog the release is refused unless prod-deploy's --accept-stale-kev
-  accepts that (kev_acceptance).
+  accepts that (kev_acceptance; alerted here for a project not
+  quarantined, whose lift would otherwise alert it).
 
 The refusal names each CVE, its package, the installed and the fixed
 version and the lists that name it, then how to fix it in the repo.
@@ -40,7 +41,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from boxmunge.commands.argv import Args, usage_error
-from boxmunge.commands.kev_acceptance import accept_at_gate
+from boxmunge.commands.kev_acceptance import accept_at_guard, stale_exit
 from boxmunge.commands.quarantine_gate import scan_release_images, start_images
 from boxmunge.commands.security_scan_core import ProjectScan
 from boxmunge.commands.security_scan_inputs import ProjectMeta, ScanTarget, project_meta
@@ -68,7 +69,12 @@ FIX_IN_REPO = ("Fix it in the repo: bump the base image, or upgrade the package 
 
 class SecurityRegressionRefused(DeployRefused):
     """The release carries a known-exploited CVE (or could not be shown not
-    to); nothing was started."""
+    to); nothing was started. ``reasons`` are the problems without the
+    closing exit, for a route with exits of its own (rollback)."""
+
+    def __init__(self, reasons: list[str], closing: str) -> None:
+        self.reasons = reasons
+        super().__init__([*reasons, closing])
 
 
 @dataclass
@@ -178,10 +184,12 @@ def _catalog_lines(paths: BoxPaths, project: str, kev: KevCatalog, stale: str) -
         return []
     refusal = (f"there is no usable CISA KEV catalog ({stale}), so boxmunge cannot tell "
                f"whether anything in the release's images is actively exploited")
-    if accept_at_gate(project, KevLiftCheck(stale, refusal=refusal, acceptable=True),
-                      paths) is not None:
+    if accept_at_guard(project, KevLiftCheck(stale, refusal=refusal, acceptable=True),
+                       paths) is not None:
         return []
-    return [refusal[0].upper() + refusal[1:] + ".", f"{fresh_data_advice()}; then deploy again."]
+    exit_ = stale_exit(project, paths)  # prod-deploy's narrower exit comes first
+    return [refusal[0].upper() + refusal[1:] + ".", f"{fresh_data_advice()}; then deploy again.",
+            *([exit_] if exit_ else [])]
 
 
 def _problems(paths: BoxPaths, target: ReleaseTarget,
@@ -256,6 +264,6 @@ def guard_release(paths: BoxPaths, target: ReleaseTarget, manifest: dict[str, An
         header = ("This release carries a known-exploited CVE" if carries_cve
                   else "The deploy guard could not clear this release")
         raise SecurityRegressionRefused([f"{header}; nothing was started in {where}:",
-                                         *problems, FIX_IN_REPO if carries_cve
-                                         else DEPLOY_ANYWAY])
+                                         *problems],
+                                        FIX_IN_REPO if carries_cve else DEPLOY_ANYWAY)
     _let_through(paths, override, project, where, component, problems)

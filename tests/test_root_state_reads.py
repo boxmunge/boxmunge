@@ -185,7 +185,7 @@ READERS = [
            exploited.read_vulncheck_cache),
     # The deploy guard's Trivy results: a record it cannot read is a fault, never a miss.
     Reader("scan_cache", lambda p: p.scan_cache_dir / ("a" * 64 + ".json"),
-           {"digest": "sha256:" + "a" * 64, "trivy_db": "2:db", "scanned_at": ISO,
+           {"digest": "sha256:" + "a" * 64, "trivy": "2:db", "scanned_at": ISO,
             "lang_types": [], "findings": []},
            lambda p: scan_cache.ScanCache(p).get("sha256:" + "a" * 64, "2:db").scanned_at),
     Reader("kev_watch", lambda p: p.kev_watch,

@@ -247,11 +247,12 @@ def refresh_db() -> None:
         )
 
 
-def trivy_db_version() -> str:
-    """The vulnerability DB Trivy scans with now, as "<schema>:<built at>"
-    (`trivy version`): a cached result is valid only for the same one
-    (cve.scan_cache). Raises TrivyNotInstalledError, or ScannerError when
-    Trivy fails or does not name its DB (none downloaded yet)."""
+def trivy_version_key() -> str:
+    """Trivy and the vulnerability DB it scans with now, as
+    "trivy <version>, DB <schema>:<built at>" (`trivy version`): a cached
+    result is valid only for the same Trivy and DB (cve.scan_cache). Raises
+    TrivyNotInstalledError, or ScannerError when Trivy fails or does not name
+    itself or its DB (none downloaded yet)."""
     cmd = ["trivy", "version", "--format", "json"]
     try:
         completed = subprocess.run(cmd, capture_output=True, text=True, check=True,
@@ -264,14 +265,15 @@ def trivy_db_version() -> str:
         raise ScannerError(f"`trivy version` failed (exit {e.returncode}): "
                            f"{(e.stderr or '').strip()}") from e
     try:
-        db = json.loads(completed.stdout)["VulnerabilityDB"]
+        payload = json.loads(completed.stdout)
+        trivy, db = payload["Version"], payload["VulnerabilityDB"]
         schema, built = db["Version"], db["UpdatedAt"]
     except (json.JSONDecodeError, KeyError, TypeError) as e:
         raise ScannerError(f"`trivy version` does not name its vulnerability DB ({e!r}); "
                            f"run `trivy image --download-db-only`") from e
-    if not isinstance(built, str) or not built:
-        raise ScannerError(f"`trivy version` gives the vulnerability DB no build time: {db!r}")
-    return f"{schema}:{built}"
+    if not isinstance(built, str) or not built or not isinstance(trivy, str) or not trivy:
+        raise ScannerError(f"`trivy version` gives no version or DB build time: {payload!r}")
+    return f"trivy {trivy}, DB {schema}:{built}"
 
 
 def scan_image(image_ref: str, *, timeout: int = _DEFAULT_TIMEOUT) -> ScanResult:

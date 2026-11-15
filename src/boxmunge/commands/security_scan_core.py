@@ -19,15 +19,8 @@ from boxmunge.commands.security_scan_relevance import (
     log_relevance_gaps,
 )
 from boxmunge.commands.security_scan_inputs import (
-    ProjectHardening,
-    ProjectMeta,
-    ScanTarget,
-    hardening_profile,
-    identify,
-    load_all_suppressions,
-    load_prior_decisions,
-    load_project_meta,
-    load_user_model,
+    ProjectHardening, ProjectMeta, ScanTarget, hardening_profile, identify,
+    load_all_suppressions, load_prior_decisions, load_project_meta, load_user_model,
 )
 from boxmunge.commands.security_enforce import (
     Enforcement,
@@ -311,13 +304,15 @@ def audit_targets(
     paths: BoxPaths, project: str, *, meta: ProjectMeta, profile: ProjectHardening,
     supps: tuple[Suppression, ...], targets: list[ScanTarget],
     unidentified: dict[str, str], kev: KevCatalog, basis: str,
-    scanned: dict[str, ScanResult],
-) -> ProjectScan:
+    known: Mapping[str, ScanResult],
+) -> tuple[ProjectScan, dict[str, ScanResult]]:
     """An audit-only scan of exactly ``targets`` under the given policy:
     nothing is written, alerted or enforced. A release not yet deployed is
     judged by its own manifest and compose, with the project's suppressions
-    (quarantine_gate). Reuses the results in ``scanned`` and adds new ones."""
+    (quarantine_gate). A ref in ``known`` is not scanned again. Returns the
+    scan and the results of the images it did scan, by ref."""
     check_declared_runtimes(project, meta.declared_runtimes)
+    scanned = dict(known)
     results, failed, skipped, warnings = _scan_targets(paths, project, targets, scanned)
     today = _today()
     decisions = _evaluate(paths, project, meta, profile, supps, results,
@@ -329,7 +324,7 @@ def audit_targets(
         failed_images=tuple(failed), skipped_images=tuple(skipped),
         unidentified=tuple(unidentified.items()), basis=basis,
         headline=headline_of(decisions),
-    )
+    ), {ref: r for ref, r in scanned.items() if ref not in known}
 
 
 def scan_one_project_locked(

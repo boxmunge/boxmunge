@@ -31,7 +31,7 @@ quarantined until the promote, which scans again.
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
@@ -60,8 +60,8 @@ from boxmunge.cve.quarantine import (
 from boxmunge.fs_nofollow import read_text_nofollow
 from boxmunge.manifest import ManifestError, load_manifest
 from boxmunge.cve.scan_state import BASIS_STARTUP_IMAGES
-from boxmunge.cve.scan_cache import ScanCache
-from boxmunge.cve.scanner import ScannerError, refresh_db, trivy_db_version
+from boxmunge.cve.scan_cache import cached_results, keep_results
+from boxmunge.cve.scanner import ScannerError, refresh_db, trivy_version_key
 from boxmunge.cve.security_policy import relaxations
 from boxmunge.docker_run import DockerError
 from boxmunge.log import log_error, log_operation, log_warning
@@ -171,11 +171,11 @@ def scan_release_images(
 ) -> tuple[ProjectScan, dict[str, str], list[ScanTarget], ProjectHardening]:
     """The audit-only scan, {service: image ID} of what it scanned, the
     scan's targets and the hardening profile it was judged with. An image
-    scanned before with the same Trivy DB is not scanned again
-    (cve.scan_cache). Raises ScannerError or StateError too."""
+    scanned before with the same Trivy and DB is not scanned again
+    (cve.scan_cache). Raises ScannerError, StateError or OSError too."""
     project = target.project
     refresh_db()
-    db = trivy_db_version()
+    trivy = trivy_version_key()
     supps = load_all_suppressions(paths, project)
     profile = _profile(target, meta)
     targets: list[ScanTarget] = []
@@ -192,21 +192,11 @@ def scan_release_images(
     # Services sharing an image are scanned once: the budget is the project's.
     once = list({t.image_ref: t for t in targets}.values())
     digests = {t.image_ref: ids[t.service] for t in once}
-    cache = ScanCache(paths)
-    scanned = {ref: replace(hit, image_ref=ref) for ref, digest in digests.items()
-               if (hit := cache.get(digest, db)) is not None}
-    known = set(scanned)
-    scan = audit_targets(
+    scan, new = audit_targets(
         paths, project, meta=meta, profile=profile, supps=supps,
         targets=once, unidentified=unidentified, kev=kev,
-        basis=BASIS_STARTUP_IMAGES, scanned=scanned)
-    for ref in sorted(set(scanned) - known):
-        try:
-            cache.put(digests[ref], db, scanned[ref])
-        except OSError as e:  # the scan stands; the next one scans the image again
-            print(f"  WARNING: keeping the scan of {ref} failed: {e}")
-            log_warning("cve-scan", f"keeping the scan of {ref} failed: {e}", paths,
-                        project=project)
+        basis=BASIS_STARTUP_IMAGES, known=cached_results(paths, project, digests, trivy))
+    keep_results(paths, project, digests, trivy, new)
     return scan, ids, targets, profile
 
 

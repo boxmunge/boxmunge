@@ -35,7 +35,7 @@ def box(tmp_path, monkeypatch) -> Box:
     b.paths.project_quarantine_state("demo").unlink()
     b.kev(KEV_CVE)
     b.db = "2:db-1"
-    monkeypatch.setattr(gate, "trivy_db_version", lambda: b.db)
+    monkeypatch.setattr(gate, "trivy_version_key", lambda: b.db)
     return b
 
 
@@ -109,12 +109,65 @@ def test_with_no_usable_kev_catalog_it_refuses_with_fresh_data_advice(box) -> No
     assert "boxmunge security scan" in str(e.value)
 
 
-def test_prod_deploys_accept_stale_kev_accepts_no_usable_catalog(box, capsys) -> None:
+def test_prod_deploys_accept_stale_kev_accepts_no_usable_catalog(box, monkeypatch,
+                                                                capsys) -> None:
+    """Not quarantined, so no lift will alert it: the guard does, once."""
     from boxmunge.commands.kev_acceptance import prod_deploy_acceptance
+    pushover = Pushover(monkeypatch, box.paths)
     box.paths.kev_catalog.unlink()
     with prod_deploy_acceptance(box.paths, "demo", True):
         _guard(box)
-    assert "--accept-stale-kev: deploying although" in capsys.readouterr().out
+        _guard(box)  # a rollback decides its release twice
+    assert capsys.readouterr().out.count("--accept-stale-kev: deploying although") == 1
+    (title, body, priority), = pushover.sent
+    assert "demo: deployed without a usable KEV catalog" in title and priority == 0
+    assert "--accept-stale-kev" in body and "no usable CISA KEV catalog" in body
+
+
+def test_a_quarantined_projects_acceptance_is_said_once_and_left_to_the_lift(
+        box, monkeypatch, capsys) -> None:
+    from boxmunge.commands.kev_acceptance import prod_deploy_acceptance
+    from tests.test_commands.cve_helpers import seed_quarantine
+    pushover = Pushover(monkeypatch, box.paths)
+    box.paths.logs.mkdir(parents=True, exist_ok=True)
+    box.paths.kev_catalog.unlink()
+    seed_quarantine(box.paths, cve_id="CVE-2026-0002")
+    with prod_deploy_acceptance(box.paths, "demo", True):
+        _guard(box)
+        assert box.clear().kev_accepted is not None
+    assert capsys.readouterr().out.count("--accept-stale-kev: deploying although") == 1
+    assert box.paths.log_file.read_text().count("--accept-stale-kev: release cleared") == 1
+    assert pushover.sent == []
+
+
+def test_prod_deploys_no_catalog_refusal_names_accept_stale_kev_first(box) -> None:
+    from boxmunge.commands.kev_acceptance import prod_deploy_acceptance
+    box.paths.kev_catalog.unlink()
+    with prod_deploy_acceptance(box.paths, "demo", False):
+        with pytest.raises(guard.SecurityRegressionRefused) as e:
+            _guard(box)
+    text = str(e.value)
+    assert "`prod-deploy demo --redeploy --accept-stale-kev`" in text
+    assert text.index("--accept-stale-kev") < text.index("--allow-security-regression")
+
+
+def test_a_fresh_box_scan_fetches_the_lists_a_first_deploy_needs(box, monkeypatch) -> None:
+    """No project is deployed yet: the fleet scan still refreshes the
+    known-exploited lists, so the first deploy is not refused for them."""
+    from boxmunge.commands import security_kev
+    from boxmunge.commands.security_actions import cmd_security_scan
+    from boxmunge.cve.kev_refresh import KevRefresh
+    box.paths.kev_catalog.unlink()
+    with pytest.raises(guard.SecurityRegressionRefused, match="no usable CISA KEV catalog"):
+        _guard(box)
+    (box.paths.state / "projects.txt").write_text("")
+
+    def fetch(paths, nightly=True):
+        box.kev(KEV_CVE)
+        return KevRefresh("https://kev.example/feed.json")
+    monkeypatch.setattr(security_kev, "refresh_kev", fetch)
+    assert cmd_security_scan([], box.paths) == 0
+    _guard(box)
 
 
 def test_a_stale_catalog_refuses_a_cve_its_cached_copy_lists(box) -> None:
@@ -126,12 +179,18 @@ def test_a_stale_catalog_refuses_a_cve_its_cached_copy_lists(box) -> None:
     assert "cached CISA KEV catalog, which is stale" in str(e.value)
 
 
-def test_unchanged_images_hit_the_cache(box) -> None:
+def test_unchanged_images_hit_the_cache(box, capsys) -> None:
+    box.paths.logs.mkdir(parents=True, exist_ok=True)
     _guard(box)
     first = list(box.scanned)
     box.scanned.clear()
+    capsys.readouterr()
     _guard(box)
     assert first and box.scanned == []
+    # The cache is deploy-writable: every use of it is said and logged.
+    out = capsys.readouterr().out
+    assert f"using cached scan of {CACHE_IMAGE} from " in out and "(2:db-1)" in out
+    assert f"using cached scan of {CACHE_IMAGE}" in box.paths.log_file.read_text()
 
 
 def test_cache_invalid_after_trivy_db_update(box) -> None:

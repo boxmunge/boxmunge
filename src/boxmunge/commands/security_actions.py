@@ -437,6 +437,9 @@ def _scan_targets_cmd(args: list[str], paths: BoxPaths) -> int:
     orphans = _orphaned(missing)
     if not targets and not registry_problems and not orphans:
         print("No deployed projects to scan." if missing else "No projects registered.")
+        if not args:  # the fleet run: the deploy guard needs the lists before a first deploy
+            refresh_kev_and_alert(paths, datetime.now(timezone.utc))
+            print("Known-exploited lists refreshed.")
         return 0
 
     try:
