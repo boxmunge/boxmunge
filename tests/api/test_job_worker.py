@@ -469,3 +469,110 @@ def test_an_agents_job_runs_as_that_agent(box):
     handler = Handler()
     assert _run(box, handler) == 0
     assert handler.ctxs[0].principal.id == "agent:mcp(claude-code)"
+
+
+def test_an_agent_job_whose_action_became_govern_only_is_forbidden(box):
+    handler = Handler()
+    registry = Registry()
+    registry.register(Action(
+        name="project.backup", tier=Tier.GOVERN, summary="Back up a project.",
+        params=obj({"project": PROJECT}), result=obj({"n": INTEGER}),
+        handler=handler, locks=("project",), job=True, cli="backup"))
+    record = job_writer.new_record(JOB_ID, "project.backup", {"project": "myapp"},
+                                   "agent:mcp(claude-code)", "myapp", NOW)
+    assert job_writer.publish(box, record)
+    assert _run(box, handler, registry=registry) == 0
+    error = _record(box)["error"]
+    assert error["code"] == "forbidden"
+    assert "not open to agents" in error["message"]
+    assert "Nothing was run" in error["message"]
+    assert handler.calls == []
+    assert _outcomes(box)[0]["code"] == "forbidden"
+
+
+def _lock_wait_raising(error, before=None):
+    def fake(project, paths, *, timeout, on_wait):
+        if before is not None:
+            before()
+        on_wait(HOLDER)
+        raise error
+    return fake
+
+
+def test_a_lock_step_that_cannot_be_written_keeps_the_job_busy(box, monkeypatch):
+    from boxmunge.api.job_events import EventLog
+    real = EventLog.step
+
+    def step(self, name, status, message=None):
+        if name == "lock":
+            raise OSError("No space left on device")
+        return real(self, name, status, message)
+    monkeypatch.setattr(EventLog, "step", step)
+    monkeypatch.setattr(job_worker, "log_error", lambda *a, **kw: None)
+    monkeypatch.setattr(job_worker, "project_lock_wait", _lock_wait_raising(
+        fileutil.LockWaitTimeout("myapp", 120, HOLDER)))
+    _publish(box)
+    handler = Handler()
+    assert _run(box, handler) == 0
+    assert _record(box)["error"]["code"] == "busy"
+    assert handler.calls == []
+
+
+def test_a_lock_that_cannot_be_taken_names_the_cause(box, monkeypatch):
+    monkeypatch.setattr(job_worker, "project_lock_wait", _lock_wait_raising(
+        PermissionError(13, "Permission denied")))
+    _publish(box)
+    handler = Handler()
+    assert _run(box, handler) == 0
+    message = _record(box)["error"]["message"]
+    assert message.startswith("myapp's lock could not be taken: PermissionError:")
+    assert "Nothing was run" in message and "boxmunge job run project.backup" in message
+    assert handler.calls == []
+
+
+def test_a_failure_outside_the_handler_names_its_real_cause(box, monkeypatch):
+    def broken(_on_line):
+        raise RuntimeError("capture_output is already active")
+    monkeypatch.setattr(job_worker, "capture_output", broken)
+    monkeypatch.setattr(job_worker, "log_error", lambda *a, **kw: None)
+    _publish(box)
+    handler = Handler()
+    assert _run(box, handler) == 0
+    message = _record(box)["error"]["message"]
+    assert message == ("internal error: RuntimeError: capture_output is already active. "
+                       "Nothing was run.")
+    assert handler.calls == []
+
+
+def _sigterm() -> None:
+    os.kill(os.getpid(), signal.SIGTERM)
+    time.sleep(5)  # the signal arrives first
+
+
+def test_sigterm_before_the_handler_started_changed_nothing(box, monkeypatch):
+    monkeypatch.setattr(job_worker, "project_lock_wait", _lock_wait_raising(
+        AssertionError("unreachable"), before=_sigterm))
+    _publish(box)
+    handler = Handler()
+    with pytest.raises(Terminated), sigterm_unwinds():
+        _run(box, handler)
+    message = _record(box)["error"]["message"]
+    assert message.startswith("stopped by SIGTERM (a service stop or shutdown) before it "
+                              "started. Nothing was changed; run the same call again: "
+                              "boxmunge job run project.backup")
+    assert "To recover" not in message
+    assert handler.calls == []
+    assert box.alerts == []
+
+
+def test_sigterm_during_after_release_keeps_the_handlers_outcome(box):
+    _publish(box)
+    handler = Handler(then=lambda _p, ctx: ctx.after_release(_sigterm))
+    with pytest.raises(Terminated), sigterm_unwinds():
+        _run(box, handler)
+    record = _record(box)
+    assert (record["state"], record["result"], record["error"]) == ("succeeded", {"n": 1}, None)
+    assert any("while its after-release steps ran" in m for m in _logs(box))
+    [alert] = box.alerts
+    assert "after-release" in alert["body"] and alert["priority"] == 1
+    assert _outcomes(box)[0]["outcome"] == "succeeded"

@@ -38,12 +38,13 @@ from boxmunge.api.job_events import EventLog
 from boxmunge.api.job_gate import GateTimeout, job_gate
 from boxmunge.api.job_recovery import recovery_advice
 from boxmunge.api.job_writer import claim, finish
-from boxmunge.api.principal import Principal
+from boxmunge.api.param_tiers import param_tier_refusal
+from boxmunge.api.principal import Principal, Tier, refusal
 from boxmunge.api.registry import Action, Registry
 from boxmunge.api.result import ActionError, ErrorCode
 from boxmunge.api.schema import validate
 from boxmunge.api.worker_identity import PROC, current
-from boxmunge.fileutil import LockWaitTimeout, project_lock_wait
+from boxmunge.fileutil import LockError, LockWaitTimeout, project_lock_wait
 from boxmunge.fleet import PROJECT_INPUT_ERRORS
 from boxmunge.log import log_error, log_operation, log_warning
 from boxmunge.notify import notify
@@ -103,6 +104,11 @@ class _Prepared:
     params: dict[str, Any]
     principal: Principal
     after: list[Callable[[], None]] = field(default_factory=list)
+    tail: OutputTail = field(default_factory=OutputTail)
+    # Set once the handler is called, and once it has returned or raised:
+    # what a SIGTERM says depends on how far the job got.
+    started: bool = False
+    returned: _Outcome | None = None
 
 
 class _Worker:
@@ -123,17 +129,20 @@ class _Worker:
             self._conclude(events, None)
             return
         stopped: Terminated | None = None
+        prepared: _Prepared | _Outcome | None = None
         try:
             prepared = self._prepare()
             outcome = prepared if isinstance(prepared, _Outcome) else self._execute(
                 prepared, events)
         except Terminated as e:
-            stopped, outcome = e, self._stopped()
+            job = prepared if isinstance(prepared, _Prepared) else None
+            stopped, (outcome, alert) = e, self._stopped(job, events)
         self._conclude(outcome, events)
         if stopped is not None:
-            notify(self._paths, f"boxmunge: job {self._id} ({self._name} {self._project}) "
-                   f"was stopped", outcome.error["message"], component=COMPONENT,
-                   project=self._project, priority=1)
+            if alert is not None:
+                notify(self._paths, f"boxmunge: job {self._id} ({self._name} "
+                       f"{self._project}) was stopped", alert, component=COMPONENT,
+                       project=self._project, priority=1)
             raise stopped
 
     def _open_events(self) -> EventLog | _Outcome:
@@ -190,13 +199,18 @@ class _Worker:
             principal = _principal(self._record["principal"])
         except StateError as e:
             return _failed(ErrorCode.FAILED, f"{e} Nothing was run.")
+        why = refusal(principal, action.tier, agent_allowed=action.agent_allowed) or \
+            param_tier_refusal(action, params, principal, frozenset(Tier))
+        if why is not None:
+            return _failed(ErrorCode.FORBIDDEN,
+                           f"{principal.id} may no longer make this {self._name} call "
+                           f"(boxmunge changed between publish and run): {why} Nothing "
+                           f"was run.")
         return _Prepared(action, params, principal)
 
     def _execute(self, job: _Prepared, events: EventLog) -> _Outcome:
-        tail = OutputTail()
-
         def on_line(line: str) -> None:
-            tail.append(line)
+            job.tail.append(line)
             events.log(line)
 
         ctx = ActionContext(principal=job.principal, paths=self._paths, host=self._host,
@@ -211,44 +225,65 @@ class _Worker:
                     outcome = self._call(job, ctx, events)
                 finally:
                     self._after_release(job.after, events)
-        except Exception as e:  # noqa: BLE001 - the capture or event log failed
-            log_error(COMPONENT, f"job {self._id}: its output or events were not all "
-                      f"recorded: {type(e).__name__}: {e}", self._paths, project=self._project)
+        except Exception as e:  # noqa: BLE001 - outside the handler; the job must finish
+            log_error(COMPONENT, f"job {self._id} ({self._name}): {type(e).__name__}: {e}",
+                      self._paths, project=self._project,
+                      detail={"traceback": traceback.format_exc()})
             if outcome is None:
-                outcome = _failed(ErrorCode.FAILED, f"internal error: the job's output could "
-                                  f"not be recorded: {type(e).__name__}: {e}")
-        if outcome.core_failed is not None:
-            failed = outcome.core_failed
-            outcome = _failed(ErrorCode.FAILED, failure_message(failed.verb, failed.rc, tail,
-                                                                job_id=self._id))
+                ran = "" if job.started else " Nothing was run."
+                outcome = _failed(ErrorCode.FAILED,
+                                  f"internal error: {type(e).__name__}: {e}.{ran}")
+        outcome = self._core_failure(job, outcome)
         if captured is not None and captured.cut_off:
             self._log(events, CUT_OFF)
             if outcome.error is not None:
                 outcome.error["message"] += f" {CUT_OFF}"
         return self._checked(job.action, outcome)
 
+    def _core_failure(self, job: _Prepared, outcome: _Outcome) -> _Outcome:
+        """*outcome*, with a failed core's message built from the output
+        tail (call it once the capture has drained)."""
+        failed = outcome.core_failed
+        if failed is None:
+            return outcome
+        return _failed(ErrorCode.FAILED, failure_message(failed.verb, failed.rc, job.tail,
+                                                         job_id=self._id))
+
     def _call(self, job: _Prepared, ctx: ActionContext, events: EventLog) -> _Outcome:
         """Take the locks, run the handler, release the locks."""
         with ExitStack() as locks:
+            project = job.params.get("project")
             try:
                 for _lock in job.action.locks:  # only "project" (_prepare checked)
-                    locks.enter_context(self._project_lock(job.params["project"], events))
+                    locks.enter_context(self._project_lock(project, events))
             except LockWaitTimeout as e:
-                events.step("lock", "failed", f"{e.project}'s lock stayed held")
+                self._step(events, "lock", "failed", f"{e.project}'s lock stayed held")
                 return self._busy(e)
-            try:
-                return _Outcome("succeeded", result=job.action.handler(job.params, ctx))
-            except CoreFailed as e:
-                return _Outcome("failed", core_failed=e)
-            except ActionError as e:
-                return _Outcome("failed", {"code": e.code.value, "message": e.message})
-            except PROJECT_INPUT_ERRORS as e:
-                return _failed(ErrorCode.FAILED, str(e))
-            except Exception as e:  # noqa: BLE001 - a bug; the job must still finish
-                log_error(COMPONENT, f"job {self._id} ({self._name}) raised "
-                          f"{type(e).__name__}: {e}", self._paths, project=self._project,
-                          detail={"traceback": traceback.format_exc()})
-                return _failed(ErrorCode.FAILED, f"internal error: {type(e).__name__}: {e}")
+            except (LockError, OSError) as e:
+                self._step(events, "lock", "failed", f"{type(e).__name__}: {e}")
+                return _failed(ErrorCode.FAILED,
+                               f"{project}'s lock could not be taken: {type(e).__name__}: "
+                               f"{e}. Nothing was run. Run the same call again: "
+                               f"{self._retry_command()}")
+            job.started = True
+            job.returned = self._handle(job, ctx)
+            return job.returned
+
+    def _handle(self, job: _Prepared, ctx: ActionContext) -> _Outcome:
+        """Run the handler; its outcome, whatever it raised (but Terminated)."""
+        try:
+            return _Outcome("succeeded", result=job.action.handler(job.params, ctx))
+        except CoreFailed as e:
+            return _Outcome("failed", core_failed=e)
+        except ActionError as e:
+            return _Outcome("failed", {"code": e.code.value, "message": e.message})
+        except PROJECT_INPUT_ERRORS as e:
+            return _failed(ErrorCode.FAILED, str(e))
+        except Exception as e:  # noqa: BLE001 - a bug; the job must still finish
+            log_error(COMPONENT, f"job {self._id} ({self._name}) raised "
+                      f"{type(e).__name__}: {e}", self._paths, project=self._project,
+                      detail={"traceback": traceback.format_exc()})
+            return _failed(ErrorCode.FAILED, f"internal error: {type(e).__name__}: {e}")
 
     @contextmanager
     def _project_lock(self, project: str, events: EventLog) -> Iterator[None]:
@@ -256,13 +291,13 @@ class _Worker:
 
         def on_wait(holder: str | None) -> None:
             waited.append(True)
-            events.step("lock", "started", f"waiting for {project}'s lock, held by "
-                        f"{holder or 'an unknown process'}")
+            self._step(events, "lock", "started", f"waiting for {project}'s lock, held by "
+                       f"{holder or 'an unknown process'}")
 
         with project_lock_wait(project, self._paths, timeout=JOB_LOCK_WAIT_SECONDS,
                                on_wait=on_wait):
             if waited:
-                events.step("lock", "succeeded", f"took {project}'s lock")
+                self._step(events, "lock", "succeeded", f"took {project}'s lock")
             yield
 
     def _busy(self, e: LockWaitTimeout) -> _Outcome:
@@ -283,7 +318,7 @@ class _Worker:
                 log_error(COMPONENT, f"job {self._id}: an after-release step failed: "
                           f"{type(e).__name__}: {e}", self._paths, project=self._project,
                           detail={"traceback": traceback.format_exc()})
-                events.step("after_release", "failed", f"{type(e).__name__}: {e}")
+                self._step(events, "after_release", "failed", f"{type(e).__name__}: {e}")
 
     def _checked(self, action: Action, outcome: _Outcome) -> _Outcome:
         if outcome.state != "succeeded":
@@ -299,14 +334,31 @@ class _Worker:
                        f"This is a boxmunge bug; please report it. Its work may be done: "
                        f"check with boxmunge status {self._project}.")
 
-    def _stopped(self) -> _Outcome:
+    def _stopped(self, job: _Prepared | None,
+                 events: EventLog) -> tuple[_Outcome, str | None]:
+        """The outcome of a job a SIGTERM stopped, and the alert to send
+        (None when nothing was changed)."""
+        if job is None or not job.started:
+            return _failed(ErrorCode.FAILED,
+                           f"stopped by SIGTERM (a service stop or shutdown) before it "
+                           f"started. Nothing was changed; run the same call again: "
+                           f"{self._retry_command()}"), None
+        if job.returned is not None:
+            note = ("stopped by SIGTERM (a service stop or shutdown) after its work "
+                    "finished, while its after-release steps ran; some of them may not "
+                    "have run.")
+            self._log(events, note)
+            outcome = self._checked(job.action, self._core_failure(job, job.returned))
+            if outcome.error is not None:
+                outcome.error["message"] += f" It was {note}"
+            return outcome, f"Job {self._id} ({self._name}) {outcome.state}, and was {note}"
         try:
             advice = recovery_advice(self._paths, self._name.split(".", 1)[-1], self._project)
         except StateError as e:
             advice = f"no way out is known for this action ({e}); check what it changed"
-        return _failed(ErrorCode.FAILED,
-                       f"stopped by SIGTERM (a service stop or shutdown); it was not run "
-                       f"again, and may have done part of its work. To recover: {advice}.")
+        message = (f"stopped by SIGTERM (a service stop or shutdown); it was not run "
+                   f"again, and may have done part of its work. To recover: {advice}.")
+        return _failed(ErrorCode.FAILED, message), message
 
     def _conclude(self, outcome: _Outcome, events: EventLog | None) -> None:
         try:
@@ -339,6 +391,15 @@ class _Worker:
                    f"The outcome ({outcome.state}) of {self._name} by {principal} (job "
                    f"{self._id}) was not recorded: {e}. The job record keeps it.",
                    component="audit", priority=1)
+
+    def _step(self, events: EventLog, step: str, status: str, message: str) -> None:
+        """A step event the worker writes; a write failure is logged, never
+        allowed to change the job's outcome."""
+        try:
+            events.step(step, status, message)
+        except OSError as e:
+            log_error(COMPONENT, f"job {self._id}: could not write step {step} {status}: "
+                      f"{e}", self._paths, project=self._project)
 
     def _log(self, events: EventLog, message: str) -> None:
         try:
