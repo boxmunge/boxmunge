@@ -12,6 +12,10 @@ a power loss the record is never older than the last step that returned:
   finish    as claim, with the terminal state; link() into jobs/; sync
             jobs/; unlink() from queue/; sync queue/
 
+A publish that raises after its link removes the queued name again before
+it returns, so a publish that raised queued nothing (only a crash, which
+runs no cleanup, leaves a queued job behind, and that job runs).
+
 Temp files are written in state/jobs/ as .<id>.<token>.tmp, never in
 queue/, so queue/ only ever holds <id>.json names. Every file is 0640 and
 deploy-owned, so a root-run step never locks the deploy worker out.
@@ -41,6 +45,7 @@ from boxmunge.api.timefmt import format_utc
 from boxmunge.api.worker_identity import WorkerIdentity
 from boxmunge.fileutil import durable_link, durable_unlink, exclusive_lock, fsync_dir
 from boxmunge.fs_nofollow import fchown_deploy, mkdir_p_deploy
+from boxmunge.log import log_error
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError
 
@@ -76,7 +81,7 @@ def publish(paths: BoxPaths, record: dict[str, Any]) -> bool:
         mkdir_p_deploy(paths.jobs_queue)
         tmp = _write_temp(paths, record)
         try:
-            durable_link(tmp, queued)
+            os.link(tmp, queued)
         except FileExistsError:
             tmp.unlink()
             raise StateError(
@@ -86,8 +91,34 @@ def publish(paths: BoxPaths, record: dict[str, Any]) -> bool:
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
-        durable_unlink(tmp)
+        try:
+            fsync_dir(paths.jobs_queue)
+            durable_unlink(tmp)
+        except BaseException:
+            _withdraw(paths, queued, tmp)
+            raise
     return True
+
+
+def _withdraw(paths: BoxPaths, queued: Path, tmp: Path) -> None:
+    """Undo a publish that failed after its link, so a publish that raises
+    has queued nothing and the caller may report the job as not queued.
+    Holds the job lock (publish's), so no worker has claimed the record."""
+    try:
+        os.unlink(queued)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        raise StateError(
+            f"Publishing job {queued.stem} failed after {queued} was written, and it could "
+            f"not be removed again ({e}), so the job is queued and will run. Do not make "
+            f"the call again; follow the job with the job.get action (id {queued.stem}).") from e
+    tmp.unlink(missing_ok=True)
+    try:
+        fsync_dir(queued.parent)
+    except OSError as e:
+        log_error("jobs", f"Withdrew {queued} after a failed publish, but could not sync "
+                  f"{queued.parent}: {e}", paths)
 
 
 def claim(paths: BoxPaths, job_id: str, identity: WorkerIdentity,

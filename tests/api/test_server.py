@@ -13,7 +13,9 @@ from pathlib import Path
 import pytest
 
 from boxmunge.api import server as server_module
+from boxmunge.api.audit import AuditLog
 from boxmunge.api.dev.fixture_host import FixtureHost
+from boxmunge.api.invoke import Invoker
 from boxmunge.api.jobs import JobStore
 from boxmunge.api.principal import Principal, Tier
 from boxmunge.api.registry import Action, Registry
@@ -62,6 +64,22 @@ def test_invoke(served) -> None:
                         {"params": {"project": "billing"}})
     assert status == 200 and body["action"] == "project.get"
     assert body["data"]["lifecycle"] == "quarantined"
+
+
+def test_a_queued_job_is_a_202_carrying_its_record(paths, sock_path) -> None:
+    registry = Registry()
+    registry.register(Action(name="test.stage", tier=Tier.OPERATE, summary="Test.",
+                             params=obj({"project": {"type": "string"}}),
+                             result=obj({"ok": BOOLEAN}), handler=lambda p, c: {"ok": True},
+                             job=True))
+    paths.project_dir("shop").mkdir(parents=True)
+    invoker = Invoker(registry, paths, FixtureHost(paths),
+                      AuditLog(paths.audit_log, create=True), jobs=True)
+    with serving(ApiApp(invoker, Principal.operator(), mode="dev"), sock_path):
+        status, body = call(sock_path, "POST", "/v1/actions/test.stage",
+                            {"params": {"project": "shop"}})
+    assert status == 202 and body["action"] == "test.stage"
+    assert body["data"]["state"] == "queued" and body["data"]["project"] == "shop"
 
 
 def test_job_route(served, fixture_paths) -> None:
