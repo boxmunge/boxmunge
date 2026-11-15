@@ -107,8 +107,9 @@ class JobStore:
                 found = _prefer(found, record)
         return None if found is None else self._presented(found)
 
-    def recent(self, *, project: str | None = None, limit: int = 50) -> JobListing:
-        """Jobs newest first, optionally for one project.
+    def recent(self, *, project: str | None = None, limit: int | None = 50) -> JobListing:
+        """Jobs newest first, optionally for one project; all of them when
+        *limit* is None.
 
         queue/ is scanned before jobs/: finishing a job links its record
         into jobs/ before unlinking it from queue/, so a job that moves
@@ -137,7 +138,7 @@ class JobStore:
         jobs.sort(key=lambda r: (r["created_at"], r["id"]), reverse=True)
         unreadable = [{"id": job_id, "problem": problem}
                       for job_id, problem in sorted(problems.items()) if job_id not in records]
-        return JobListing(jobs=jobs[:limit], unreadable=unreadable)
+        return JobListing(jobs=jobs if limit is None else jobs[:limit], unreadable=unreadable)
 
     def events(self, job_id: str, *, after: int = 0) -> list[dict[str, Any]]:
         """The job's events with seq greater than *after*, in order."""

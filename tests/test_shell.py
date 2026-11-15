@@ -105,6 +105,9 @@ class TestAllowedCommands:
                      "add-project"]:
             assert cmd not in ALLOWED_COMMANDS, f"{cmd} should not be allowed"
 
+    def test_shell_allows_job_and_jobs(self) -> None:
+        assert {"job", "jobs"} <= ALLOWED_COMMANDS
+
     def test_shell_allows_upgrade_howto_and_upgrade_check(self) -> None:
         assert {"upgrade-howto", "upgrade-check"} <= ALLOWED_COMMANDS
 
