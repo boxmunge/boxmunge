@@ -167,3 +167,10 @@ def test_a_mixed_project_alert_names_a_command_that_takes_the_project() -> None:
     for alert in (failed, interrupted):
         assert "`boxmunge security demo`" in alert.body
         assert "boxmunge status demo" not in alert.body
+
+
+def test_the_started_alert_does_not_promise_a_time_the_queue_cannot_keep() -> None:
+    from boxmunge.cve.alerting import format_autofix_started_alert
+    body = format_autofix_started_alert("demo", ("CVE-2026-0001",), downtime=False).body
+    assert "once its turn in the queue runs (up to 30 minutes each)" in body
+    assert "within 30 minutes" not in body

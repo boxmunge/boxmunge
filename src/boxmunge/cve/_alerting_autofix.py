@@ -33,7 +33,8 @@ def format_autofix_started_alert(project: str, cves: Sequence[str], *, downtime:
         "",
         "Autofix builds a patched image from the one running, scans it, swaps it in",
         "and checks its health; anything that fails is rolled back. The outcome",
-        "follows within 30 minutes.",
+        "follows once its turn in the queue runs (up to 30 minutes each);",
+        "`boxmunge status` shows it as autofixing until then.",
         f"Details: boxmunge security {project}",
     ]), priority=0)
 

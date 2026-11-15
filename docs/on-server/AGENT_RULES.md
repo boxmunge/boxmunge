@@ -204,11 +204,11 @@ What each autofix alert means, and the one step for it:
 
 | Alert | Meaning | Your step |
 |---|---|---|
-| `<CVEs> found on <project>, patching (site up)` or `(site down while patching)` | A known-exploited CVE is being patched now; `status` shows `autofixing` | Nothing yet: the outcome follows within 30 minutes |
-| `Autofix patched <CVEs>` | The patched images run (and a quarantine taken for the patch is lifted) | Bring the fix into the repo, as above. If the title is priority 1 (a smoke test failed, or the quarantine could not be lifted), run `check <project>` and `security <project>` first |
+| `<CVEs> found on <project>, patching (site up)` or `(site down while patching)` | An urgent finding is being patched now | Nothing yet: the outcome follows once its turn in the queue runs (up to 30 minutes each); `status` shows `autofixing` until then |
+| `Autofix patched <CVEs>` | The patched images run (and a quarantine taken for the patch is lifted) | Bring the fix into the repo, as above. If the alert is priority 1 (a smoke test failed, or the quarantine could not be lifted), run `check <project>` and `security <project>` first |
 | `Autofix FAILED at the <step> step — <CVEs>` | The patch was rolled back and the posture's own rule applies (the body says whether the site is down) | Fix it in the repo and deploy: rebuild from a base with the fixed packages. If the body says the rollback did not finish, the project may be left mixed: tell the operator; deploying the fixed release puts every service back on the release's images |
 | `Autofix run interrupted — rolled back` | A killed run was undone from its journal | Run `security <project>`; if the body lists problems, hand them to the operator |
-| `Nightly autofix: ...` (quiet digest) | The nightly patches: patched, fixed by tonight's update, could not patch, skipped, deferred, switched to upstream | `patched` or `re-patched` lines: bring the fix into the repo. `could not patch`: rebuild with the fix. Nothing for the others |
+| `Nightly autofix: ...` (quiet digest) | The nightly patches: patched, fixed by tonight's update, could not patch, skipped, deferred, switched to upstream | `patched`, `re-patched` or `could not catch up with upstream` lines: bring the fix into the repo. `could not patch`: rebuild with the fix. Nothing for the others |
 
 `security.autofix: false` in the manifest opts a project out (`agent-help conventions`); the scans then alert and quarantine as they would without it.
 
