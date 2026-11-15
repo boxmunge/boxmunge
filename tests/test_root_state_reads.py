@@ -21,7 +21,7 @@ import os
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -33,6 +33,7 @@ from boxmunge import (
     overlay_users, pause, release, release_txn, run_as, staged_release,
     upgrade_state, user_drift,
 )
+from boxmunge.api.job_retention import JOB_RETAIN_COUNT, prune
 from boxmunge.api.jobs import JobStore
 from boxmunge.backup_evidence import project_evidence, sync_evidence
 from boxmunge.bind_sources import read_record
@@ -112,6 +113,23 @@ JOB_EVENT = json.dumps({"seq": 1, "ts": "2026-10-14T01:00:06Z", "type": "log", "
 
 def _jobs(paths: BoxPaths) -> JobStore:
     return JobStore(paths, result_schemas=registry_results)
+
+
+def _prune_oldest(paths: BoxPaths) -> list[str]:
+    """The job at the row's name is the oldest of 201 finished jobs, so it is
+    pruned if (and only if) its record is read. The record is put back, as the
+    harness moves it around after a read."""
+    for n in range(JOB_RETAIN_COUNT):
+        job_id = f"01J{n:023d}"
+        stamp = (NOW - timedelta(minutes=n)).isoformat()
+        (paths.jobs_dir / f"{job_id}.json").write_text(
+            json.dumps({"id": job_id, "state": "succeeded", "finished_at": stamp}))
+    name = paths.jobs_dir / f"{JOB_ID}.json"
+    kept = name.read_text() if name.is_file() and not name.is_symlink() else None
+    deleted = prune(paths, NOW)
+    if kept is not None and not name.exists():
+        name.write_text(kept)
+    return deleted
 
 
 def _alerted(paths: BoxPaths) -> bool:
@@ -278,6 +296,9 @@ READERS = [
            lambda p: project_evidence(p, P)),
     Reader("job record", lambda p: p.jobs_dir / f"{JOB_ID}.json", JOB,
            lambda p: _jobs(p).get(JOB_ID)),
+    # An unreadable record is kept and logged, never pruned as if it were old.
+    Reader("job retention", lambda p: p.jobs_dir / f"{JOB_ID}.json", JOB, _prune_oldest,
+           dangling=lambda o, p: o == ("value", []) and str(p.jobs_dir) in p.log_file.read_text()),
     Reader("job events", lambda p: p.jobs_dir / f"{JOB_ID}.events.jsonl", JOB_EVENT,
            lambda p: _jobs(p).events(JOB_ID)),
     Reader("backup sync evidence", lambda p: p.backup_sync_state, {"synced_at": ISO},
