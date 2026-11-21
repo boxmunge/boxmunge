@@ -12,10 +12,12 @@ from ``boxmunge.cve.alerting``.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, time, timezone
+from datetime import datetime
 
 from boxmunge.cve._alerting_types import Alert
-from boxmunge.cve.suppression_impact import URGENT, Impact, ProjectImpact
+from boxmunge.cve.suppression_impact import (
+    UNCHANGED, URGENT, Impact, ProjectImpact, expires_at,
+)
 from boxmunge.cve.suppressions import Suppression
 
 # One suppression and its outcome on each project that judged it.
@@ -29,7 +31,13 @@ _WILL = {
     Impact.HELD: ("will be held by the circuit breaker", "will be held by the circuit breaker"),
     Impact.AT_RISK: ("will keep running at quarantine level (quarantine disabled by config)",
                      "will keep running at quarantine level (quarantine disabled by config)"),
+    Impact.SCAN_FAILED: ("was not judged (its scan failed or was skipped)",
+                         "were not judged (their scans failed or were skipped)"),
     Impact.ALERT: ("will alert only and keep running", "will alert only and keep running"),
+    Impact.ALREADY_QUARANTINED: ("is already quarantined for another finding",
+                                 "are already quarantined for another finding"),
+    Impact.NOT_APPLYING: ("already ignores it (a known-exploited listing overrides it)",
+                          "already ignore it (a known-exploited listing overrides it)"),
     Impact.SUPPRESSED: ("stays covered by another suppression",
                         "stay covered by another suppression"),
 }
@@ -39,18 +47,26 @@ _DID = {
                   "are held by the circuit breaker, still running"),
     Impact.AT_RISK: ("is at quarantine level but still running",
                      "are at quarantine level but still running"),
+    Impact.SCAN_FAILED: ("was not judged: its scan failed or was skipped",
+                         "were not judged: their scans failed or were skipped"),
     Impact.ALERT: ("alerts only and keeps running", "alert only and keep running"),
+    Impact.ALREADY_QUARANTINED: ("is already quarantined for another finding",
+                                 "are already quarantined for another finding"),
+    Impact.NOT_APPLYING: ("was already ignoring it (a known-exploited listing overrode it)",
+                          "were already ignoring it (a known-exploited listing overrode it)"),
     Impact.SUPPRESSED: ("is still covered by another suppression",
                         "are still covered by another suppression"),
 }
 # The title's worst outcome, for N projects.
 _HEADLINE_WILL = {
     Impact.QUARANTINED: "will be quarantined", Impact.HELD: "will be held",
-    Impact.AT_RISK: "will run at risk", Impact.ALERT: "will alert only",
+    Impact.AT_RISK: "will run at risk", Impact.SCAN_FAILED: "not judged (scan failed)",
+    Impact.ALERT: "will alert only",
 }
 _HEADLINE_DID = {
     Impact.QUARANTINED: "quarantined", Impact.HELD: "quarantine held by the breaker",
-    Impact.AT_RISK: "running at risk", Impact.ALERT: "alerting only",
+    Impact.AT_RISK: "running at risk", Impact.SCAN_FAILED: "not judged (scan failed)",
+    Impact.ALERT: "alerting only",
 }
 _ORDER = tuple(Impact)  # worst first
 
@@ -100,7 +116,7 @@ def _worst(entries: Sequence[Entry]) -> tuple[Impact | None, int]:
             if held is None or _ORDER.index(i.impact) < _ORDER.index(held):
                 by_project[i.project] = i.impact
     for impact in _ORDER:
-        if impact in (Impact.SUPPRESSED, Impact.NO_FINDING):
+        if impact in UNCHANGED:
             break
         n = sum(v is impact for v in by_project.values())
         if n:
@@ -128,8 +144,7 @@ def _subject(entries: Sequence[Entry], scope: str) -> str:
 
 
 def _hours_left(sup: Suppression, now: datetime) -> str:
-    ends = datetime.combine(sup.until, time.min, tzinfo=timezone.utc)
-    hours = int((ends - now).total_seconds() // 3600)
+    hours = int((expires_at(sup) - now).total_seconds() // 3600)
     return "in under an hour" if hours < 1 else f"in {hours}h"
 
 
@@ -159,13 +174,12 @@ def _sorted(entries: Sequence[Entry]) -> list[Entry]:
 
 def format_suppression_expiring_alert(
     entries: Sequence[Entry], *, project: str | None, now: datetime,
-    unscanned: Sequence[str] = (),
 ) -> Alert:
     """Suppressions that stop applying within the warning window, and what
-    that will do. ``project`` None is host scope: every project the fleet
-    run judged, plus those it could not scan (``unscanned``). Sent once per
-    (CVE, scope, until). Priority 1 when a project will be quarantined or
-    run at risk, else normal."""
+    that will do. ``project`` None is host scope: every project of a full
+    fleet run, those it could not scan as SCAN_FAILED. Sent once per (CVE,
+    scope, until). Priority 1 when a project will be quarantined, run at
+    risk or was not judged, else normal."""
     entries = _sorted(entries)
     host = project is None
     scope = "host" if host else "project"
@@ -181,8 +195,6 @@ def format_suppression_expiring_alert(
             f"{sup.until.isoformat()} 00:00 UTC ({_hours_left(sup, now)}). Then:",
             *_impact_lines(impacts, foreseen=True, host=host),
         ]
-    if unscanned:
-        lines.append(f"Not scanned this run, so not judged: {', '.join(sorted(unscanned))}")
     lines += _actions(entries, project, foreseen=True)
     lines += ["", *(f"{s.cve_id} was added {s.added.isoformat()} by {s.reviewed_by}: "
                     f"{s.reason}" for s, _ in entries),
@@ -193,13 +205,16 @@ def format_suppression_expiring_alert(
 
 
 def format_suppression_expired_alert(
-    entries: Sequence[Entry], *, project: str | None,
+    entries: Sequence[Entry], *, project: str | None, partial: bool = False,
 ) -> Alert:
     """Suppressions that stopped applying since the prior scan, and what this
     run did about each: quarantined, held by the circuit breaker, running at
     risk, alerting, or nothing to do. Host scope (``project`` None) is once
-    per fleet run (audit B-14). Priority 1 when a project was quarantined,
-    held or left at risk, else normal."""
+    per full fleet run (audit B-14). ``partial``: a host alert from a run
+    that judged only some projects (the notice record was unusable, so it
+    could not be left to the fleet run); it says so and is priority 1, since
+    the rest of the fleet is unknown. Otherwise priority 1 when a project was
+    quarantined, held, left at risk or not judged, else normal."""
     entries = _sorted(entries)
     host = project is None
     scope = "host" if host else "project"
@@ -214,6 +229,31 @@ def format_suppression_expired_alert(
             f"expired {sup.until.isoformat()} and no longer applies. This scan:",
             *_impact_lines(impacts, foreseen=False, host=host),
         ]
+    if partial:
+        title += " (partial: one scan's projects)"
+        lines.append("This run judged only the projects above; the rest of the fleet was "
+                     "not scanned. The nightly scan judges them.")
     lines += _actions(entries, project, foreseen=False)
     return Alert(kind="suppression_expired", title=title, body="\n".join(lines),
-                 priority=_priority(entries))
+                 priority=1 if partial else _priority(entries))
+
+
+def format_suppression_record_alert(path: str, error: str, remedy: str) -> Alert:
+    """The suppression notice record cannot be used: no expiry warning is
+    sent until it can (and none is recorded, so none repeats every scan).
+    Sent by the full fleet run only, so at most once a night. Priority 1:
+    suppressions can now expire without notice."""
+    return Alert(
+        kind="suppression_record",
+        title="Suppression expiry warnings stopped — notice record unusable",
+        body="\n".join([
+            f"The suppression notice record {path} cannot be used:",
+            f"  {error}",
+            "",
+            "Until it can, no suppression expiry warning is sent, and a host "
+            "suppression expiry found by a single-project scan or KEV watch tick is "
+            "alerted at once, for that run's projects only.",
+            f"To fix: {remedy}.",
+        ]),
+        priority=1,
+    )

@@ -2,7 +2,7 @@
 """cve.suppression_impact: the warning window and the outcome classes."""
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -10,8 +10,8 @@ from boxmunge.cve.exploited import ExploitedSource
 from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
 from boxmunge.cve.scanner import Finding, Severity
 from boxmunge.cve.suppression_impact import (
-    WARN_DAYS, Impact, actual_impact, foreseen_impact, in_warning_window,
-    suppressions_at_expiry,
+    MAX_RUN_GAP, WARN_BEFORE, Impact, actual_impact, expires_at, foreseen_impact,
+    in_warning_window, suppressions_at_expiry,
 )
 from boxmunge.cve.suppressions import SCOPE_HOST, Suppression
 
@@ -36,15 +36,33 @@ def _decisions(*fds: FindingDisposition) -> tuple[ProjectDecision, ...]:
                             datetime(2026, 11, 21, 3, tzinfo=timezone.utc)),)
 
 
-@pytest.mark.parametrize(("today", "inside"), [
-    (date(2026, 11, 20), False),   # 3 days out: the next scan is still > 24h ahead
-    (date(2026, 11, 21), True),    # the scan on until-2 (UTC): 24-48h ahead
-    (date(2026, 11, 22), True),    # a missed until-2 scan: the next one still warns
-    (date(2026, 11, 23), False),   # expired: the expiry alert's turn
+def _at(day: int, hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 11, day, hour, minute, tzinfo=timezone.utc)
+
+
+@pytest.mark.parametrize(("now", "inside"), [
+    (_at(20, 19, 59), False),   # 52h01m out
+    (_at(20, 20), True),        # exactly WARN_BEFORE (52h)
+    (_at(21, 2, 30), True),     # a nightly at 02:30 UTC two days before
+    (_at(22, 23, 30), True),    # a missed night: the next run still warns
 ])
-def test_warning_window_edges(today, inside) -> None:
-    assert WARN_DAYS == 2
-    assert in_warning_window(_sup(), today) is inside
+def test_warning_window_edges(now, inside) -> None:
+    assert WARN_BEFORE == timedelta(hours=52)
+    assert in_warning_window(_sup(), today=now.date(), now=now) is inside
+
+
+def test_expired_is_never_in_the_window() -> None:
+    assert not in_warning_window(_sup(), today=UNTIL, now=_at(23, 0, 1))
+
+
+def test_first_run_in_the_window_is_at_least_24h_ahead() -> None:
+    """A run just outside the window; the next, at most MAX_RUN_GAP later
+    (timer, jitter, DST, a KEV watch wait), is in it with >= 24h left."""
+    previous = expires_at(_sup()) - WARN_BEFORE - timedelta(minutes=1)
+    assert not in_warning_window(_sup(), today=previous.date(), now=previous)
+    nxt = previous + MAX_RUN_GAP
+    assert in_warning_window(_sup(), today=nxt.date(), now=nxt)
+    assert expires_at(_sup()) - nxt > timedelta(hours=24)
 
 
 def test_suppressions_at_expiry_drop_everything_gone_by_then() -> None:
@@ -61,20 +79,34 @@ def test_suppressions_at_expiry_drop_everything_gone_by_then() -> None:
     (Disposition.SUPPRESSED, Impact.SUPPRESSED),
 ])
 def test_foreseen_classes(disposition, impact) -> None:
-    assert foreseen_impact("shop", "strict", _decisions(_fd(disposition)), CVE).impact is impact
+    current = _decisions(_fd(Disposition.SUPPRESSED))
+    got = foreseen_impact("shop", "strict", _decisions(_fd(disposition)), current, CVE)
+    assert got.impact is impact
+
+
+def test_a_suppression_already_not_applying_changes_nothing() -> None:
+    """A known-exploited listing overrides it: the scan did not suppress the
+    finding, so the expiry is not a quarantine to warn of."""
+    listed = _fd(Disposition.QUARANTINE, exploited=frozenset({ExploitedSource.VULNCHECK}))
+    got = foreseen_impact("shop", "paranoid", _decisions(listed), _decisions(listed), CVE)
+    assert got.impact is Impact.NOT_APPLYING
 
 
 def test_foreseen_no_finding_and_worst_package_decides() -> None:
-    assert foreseen_impact("shop", "balanced", _decisions(), CVE).impact is Impact.NO_FINDING
+    none = foreseen_impact("shop", "balanced", _decisions(), _decisions(), CVE)
+    assert none.impact is Impact.NO_FINDING
     mixed = _decisions(_fd(Disposition.INFORMATIONAL, package="perl-base"),
                        _fd(Disposition.QUARANTINE, package="libperl"))
-    assert foreseen_impact("shop", "paranoid", mixed, CVE).impact is Impact.QUARANTINED
+    current = _decisions(_fd(Disposition.SUPPRESSED, package="perl-base"),
+                         _fd(Disposition.SUPPRESSED, package="libperl"))
+    assert foreseen_impact("shop", "paranoid", mixed, current, CVE).impact is Impact.QUARANTINED
 
 
 def test_facts_name_kev_and_fix() -> None:
     fd = _fd(Disposition.QUARANTINE, fix="2",
              exploited=frozenset({ExploitedSource.VULNCHECK}))
-    impact = foreseen_impact("shop", "paranoid", _decisions(fd), CVE)
+    impact = foreseen_impact("shop", "paranoid", _decisions(fd),
+                             _decisions(_fd(Disposition.SUPPRESSED)), CVE)
     assert impact.facts == ("known exploited (VulnCheck KEV)", "fix available")
 
 
@@ -90,7 +122,15 @@ def test_actual_quarantine_outcomes(quarantined, held, impact) -> None:
     assert got.impact is impact
 
 
-def test_actual_alert_only_ignores_enforcement_state() -> None:
+def test_actual_alert_only() -> None:
     got = actual_impact("blog", "balanced", _decisions(_fd(Disposition.AWAITING_FIX)), CVE,
-                        quarantined=True, held=frozenset({CVE}))
+                        quarantined=False, held=frozenset({CVE}))
     assert got.impact is Impact.ALERT
+
+
+@pytest.mark.parametrize("disposition", [Disposition.AWAITING_FIX,
+                                         Disposition.STILL_RUNNING_AT_RISK])
+def test_actual_already_quarantined_for_another_finding(disposition) -> None:
+    got = actual_impact("blog", "balanced", _decisions(_fd(disposition)), CVE,
+                        quarantined=True, held=frozenset())
+    assert got.impact is Impact.ALREADY_QUARANTINED

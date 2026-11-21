@@ -2,7 +2,7 @@
 """What a suppression's expiry does to a project: foreseen, or as it happened.
 
 A suppression nearing its ``until`` date is warned about in advance
-(``WARN_DAYS``), and its expiry is alerted. Both alerts say, per project,
+(``WARN_BEFORE``), and its expiry is alerted. Both alerts say, per project,
 what the expiry means, so an operator knows whether to act now.
 
 Pure: decisions in, ``ProjectImpact`` out. The policy is never restated
@@ -14,29 +14,38 @@ own decisions plus what the fleet run's enforcement did.
 
 Timing: ``Suppression.is_active`` compares ``until`` with the scan's
 ``today``, a UTC date, so a suppression stops applying at 00:00 UTC on
-``until``. The nightly scan runs once a day at a local time; whatever the
-box's time zone, it runs once on each UTC date. The scan on UTC date
-``until - 2`` is therefore between 24 and 48 hours before the expiry, and
-it is the first scan in the window. If that scan is missed, the next scan
-in the window (``until - 1``) still warns, with less notice.
+``until`` (``expires_at``). A fleet run takes one clock for every project
+it scans. The window is measured in hours from that clock, not in UTC
+dates: the nightly timer fires once a day at a local time, and the time
+between two runs' clocks is 24 hours give or take the timer's 30-minute
+jitter, an hour's DST shift and up to an hour waiting on a KEV watch tick,
+so at most ``MAX_RUN_GAP``. The first run whose clock is within
+``WARN_BEFORE`` of the expiry is then at least ``WARN_BEFORE - MAX_RUN_GAP``
+(24 hours) ahead, provided the previous night's run happened. If it was
+missed, the next run in the window still warns, with less notice.
 """
 from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from enum import Enum
 
 from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
 from boxmunge.cve.suppressions import Suppression
 
-# Warn on a scan whose UTC date is at most this many days before ``until``.
-WARN_DAYS = 2
+MAX_RUN_GAP = timedelta(hours=28)
+WARN_BEFORE = timedelta(hours=24) + MAX_RUN_GAP
 
 
-def in_warning_window(sup: Suppression, today: date) -> bool:
-    """Still applies today, and stops applying within WARN_DAYS."""
-    return sup.is_active(today=today) and sup.until - today <= timedelta(days=WARN_DAYS)
+def expires_at(sup: Suppression) -> datetime:
+    """When the suppression stops applying: 00:00 UTC on ``until``."""
+    return datetime.combine(sup.until, time.min, tzinfo=timezone.utc)
+
+
+def in_warning_window(sup: Suppression, *, today: date, now: datetime) -> bool:
+    """Still applies today, and stops applying within WARN_BEFORE of ``now``."""
+    return sup.is_active(today=today) and expires_at(sup) - now <= WARN_BEFORE
 
 
 def suppressions_at_expiry(
@@ -54,14 +63,21 @@ class Impact(Enum):
     QUARANTINED = "quarantined"
     HELD = "held"                 # quarantine-level, held by the circuit breaker
     AT_RISK = "at_risk"           # quarantine-level, still running
+    SCAN_FAILED = "scan_failed"   # not judged: its scan failed or was skipped
     ALERT = "alert"               # a finding below the quarantine gate: alerted, runs
+    ALREADY_QUARANTINED = "already_quarantined"   # down for another finding
+    NOT_APPLYING = "not_applying"  # the suppression already does not apply (a listing)
     SUPPRESSED = "suppressed"     # still covered by another suppression
     NO_FINDING = "no_finding"
 
 
-# Impacts that raise an alert to priority 1: a site is or will be down, or
-# runs with a quarantine-level finding (the still_running convention).
-URGENT = frozenset({Impact.QUARANTINED, Impact.HELD, Impact.AT_RISK})
+# Impacts that raise an alert to priority 1: a site is or will be down, runs
+# with a quarantine-level finding (the still_running convention), or could
+# not be judged (a failed scan must not lower the priority).
+URGENT = frozenset({Impact.QUARANTINED, Impact.HELD, Impact.AT_RISK, Impact.SCAN_FAILED})
+# Impacts the expiry changes nothing about.
+UNCHANGED = frozenset({Impact.ALREADY_QUARANTINED, Impact.NOT_APPLYING,
+                       Impact.SUPPRESSED, Impact.NO_FINDING})
 
 
 @dataclass(frozen=True)
@@ -82,6 +98,19 @@ class Foreseen:
     impact: ProjectImpact
 
 
+@dataclass(frozen=True)
+class Expiry:
+    """Suppressions a project's scan found expired since its prior scan,
+    with that scan's decisions. ``failed``: the scan raised after recording
+    its result (an enforcement error), so its outcome is not known."""
+
+    project: str
+    posture: str
+    suppressions: tuple[Suppression, ...]
+    decisions: tuple[ProjectDecision, ...]
+    failed: bool = False
+
+
 # The finding that decides a project's outcome when several packages or
 # images carry the CVE.
 _RANK = {
@@ -94,12 +123,17 @@ _RANK = {
 }
 
 
+def _found(decisions: Sequence[ProjectDecision], cve_id: str) -> list[FindingDisposition]:
+    return [fd for d in decisions for fd in d.findings if fd.finding.cve_id == cve_id]
+
+
 def _worst(decisions: Sequence[ProjectDecision], cve_id: str) -> FindingDisposition | None:
-    found = [fd for d in decisions for fd in d.findings if fd.finding.cve_id == cve_id]
-    return max(found, key=lambda fd: _RANK[fd.disposition], default=None)
+    return max(_found(decisions, cve_id), key=lambda fd: _RANK[fd.disposition], default=None)
 
 
-def _facts(fd: FindingDisposition) -> tuple[str, ...]:
+def _facts(fd: FindingDisposition | None) -> tuple[str, ...]:
+    if fd is None:
+        return ()
     facts = []
     if fd.exploited_by:
         facts.append(f"known exploited ({fd.exploited_label})")
@@ -119,13 +153,20 @@ def _classify(fd: FindingDisposition | None) -> Impact:
 
 
 def foreseen_impact(
-    project: str, posture: str, decisions: Sequence[ProjectDecision], cve_id: str,
+    project: str, posture: str, foreseen: Sequence[ProjectDecision],
+    current: Sequence[ProjectDecision], cve_id: str,
 ) -> ProjectImpact:
-    """What the expiry will do, from decisions judged without the suppression.
-    QUARANTINED here means the policy will take the site down; the circuit
+    """What the expiry will do, from ``foreseen`` (decisions judged without
+    the suppression). A CVE the project carries but whose findings this scan
+    (``current``) did not suppress is NOT_APPLYING: a known-exploited listing
+    already overrides the suppression, so its expiry changes nothing.
+    QUARANTINED means the policy will take the site down; the circuit
     breaker or an urgent autofix may still keep it up on the day."""
-    fd = _worst(decisions, cve_id)
-    return ProjectImpact(project, posture, _classify(fd), _facts(fd) if fd else ())
+    now = _found(current, cve_id)
+    if now and not any(fd.disposition is Disposition.SUPPRESSED for fd in now):
+        return ProjectImpact(project, posture, Impact.NOT_APPLYING, _facts(_worst(current, cve_id)))
+    fd = _worst(foreseen, cve_id)
+    return ProjectImpact(project, posture, _classify(fd), _facts(fd))
 
 
 def actual_impact(
@@ -139,4 +180,13 @@ def actual_impact(
     impact = _classify(fd)
     if impact is Impact.QUARANTINED and not quarantined:
         impact = Impact.HELD if cve_id in held else Impact.AT_RISK
-    return ProjectImpact(project, posture, impact, _facts(fd) if fd else ())
+    elif quarantined and fd is not None and fd.disposition in (
+            Disposition.STILL_RUNNING_AT_RISK, Disposition.AWAITING_FIX,
+            Disposition.INFORMATIONAL, Disposition.IGNORED_FIXED):
+        impact = Impact.ALREADY_QUARANTINED
+    return ProjectImpact(project, posture, impact, _facts(fd))
+
+
+def not_judged(project: str, posture: str = "") -> ProjectImpact:
+    """A project whose scan failed or was skipped this run."""
+    return ProjectImpact(project, posture, Impact.SCAN_FAILED)

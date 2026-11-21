@@ -87,12 +87,15 @@ def foresee(
     paths: BoxPaths, project: str, meta: ProjectMeta, profile: ProjectHardening,
     supps: tuple[Suppression, ...], results: list[ScanResult],
     exploited: ExploitedIndex, today: date, *, now: datetime, complete: bool,
+    current: list[ProjectDecision],
 ) -> tuple[Foreseen, ...]:
     """Each suppression in its warning window, with what its expiry will do
     here: the images re-judged with the suppressions that still apply on its
     ``until`` date. Everything else (KEV listings, fix deadlines, posture)
-    is as of this scan. Raises StateError like ``evaluate``."""
-    window = [s for s in supps if in_warning_window(s, today)]
+    is as of this scan. ``current`` is this scan's own decisions (a
+    suppression they show not applying is reported so). Raises StateError
+    like ``evaluate``."""
+    window = [s for s in supps if in_warning_window(s, today=today, now=now)]
     out: list[Foreseen] = []
     for until in sorted({s.until for s in window}):
         judged = [d for _, _, d in _judge(project, meta, profile,
@@ -102,6 +105,7 @@ def foresee(
         decisions = graced_decisions(paths, project, judged, posture=meta.posture,
                                      dangerously=meta.dangerously, now=now,
                                      complete=complete, alerts=None)
-        out += [Foreseen(s, foreseen_impact(project, meta.posture.value, decisions, s.cve_id))
+        out += [Foreseen(s, foreseen_impact(project, meta.posture.value, decisions,
+                                            current, s.cve_id))
                 for s in window if s.until == until]
     return tuple(out)

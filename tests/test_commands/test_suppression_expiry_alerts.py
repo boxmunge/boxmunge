@@ -3,7 +3,7 @@
 policy and enforcement (Docker and Trivy stubbed)."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import pytest
 import yaml
@@ -15,20 +15,23 @@ from boxmunge.cve.exploited import ExploitedIndex, ExploitedSource
 from boxmunge.cve.policy import ProjectDecision
 from boxmunge.cve.quarantine import is_quarantined
 from boxmunge.cve.scan_state import write_scan_state
-from boxmunge.cve.suppression_warned import read_warned
+from boxmunge.cve.scanner import TrivyNotInstalledError
+from boxmunge.cve.suppression_record import read_record
 from tests.test_commands.cve_helpers import (
-    Docker, Pushover, finding, make_box, scan_result, write_project,
+    Docker, Pushover, finding, make_box, scan_result, seed_quarantine, write_project,
 )
 
 CVE = "CVE-2026-57433"
 TODAY = datetime.now(timezone.utc).date()
+# Every run judges by this clock: 03:00 UTC today, so TODAY + 2 days is 45h out.
+NOW = datetime.combine(TODAY, time(3), tzinfo=timezone.utc)
 
 
 @pytest.fixture
 def box(tmp_path, monkeypatch):
     """shop (paranoid) and blog (balanced) carry CVE; wiki (paranoid) does
-    not. Returns (paths, pushover, carriers): ``carriers`` is the set of
-    projects whose image carries CVE, which a test may change."""
+    not. Returns (paths, pushover, carriers, docker): ``carriers`` is the set
+    of projects whose image carries CVE, which a test may change."""
     paths = make_box(tmp_path, projects=("shop", "wiki"))
     write_project(paths, "blog", security={"posture": "balanced"})
     (paths.state / "projects.txt").write_text("shop\nwiki\nblog\n")
@@ -39,8 +42,10 @@ def box(tmp_path, monkeypatch):
         lambda ref, timeout: scan_result(
             ref, [finding(CVE)] if ref.split("-")[0] in carriers else []),
     )
-    Docker(monkeypatch)
-    return paths, Pushover(monkeypatch, paths), carriers
+    monkeypatch.setattr(security_scan_core, "_now", lambda: NOW)
+    monkeypatch.setattr(security_scan_core, "_today", lambda: TODAY)
+    docker = Docker(monkeypatch)
+    return paths, Pushover(monkeypatch, paths), carriers, docker
 
 
 def _suppress(paths, until: date, *, project: str | None = None) -> None:
@@ -69,7 +74,7 @@ def _scanned_yesterday(paths, *names: str) -> None:
 
 
 def test_host_warning_names_each_projects_outcome_once(box):
-    paths, pushover, _ = box
+    paths, pushover, *_ = box
     _suppress(paths, TODAY + timedelta(days=2))
     cmd_security_scan([], paths)
     [(title, body, priority)] = _sent(pushover, "host suppression expires")
@@ -87,16 +92,16 @@ def test_host_warning_names_each_projects_outcome_once(box):
 
 
 def test_no_warning_before_the_window(box):
-    paths, pushover, _ = box
+    paths, pushover, *_ = box
     _suppress(paths, TODAY + timedelta(days=3))
     cmd_security_scan([], paths)
     assert _sent(pushover, "expires") == []
-    assert read_warned(paths) == {}
+    assert read_record(paths).warned == {}
 
 
 def test_single_project_scan_leaves_the_host_warning_to_the_fleet_run(box):
     """It judges one project; the host warning needs the whole fleet."""
-    paths, pushover, _ = box
+    paths, pushover, *_ = box
     _suppress(paths, TODAY + timedelta(days=1))
     cmd_security_scan(["shop"], paths)
     assert _sent(pushover, "expires") == []
@@ -105,7 +110,7 @@ def test_single_project_scan_leaves_the_host_warning_to_the_fleet_run(box):
 
 
 def test_host_warning_with_no_carrier_is_normal_priority(box):
-    paths, pushover, carriers = box
+    paths, pushover, carriers, _ = box
     carriers.clear()
     _suppress(paths, TODAY + timedelta(days=2))
     cmd_security_scan([], paths)
@@ -117,7 +122,7 @@ def test_host_warning_with_no_carrier_is_normal_priority(box):
 def test_project_warning_once_and_again_for_an_extension(box):
     """Once per (CVE, scope, project, until): extended, the new date is a new
     window, warned again when it nears."""
-    paths, pushover, _ = box
+    paths, pushover, *_ = box
     _suppress(paths, TODAY + timedelta(days=1), project="shop")
     cmd_security_scan([], paths)
     [(title, body, priority)] = _sent(pushover, "project suppression expires")
@@ -132,35 +137,80 @@ def test_project_warning_once_and_again_for_an_extension(box):
     _suppress(paths, TODAY + timedelta(days=2), project="shop")   # extended
     cmd_security_scan(["shop"], paths)
     assert len(_sent(pushover, "project suppression expires")) == 1
-    assert {k[3] for k in read_warned(paths)} == {
+    assert {k[3] for k in read_record(paths).warned} == {
         (TODAY + timedelta(days=1)).isoformat(), (TODAY + timedelta(days=2)).isoformat()}
 
 
 def test_extended_after_the_warning_never_expires(box):
     """The scan dates straddle the old until; the suppression now runs later."""
-    paths, pushover, _ = box
+    paths, pushover, *_ = box
     _suppress(paths, TODAY + timedelta(days=30), project="shop")
     _scanned_yesterday(paths, "shop", "wiki", "blog")
     cmd_security_scan([], paths)
     assert _sent(pushover, "expired") == []
 
 
-def test_unusable_warning_record_fails_the_run_loudly(box):
-    paths, pushover, _ = box
+def _corrupt_record(paths) -> None:
+    paths.suppression_notices.parent.mkdir(parents=True, exist_ok=True)
+    paths.suppression_notices.write_text("{not json")
+
+
+def test_unusable_record_sends_its_own_alert_from_the_fleet_run(box):
+    paths, pushover, *_ = box
     _suppress(paths, TODAY + timedelta(days=2))
-    paths.suppression_warnings.parent.mkdir(parents=True, exist_ok=True)
-    paths.suppression_warnings.write_text("{not json")
+    _corrupt_record(paths)
     assert cmd_security_scan([], paths) == 1
     assert _sent(pushover, "expires") == []
-    [(_, body, _)] = _sent(pushover, "CVE scan incomplete")
-    assert "suppression expiry warnings not sent" in body
+    assert _sent(pushover, "CVE scan incomplete") == []
+    [(title, body, priority)] = _sent(pushover, "Suppression expiry warnings stopped")
+    assert priority == 1
+    assert str(paths.suppression_notices) in body and f"remove {paths.suppression_notices}" in body
+
+
+def test_unusable_record_is_not_alerted_by_a_partial_run(box):
+    paths, pushover, *_ = box
+    _suppress(paths, TODAY + timedelta(days=1), project="shop")
+    _corrupt_record(paths)
+    assert cmd_security_scan(["shop"], paths) == 1
+    assert _sent(pushover, "Suppression expiry warnings stopped") == []
+    assert _sent(pushover, "expires") == []
+
+
+def test_undelivered_warning_is_sent_again_next_scan(box, monkeypatch):
+    paths, pushover, *_ = box
+    _suppress(paths, TODAY + timedelta(days=2))
+    monkeypatch.setattr("boxmunge.notify.send_notification", lambda *a, **k: False)
+    cmd_security_scan([], paths)
+    assert read_record(paths).warned == {}
+    monkeypatch.setattr("boxmunge.notify.send_notification", pushover._send)
+    cmd_security_scan([], paths)
+    assert len(_sent(pushover, "host suppression expires")) == 1
+    pushover.clear()
+    cmd_security_scan([], paths)
+    assert _sent(pushover, "expires") == []
+
+
+def test_one_clock_per_run_across_midnight(box, monkeypatch):
+    """A run that crosses 00:00 UTC judges every project by its start: here
+    the start is just outside the window, so no project is warned, rather
+    than the later ones alone in a partial warning that is never corrected."""
+    paths, pushover, *_ = box
+    until = TODAY + timedelta(days=3)
+    start = datetime.combine(until, time(), tzinfo=timezone.utc) - timedelta(hours=53)
+    ticks = iter([start + timedelta(hours=h) for h in range(10)])
+    monkeypatch.setattr(security_scan_core, "_now", lambda: next(ticks))
+    monkeypatch.setattr(security_scan_core, "_today", lambda: start.date())
+    _suppress(paths, until)
+    cmd_security_scan([], paths)
+    assert _sent(pushover, "expires") == []
+    assert read_record(paths).warned == {}
 
 
 # ---------- the expiry alert ----------
 
 
 def test_host_expiry_says_what_happened_once_per_run(box):
-    paths, pushover, _ = box
+    paths, pushover, *_ = box
     _suppress(paths, TODAY)
     _scanned_yesterday(paths, "shop", "wiki", "blog")
     cmd_security_scan([], paths)
@@ -176,7 +226,7 @@ def test_host_expiry_says_what_happened_once_per_run(box):
 
 def test_expiry_held_by_the_breaker(box):
     """Two paranoid carriers of three projects trip the breaker."""
-    paths, pushover, carriers = box
+    paths, pushover, carriers, _ = box
     carriers.add("wiki")
     _suppress(paths, TODAY)
     _scanned_yesterday(paths, "shop", "wiki", "blog")
@@ -189,7 +239,7 @@ def test_expiry_held_by_the_breaker(box):
 
 
 def test_project_expiry_with_no_finding_is_normal_priority(box):
-    paths, pushover, _ = box
+    paths, pushover, *_ = box
     _suppress(paths, TODAY, project="wiki")
     _scanned_yesterday(paths, "wiki")
     cmd_security_scan(["wiki"], paths)
@@ -200,24 +250,85 @@ def test_project_expiry_with_no_finding_is_normal_priority(box):
 
 
 def test_vulncheck_listing_is_judged_per_posture(box, monkeypatch):
-    """A VulnCheck-only listing: paranoid ignores the suppression already and
-    quarantines; under balanced the suppression applies, and its expiry only
-    alerts (the site stays up)."""
-    paths, pushover, _ = box
+    """A VulnCheck-only listing: paranoid already ignores the suppression, so
+    its expiry changes nothing there; under balanced the suppression applies,
+    and its expiry only alerts (the site stays up)."""
+    paths, pushover, *_ = box
     monkeypatch.setattr(security_scan_core, "load_exploited", lambda p, today, cisa=None:
                         ExploitedIndex({CVE: frozenset({ExploitedSource.VULNCHECK})}, {}))
     _suppress(paths, TODAY + timedelta(days=2))
     cmd_security_scan([], paths)
     [(_, body, _)] = _sent(pushover, "host suppression expires")
     assert "will alert only and keep running: blog [balanced; known exploited (VulnCheck" in body
-    assert "will be quarantined (stopped): shop [paranoid; known exploited (VulnCheck" in body
+    assert ("already ignores it (a known-exploited listing overrides it): shop [paranoid; "
+            "known exploited (VulnCheck") in body
+    assert "will be quarantined" not in body
 
 
 def test_project_suppression_outliving_the_host_one_keeps_it_covered(box):
-    paths, pushover, _ = box
+    paths, pushover, *_ = box
     _suppress(paths, TODAY + timedelta(days=1))
     _suppress(paths, TODAY + timedelta(days=20), project="shop")
     cmd_security_scan([], paths)
     [(title, body, _)] = _sent(pushover, "host suppression expires")
     assert "- 1 project stays covered by another suppression: shop [paranoid]" in body
     assert title.endswith("— 1 project will alert only")
+
+
+def test_partial_run_leaves_the_host_expiry_to_the_fleet_run(box):
+    """A single-project scan on the expiry day judges one project: the host
+    expiry waits for the fleet run, which judges every project."""
+    paths, pushover, *_ = box
+    _suppress(paths, TODAY)
+    _scanned_yesterday(paths, "shop", "wiki", "blog")
+    cmd_security_scan(["blog"], paths)
+    assert _sent(pushover, "host suppression expired") == []
+    assert read_record(paths).pending == {(CVE, TODAY.isoformat())}
+    cmd_security_scan([], paths)
+    [(title, body, priority)] = _sent(pushover, "host suppression expired")
+    assert title.endswith("— 1 project quarantined") and priority == 1
+    assert "- 1 project alerts only and keeps running: blog [balanced]" in body
+    assert read_record(paths).pending == set()
+
+
+def test_expiry_survives_an_enforcement_error_after_recording(box):
+    """shop's quarantine cannot be re-asserted: its scan recorded its result,
+    then raised. Its project expiry is still alerted, as not judged."""
+    paths, pushover, _, docker = box
+    seed_quarantine(paths, "shop")
+    docker.fail = {"caddy_reload": 9, "compose_stop": 9}
+    _suppress(paths, TODAY, project="shop")
+    _scanned_yesterday(paths, "shop")
+    assert cmd_security_scan(["shop"], paths) == 1
+    [(title, body, priority)] = _sent(pushover, "project suppression expired")
+    assert title.endswith("— not judged (scan failed)") and priority == 1
+    assert "was not judged: its scan failed or was skipped" in body
+
+
+def test_expiry_survives_trivy_going_missing_mid_run(box, monkeypatch):
+    paths, pushover, carriers, _ = box
+    _suppress(paths, TODAY, project="blog")
+    _scanned_yesterday(paths, "shop", "wiki", "blog")
+
+    def scan(ref, timeout):
+        if ref.startswith("wiki"):
+            raise TrivyNotInstalledError("trivy is gone")
+        return scan_result(ref, [finding(CVE)] if ref.split("-")[0] in carriers else [])
+    monkeypatch.setattr(security_scan_core, "scan_image", scan)
+    (paths.state / "projects.txt").write_text("blog\nshop\nwiki\n")
+    assert cmd_security_scan([], paths) == 1
+    [(title, _, _)] = _sent(pushover, "project suppression expired")
+    assert "[boxmunge:blog]" in title and title.endswith("— alerting only")
+
+
+def test_unusable_record_partial_run_alerts_the_host_expiry_as_partial(box):
+    """It cannot leave the expiry pending, so it alerts at once, saying the
+    run judged only its own projects."""
+    paths, pushover, *_ = box
+    _suppress(paths, TODAY)
+    _scanned_yesterday(paths, "blog")
+    _corrupt_record(paths)
+    assert cmd_security_scan(["blog"], paths) == 1
+    [(title, body, priority)] = _sent(pushover, "host suppression expired")
+    assert title.endswith("(partial: one scan's projects)") and priority == 1
+    assert "blog [balanced]" in body

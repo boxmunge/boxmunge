@@ -45,7 +45,8 @@ from boxmunge.commands.security_scan_inputs import project_suppressions_path
 from boxmunge.container_update_targets import read_target_state
 from boxmunge.cve import (
     autofix_record, breaker, exploited, fix_grace, kev, kev_enisa, kev_source_history,
-    kev_watch_state, kev_withdrawals, quarantine, scan_cache, scan_state, suppressions,
+    kev_watch_state, kev_withdrawals, quarantine, scan_cache, scan_state, suppression_record,
+    suppressions,
 )
 from boxmunge.discovery_freshness import stale_discovery_warning
 from boxmunge.health_checks.backup_freshness import check_backup_freshness
@@ -283,6 +284,11 @@ READERS = [
            lambda p: scan_cache.ScanCache(p).get("sha256:" + "a" * 64, "2:db").scanned_at),
     Reader("kev_watch", lambda p: p.kev_watch,
            {"seen_at": ISO, "cve_ids": ["CVE-1"], "failing": {}}, kev_watch_state.read_watch),
+    Reader("suppression_notices", lambda p: p.suppression_notices,
+           {"warned": [{"cve_id": "CVE-1", "scope": "host", "project": "",
+                        "until": "2026-12-01", "warned_at": ISO}],
+            "pending_host_expiries": [{"cve_id": "CVE-2", "until": "2026-11-30"}]},
+           suppression_record.read_record),
     Reader("blocked_update", lambda p: p.platform_update_state,
            {"checked_at": ISO, "current_version": "0.1.0", "blocked": None, "alerted": None},
            read_blocked_state),

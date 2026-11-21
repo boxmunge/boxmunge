@@ -167,9 +167,9 @@ class BoxPaths:
         # Every CVE any source listed as of the KEV watch's last tick, and
         # when that tick ran (commands.kev_watch).
         self.kev_watch = self.state / "kev" / "watch.json"
-        # The suppression expiry warnings already sent, so each is sent once
-        # (cve.suppression_warned).
-        self.suppression_warnings = self.state / "cve" / "suppression-warnings.json"
+        # The suppression expiry warnings already sent, and the host expiries a
+        # partial run left for the fleet run to alert (cve.suppression_record).
+        self.suppression_notices = self.state / "cve" / "suppression-notices.json"
         # The urgent autofix queue, one entry per project (cve.autofix_queue).
         self.autofix_queue_dir = self.state / "autofix" / "queue"
         # Last auto-update discovery that installed nothing: any security or

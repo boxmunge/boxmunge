@@ -6,6 +6,7 @@ from datetime import date, datetime, timezone
 
 from boxmunge.cve.alerting import (
     format_suppression_expired_alert, format_suppression_expiring_alert,
+    format_suppression_record_alert,
 )
 from boxmunge.cve.suppression_impact import Impact, ProjectImpact
 from boxmunge.cve.suppressions import SCOPE_HOST, Suppression
@@ -27,9 +28,9 @@ def test_host_warning_groups_by_outcome_with_worst_in_title() -> None:
                _p("api", Impact.QUARANTINED, "strict"),
                _p("blog", Impact.ALERT), _p("wiki", Impact.ALERT), _p("docs", Impact.ALERT),
                _p("legacy", Impact.AT_RISK, "strict"),
-               *(_p(f"site{i}", Impact.NO_FINDING) for i in range(4))]
-    alert = format_suppression_expiring_alert([(_sup(), impacts)], project=None, now=NOW,
-                                              unscanned=["old"])
+               *(_p(f"site{i}", Impact.NO_FINDING) for i in range(4)),
+               _p("old", Impact.SCAN_FAILED, "")]
+    alert = format_suppression_expiring_alert([(_sup(), impacts)], project=None, now=NOW)
     assert alert.kind == "suppression_expiring" and alert.priority == 1
     assert alert.title == ("CVE-2026-57433 host suppression expires in 45h — "
                            "2 projects will be quarantined")
@@ -42,7 +43,7 @@ def test_host_warning_groups_by_outcome_with_worst_in_title() -> None:
     assert "- 3 projects will alert only and keep running: blog [balanced], docs" in body
     assert "- 4 projects have no finding for it (no effect)" in body
     assert "site0" not in body
-    assert "Not scanned this run, so not judged: old" in body
+    assert "- 1 project was not judged (its scan failed or was skipped): old" in body
     assert "boxmunge security unsuppress CVE-2026-57433 --host" in body
     assert "boxmunge security suppress CVE-2026-57433 --host --until <date>" in body
     assert "operator only" in body and "Review: boxmunge security <project>" in body
@@ -110,3 +111,34 @@ def test_expired_project_with_nothing_found() -> None:
         [(_sup(scope="project"), [_p("wiki", Impact.NO_FINDING)])], project="wiki")
     assert alert.priority == 0
     assert alert.title == "[boxmunge:wiki] CVE-2026-57433 project suppression expired — no effect"
+
+
+def test_scan_failed_keeps_the_priority_up() -> None:
+    alert = format_suppression_expiring_alert(
+        [(_sup(), [_p("blog", Impact.ALERT), _p("old", Impact.SCAN_FAILED, "")])],
+        project=None, now=NOW)
+    assert alert.priority == 1
+
+
+def test_expired_already_quarantined_and_not_applying_change_nothing() -> None:
+    alert = format_suppression_expired_alert(
+        [(_sup(), [_p("blog", Impact.ALREADY_QUARANTINED),
+                   _p("shop", Impact.NOT_APPLYING, "paranoid")])], project=None)
+    assert alert.priority == 0 and alert.title.endswith("— no project affected")
+    assert "- 1 project is already quarantined for another finding: blog [balanced]" in alert.body
+    assert "- 1 project was already ignoring it" in alert.body
+
+
+def test_partial_host_expiry_says_so_and_stays_urgent() -> None:
+    alert = format_suppression_expired_alert(
+        [(_sup(), [_p("wiki", Impact.NO_FINDING)])], project=None, partial=True)
+    assert alert.priority == 1
+    assert alert.title.endswith("(partial: one scan's projects)")
+    assert "the rest of the fleet was not scanned" in alert.body
+
+
+def test_record_alert_names_the_file_and_remedy() -> None:
+    alert = format_suppression_record_alert("/x/notices.json", "bad json", "remove /x/notices.json")
+    assert alert.priority == 1 and alert.kind == "suppression_record"
+    assert "/x/notices.json cannot be used" in alert.body
+    assert "To fix: remove /x/notices.json." in alert.body

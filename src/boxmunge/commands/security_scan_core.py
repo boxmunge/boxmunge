@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import NamedTuple
 from datetime import date, datetime, timezone
 
 from boxmunge.commands.autofix_urgent_scan import NOTHING_URGENT, prepare_urgent
@@ -30,7 +31,7 @@ from boxmunge.commands.security_enforce import (
     raise_enforcement_error,
 )
 from boxmunge.compose_images import image_phrase
-from boxmunge.cve.alerting import Alert, emit_scan_alerts
+from boxmunge.cve.alerting import Alert, emit_scan_alerts, expired_between, scan_date
 from boxmunge.cve.exploited import ExploitedSource, load_exploited
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import FindingDisposition, Posture, ProjectDecision
@@ -39,7 +40,7 @@ from boxmunge.cve.scan_state import (
     ScanStateWriteError,
     write_scan_state,
 )
-from boxmunge.cve.suppression_impact import Foreseen
+from boxmunge.cve.suppression_impact import Expiry, Foreseen
 from boxmunge.cve.suppressions import Suppression
 from boxmunge.cve.scanner import (
     _DEFAULT_TIMEOUT,
@@ -137,6 +138,37 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class ScanClock(NamedTuple):
+    """The UTC date and time a scan judges by. A fleet run takes one for all
+    its projects, so a run that crosses 00:00 UTC judges every project on
+    the same date (suppressions, fix deadlines, warning windows)."""
+
+    today: date
+    now: datetime
+
+
+def scan_clock() -> ScanClock:
+    return ScanClock(_today(), _now())
+
+
+class ScanRecordedError(RuntimeError):
+    """The scan recorded its result, then failed (an enforcement error).
+    ``expiry`` carries the suppressions it found expired: the record has
+    moved past their date, so no later scan finds them again."""
+
+    def __init__(self, message: str, expiry: Expiry | None) -> None:
+        super().__init__(message)
+        self.expiry = expiry
+
+
+def _raise_recorded(error: str | None, record_error: str | None,
+                    expiry: Expiry | None) -> None:
+    try:
+        raise_enforcement_error(error, record_error)
+    except RuntimeError as e:
+        raise ScanRecordedError(str(e), expiry) from None
+
+
 def scan_one_project(
     paths: BoxPaths, project: str, *,
     audit_only: bool = False,
@@ -144,12 +176,18 @@ def scan_one_project(
     defer_new: bool = False,
     scanned: dict[str, ScanResult] | None = None,
     alerts: list[Alert] | None = None,
+    clock: ScanClock | None = None,
 ) -> ProjectScan:
     """Scan a single project, persist state, take quarantine action.
 
     Sends no alerts: appends the transition alerts to ``alerts`` (required
     unless ``audit_only``), before any enforcement error is raised, for the
-    caller to deliver (the fleet scan digests the low-urgency ones).
+    caller to deliver (the fleet scan digests the low-urgency ones). The
+    suppressions found expired are ``ProjectScan.expired``, or, when the
+    scan fails after recording its result, ``ScanRecordedError.expiry``:
+    the fleet run alerts them after its enforcement.
+
+    ``clock`` is the run's (``scan_clock()`` when None).
 
     ``ProjectScan.headline`` is the first (decision, finding) pair that
     requires quarantine, or None if nothing quarantines.
@@ -170,7 +208,8 @@ def scan_one_project(
         LockError: when another operation holds the project lock.
         TrivyNotInstalledError: when the Trivy binary is missing.
         RuntimeError: on irrecoverable failures (manifest unreadable, all
-            images failed to scan, quarantine action raised).
+            images failed to scan); ScanRecordedError, a RuntimeError, when
+            a quarantine action failed after the result was recorded.
     """
     # Direct callers use the cached catalog without a refresh (no network).
     if kev is None:
@@ -178,7 +217,7 @@ def scan_one_project(
     with project_lock(project, paths):
         return scan_one_project_locked(
             paths, project, audit_only=audit_only, kev=kev, defer_new=defer_new,
-            scanned=scanned, alerts=alerts,
+            scanned=scanned, alerts=alerts, clock=clock,
         )
 
 
@@ -278,10 +317,12 @@ def scan_one_project_locked(
     defer_new: bool = False,
     scanned: dict[str, ScanResult] | None = None,
     alerts: list[Alert] | None = None,
+    clock: ScanClock | None = None,
 ) -> ProjectScan:
     """Inner scan body. Caller MUST hold the per-project lock."""
     if alerts is None and not audit_only:
         raise ValueError("scan_one_project needs an `alerts` list unless audit_only")
+    today, now = clock or scan_clock()
     meta = load_project_meta(paths, project)
     dangerously = meta.dangerously
     check_declared_runtimes(project, meta.declared_runtimes)
@@ -306,31 +347,33 @@ def scan_one_project_locked(
         # Persist an empty scan-state so we don't wedge the per-project view.
         # Audit-only (resume re-scan, audit A-3) leaves the prior alone.
         record_error = None
+        gone: tuple[Suppression, ...] = ()
         if not audit_only:
             outcome = _enforce(paths, project, meta, None, {}, defer_new=defer_new)
             record_error = _record(
                 scan_state_path, decisions=(),
                 unscanned=tuple(_unscanned(unidentified=unidentified)), **basis,
             )
-            raise_enforcement_error(outcome.error, record_error)
+            gone = expired_between(supps, scan_date(prior_decisions), today)
+            _raise_recorded(outcome.error, record_error, Expiry(
+                project, meta.posture.value, gone, (), failed=True) if gone else None)
         return ProjectScan(
             project=project, posture=meta.posture.value, dangerously=dangerously,
             decisions=(), warnings=tuple(warnings),
             unidentified=tuple(unidentified.items()), record_error=record_error,
-            **basis,
+            expired=gone, **basis,
         )
 
     results, failed, skipped, scan_warnings = _scan_targets(
         paths, project, targets, scanned)
     warnings.extend(scan_warnings)
-    today = _today()
     exploited = load_exploited(paths, today, cisa=kev)
     complete = not (failed or skipped or unidentified)
     decisions = evaluate(paths, project, meta, profile, supps, results, exploited, today,
-                         now=_now(), complete=complete, alerts=None if audit_only else alerts)
+                         now=now, complete=complete, alerts=None if audit_only else alerts)
     expiring = () if audit_only else foresee(
         paths, project, meta, profile, supps, results, exploited, today,
-        now=_now(), complete=complete)
+        now=now, complete=complete, current=decisions)
 
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow
     # itself and never act. Everyone else enforces: an existing quarantine
@@ -338,7 +381,7 @@ def scan_one_project_locked(
     # new one fires here unless the fleet run decides it (defer_new), or
     # the site stays up while autofix patches it (autofix_urgent_scan).
     urgent = NOTHING_URGENT if audit_only else prepare_urgent(
-        paths, project, meta, decisions, now=_now(), alerts=alerts)
+        paths, project, meta, decisions, now=now, alerts=alerts)
     headline = urgent.headline(headline_of(decisions))
     outcome = Enforcement()
     if not audit_only:
@@ -373,10 +416,11 @@ def scan_one_project_locked(
         if outcome.landed:
             announce_quarantine(paths, project, decisions, note=urgent.quarantine_note)
         expired = _collect_transition_alerts(
-            paths, project, meta.posture, decisions, prior_decisions, supps, alerts,
+            paths, project, meta.posture, decisions, prior_decisions, supps, alerts, today,
         )
         urgent.annotate(alerts)
-    raise_enforcement_error(outcome.error, record_error)
+    _raise_recorded(outcome.error, record_error, Expiry(
+        project, meta.posture.value, expired, tuple(decisions), failed=True) if expired else None)
 
     return ProjectScan(
         project=project,
@@ -428,6 +472,7 @@ def _collect_transition_alerts(
     prior_decisions: tuple[ProjectDecision, ...],
     supps: tuple[Suppression, ...],
     sink: list[Alert],
+    today: date,
 ) -> tuple[Suppression, ...]:
     """Best-effort transition alerts, appended to ``sink`` for the caller to
     deliver; failures never fail the scan. Returns the expired suppressions
@@ -440,6 +485,7 @@ def _collect_transition_alerts(
             prior=prior_decisions,
             suppressions=supps,
             paths=paths,
+            today=today,
         )
     except Exception as e:  # noqa: BLE001 — alerting must never block scan
         log_warning("cve-scan", f"alert emission failed for {project}: {e}",

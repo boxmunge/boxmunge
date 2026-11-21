@@ -86,6 +86,7 @@ from boxmunge.cve._alerting_formatters import (
 from boxmunge.cve._alerting_suppression import (
     format_suppression_expired_alert,
     format_suppression_expiring_alert,
+    format_suppression_record_alert,
 )
 from boxmunge.cve._alerting_types import Alert, AlertKind, Hit
 from boxmunge.cve._alerting_digest import (
@@ -126,6 +127,7 @@ __all__ = [
     "format_hardening_upcoming_alert",
     "format_suppression_expired_alert",
     "format_suppression_expiring_alert",
+    "format_suppression_record_alert",
     "format_breaker_held_alert",
     "format_kev_sources_disagree_alert",
     "format_kev_stale_alert",
@@ -220,10 +222,22 @@ def hardening_upcoming_by_key(
     }
 
 
-def _scan_date(decisions: Sequence[ProjectDecision]) -> date | None:
+def scan_date(decisions: Sequence[ProjectDecision]) -> date | None:
+    """The UTC date of a scan's decisions, or None for a scan with none."""
     if not decisions:
         return None
     return max(d.scanned_at for d in decisions).date()
+
+
+def expired_between(
+    suppressions: Sequence[Suppression], prior: date | None, current: date | None,
+) -> tuple[Suppression, ...]:
+    """The suppressions that applied on ``prior`` and not on ``current``
+    (none when either date is unknown)."""
+    if prior is None or current is None:
+        return ()
+    return tuple(s for s in suppressions
+                 if s.is_active(today=prior) and not s.is_active(today=current))
 
 
 def detect_transitions(
@@ -233,13 +247,16 @@ def detect_transitions(
     current: Sequence[ProjectDecision],
     prior: Sequence[ProjectDecision],
     suppressions: tuple[Suppression, ...],
+    today: date | None = None,
 ) -> Transitions:
     """Compute this project's alerts from its prior and current decisions.
 
     Pure. A finding transitions when its (CVE, package) key is new or its
     disposition changed. Suppression expiry is detected by replaying the
     suppression list against the prior and current scan dates, and returned
-    in ``Transitions.expired`` rather than alerted here.
+    in ``Transitions.expired`` rather than alerted here. ``today`` is the
+    date the scan judged by (its run's clock); the current decisions' own
+    date when None.
 
     QUARANTINE dispositions are not alerted here: the QUARANTINED alert is
     tied to the quarantine action landing (audit B-17), which the
@@ -309,11 +326,8 @@ def detect_transitions(
     new_upcoming = [h for k, h in hardening_upcoming_by_key(current).items()
                     if k not in flagged_before]
 
-    expired: list[Suppression] = []
-    prior_date, current_date = _scan_date(prior), _scan_date(current)
-    if prior_date is not None and current_date is not None:
-        expired = [sup for sup in suppressions if sup.is_active(today=prior_date)
-                   and not sup.is_active(today=current_date)]
+    expired = expired_between(suppressions, scan_date(prior),
+                              today if today is not None and current else scan_date(current))
 
     alerts: list[Alert] = []
     dropped: list[Alert] = []
@@ -364,6 +378,7 @@ def emit_scan_alerts(
     prior: Sequence[ProjectDecision],
     suppressions: tuple[Suppression, ...],
     paths: BoxPaths,
+    today: date | None = None,
 ) -> Transitions:
     """detect_transitions for one project, with nothing sent.
 
@@ -377,6 +392,7 @@ def emit_scan_alerts(
         current=current,
         prior=prior,
         suppressions=suppressions,
+        today=today,
     )
     for alert in transitions.dropped:
         log_operation(
