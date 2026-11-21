@@ -79,7 +79,7 @@ class _Scan:
     record_error = None
     warnings = ()
     lifted = kept = headline = None
-    host_expired = ()
+    expired = expiring = ()
     complete = True
     decisions = ()
 

@@ -28,8 +28,9 @@ from boxmunge.fs_nofollow import read_text_nofollow_or_none
 
 E = TypeVar("E", bound=Enum)
 
-# The scan runs daily (03:00-03:30); 36h tolerates one late or missed run's
-# worth of jitter without crying wolf, and catches a second missed night.
+# The scan runs daily (02:30-03:00 local, boxmunge-maintenance.timer); 36h
+# tolerates one late or missed run's worth of jitter without crying wolf, and
+# catches a second missed night.
 SCAN_MAX_AGE = timedelta(hours=36)
 
 

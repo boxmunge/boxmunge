@@ -14,11 +14,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 
 from boxmunge.commands.autofix_urgent_scan import NOTHING_URGENT, prepare_urgent
-from boxmunge.commands.security_scan_relevance import (
-    check_declared_runtimes,
-    gate_exempted_packages,
-    log_relevance_gaps,
-)
+from boxmunge.commands.security_scan_evaluate import evaluate, foresee
+from boxmunge.commands.security_scan_relevance import check_declared_runtimes
 from boxmunge.commands.security_scan_inputs import (
     ProjectHardening, ProjectMeta, ScanTarget, hardening_profile, identify,
     load_all_suppressions, load_prior_decisions, load_project_meta, load_user_model,
@@ -34,24 +31,15 @@ from boxmunge.commands.security_enforce import (
 )
 from boxmunge.compose_images import image_phrase
 from boxmunge.cve.alerting import Alert, emit_scan_alerts
-from boxmunge.cve.exploited import ExploitedIndex, ExploitedSource, load_exploited
-from boxmunge.cve.fix_grace import graced_decisions
+from boxmunge.cve.exploited import ExploitedSource, load_exploited
 from boxmunge.cve.kev import KevCatalog, load_kev
-from boxmunge.cve.policy import (
-    FindingDisposition,
-    Posture,
-    ProjectDecision,
-    evaluate_project,
-)
-from boxmunge.cve.relevance import (
-    effective_runtimes,
-    unrecognised_lang_types,
-)
+from boxmunge.cve.policy import FindingDisposition, Posture, ProjectDecision
 from boxmunge.cve.scan_state import (
     BASIS_CONTAINERS,
     ScanStateWriteError,
     write_scan_state,
 )
+from boxmunge.cve.suppression_impact import Foreseen
 from boxmunge.cve.suppressions import Suppression
 from boxmunge.cve.scanner import (
     _DEFAULT_TIMEOUT,
@@ -99,9 +87,11 @@ class ProjectScan:
     basis: str = BASIS_CONTAINERS
     stopped_reason: str | None = None
     headline: tuple[ProjectDecision, FindingDisposition] | None = None
-    # Host-scope suppressions that expired since the last scan; the fleet
-    # run alerts them once rather than once per project (audit B-14).
-    host_expired: tuple[Suppression, ...] = ()
+    # Suppressions (either scope) that expired since the last scan, and those
+    # in their warning window with what their expiry will do. The fleet run
+    # alerts them after its enforcement, host scope once per run (B-14).
+    expired: tuple[Suppression, ...] = ()
+    expiring: tuple[Foreseen, ...] = ()
     # Set when the scan ran and was acted on but its result could not be
     # written (ScanStateWriteError); the fleet run fails and alerts on it.
     record_error: str | None = None
@@ -253,51 +243,6 @@ def _scan_targets(
     return results, failed, skipped, warnings
 
 
-def _evaluate(
-    paths: BoxPaths, project: str, meta: ProjectMeta, profile: ProjectHardening,
-    supps: tuple[Suppression, ...], results: list[ScanResult],
-    exploited: ExploitedIndex, today: date, *, complete: bool, alerts: list[Alert] | None,
-) -> list[ProjectDecision]:
-    """One decision per scanned image, under the project's policy and strict's fix
-    deadlines (cve.fix_grace). ``exploited``: the fresh sources (cve.exploited)."""
-    posture, dangerously, declared = meta.posture, meta.dangerously, meta.declared_runtimes
-    decisions: list[ProjectDecision] = []
-
-    # Collected across every image but logged at most once per project scan.
-    dropped_lang_types: set[str] = set()
-    empty_runtime_exempted: set[str] = set()
-    for sr in results:
-        # `declared` was validated first; this only infers from lang_types.
-        runtimes = effective_runtimes(sr.lang_types, declared=declared)
-        if declared is None:
-            # An unmapped Trivy lang-pkgs Type is dropped by infer_runtimes,
-            # which biases toward OVER-exemption; surface it.
-            dropped_lang_types |= unrecognised_lang_types(sr.lang_types)
-        decision = evaluate_project(
-            project, sr,
-            posture=posture,
-            hardening_profile=profile.applied,
-            upcoming=profile.upcoming,
-            dangerously_disable_quarantine=dangerously,
-            suppressions=supps,
-            today=today,
-            exploited_lookup=exploited.lookup,
-            runtimes=runtimes,
-        )
-        decisions.append(decision)
-        if declared is None and not runtimes and posture in (
-            Posture.BALANCED, Posture.STRICT,
-        ):
-            empty_runtime_exempted |= gate_exempted_packages(
-                decision, posture=posture, dangerously=dangerously,
-                suppressions=supps, today=today, exploited_lookup=exploited.lookup,
-            )
-
-    log_relevance_gaps(paths, project, dropped_lang_types, empty_runtime_exempted)
-    return graced_decisions(paths, project, decisions, posture=posture, dangerously=dangerously,
-                            now=_now(), complete=complete, alerts=alerts)
-
-
 def audit_targets(
     paths: BoxPaths, project: str, *, meta: ProjectMeta, profile: ProjectHardening,
     supps: tuple[Suppression, ...], targets: list[ScanTarget],
@@ -313,8 +258,9 @@ def audit_targets(
     scanned = dict(known)
     results, failed, skipped, warnings = _scan_targets(paths, project, targets, scanned)
     today = _today()
-    decisions = _evaluate(paths, project, meta, profile, supps, results,
-                          load_exploited(paths, today, cisa=kev), today, complete=True, alerts=None)
+    decisions = evaluate(paths, project, meta, profile, supps, results,
+                         load_exploited(paths, today, cisa=kev), today, now=_now(),
+                         complete=True, alerts=None)
     return ProjectScan(
         project=project, posture=meta.posture.value, dangerously=meta.dangerously,
         decisions=tuple(decisions),
@@ -380,8 +326,11 @@ def scan_one_project_locked(
     today = _today()
     exploited = load_exploited(paths, today, cisa=kev)
     complete = not (failed or skipped or unidentified)
-    decisions = _evaluate(paths, project, meta, profile, supps, results, exploited, today,
-                          complete=complete, alerts=None if audit_only else alerts)
+    decisions = evaluate(paths, project, meta, profile, supps, results, exploited, today,
+                         now=_now(), complete=complete, alerts=None if audit_only else alerts)
+    expiring = () if audit_only else foresee(
+        paths, project, meta, profile, supps, results, exploited, today,
+        now=_now(), complete=complete)
 
     # Audit-only callers (resume re-scan, audit A-3) are the lift flow
     # itself and never act. Everyone else enforces: an existing quarantine
@@ -419,11 +368,11 @@ def scan_one_project_locked(
 
     # Transition alerts are best-effort; audit-only callers (resume) must not
     # push alerts.
-    host_expired: tuple[Suppression, ...] = ()
+    expired: tuple[Suppression, ...] = ()
     if not audit_only:
         if outcome.landed:
             announce_quarantine(paths, project, decisions, note=urgent.quarantine_note)
-        host_expired = _collect_transition_alerts(
+        expired = _collect_transition_alerts(
             paths, project, meta.posture, decisions, prior_decisions, supps, alerts,
         )
         urgent.annotate(alerts)
@@ -441,7 +390,8 @@ def scan_one_project_locked(
         unidentified=tuple(unidentified.items()),
         **basis,
         headline=headline,
-        host_expired=host_expired,
+        expired=expired,
+        expiring=expiring,
         lifted=outcome.lifted,
         kept=outcome.kept,
         autofix_note=urgent.quarantine_note,
@@ -480,8 +430,8 @@ def _collect_transition_alerts(
     sink: list[Alert],
 ) -> tuple[Suppression, ...]:
     """Best-effort transition alerts, appended to ``sink`` for the caller to
-    deliver; failures never fail the scan. Returns the expired host-scope
-    suppressions for the fleet to alert once."""
+    deliver; failures never fail the scan. Returns the expired suppressions
+    for the fleet run to alert after its enforcement."""
     try:
         transitions = emit_scan_alerts(
             project_name=project,
@@ -496,4 +446,4 @@ def _collect_transition_alerts(
                     paths, project=project, detail={"error": str(e)})
         return ()
     sink.extend(transitions.alerts)
-    return transitions.host_expired
+    return transitions.expired

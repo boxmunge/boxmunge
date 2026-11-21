@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Fleet-level alert formatters: one alert per scan run, not per project.
 
+Suppression expiry (either scope) is in ``_alerting_suppression``.
+
 Pure functions: in-memory values in, ``Alert`` out. Consumers import them
 from ``boxmunge.cve.alerting``.
 """
@@ -11,7 +13,6 @@ from datetime import datetime
 
 from boxmunge.cve._alerting_types import Alert
 from boxmunge.cve.kev import KEV_DEFAULT_SOURCES, KevCatalog
-from boxmunge.cve.suppressions import Suppression
 
 _MAX_LINES = 20
 
@@ -222,23 +223,3 @@ def format_breaker_held_alert(
         title=f"Circuit breaker held {n} quarantine{'s' if n != 1 else ''}",
         body="\n".join(lines), priority=1,
     )
-
-
-def format_host_suppression_expired_alert(suppressions: Sequence[Suppression]) -> Alert:
-    """Host-scope suppressions that expired: once per fleet run, not once
-    per project per image (audit B-14). Priority 1."""
-    sups = sorted(suppressions, key=lambda s: s.cve_id)
-    more = f" (+{len(sups) - 1} more)" if len(sups) > 1 else ""
-    title = f"Host suppression expired — {sups[0].cve_id}{more}"
-    lines = ["Host-scope suppressions (they applied to every project) expired:"]
-    for s in sups:
-        lines.append(f"- {s.cve_id}: added {s.added.isoformat()}, "
-                     f"expired {s.until.isoformat()}")
-    lines += [
-        "",
-        "These are active findings again on every project that has them.",
-        "To re-review and extend (operator only, not from the deploy shell):",
-        "  boxmunge security suppress <CVE> --host --until <date> --reason <text>",
-    ]
-    return Alert(kind="suppression_expired", title=title, body="\n".join(lines), priority=1)
-

@@ -17,12 +17,12 @@ from boxmunge.commands.autofix_queue_cmd import after_scan
 from boxmunge.commands.autofix_urgent_scan import held_for_patch
 from boxmunge.commands.security_fleet_enforce import apply_held, apply_new_quarantines
 from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project
+from boxmunge.commands.security_suppression_alerts import suppression_alerts
 from boxmunge.cve.breaker import BreakerError
 from boxmunge.cve.alerting import (
     Alert,
     format_scan_digest,
     is_low_urgency,
-    format_host_suppression_expired_alert,
     format_scan_failure_alert,
     format_scan_unrecorded_alert,
     send_alerts,
@@ -129,6 +129,9 @@ BREAKER_PROBLEM = "(circuit breaker)"
 # FleetRun.problems key for a damaged project registry: a fleet-level
 # problem, since a bad line names no project that can be scanned.
 REGISTRY_PROBLEM = "(project registry)"
+
+# FleetRun.problems key for a suppression warning record that cannot be used.
+WARNINGS_PROBLEM = "(suppression warnings)"
 
 
 def _parse_scan_targets(
@@ -353,12 +356,21 @@ def _cmd_apply_held(paths: BoxPaths) -> int:
     return 1 if result.errors else 0
 
 
-def _alert_fleet(paths: BoxPaths, run: FleetRun, *, quiet: frozenset[str] = frozenset()) -> None:
-    """Once-per-run alerts: scan failures (audit B-11), expired host-scope
-    suppressions (once, not once per project — B-14). ``quiet`` names
-    projects whose scan failure is not alerted again (the KEV watch, once a
-    day)."""
-    alerts = []
+def _alert_fleet(paths: BoxPaths, run: FleetRun, *, quiet: frozenset[str] = frozenset(),
+                 host_warnings: bool = False) -> None:
+    """Once-per-run alerts: suppression expiries and warnings, after the
+    run's enforcement (host scope once, not once per project — B-14; host
+    warnings only when ``host_warnings``: the run judged the whole fleet),
+    and scan failures (audit B-11). ``quiet`` names projects whose scan
+    failure is not alerted again (the KEV watch, once a day)."""
+    unjudged = [n for n in (*run.problems, *run.skipped_locked)
+                if n not in run.scans and not n.startswith("(")]
+    alerts, problem = suppression_alerts(
+        paths, run.scans, run.held, now=datetime.now(timezone.utc),
+        host_warnings=host_warnings, unscanned=sorted(set(unjudged)))
+    if problem:
+        log_warning("cve-scan", problem, paths)
+        run.problems[WARNINGS_PROBLEM] = [problem]
     problems = {p: r for p, r in run.problems.items() if p not in quiet}
     if problems:
         alerts.append(format_scan_failure_alert(problems))
@@ -371,9 +383,6 @@ def _alert_fleet(paths: BoxPaths, run: FleetRun, *, quiet: frozenset[str] = froz
             except StateError as e:
                 unreadable[p] = str(e)
         alerts.append(format_scan_unrecorded_alert(run.unrecorded, last, unreadable))
-    host_expired = {s.cve_id: s for scan in run.scans.values() for s in scan.host_expired}
-    if host_expired:
-        alerts.append(format_host_suppression_expired_alert(list(host_expired.values())))
     if not alerts:
         return
     try:
@@ -481,7 +490,7 @@ def _scan_targets_cmd(args: list[str], paths: BoxPaths) -> int:
         log_warning("cve-scan", f"{name}: {reasons[0]}", paths, project=name)
         run.problems[name] = reasons
     _enforce_fleet(paths, run)
-    _alert_fleet(paths, run)
+    _alert_fleet(paths, run, host_warnings=not args)
 
     elapsed = time.monotonic() - start
     print(f"Scanned {len(targets)} projects in {elapsed:.1f}s.")

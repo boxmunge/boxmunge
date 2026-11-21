@@ -1855,6 +1855,29 @@ Rules:
   on the next scan after `until`, the finding is active again and an alert
   fires. The expired entry stays in the file, so suppressing the CVE again
   needs an `unsuppress` first.
+- An expiring suppression is warned about first, once per CVE, scope and
+  `until` date. A suppression stops applying at 00:00 UTC on `until` (the
+  scan's date is UTC), and the warning goes from the first scan whose UTC
+  date is at most two days before it. The nightly scan runs on every UTC
+  date, so the warning normally arrives 24 to 48 hours ahead. If that scan
+  is missed, the next one still warns, with less notice. A suppression
+  added or extended into that window is warned at the next scan. Extending
+  one after its warning means it does not expire, and its new date gets
+  its own warning. A host suppression's warning comes only from the nightly
+  (fleet) scan, which judges every project. A `security scan <project>` or
+  a KEV watch tick sees only part of the fleet, so it does not send it.
+- The warning and the expiry alert both say what the expiry means for each
+  project, grouped by outcome: quarantined (stopped), held by the circuit
+  breaker, running at quarantine level (quarantine disabled by config),
+  alert only, still covered by another suppression, or no finding (a count,
+  not a list). The worst outcome is in the title. The warning comes from
+  the scan judging the project again with the suppressions that will still
+  apply on `until`, under the same policy and fix deadlines. The expiry
+  alert reports what this scan's enforcement actually did. Either is
+  priority-1 when a project is or will be quarantined, held or left at
+  risk, and normal priority otherwise. Each names the `unsuppress` and
+  `suppress … --until` commands that extend the suppression, and
+  `security <project>` to review it.
 - Suppression IDs are unique per project. To replace an existing
   suppression, `unsuppress` first, then `suppress` with the new fields.
   This is deliberate — silent overwrites would erase audit-trail entries.
@@ -1972,7 +1995,8 @@ two stable findings, not one that flaps every day. Only transitions (a new
 finding, a change of disposition, a suppression expiring) alert, and each kind of transition is **one alert per project
 per scan** listing every finding involved — a project's first scan sends
 one informational digest, not one push per finding. Host-scope
-suppression expiry is alerted once per fleet scan, not once per project.
+suppression expiry, and its advance warning, are alerted once per fleet
+scan, not once per project.
 
 The `QUARANTINED` alert belongs to the quarantine **action**, not to a
 change in a finding's disposition: it is sent once, when the maintenance
@@ -2097,8 +2121,10 @@ several findings are involved the title names the worst and adds
 | `[boxmunge:<project>] <N> CVE findings will quarantine from 0.12 (warning only)` (once per finding) | normal |
 | `[boxmunge:<project>] <N> new CVE findings (informational)` (digest, top 5 listed; `strict` and `paranoid` only — `relaxed` and `balanced` log it instead) | normal |
 | `[<hostname>] Nightly CVE scan: new findings in <N> projects` (one line per project; replaces the per-project "new findings", "no fix yet", "fixable" and "will quarantine from 0.12" pushes of a multi-project scan, which a single-project `security scan <p>` still sends at once) | quiet (no sound) |
-| `[boxmunge:<project>] Suppression expired — <CVE>` | priority-1 |
-| `[<hostname>] Host suppression expired — <CVE>` (once per fleet scan) | priority-1 |
+| `[boxmunge:<project>] <CVE> project suppression expires in <N>h — <outcome>` (once per CVE and `until`, 24-48 hours ahead; outcome e.g. `will be quarantined`, `will alert only`, `no effect`) | priority-1 when it will quarantine or run at risk; else normal |
+| `[<hostname>] <CVE> host suppression expires in <N>h — <N> projects will be quarantined` (once per CVE and `until`, from the nightly fleet scan; `— no project affected` when none) | priority-1 when a project will quarantine or run at risk; else normal |
+| `[boxmunge:<project>] <CVE> project suppression expired — <outcome>` (e.g. `quarantined`, `quarantine held by the breaker`, `alerting only`, `no effect`) | priority-1 when quarantined, held or at risk; else normal |
+| `[<hostname>] <CVE> host suppression expired — <N> projects quarantined` (once per fleet scan) | priority-1 when a project was quarantined, held or left at risk; else normal |
 | `[<hostname>] CVE policy enforcement begins in <N>h` (one-time) | priority-1 |
 | `[<hostname>] CISA KEV feed stale — exploitation defense degraded` | priority-1 |
 | `[<hostname>] CISA KEV refresh rejected — previous catalog kept` | priority-1 |

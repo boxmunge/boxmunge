@@ -96,9 +96,10 @@ def test_host_suppression_expiry_alerts_once_per_fleet_run(tmp_path, monkeypatch
         "reviewed_by": "ops", "added": (today - timedelta(days=30)).isoformat(),
     }]}))
     assert cmd_security_scan([], paths) == 0
-    host = [t for t in pushover.titles() if "Host suppression expired" in t]
-    assert len(host) == 1 and host[0].endswith("] Host suppression expired — CVE-2026-0007")
-    assert not [t for t in pushover.titles() if "Suppression expired" in t]
+    host = [t for t in pushover.titles() if "host suppression expired" in t]
+    assert len(host) == 1
+    assert host[0].endswith("] CVE-2026-0007 host suppression expired — no project affected")
+    assert not [t for t in pushover.titles() if "project suppression expired" in t]
 
 
 def test_quarantined_project_rescan_is_silent(tmp_path, monkeypatch, stubs):
