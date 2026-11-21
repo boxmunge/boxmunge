@@ -2,7 +2,7 @@
 """The suppression notice record: ``state/cve/suppression-notices.json``.
 
 ``{"warned": [{"cve_id", "scope", "project", "until", "warned_at"}],
-"pending_host_expiries": [{"cve_id", "until"}]}``; ``project`` is "" for a
+"pending_host_expiries": [{"cve_id", "until", "detected_at"}]}``; ``project`` is "" for a
 host suppression, ``until`` a YYYY-MM-DD date, ``warned_at`` ISO 8601 UTC.
 
 ``warned``: a warning is sent once per key (CVE, scope, project, until),
@@ -12,7 +12,9 @@ entry is pruned once its ``until`` has passed.
 
 ``pending_host_expiries``: a host suppression whose expiry a partial run (a
 single-project scan, a KEV watch tick) detected, or whose expiry alert was
-not delivered. The next full fleet run alerts it with every project judged.
+not delivered, with when it was first left pending. The next full fleet
+run alerts it with every project judged; if none has done so within
+SCAN_MAX_AGE, a partial run alerts it, saying it is partial.
 
 Read-modify-write is under ``record_lock``: a single-project scan holds only
 its project's lock, so two can run at once.
@@ -49,7 +51,7 @@ def host_key(sup: Suppression) -> HostKey:
 @dataclass
 class NoticeRecord:
     warned: dict[Key, datetime] = field(default_factory=dict)
-    pending: set[HostKey] = field(default_factory=set)
+    pending: dict[HostKey, datetime] = field(default_factory=dict)
 
 
 def repair_hint(paths: BoxPaths) -> str:
@@ -71,6 +73,13 @@ def _strings(item: dict, *names: str) -> tuple[str, ...]:
     return values
 
 
+def _aware(value, what: str) -> datetime:
+    when = datetime.fromisoformat(value)
+    if when.tzinfo is None:
+        raise ValueError(f"{what} {value!r} has no timezone")
+    return when
+
+
 def read_record(paths: BoxPaths) -> NoticeRecord:
     """The record (empty before the first notice). Raises StateError naming
     the file. Hold ``record_lock`` across a read and its write."""
@@ -83,12 +92,10 @@ def read_record(paths: BoxPaths) -> NoticeRecord:
         record = NoticeRecord()
         for item in data["warned"]:
             key = _strings(item, "cve_id", "scope", "project", "until")
-            when = datetime.fromisoformat(item["warned_at"])
-            if when.tzinfo is None:
-                raise ValueError(f"warned_at {item['warned_at']!r} has no timezone")
-            record.warned[key] = when  # type: ignore[index]
+            record.warned[key] = _aware(item["warned_at"], "warned_at")  # type: ignore[index]
         for item in data["pending_host_expiries"]:
-            record.pending.add(_strings(item, "cve_id", "until"))  # type: ignore[arg-type]
+            key = _strings(item, "cve_id", "until")
+            record.pending[key] = _aware(item["detected_at"], "detected_at")  # type: ignore[index]
         return record
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
         raise StateError(f"cannot read the suppression notice record {path}: {e!r}") from e
@@ -103,7 +110,8 @@ def write_record(paths: BoxPaths, record: NoticeRecord, today: date) -> None:
                     "warned_at": when.isoformat()}
                    for k, when in sorted(record.warned.items())
                    if date.fromisoformat(k[3]) > today],
-        "pending_host_expiries": [{"cve_id": c, "until": u} for c, u in sorted(record.pending)],
+        "pending_host_expiries": [{"cve_id": c, "until": u, "detected_at": when.isoformat()}
+                                  for (c, u), when in sorted(record.pending.items())],
     }
     try:
         # atomic_write_text creates state/cve/ as deploy's when run as root.

@@ -11,6 +11,7 @@ report that one project and carry on with the rest (audit B-12).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,8 @@ from boxmunge.cve.hardening import (
 from boxmunge.cve.policy import PolicyError, Posture, ProjectDecision, parse_posture
 from boxmunge.cve.security_policy import security_policy
 from boxmunge.cve.scan_state import (
-    BASIS_CONTAINERS, BASIS_STARTUP_IMAGES, decisions_from_scan_state, read_scan_state,
+    BASIS_CONTAINERS, BASIS_STARTUP_IMAGES, decisions_from_scan_state, prior_judged_on,
+    read_scan_state,
 )
 from boxmunge.cve.suppressions import Suppression, SuppressionsError, load_suppressions
 from boxmunge.deployed_inventory import (
@@ -342,13 +344,17 @@ def identify(paths: BoxPaths, project: str, meta: ProjectMeta) -> ImageInventory
         raise ProjectScanError(f"project {project!r}: {e}") from e
 
 
-def load_prior_decisions(paths: BoxPaths, project: str) -> tuple[ProjectDecision, ...]:
-    """The previous scan's decisions, for transition detection."""
+def load_prior_decisions(
+    paths: BoxPaths, project: str,
+) -> tuple[tuple[ProjectDecision, ...], date | None]:
+    """The previous scan's decisions, for transition detection, and the date
+    it judged by (scan_state.prior_judged_on), for suppression expiry."""
     try:
         prior_state = read_scan_state(paths.project_scan_state(project))
         if prior_state is None:
-            return ()
-        return decisions_from_scan_state(prior_state, project_name=project)
+            return (), None
+        return (decisions_from_scan_state(prior_state, project_name=project),
+                prior_judged_on(prior_state))
     except (StateError, ValueError, KeyError, TypeError, AttributeError) as e:
         # Audit B-12: a truncated or hand-mangled file (JSON errors are
         # ValueErrors) must not stop this project's scan, let alone the
@@ -360,4 +366,4 @@ def load_prior_decisions(paths: BoxPaths, project: str) -> tuple[ProjectDecision
             f"ignoring unreadable prior scan state for {project}: {e}",
             paths, project=project,
         )
-        return ()
+        return (), None

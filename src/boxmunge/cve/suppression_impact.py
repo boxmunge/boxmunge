@@ -157,13 +157,16 @@ def foreseen_impact(
     current: Sequence[ProjectDecision], cve_id: str,
 ) -> ProjectImpact:
     """What the expiry will do, from ``foreseen`` (decisions judged without
-    the suppression). A CVE the project carries but whose findings this scan
-    (``current``) did not suppress is NOT_APPLYING: a known-exploited listing
-    already overrides the suppression, so its expiry changes nothing.
+    the suppression). A CVE whose every current finding a known-exploited
+    listing decided (``kev_override``: full KEV, or VulnCheck under paranoid)
+    is NOT_APPLYING: that listing already overrides the suppression, so its
+    expiry changes nothing. Not "no finding is SUPPRESSED": a fixable finding
+    is IGNORED_FIXED with its suppression still in force (the policy checks
+    the fix first), and its expiry can quarantine it.
     QUARANTINED means the policy will take the site down; the circuit
     breaker or an urgent autofix may still keep it up on the day."""
     now = _found(current, cve_id)
-    if now and not any(fd.disposition is Disposition.SUPPRESSED for fd in now):
+    if now and all(fd.kev_override for fd in now):
         return ProjectImpact(project, posture, Impact.NOT_APPLYING, _facts(_worst(current, cve_id)))
     fd = _worst(foreseen, cve_id)
     return ProjectImpact(project, posture, _classify(fd), _facts(fd))

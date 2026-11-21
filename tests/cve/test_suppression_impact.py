@@ -24,11 +24,11 @@ def _sup(until: date = UNTIL, cve: str = CVE, scope: str = SCOPE_HOST) -> Suppre
 
 
 def _fd(disposition: Disposition, *, package: str = "perl", fix: str | None = None,
-        exploited=frozenset()) -> FindingDisposition:
+        exploited=frozenset(), kev_override: bool = False) -> FindingDisposition:
     finding = Finding(cve_id=CVE, severity=Severity.HIGH, package=package,
                       installed_version="1", fixed_version=fix, title="", primary_url=None)
     return FindingDisposition(finding, Severity.HIGH, 0, Severity.HIGH, disposition, None, "",
-                              exploited_by=exploited)
+                              exploited_by=exploited, kev_override=kev_override)
 
 
 def _decisions(*fds: FindingDisposition) -> tuple[ProjectDecision, ...]:
@@ -87,7 +87,8 @@ def test_foreseen_classes(disposition, impact) -> None:
 def test_a_suppression_already_not_applying_changes_nothing() -> None:
     """A known-exploited listing overrides it: the scan did not suppress the
     finding, so the expiry is not a quarantine to warn of."""
-    listed = _fd(Disposition.QUARANTINE, exploited=frozenset({ExploitedSource.VULNCHECK}))
+    listed = _fd(Disposition.QUARANTINE, exploited=frozenset({ExploitedSource.VULNCHECK}),
+                 kev_override=True)
     got = foreseen_impact("shop", "paranoid", _decisions(listed), _decisions(listed), CVE)
     assert got.impact is Impact.NOT_APPLYING
 
@@ -134,3 +135,12 @@ def test_actual_already_quarantined_for_another_finding(disposition) -> None:
     got = actual_impact("blog", "balanced", _decisions(_fd(disposition)), CVE,
                         quarantined=True, held=frozenset())
     assert got.impact is Impact.ALREADY_QUARANTINED
+
+
+def test_a_suppressed_fixable_finding_is_not_mistaken_for_an_override() -> None:
+    """The policy checks the fix before the suppression: a suppressed
+    fixable finding is IGNORED_FIXED, and its expiry can still quarantine."""
+    current = _decisions(_fd(Disposition.IGNORED_FIXED, fix="2"))
+    foreseen = _decisions(_fd(Disposition.QUARANTINE, fix="2"))
+    got = foreseen_impact("shop", "paranoid", foreseen, current, CVE)
+    assert got.impact is Impact.QUARANTINED

@@ -31,7 +31,7 @@ from boxmunge.commands.security_enforce import (
     raise_enforcement_error,
 )
 from boxmunge.compose_images import image_phrase
-from boxmunge.cve.alerting import Alert, emit_scan_alerts, expired_between, scan_date
+from boxmunge.cve.alerting import Alert, emit_scan_alerts, expired_between
 from boxmunge.cve.exploited import ExploitedSource, load_exploited
 from boxmunge.cve.kev import KevCatalog, load_kev
 from boxmunge.cve.policy import FindingDisposition, Posture, ProjectDecision
@@ -333,7 +333,7 @@ def scan_one_project_locked(
 
     # Load the prior scan_state BEFORE we overwrite it (transition alerts).
     scan_state_path = paths.project_scan_state(project)
-    prior_decisions = load_prior_decisions(paths, project)
+    prior_decisions, prior_date = load_prior_decisions(paths, project)
 
     inventory = identify(paths, project, meta)
     targets, unidentified = inventory.targets, inventory.unidentified
@@ -351,10 +351,10 @@ def scan_one_project_locked(
         if not audit_only:
             outcome = _enforce(paths, project, meta, None, {}, defer_new=defer_new)
             record_error = _record(
-                scan_state_path, decisions=(),
+                scan_state_path, decisions=(), judged_on=today,
                 unscanned=tuple(_unscanned(unidentified=unidentified)), **basis,
             )
-            gone = expired_between(supps, scan_date(prior_decisions), today)
+            gone = expired_between(supps, prior_date, today)
             _raise_recorded(outcome.error, record_error, Expiry(
                 project, meta.posture.value, gone, (), failed=True) if gone else None)
         return ProjectScan(
@@ -405,7 +405,7 @@ def scan_one_project_locked(
     record_error = None
     if not audit_only:
         record_error = _record(
-            scan_state_path, decisions=tuple(decisions),
+            scan_state_path, decisions=tuple(decisions), judged_on=today,
             unscanned=tuple(_unscanned(failed, skipped, unidentified)), **basis,
         )
 
@@ -416,7 +416,8 @@ def scan_one_project_locked(
         if outcome.landed:
             announce_quarantine(paths, project, decisions, note=urgent.quarantine_note)
         expired = _collect_transition_alerts(
-            paths, project, meta.posture, decisions, prior_decisions, supps, alerts, today,
+            paths, project, meta.posture, decisions, prior_decisions, supps, alerts,
+            today, prior_date,
         )
         urgent.annotate(alerts)
     _raise_recorded(outcome.error, record_error, Expiry(
@@ -473,6 +474,7 @@ def _collect_transition_alerts(
     supps: tuple[Suppression, ...],
     sink: list[Alert],
     today: date,
+    prior_date: date | None,
 ) -> tuple[Suppression, ...]:
     """Best-effort transition alerts, appended to ``sink`` for the caller to
     deliver; failures never fail the scan. Returns the expired suppressions
@@ -486,6 +488,7 @@ def _collect_transition_alerts(
             suppressions=supps,
             paths=paths,
             today=today,
+            prior_date=prior_date,
         )
     except Exception as e:  # noqa: BLE001 — alerting must never block scan
         log_warning("cve-scan", f"alert emission failed for {project}: {e}",

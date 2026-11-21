@@ -3,6 +3,7 @@
 policy and enforcement (Docker and Trivy stubbed)."""
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, time, timedelta, timezone
 
 import pytest
@@ -283,12 +284,12 @@ def test_partial_run_leaves_the_host_expiry_to_the_fleet_run(box):
     _scanned_yesterday(paths, "shop", "wiki", "blog")
     cmd_security_scan(["blog"], paths)
     assert _sent(pushover, "host suppression expired") == []
-    assert read_record(paths).pending == {(CVE, TODAY.isoformat())}
+    assert set(read_record(paths).pending) == {(CVE, TODAY.isoformat())}
     cmd_security_scan([], paths)
     [(title, body, priority)] = _sent(pushover, "host suppression expired")
     assert title.endswith("— 1 project quarantined") and priority == 1
     assert "- 1 project alerts only and keeps running: blog [balanced]" in body
-    assert read_record(paths).pending == set()
+    assert read_record(paths).pending == {}
 
 
 def test_expiry_survives_an_enforcement_error_after_recording(box):
@@ -332,3 +333,72 @@ def test_unusable_record_partial_run_alerts_the_host_expiry_as_partial(box):
     [(title, body, priority)] = _sent(pushover, "host suppression expired")
     assert title.endswith("(partial: one scan's projects)") and priority == 1
     assert "blog [balanced]" in body
+
+
+def test_expiry_after_a_run_judged_before_midnight_but_written_after(box, monkeypatch):
+    """Run 1 judges by yesterday's clock (it started before 00:00 UTC) but
+    writes today; run 2 must still replay the expiry from the judged date."""
+    paths, pushover, *_ = box
+    _suppress(paths, TODAY, project="shop")
+    _scanned_yesterday(paths, "shop")
+    monkeypatch.setattr(security_scan_core, "_today", lambda: TODAY - timedelta(days=1))
+    monkeypatch.setattr(security_scan_core, "_now", lambda: NOW - timedelta(hours=4))
+    cmd_security_scan(["shop"], paths)
+    assert _sent(pushover, "expired") == []
+    monkeypatch.setattr(security_scan_core, "_today", lambda: TODAY)
+    monkeypatch.setattr(security_scan_core, "_now", lambda: NOW)
+    cmd_security_scan(["shop"], paths)
+    [(title, _, _)] = _sent(pushover, "project suppression expired")
+    assert title.endswith("— quarantined")
+
+
+@pytest.mark.parametrize(("posture", "title_end", "line"), [
+    ("paranoid", "— will be quarantined", "will be quarantined (stopped)"),
+    ("strict", "— will alert only", "will alert only and keep running"),
+])
+def test_suppressed_fixable_finding_is_warned(box, monkeypatch, posture, title_end, line):
+    """A fixable finding under a suppression is IGNORED_FIXED, not
+    SUPPRESSED: its expiry still changes what the policy does."""
+    paths, pushover, *_ = box
+    write_project(paths, "api", security={"posture": posture})
+    (paths.state / "projects.txt").write_text("shop\nwiki\nblog\napi\n")
+    monkeypatch.setattr(security_scan_core, "scan_image", lambda ref, timeout: scan_result(
+        ref, [finding(CVE, fix="2")] if ref.startswith("api") else []))
+    _suppress(paths, TODAY + timedelta(days=1), project="api")
+    cmd_security_scan(["api"], paths)
+    [(title, body, _)] = _sent(pushover, "project suppression expires")
+    assert title.endswith(title_end)
+    assert f"- api [{posture}; fix available] {line}" in body
+
+
+def _pend(paths, detected_at: datetime) -> None:
+    paths.suppression_notices.parent.mkdir(parents=True, exist_ok=True)
+    paths.suppression_notices.write_text(json.dumps({"warned": [], "pending_host_expiries": [
+        {"cve_id": CVE, "until": (TODAY - timedelta(days=2)).isoformat(),
+         "detected_at": detected_at.isoformat()}]}))
+
+
+def test_overdue_pending_host_expiry_is_alerted_by_a_partial_run(box):
+    """No full nightly has completed within SCAN_MAX_AGE of the expiry being
+    found: a partial run alerts it, as partial, once."""
+    paths, pushover, *_ = box
+    _suppress(paths, TODAY - timedelta(days=2))
+    _pend(paths, NOW - timedelta(hours=37))
+    cmd_security_scan(["blog"], paths)
+    [(title, body, priority)] = _sent(pushover, "host suppression expired")
+    assert title.endswith("(partial: one scan's projects)") and priority == 1
+    assert "No full nightly scan has completed since" in body
+    assert "blog [balanced]" in body
+    assert read_record(paths).pending == {}
+    pushover.clear()
+    cmd_security_scan(["blog"], paths)
+    assert _sent(pushover, "expired") == []
+
+
+def test_recent_pending_host_expiry_waits_for_the_fleet_run(box):
+    paths, pushover, *_ = box
+    _suppress(paths, TODAY - timedelta(days=2))
+    _pend(paths, NOW - timedelta(hours=2))
+    cmd_security_scan(["blog"], paths)
+    assert _sent(pushover, "expired") == []
+    assert len(read_record(paths).pending) == 1

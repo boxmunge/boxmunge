@@ -13,7 +13,8 @@ it. Host scope needs every project judged, so only a full fleet run (the
 nightly scan) alerts it, once per run (audit B-14). A partial run (a
 single-project scan, a KEV watch tick) that finds a host suppression expired
 leaves it pending in the notice record for the next full run, which judges
-the whole fleet; a host expiry alert that is not delivered stays pending.
+the whole fleet; a host expiry alert that is not delivered stays pending. If
+no full run alerts it within SCAN_MAX_AGE, a partial run does, as partial.
 
 Each warning is sent once per (CVE, scope, project, until) and recorded only
 once delivered (cve.suppression_record). If the record cannot be used, no
@@ -23,6 +24,7 @@ than lost.
 """
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -32,6 +34,7 @@ from boxmunge.cve.alerting import (
     Alert, format_suppression_expired_alert, format_suppression_expiring_alert,
 )
 from boxmunge.cve.quarantine import is_quarantined
+from boxmunge.cve.scan_state import SCAN_MAX_AGE
 from boxmunge.cve.suppression_impact import Expiry, ProjectImpact, actual_impact, not_judged
 from boxmunge.cve.suppression_record import (
     HostKey, NoticeRecord, host_key, read_record, record_lock, repair_hint, warned_key,
@@ -106,15 +109,20 @@ def _host_detected(run: SuppressionRun) -> dict[HostKey, Suppression]:
 
 
 def _host_alert(paths: BoxPaths, run: SuppressionRun,
-                sups: Mapping[HostKey, Suppression], *, partial: bool) -> Alert:
+                sups: Mapping[HostKey, Suppression], *, partial: bool,
+                no_full_run_since: datetime | None = None) -> Alert:
     entries: _Entries = [(s, _fleet_impacts(paths, run, s.cve_id)) for s in sups.values()]
-    return format_suppression_expired_alert(entries, project=None, partial=partial)
+    return format_suppression_expired_alert(entries, project=None, partial=partial,
+                                            no_full_run_since=no_full_run_since)
 
 
-def _pending_suppressions(paths: BoxPaths, pending: set[HostKey]) -> dict[HostKey, Suppression]:
-    """The pending host expiries still in the host file (one the operator
-    has since removed or replaced is dropped: there is nothing to alert)."""
-    if not pending:
+def _pending_suppressions(
+    paths: BoxPaths, pending: dict[HostKey, datetime], keys,
+) -> dict[HostKey, Suppression]:
+    """Of ``keys`` (pending), those still in the host file. One the operator
+    has since removed or replaced is dropped from ``pending``: there is
+    nothing to alert."""
+    if not keys:
         return {}
     try:
         listed = {host_key(s): s for s in load_suppressions(
@@ -123,30 +131,46 @@ def _pending_suppressions(paths: BoxPaths, pending: set[HostKey]) -> dict[HostKe
         # The scans fail on the same file; keep the entries for a later run.
         log_warning("cve-scan", f"pending host suppression expiries kept: {e}", paths)
         return {}
-    for key in sorted(pending - set(listed)):
+    for key in sorted(set(keys) - set(listed)):
         log_operation("cve-alert", f"host suppression {key[0]} (until {key[1]}) is no "
                       f"longer in the host file; its pending expiry alert is dropped", paths)
-        pending.discard(key)
-    return {k: listed[k] for k in pending}
+        pending.pop(key, None)
+    return {k: listed[k] for k in keys if k in listed}
+
+
+def _leave_pending(paths: BoxPaths, run: SuppressionRun, record: NoticeRecord) -> None:
+    """A partial run: leave what it found for the full run, and alert, as
+    partial, any expiry no full run has alerted within SCAN_MAX_AGE (the
+    timer is off, or every nightly dies before its enforcement ends)."""
+    for key in sorted(set(_host_detected(run)) - set(record.pending)):
+        log_operation("cve-alert", f"host suppression {key[0]} expired; the nightly "
+                      f"fleet scan alerts it with every project judged", paths)
+        record.pending[key] = run.now
+    overdue = [k for k, when in record.pending.items() if run.now - when > SCAN_MAX_AGE]
+    sups = _pending_suppressions(paths, record.pending, overdue)
+    if sups and _send(paths, _host_alert(
+            paths, run, sups, partial=True,
+            no_full_run_since=min(record.pending[k] for k in sups))):
+        for key in sups:
+            del record.pending[key]
 
 
 def _host_expiries(paths: BoxPaths, run: SuppressionRun, record: NoticeRecord) -> bool:
     """Alert (full run) or leave pending (partial run) the host expiries.
-    True when a host expiry alert was delivered."""
-    detected = _host_detected(run)
+    True when a host expiry alert was delivered by a full run."""
     if not run.full:
-        for key in sorted(set(detected) - record.pending):
-            log_operation("cve-alert", f"host suppression {key[0]} expired; the nightly "
-                          f"fleet scan alerts it with every project judged", paths)
-        record.pending |= set(detected)
+        _leave_pending(paths, run, record)
         return False
-    sups = {**_pending_suppressions(paths, record.pending), **detected}
+    detected = _host_detected(run)
+    sups = {**_pending_suppressions(paths, record.pending, list(record.pending)), **detected}
     if not sups:
         return False
     if _send(paths, _host_alert(paths, run, sups, partial=False)):
-        record.pending -= set(sups)
+        for key in sups:
+            record.pending.pop(key, None)
         return True
-    record.pending |= set(sups)
+    for key in sups:
+        record.pending.setdefault(key, run.now)
     return False
 
 
@@ -182,7 +206,8 @@ def send_suppression_alerts(paths: BoxPaths, run: SuppressionRun) -> str | None:
     not be used, or None. The caller reports it and fails the run."""
     for alert in _project_expiries(paths, run):
         _send(paths, alert)
-    if not (run.full or _host_detected(run) or any(s.expiring for s in run.scans.values())):
+    if not (run.full or _host_detected(run) or any(s.expiring for s in run.scans.values())
+            or os.path.lexists(paths.suppression_notices)):   # pending may be overdue
         return None
     host_handled = False
     try:

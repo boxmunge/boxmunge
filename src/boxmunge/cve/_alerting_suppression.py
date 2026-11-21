@@ -206,6 +206,7 @@ def format_suppression_expiring_alert(
 
 def format_suppression_expired_alert(
     entries: Sequence[Entry], *, project: str | None, partial: bool = False,
+    no_full_run_since: datetime | None = None,
 ) -> Alert:
     """Suppressions that stopped applying since the prior scan, and what this
     run did about each: quarantined, held by the circuit breaker, running at
@@ -213,7 +214,9 @@ def format_suppression_expired_alert(
     per full fleet run (audit B-14). ``partial``: a host alert from a run
     that judged only some projects (the notice record was unusable, so it
     could not be left to the fleet run); it says so and is priority 1, since
-    the rest of the fleet is unknown. Otherwise priority 1 when a project was
+    the rest of the fleet is unknown. ``no_full_run_since``: a partial alert
+    for a host expiry left pending that long ago, because no full nightly
+    run has completed since. Otherwise priority 1 when a project was
     quarantined, held, left at risk or not judged, else normal."""
     entries = _sorted(entries)
     host = project is None
@@ -233,6 +236,10 @@ def format_suppression_expired_alert(
         title += " (partial: one scan's projects)"
         lines.append("This run judged only the projects above; the rest of the fleet was "
                      "not scanned. The nightly scan judges them.")
+        if no_full_run_since is not None:
+            lines.append(f"No full nightly scan has completed since this expiry was found "
+                         f"({no_full_run_since.isoformat(timespec='minutes')}): check "
+                         f"boxmunge-maintenance.timer and the cve-scan log.")
     lines += _actions(entries, project, foreseen=False)
     return Alert(kind="suppression_expired", title=title, body="\n".join(lines),
                  priority=1 if partial else _priority(entries))

@@ -248,6 +248,7 @@ def detect_transitions(
     prior: Sequence[ProjectDecision],
     suppressions: tuple[Suppression, ...],
     today: date | None = None,
+    prior_date: date | None = None,
 ) -> Transitions:
     """Compute this project's alerts from its prior and current decisions.
 
@@ -255,8 +256,9 @@ def detect_transitions(
     disposition changed. Suppression expiry is detected by replaying the
     suppression list against the prior and current scan dates, and returned
     in ``Transitions.expired`` rather than alerted here. ``today`` is the
-    date the scan judged by (its run's clock); the current decisions' own
-    date when None.
+    date the scan judged by (its run's clock), ``prior_date`` the date the
+    prior scan judged by (its recorded ``judged_on``); each falls back to its
+    decisions' own date when None.
 
     QUARANTINE dispositions are not alerted here: the QUARANTINED alert is
     tied to the quarantine action landing (audit B-17), which the
@@ -326,7 +328,8 @@ def detect_transitions(
     new_upcoming = [h for k, h in hardening_upcoming_by_key(current).items()
                     if k not in flagged_before]
 
-    expired = expired_between(suppressions, scan_date(prior),
+    expired = expired_between(suppressions,
+                              prior_date if prior_date is not None else scan_date(prior),
                               today if today is not None and current else scan_date(current))
 
     alerts: list[Alert] = []
@@ -379,6 +382,7 @@ def emit_scan_alerts(
     suppressions: tuple[Suppression, ...],
     paths: BoxPaths,
     today: date | None = None,
+    prior_date: date | None = None,
 ) -> Transitions:
     """detect_transitions for one project, with nothing sent.
 
@@ -393,6 +397,7 @@ def emit_scan_alerts(
         prior=prior,
         suppressions=suppressions,
         today=today,
+        prior_date=prior_date,
     )
     for alert in transitions.dropped:
         log_operation(

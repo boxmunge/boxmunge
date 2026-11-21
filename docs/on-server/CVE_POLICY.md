@@ -1871,7 +1871,9 @@ Rules:
   its expiry alert, come only from the nightly (fleet) scan, which judges
   every project. A `security scan <project>` or a KEV watch tick sees only
   part of the fleet: one that finds a host suppression expired leaves it
-  to the next nightly scan.
+  to the next nightly scan. If no nightly scan completes within 36 hours
+  of that, the next partial run alerts it at priority-1, marked partial,
+  saying no full nightly scan has completed since.
 - A suppression that already does not apply (a CVE listed as known
   exploited overrides it) is not warned as a quarantine: the warning says
   the project already ignores it.

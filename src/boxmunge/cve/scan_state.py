@@ -10,7 +10,7 @@ from __future__ import annotations
 import errno
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, TypeVar
@@ -104,6 +104,7 @@ def write_scan_state(
     unscanned: tuple[str, ...] = (),
     basis: str = BASIS_CONTAINERS,
     stopped_reason: str | None = None,
+    judged_on: date | None = None,
 ) -> None:
     """Persist the result of a project scan.
 
@@ -112,7 +113,9 @@ def write_scan_state(
     defaults to "now" when omitted. `unscanned` names each image or service
     the scan did not cover, for the scan-freshness health check. `basis`
     records what was scanned (`stopped_reason` says why a project scanned
-    by BASIS_STARTUP_IMAGES is stopped).
+    by BASIS_STARTUP_IMAGES is stopped). `judged_on` is the UTC date the
+    scan judged by (its run's clock, see ``prior_judged_on``); `scanned_at`
+    stays the write time, for the freshness check.
     """
     when = scanned_at or datetime.now(timezone.utc)
     data: dict[str, Any] = {
@@ -122,10 +125,31 @@ def write_scan_state(
         "decisions": [_serialize_decision(d) for d in decisions],
         "unscanned": list(unscanned),
     }
+    if judged_on is not None:
+        data["judged_on"] = judged_on.isoformat()
     try:
         atomic_write_text(path, json.dumps(data, indent=2) + "\n")
     except OSError as e:
         raise ScanStateWriteError(path, e) from e
+
+
+def prior_judged_on(state: dict[str, Any]) -> date | None:
+    """The UTC date a recorded scan judged suppressions by: the date the next
+    scan replays suppression expiry from. A fleet run judges every project
+    by its start, so a run crossing 00:00 UTC writes a later stamp than the
+    date it judged by; the stamp would skip an expiry on the date between.
+
+    A record written before ``judged_on`` existed has only its write stamp;
+    for those, and only those, its date is the best there is. StateError for
+    a ``judged_on`` that is not a date."""
+    raw = state.get("judged_on")
+    if raw is None:
+        when = state.get("scanned_at")
+        return datetime.fromisoformat(when).date() if isinstance(when, str) else None
+    try:
+        return date.fromisoformat(raw)
+    except (TypeError, ValueError):
+        raise StateError(f"stored 'judged_on' is {raw!r}, not a date") from None
 
 
 def last_scanned_at(path: Path) -> str | None:

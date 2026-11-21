@@ -34,15 +34,18 @@ def test_round_trip_prunes_passed_warnings_and_keeps_pending(tmp_path) -> None:
     gone = warned_key(_sup(date(2026, 11, 21), SCOPE_PROJECT), "shop")
     pending = host_key(_sup(date(2026, 11, 20), SCOPE_HOST))
     with record_lock(paths):
-        write_record(paths, NoticeRecord({live: NOW, gone: NOW}, {pending}), date(2026, 11, 21))
-    assert read_record(paths) == NoticeRecord({live: NOW}, {pending})
+        write_record(paths, NoticeRecord({live: NOW, gone: NOW}, {pending: NOW}),
+                     date(2026, 11, 21))
+    assert read_record(paths) == NoticeRecord({live: NOW}, {pending: NOW})
 
 
 @pytest.mark.parametrize("raw", [
     "{not json", '{"warned": [{"cve_id": "x"}], "pending_host_expiries": []}',
     '{"warned": [{"cve_id": "x", "scope": "host", "project": "", "until": "soon",'
     ' "warned_at": "2026-11-21T03:00:00+00:00"}], "pending_host_expiries": []}',
-    '{"warned": [], "pending_host_expiries": [{"cve_id": "x"}]}'])
+    '{"warned": [], "pending_host_expiries": [{"cve_id": "x"}]}',
+    '{"warned": [], "pending_host_expiries": [{"cve_id": "x", "until": "2026-11-20",'
+    ' "detected_at": "2026-11-20T01:00:00"}]}'])
 def test_unusable_record_is_refused_naming_the_file(tmp_path, raw) -> None:
     paths = BoxPaths(root=tmp_path)
     paths.suppression_notices.parent.mkdir(parents=True)
