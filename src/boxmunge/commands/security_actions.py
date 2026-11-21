@@ -16,91 +16,43 @@ from datetime import datetime, timezone
 from boxmunge.commands.autofix_queue_cmd import after_scan
 from boxmunge.commands.autofix_urgent_scan import held_for_patch
 from boxmunge.commands.security_fleet_enforce import apply_held, apply_new_quarantines
-from boxmunge.commands.security_scan_core import ProjectScan, scan_one_project
+from boxmunge.commands.security_scan_core import (
+    ProjectScan, ScanClock, ScanRecordedError, scan_clock, scan_one_project,
+)
+from boxmunge.commands.security_scan_targets import (
+    orphaned, parse_scan_targets, report_unfinished, retire_grace_marker,
+    summarise_decisions,
+)
+from boxmunge.commands.security_suppression_alerts import (
+    SuppressionRun, send_suppression_alerts,
+)
 from boxmunge.cve.breaker import BreakerError
 from boxmunge.cve.alerting import (
     Alert,
     format_scan_digest,
     is_low_urgency,
-    format_host_suppression_expired_alert,
     format_scan_failure_alert,
     format_scan_unrecorded_alert,
+    format_suppression_record_alert,
     send_alerts,
 )
 from boxmunge.commands.security_kev import refresh_kev_and_alert
 from boxmunge.cve.fleet_lock import fleet_lock
 from boxmunge.cve.kev import KevCatalog
 from boxmunge.cve.scan_state import last_scanned_at
-from boxmunge.cve.policy import Disposition, ProjectDecision
+from boxmunge.cve.policy import Disposition
 from boxmunge.cve.quarantine import QuarantineError, is_quarantined
 from boxmunge.cve.scanner import ScanResult, TrivyNotInstalledError, refresh_db
-from boxmunge import docker_containers
-from boxmunge.docker_run import DockerError
 from boxmunge.fileutil import LockError
-from boxmunge.log import log_operation, log_warning
+from boxmunge.log import log_warning
 from boxmunge.manifest import ManifestError
 from boxmunge.paths import BoxPaths
 from boxmunge.state import StateError
-from boxmunge.project_registry import (
-    deployed_among, forget_advice, is_registered, missing_among, read_registry,
-    registry_problem_message, unfinished_removals,
-)
+from boxmunge.cve.suppression_impact import Expiry
+from boxmunge.cve.suppression_record import repair_hint
+from boxmunge.project_registry import registry_problem_message
 
-
-# ---------- helpers ----------
-
-
-# The v0.6.0 migration grace window's marker and its lock. Every box's
-# window closed in May 2026 and nothing reads them any more; the scan
-# removes what an older release left behind.
-_RETIRED_GRACE_FILES = ("cve-grace.json", ".cve-grace.lock")
-
-
-def _retire_grace_marker(paths: BoxPaths) -> None:
-    """Remove the retired grace marker and lock; say so once, when they go.
-
-    A file that cannot be removed is warned about, not raised: it is inert,
-    and the scan it would block is the box's CVE enforcement."""
-    removed = []
-    for name in _RETIRED_GRACE_FILES:
-        path = paths.state / name
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            continue
-        except OSError as e:
-            log_warning("cve-scan", f"could not remove the retired {path}: {e}; "
-                        f"remove it by hand: sudo rm {path}", paths)
-            continue
-        removed.append(name)
-    if removed:
-        log_operation("cve-scan", f"removed the retired migration grace files: "
-                      f"{', '.join(removed)}", paths)
-
-
-def _summarise_decisions(decisions: list[ProjectDecision]) -> str:
-    """One-line counts of dispositions across all decisions."""
-    counts: dict[str, int] = {}
-    total = 0
-    for d in decisions:
-        for f in d.findings:
-            total += 1
-            counts[f.disposition.value] = counts.get(f.disposition.value, 0) + 1
-    if total == 0:
-        return "0 findings"
-    parts = []
-    for tag in (
-        Disposition.QUARANTINE.value,
-        Disposition.SUPPRESSED.value,
-        Disposition.STILL_RUNNING_AT_RISK.value,
-        Disposition.AWAITING_FIX.value,
-        Disposition.INFORMATIONAL.value,
-        Disposition.IGNORED_FIXED.value,
-    ):
-        c = counts.get(tag, 0)
-        if c:
-            parts.append(f"{c} {tag.replace('_', '-')}")
-    return f"{total} findings ({', '.join(parts)})"
+_parse_scan_targets = parse_scan_targets  # tests resolve it here
 
 
 # ---------- subcommand: scan ----------
@@ -120,6 +72,13 @@ class FleetRun:
     held: dict[str, frozenset[str]] = field(default_factory=dict)
     # Low-urgency alerts held back for the one digest sent at the end.
     digest: list[Alert] = field(default_factory=list)
+    # One clock for every project of the run (security_scan_core.ScanClock).
+    clock: ScanClock = field(default_factory=scan_clock)
+    # Suppressions each scan found expired, failed scans' too (they are
+    # recorded, so no later scan finds them again).
+    expiries: list[Expiry] = field(default_factory=list)
+    # Why the suppression notice record could not be used (fails the run).
+    record_problem: str | None = None
 
 
 # FleetRun.problems key for a circuit breaker that failed: no new quarantine
@@ -129,34 +88,6 @@ BREAKER_PROBLEM = "(circuit breaker)"
 # FleetRun.problems key for a damaged project registry: a fleet-level
 # problem, since a bad line names no project that can be scanned.
 REGISTRY_PROBLEM = "(project registry)"
-
-
-def _parse_scan_targets(
-    args: list[str], paths: BoxPaths,
-) -> tuple[list[str], tuple[str, ...], list[str]] | int:
-    """Resolve the projects to scan, any registry problems and the registered
-    names with no project directory, or return a lookup exit code.
-
-    A fleet scan scans every valid registered project and carries each bad
-    registry line forward to be reported. Usage errors exit 2 from parse_args.
-    """
-    from boxmunge.commands.argv import parse_args, require_project_name
-    parsed = parse_args("security", args, max_positional=1)
-    if not parsed.positional:
-        registry = read_registry(paths)
-        return (deployed_among(registry.names, paths), registry.problems,
-                missing_among(registry.names, paths))
-    project = require_project_name("security", parsed.positional[0])
-    if not is_registered(project, paths):
-        print(f"ERROR: project '{project}' is not registered.", file=sys.stderr)
-        return 1
-    if unfinished_removals({project}, paths):
-        print(f"ERROR: {forget_advice(project)}.", file=sys.stderr)
-        return 1
-    if missing_among({project}, paths):
-        print(f"{project} is awaiting its first deploy: nothing to scan.")
-        return 0
-    return [project], (), []
 
 
 def _report_registry_problems(
@@ -172,40 +103,6 @@ def _report_registry_problems(
     run.problems[REGISTRY_PROBLEM] = list(problems)
 
 
-def _report_unfinished(paths: BoxPaths, missing: list[str]) -> None:
-    """Say once per run which registered names are left behind by an
-    unfinished removal (a name merely awaiting its first deploy is not
-    mentioned). Not a scan failure: there is nothing to scan, and doctor and
-    health keep reporting it until the entry is dropped."""
-    unfinished = unfinished_removals(set(missing), paths)
-    if not unfinished:
-        return
-    message = (f"registered but missing, so not scanned: {', '.join(unfinished)}. Drop "
-               f"each entry as the supervisor: sudo boxmunge-server project-forget <name>")
-    print(f"NOTE: {message}")
-    log_warning("cve-scan", message, paths, detail={"missing": unfinished})
-
-
-def _orphaned(missing: list[str]) -> dict[str, list[str]]:
-    """Registered names with no project directory whose containers exist (or
-    cannot be ruled out): they run, unscanned and unmanaged, so they fail
-    the run."""
-    found: dict[str, list[str]] = {}
-    for name in missing:
-        try:
-            names = [c.name for p in (name, f"{name}-staging")
-                     for c in docker_containers.project_containers(p)]
-        except DockerError as e:
-            found[name] = [f"no project directory, and Docker could not be asked "
-                           f"whether containers remain: {e}"]
-            continue
-        if names:
-            found[name] = [f"no project directory, but containers still exist "
-                           f"({', '.join(names)}) and are not scanned; remove them "
-                           f"with project-delete {name}"]
-    return found
-
-
 def _scan_each(
     paths: BoxPaths, targets: list[str], *, kev: KevCatalog, run: FleetRun,
 ) -> None:
@@ -219,7 +116,7 @@ def _scan_each(
         collected: list[Alert] = []
         try:
             scan = scan_one_project(paths, name, kev=kev, defer_new=True,
-                                    scanned=scanned, alerts=collected)
+                                    scanned=scanned, alerts=collected, clock=run.clock)
         except LockError:
             # Audit A-2: another operation holds the project lock. Skip and
             # warn; the next cron tick will re-attempt.
@@ -236,6 +133,8 @@ def _scan_each(
             # Audit B-12: a malformed per-project file (a manifest, a corrupt
             # health, deploy, pause or quarantine record) is reported for
             # that project and the fleet scan carries on with the rest.
+            if isinstance(e, ScanRecordedError) and e.expiry:
+                run.expiries.append(e.expiry)  # recorded: no later scan finds it
             print(f"{name}: ERROR — {e}")
             log_warning(
                 "cve-scan", f"scan failed for {name}: {e}",
@@ -246,6 +145,8 @@ def _scan_each(
         finally:
             _deliver(paths, run, collected, batch=batch)
         run.scans[name] = scan  # enforced and alerted even if unrecorded
+        if scan.expired:
+            run.expiries.append(Expiry(name, scan.posture, scan.expired, scan.decisions))
         if scan.record_error:
             print(f"{name}: ERROR — {scan.record_error}")
             log_warning(
@@ -255,7 +156,7 @@ def _scan_each(
             run.unrecorded[name] = scan.record_error
         for w in scan.warnings:
             print(f"{name}: WARN — {w}")
-        print(f"{name}: {_summarise_decisions(list(scan.decisions))}")
+        print(f"{name}: {summarise_decisions(list(scan.decisions))}")
         if scan.lifted:
             print(f"{name}: quarantine lifted ({scan.lifted})")
         if scan.kept:
@@ -329,12 +230,31 @@ def scan_projects(paths: BoxPaths, targets: list[str], *, kev: KevCatalog,
     a held quarantine is the operator's to apply (`scan --apply-held`)."""
     run = FleetRun()
     try:
-        _scan_each(paths, targets, kev=kev, run=run)
+        try:
+            _scan_each(paths, targets, kev=kev, run=run)
+        finally:
+            _send_digest(paths, run)
+        _enforce_fleet(paths, run)
     finally:
-        _send_digest(paths, run)
-    _enforce_fleet(paths, run)
+        _alert_suppressions(paths, run, full=False)
     _alert_fleet(paths, run, quiet=quiet)
     return run
+
+
+def _alert_suppressions(paths: BoxPaths, run: FleetRun, *, full: bool) -> None:
+    """Suppression expiries and warnings, after the run's enforcement or from
+    a ``finally`` when the run died (what its scans recorded must still be
+    alerted). ``full``: the run judged the whole fleet, so host scope is
+    alerted (security_suppression_alerts)."""
+    unjudged = [n for n in (*run.problems, *run.skipped_locked)
+                if n not in run.scans and not n.startswith("(")]
+    problem = send_suppression_alerts(paths, SuppressionRun(
+        scans=run.scans, expiries=run.expiries, held=run.held, unjudged=unjudged,
+        full=full, today=run.clock.today, now=run.clock.now))
+    if problem:
+        print(f"ERROR: {problem}", file=sys.stderr)
+        log_warning("cve-scan", problem, paths)
+        run.record_problem = problem
 
 
 def _cmd_apply_held(paths: BoxPaths) -> int:
@@ -353,12 +273,16 @@ def _cmd_apply_held(paths: BoxPaths) -> int:
     return 1 if result.errors else 0
 
 
-def _alert_fleet(paths: BoxPaths, run: FleetRun, *, quiet: frozenset[str] = frozenset()) -> None:
-    """Once-per-run alerts: scan failures (audit B-11), expired host-scope
-    suppressions (once, not once per project — B-14). ``quiet`` names
-    projects whose scan failure is not alerted again (the KEV watch, once a
-    day)."""
+def _alert_fleet(paths: BoxPaths, run: FleetRun, *, quiet: frozenset[str] = frozenset(),
+                 full: bool = False) -> None:
+    """Once-per-run alerts: scan failures (audit B-11) and, from a ``full``
+    run only (so once a night), an unusable suppression notice record.
+    ``quiet`` names projects whose scan failure is not alerted again (the
+    KEV watch, once a day)."""
     alerts = []
+    if full and run.record_problem:
+        alerts.append(format_suppression_record_alert(
+            str(paths.suppression_notices), run.record_problem, repair_hint(paths)))
     problems = {p: r for p, r in run.problems.items() if p not in quiet}
     if problems:
         alerts.append(format_scan_failure_alert(problems))
@@ -371,9 +295,6 @@ def _alert_fleet(paths: BoxPaths, run: FleetRun, *, quiet: frozenset[str] = froz
             except StateError as e:
                 unreadable[p] = str(e)
         alerts.append(format_scan_unrecorded_alert(run.unrecorded, last, unreadable))
-    host_expired = {s.cve_id: s for scan in run.scans.values() for s in scan.host_expired}
-    if host_expired:
-        alerts.append(format_host_suppression_expired_alert(list(host_expired.values())))
     if not alerts:
         return
     try:
@@ -389,8 +310,9 @@ def _exit_code(paths: BoxPaths, run: FleetRun) -> int:
     2 = scanned, ≥1 project quarantined, at-risk-running or held by the
     circuit breaker; 0 = clean.
     """
-    if run.problems or run.unrecorded:
-        failed = sorted({*run.problems, *run.unrecorded})
+    if run.problems or run.unrecorded or run.record_problem:
+        record = {"(suppression notice record)"} if run.record_problem else set()
+        failed = sorted({*run.problems, *run.unrecorded} | record)
         print(f"Scan incomplete: {', '.join(failed)}. Exit code 1.")
         return 1
     quarantined = [n for n in run.scans if is_quarantined(n, paths)]
@@ -442,12 +364,12 @@ def _with_urgent(paths: BoxPaths, rc: int, *, only: list[str] | None = None) -> 
 
 
 def _scan_targets_cmd(args: list[str], paths: BoxPaths) -> int:
-    parsed = _parse_scan_targets(args, paths)
+    parsed = parse_scan_targets(args, paths)
     if isinstance(parsed, int):
         return parsed
     targets, registry_problems, missing = parsed
-    _report_unfinished(paths, missing)
-    orphans = _orphaned(missing)
+    report_unfinished(paths, missing)
+    orphans = orphaned(missing)
     if not targets and not registry_problems and not orphans:
         print("No deployed projects to scan." if missing else "No projects registered.")
         if not args:  # the fleet run: the deploy guard needs the lists before a first deploy
@@ -464,24 +386,31 @@ def _scan_targets_cmd(args: list[str], paths: BoxPaths) -> int:
     now = datetime.now(timezone.utc)
     kev = refresh_kev_and_alert(paths, now)
 
-    _retire_grace_marker(paths)
+    retire_grace_marker(paths)
 
     start = time.monotonic()
     run = FleetRun()
+    finished = False
     try:
-        _scan_each(paths, targets, kev=kev, run=run)
-    except TrivyNotInstalledError as e:
-        print(f"ERROR: {e}", file=sys.stderr)
-        return 1
+        try:
+            _scan_each(paths, targets, kev=kev, run=run)
+        except TrivyNotInstalledError as e:
+            print(f"ERROR: {e}", file=sys.stderr)
+            return 1
+        finally:
+            _send_digest(paths, run)
+        _report_registry_problems(paths, run, registry_problems)
+        for name, reasons in orphans.items():
+            print(f"{name}: ERROR — {reasons[0]}")
+            log_warning("cve-scan", f"{name}: {reasons[0]}", paths, project=name)
+            run.problems[name] = reasons
+        _enforce_fleet(paths, run)
+        finished = True
     finally:
-        _send_digest(paths, run)
-    _report_registry_problems(paths, run, registry_problems)
-    for name, reasons in orphans.items():
-        print(f"{name}: ERROR — {reasons[0]}")
-        log_warning("cve-scan", f"{name}: {reasons[0]}", paths, project=name)
-        run.problems[name] = reasons
-    _enforce_fleet(paths, run)
-    _alert_fleet(paths, run)
+        # Even a run that died sends what its scans recorded; only a whole
+        # fleet run that finished judges host scope.
+        _alert_suppressions(paths, run, full=finished and not args)
+    _alert_fleet(paths, run, full=not args)
 
     elapsed = time.monotonic() - start
     print(f"Scanned {len(targets)} projects in {elapsed:.1f}s.")

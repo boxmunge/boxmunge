@@ -31,8 +31,9 @@ Module layout
   informational new-findings alert is dropped (still in ``security status``
   and the log): those postures only act on what needs acting on.
 * Per-project formatters live in ``_alerting_formatters``; fleet-level
-  ones (KEV, scan failure, host suppression expiry) in
-  ``_alerting_fleet``. Both are re-exported here.
+  ones (KEV, scan failure, breaker) in ``_alerting_fleet``; suppression
+  expiry and its advance warning, either scope, in
+  ``_alerting_suppression``. All are re-exported here.
 """
 
 from __future__ import annotations
@@ -44,7 +45,6 @@ from datetime import date
 
 from boxmunge.cve._alerting_fleet import (
     format_breaker_held_alert,
-    format_host_suppression_expired_alert,
     format_kev_sources_disagree_alert,
     format_kev_stale_alert,
     format_kev_withdrawn_alert,
@@ -81,8 +81,12 @@ from boxmunge.cve._alerting_formatters import (
     format_quarantine_alert,
     format_quarantine_lifted_alert,
     format_still_running_alert,
-    format_suppression_expired_alert,
     lift_reason,
+)
+from boxmunge.cve._alerting_suppression import (
+    format_suppression_expired_alert,
+    format_suppression_expiring_alert,
+    format_suppression_record_alert,
 )
 from boxmunge.cve._alerting_types import Alert, AlertKind, Hit
 from boxmunge.cve._alerting_digest import (
@@ -92,7 +96,7 @@ from boxmunge.cve._alerting_digest import (
     is_low_urgency,
 )
 from boxmunge.cve.policy import Disposition, Posture, ProjectDecision
-from boxmunge.cve.suppressions import SCOPE_HOST, Suppression
+from boxmunge.cve.suppressions import Suppression
 from boxmunge.log import log_operation
 from boxmunge.notify import notify
 from boxmunge.paths import BoxPaths
@@ -122,7 +126,8 @@ __all__ = [
     "format_fix_deadline_alert",
     "format_hardening_upcoming_alert",
     "format_suppression_expired_alert",
-    "format_host_suppression_expired_alert",
+    "format_suppression_expiring_alert",
+    "format_suppression_record_alert",
     "format_breaker_held_alert",
     "format_kev_sources_disagree_alert",
     "format_kev_stale_alert",
@@ -173,11 +178,13 @@ def _extra(
 
 @dataclass(frozen=True)
 class Transitions:
-    """Alerts for one project, plus the host-scope suppressions that
-    expired — those are alerted once per fleet run by the caller."""
+    """Alerts for one project, plus the suppressions (either scope) that
+    expired since the prior scan. Those are alerted by the fleet run after
+    its enforcement, so the alert can say what the expiry did (host scope
+    once per run, audit B-14; cve.suppression_impact)."""
 
     alerts: tuple[Alert, ...]
-    host_expired: tuple[Suppression, ...] = ()
+    expired: tuple[Suppression, ...] = ()
     # Informational alerts this posture does not send (logged by the caller).
     dropped: tuple[Alert, ...] = ()
 
@@ -215,10 +222,22 @@ def hardening_upcoming_by_key(
     }
 
 
-def _scan_date(decisions: Sequence[ProjectDecision]) -> date | None:
+def scan_date(decisions: Sequence[ProjectDecision]) -> date | None:
+    """The UTC date of a scan's decisions, or None for a scan with none."""
     if not decisions:
         return None
     return max(d.scanned_at for d in decisions).date()
+
+
+def expired_between(
+    suppressions: Sequence[Suppression], prior: date | None, current: date | None,
+) -> tuple[Suppression, ...]:
+    """The suppressions that applied on ``prior`` and not on ``current``
+    (none when either date is unknown)."""
+    if prior is None or current is None:
+        return ()
+    return tuple(s for s in suppressions
+                 if s.is_active(today=prior) and not s.is_active(today=current))
 
 
 def detect_transitions(
@@ -228,12 +247,18 @@ def detect_transitions(
     current: Sequence[ProjectDecision],
     prior: Sequence[ProjectDecision],
     suppressions: tuple[Suppression, ...],
+    today: date | None = None,
+    prior_date: date | None = None,
 ) -> Transitions:
     """Compute this project's alerts from its prior and current decisions.
 
     Pure. A finding transitions when its (CVE, package) key is new or its
     disposition changed. Suppression expiry is detected by replaying the
-    suppression list against the prior and current scan dates.
+    suppression list against the prior and current scan dates, and returned
+    in ``Transitions.expired`` rather than alerted here. ``today`` is the
+    date the scan judged by (its run's clock), ``prior_date`` the date the
+    prior scan judged by (its recorded ``judged_on``); each falls back to its
+    decisions' own date when None.
 
     QUARANTINE dispositions are not alerted here: the QUARANTINED alert is
     tied to the quarantine action landing (audit B-17), which the
@@ -256,8 +281,7 @@ def detect_transitions(
     alert is dropped into ``Transitions.dropped``; awaiting_fix, fixable and
     hardening_upcoming are kept, as they name a change the operator may act on.
 
-    Order: kev_at_risk, kev_fix_pending, still_running, suppression_expired,
-    fix_available, awaiting_fix, hardening_upcoming, informational.
+    Order: kev_at_risk, kev_fix_pending, still_running, fix_available, awaiting_fix, hardening_upcoming, informational.
     """
     before = findings_by_key(prior)
     now = findings_by_key(current)
@@ -304,13 +328,9 @@ def detect_transitions(
     new_upcoming = [h for k, h in hardening_upcoming_by_key(current).items()
                     if k not in flagged_before]
 
-    project_expired: list[Suppression] = []
-    host_expired: list[Suppression] = []
-    prior_date, current_date = _scan_date(prior), _scan_date(current)
-    if prior_date is not None and current_date is not None:
-        for sup in suppressions:
-            if sup.is_active(today=prior_date) and not sup.is_active(today=current_date):
-                (host_expired if sup.scope == SCOPE_HOST else project_expired).append(sup)
+    expired = expired_between(suppressions,
+                              prior_date if prior_date is not None else scan_date(prior),
+                              today if today is not None and current else scan_date(current))
 
     alerts: list[Alert] = []
     dropped: list[Alert] = []
@@ -322,8 +342,6 @@ def detect_transitions(
         alerts.append(format_exploited_listed_alert(project_name, exploited_listed))
     if new_at_risk:
         alerts.append(format_still_running_alert(project_name, new_at_risk))
-    if project_expired:
-        alerts.append(format_suppression_expired_alert(project_name, project_expired))
     if new_fixable:
         alerts.append(format_fixable_alert(project_name, new_fixable))
     if new_awaiting:
@@ -333,7 +351,7 @@ def detect_transitions(
     if new_info:
         info = format_new_findings_alert(project_name, new_info)
         (dropped if posture in _QUIET_INFORMATIONAL else alerts).append(info)
-    return Transitions(alerts=tuple(alerts), host_expired=tuple(host_expired),
+    return Transitions(alerts=tuple(alerts), expired=tuple(expired),
                        dropped=tuple(dropped))
 
 
@@ -363,6 +381,8 @@ def emit_scan_alerts(
     prior: Sequence[ProjectDecision],
     suppressions: tuple[Suppression, ...],
     paths: BoxPaths,
+    today: date | None = None,
+    prior_date: date | None = None,
 ) -> Transitions:
     """detect_transitions for one project, with nothing sent.
 
@@ -376,6 +396,8 @@ def emit_scan_alerts(
         current=current,
         prior=prior,
         suppressions=suppressions,
+        today=today,
+        prior_date=prior_date,
     )
     for alert in transitions.dropped:
         log_operation(

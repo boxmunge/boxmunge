@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for scan_state persistence of the VulnStatus `status` field."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
 from boxmunge.cve.policy import Disposition, FindingDisposition, ProjectDecision
 from boxmunge.cve.scanner import AttackVector, Finding, PkgClass, Severity, VulnStatus
+from boxmunge.cve.scan_state import prior_judged_on, read_scan_state, write_scan_state
+from boxmunge.state import StateError
 
 
 # ---------- helpers ----------
@@ -190,3 +192,21 @@ def test_a_stored_patch_gate_that_is_not_a_boolean_is_refused(value):
     from boxmunge.state import StateError
     with pytest.raises(StateError, match="fix_meets_patch_gate"):
         decisions_from_scan_state(_stored(fix_meets_patch_gate=value), project_name="p")
+
+
+def test_judged_on_is_kept_apart_from_the_write_time(tmp_path):
+    """A run judged by yesterday's clock and written today: suppression
+    expiry replays from the judged date; freshness keeps the write time."""
+    path = tmp_path / "s.json"
+    written = datetime(2026, 11, 21, 0, 10, tzinfo=timezone.utc)
+    write_scan_state(path, decisions=(), scanned_at=written, judged_on=date(2026, 11, 20))
+    state = read_scan_state(path)
+    assert prior_judged_on(state) == date(2026, 11, 20)
+    assert state["scanned_at"] == written.isoformat()
+
+
+def test_a_record_without_judged_on_falls_back_to_its_stamp(tmp_path):
+    """Written before judged_on existed: the stamp's date is all it has."""
+    assert prior_judged_on({"scanned_at": "2026-11-21T00:10:00+00:00"}) == date(2026, 11, 21)
+    with pytest.raises(StateError):
+        prior_judged_on({"scanned_at": "2026-11-21T00:10:00+00:00", "judged_on": "soon"})

@@ -16,7 +16,6 @@ from boxmunge.cve.alerting import (
     format_new_findings_alert,
     format_quarantine_alert,
     format_still_running_alert,
-    format_suppression_expired_alert,
     send_alerts,
 )
 from boxmunge.cve.exploited import ExploitedSource
@@ -211,17 +210,6 @@ def test_format_new_findings_alert_shows_penalty() -> None:
     assert "explained" in alert.body
 
 
-def test_format_suppression_expired_alert_shape() -> None:
-    sup = _suppression("CVE-2026-7777", until=date(2026, 8, 1),
-                       added=date(2026, 5, 1))
-    alert = format_suppression_expired_alert("demo", [sup])
-    assert alert.kind == "suppression_expired"
-    assert alert.priority == 1
-    assert alert.title == "[boxmunge:demo] Suppression expired — CVE-2026-7777"
-    assert "CVE-2026-7777: added 2026-05-01, expired 2026-08-01" in alert.body
-    assert "--project demo" in alert.body
-
-
 # ---------- detect_transitions ----------
 
 
@@ -347,26 +335,18 @@ def test_new_at_risk_findings_are_one_alert() -> None:
     assert "CVE-2026-0002" in alerts[0].title and "(+1 more)" in alerts[0].title
 
 
-def test_suppression_expired_between_scans() -> None:
-    sups = (_suppression("CVE-2026-5555"), _suppression("CVE-2026-5556"))
-    fd = _disp("CVE-2026-0042")
-    prior = _decision(fd, when=datetime(2026, 7, 31, tzinfo=timezone.utc))
-    current = _decision(fd, when=datetime(2026, 8, 2, tzinfo=timezone.utc))
-    expired = [a for a in _alerts(current, prior, sups) if a.kind == "suppression_expired"]
-    assert len(expired) == 1
-    assert "CVE-2026-5555" in expired[0].title and "(+1 more)" in expired[0].title
-
-
-def test_host_suppression_expiry_is_returned_not_alerted() -> None:
-    """Audit B-14: the fleet alerts host expiry once, not every project."""
-    sup = _suppression("CVE-2026-5555", scope=SCOPE_HOST)
+def test_suppression_expiry_is_returned_not_alerted() -> None:
+    """Either scope: the fleet run alerts it after enforcement, so the alert
+    can say what the expiry did (host scope once per run, audit B-14)."""
+    sups = (_suppression("CVE-2026-5555"), _suppression("CVE-2026-5556", scope=SCOPE_HOST),
+            _suppression("CVE-2026-5557", until=date(2027, 1, 1)))
     prior = _decision(when=datetime(2026, 7, 31, tzinfo=timezone.utc))
     current = _decision(when=datetime(2026, 8, 2, tzinfo=timezone.utc))
     result = detect_transitions(project_name="demo", posture=Posture.STRICT,
                                 current=(current,),
-                                prior=(prior,), suppressions=(sup,))
+                                prior=(prior,), suppressions=sups)
     assert result.alerts == ()
-    assert result.host_expired == (sup,)
+    assert result.expired == sups[:2]
 
 
 def test_suppression_active_no_alert() -> None:
@@ -378,8 +358,7 @@ def test_suppression_active_no_alert() -> None:
 
 
 def test_multiple_alerts_ordering() -> None:
-    """Mix of all categories emits in order: still_running,
-    suppression_expired, informational."""
+    """Mix of all categories emits in order: still_running, informational."""
     sup = _suppression("CVE-2026-9999")
     current = _decision(
         _disp("CVE-2026-0001", disposition=Disposition.QUARANTINE),
@@ -389,7 +368,7 @@ def test_multiple_alerts_ordering() -> None:
     )
     prior = _decision(when=datetime(2026, 7, 31, tzinfo=timezone.utc))
     assert [a.kind for a in _alerts(current, prior, (sup,))] == [
-        "still_running", "suppression_expired", "informational",
+        "still_running", "informational",
     ]
 
 
@@ -489,7 +468,7 @@ def test_emit_scan_alerts_integration(monkeypatch, tmp_path) -> None:
         current=(current,), prior=(), suppressions=(),
         paths=paths,
     )
-    assert result.host_expired == ()
+    assert result.expired == ()
     assert [a.kind for a in result.alerts] == ["still_running"]
     assert "CVE-2026-9999" in result.alerts[0].title
     assert sent_titles == []  # collected, not sent: the caller delivers

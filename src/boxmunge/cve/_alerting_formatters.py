@@ -20,7 +20,6 @@ from boxmunge.compose_images import describe_image
 from boxmunge.cve._alerting_types import Alert, Hit
 from boxmunge.cve.policy import Disposition, FindingDisposition
 from boxmunge.cve.policy_types import BALANCED_KEV_ONLY_SINCE, STRICT_ALERTS_ONLY_SINCE, Posture
-from boxmunge.cve.suppressions import Suppression
 
 # Lines listed in an aggregated alert body before "... and N more".
 _MAX_LISTED = 10
@@ -306,28 +305,6 @@ def format_new_findings_alert(project: str, hits: Sequence[Hit]) -> Alert:
     lines += ["", f"All findings: boxmunge security {project}"]
     return Alert(kind="informational", title=title, body="\n".join(lines), priority=0,
                  project=project, hits=tuple(hits))
-
-
-def format_suppression_expired_alert(
-    project: str, suppressions: Sequence[Suppression],
-) -> Alert:
-    """Project-scope suppressions that expired between scans. Priority 1."""
-    sups = sorted(suppressions, key=lambda s: s.cve_id)
-    first = sups[0]
-    title = (f"[boxmunge:{project}] Suppression expired — {first.cve_id}"
-             f"{_more(len(sups) - 1)}")
-    lines = [f"Project: {project}"]
-    for s in sups:
-        lines.append(f"- {s.cve_id}: added {s.added.isoformat()}, "
-                     f"expired {s.until.isoformat()}")
-    lines += [
-        "",
-        "These are active findings again; any that meet the posture threshold",
-        "quarantine on this or the next scan. To re-review and extend:",
-        f"  boxmunge security suppress <CVE> --project {project} \\",
-        "      --until <date> --reason <text>",
-    ]
-    return Alert(kind="suppression_expired", title=title, body="\n".join(lines), priority=1)
 
 
 # Posture → (release, what changed) for a quarantine an earlier rule took

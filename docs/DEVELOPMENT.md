@@ -160,6 +160,7 @@ Everything in the first table is deploy-writable. The cap is `fs_nofollow.READ_L
 | `cve/exploited.py` | `_read_cache` | `kev/enisa.json`, `kev/vulncheck.json` | `state/` |
 | `cve/kev_enisa.py` | `_cached` | `kev/enisa.json`, for its validators and entries before they are renewed | `state/` |
 | `cve/kev_watch_state.py` | `read_watch` | `kev/watch.json`, the KEV watch's last-seen set | `state/` |
+| `cve/suppression_record.py` | `read_record` | `cve/suppression-notices.json`, the suppression expiry warnings sent and host expiries pending | `state/` |
 | `cve/kev_withdrawals.py` | `_entries` | `kev/withdrawn.json` | `state/` |
 | `cve/kev_source_history.py` | `_entries` | `kev/sources.json` | `state/` |
 | `cve/fix_grace.py` | `load` | `cve/fix_grace/<p>.json`, strict's fix deadlines (`FixGrace.load`) | `state/` |
